@@ -8,6 +8,7 @@ enum class TokenType {
   Identifier,
   NUMBER,
   String,
+  Boolean,
   Operator,
   Delimiter,
   Separator,

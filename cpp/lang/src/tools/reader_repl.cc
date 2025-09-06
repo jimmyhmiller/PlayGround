@@ -1,8 +1,8 @@
 #include "../reader.h"
-#include <cstdio> // for fileno
+#include <cstdio>  // for fileno
+#include <cstring> // for strcmp
 #include <iostream>
 #include <string>
-#include <cstring> // for strcmp
 #include <unistd.h> // for isatty
 
 std::string indent(int level) { return std::string(level * 2, ' '); }
@@ -86,7 +86,8 @@ void print_sexpr(const ReaderNode &node) {
     std::cout << "(";
     bool first = true;
     for (const auto &child : node.children) {
-      if (!first) std::cout << " ";
+      if (!first)
+        std::cout << " ";
       first = false;
       print_sexpr(child);
     }
@@ -98,7 +99,8 @@ void print_sexpr(const ReaderNode &node) {
       print_sexpr(child);
     }
     std::cout << ")";
-  } else if (node.type == ReaderNodeType::Ident || node.type == ReaderNodeType::Literal) {
+  } else if (node.type == ReaderNodeType::Ident ||
+             node.type == ReaderNodeType::Literal) {
     std::cout << node.value();
   } else {
     std::cout << node.value();
@@ -116,7 +118,8 @@ void print_parsed_result(const Reader &reader, bool sexpr_mode = false) {
       std::cout << "(";
       bool first = true;
       for (const auto &child : reader.root.children) {
-        if (!first) std::cout << " ";
+        if (!first)
+          std::cout << " ";
         first = false;
         print_sexpr(child);
       }
@@ -204,9 +207,9 @@ void run_reader_repl(bool sexpr_mode) {
   }
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
   bool sexpr_mode = false;
-  
+
   // Check for --sexpr flag
   for (int i = 1; i < argc; i++) {
     if (std::strcmp(argv[i], "--sexpr") == 0) {
@@ -214,7 +217,7 @@ int main(int argc, char* argv[]) {
       break;
     }
   }
-  
+
   run_reader_repl(sexpr_mode);
   return 0;
 }

@@ -21,7 +21,7 @@ int main() {
 
     ASTBuilder builder(reader.root.children);
     auto ast = builder.build();
-    
+
     std::cout << ast_to_code(ast.get()) << std::endl;
 
     return 0;

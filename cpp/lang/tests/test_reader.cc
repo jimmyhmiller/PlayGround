@@ -423,7 +423,7 @@ void test_reader_nested_structures() {
     auto &call = block.children[0];
     assert(call.type == ReaderNodeType::Call);
     assert(call.children.size() == 3);
-    
+
     auto &list1 = call.children[0];
     assert(list1.type == ReaderNodeType::List);
     assert(list1.children.size() == 2);
@@ -664,7 +664,7 @@ void test_reader_complex_mixed_expressions() {
     assert(expr.type == ReaderNodeType::BinaryOp);
     assert(expr.value() == ".");
     assert(expr.children[0].value() == "obj");
-    
+
     auto &call = expr.children[1];
     assert(call.type == ReaderNodeType::Call);
     assert(call.children.size() == 2);

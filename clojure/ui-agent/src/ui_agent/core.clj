@@ -55,6 +55,21 @@
   (when (:active @*processing-state)
     (swap! *processing-state update :dots #(mod (inc %) 4))))
 
+(defn debug-draw-errors! []
+  "Print all current draw errors to console"
+  (let [errors @*draw-errors]
+    (println "\n=== DRAW ERRORS DEBUG ===")
+    (println "Total errors:" (count errors))
+    (doseq [[idx error] (map-indexed vector errors)]
+      (println (str "Error " (inc idx) ":"))
+      (println "  Timestamp:" (:timestamp error))
+      (println "  Message:" (:error-message error))
+      (println "  Stack trace:" (:stack-trace error))
+      (println))
+    (when (empty? errors)
+      (println "No draw errors found."))
+    (println "========================\n")))
+
 (defn draw [^Canvas canvas]
   ;; Draw rectangles for backwards compatibility
   (doseq [{:keys [x y width height color]} @*rectangles]
@@ -95,7 +110,17 @@
         (catch Exception e
           (println "Error drawing processing indicator:" (.getMessage e)))))
     ;; Update dots animation
-    (update-processing-dots!)))
+    (update-processing-dots!))
+  ;; Always show draw error count for debugging
+  (let [error-count (count @*draw-errors)]
+    (when (> error-count 0)
+      (try
+        (let [paint (doto (Paint.) (.setColor (color 0xFFFF0000)))
+              font (Font.)
+              error-text (str "Draw Errors: " error-count " (check console)")]
+          (.drawString canvas error-text 10 400 font paint))
+        (catch Exception e
+          (println "Error drawing error indicator:" (.getMessage e)))))))
 
 (defn display-scale [window]
   (let [x (make-array Float/TYPE 1)

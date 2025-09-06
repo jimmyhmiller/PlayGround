@@ -1,4 +1,5 @@
 #include "ast.h"
+#include "identifier_validator.h"
 #include <functional>
 
 std::unique_ptr<ASTNode> ASTBuilder::build() {
@@ -19,23 +20,23 @@ std::unique_ptr<ASTNode> ASTBuilder::build() {
 
 void ASTBuilder::preprocess_function_calls() {
   std::vector<ReaderNode> processed_nodes;
-  
+
   for (size_t i = 0; i < reader_nodes.size(); ++i) {
     // Check for function call pattern: identifier followed by list
     if (i + 1 < reader_nodes.size() &&
         reader_nodes[i].type == ReaderNodeType::Ident &&
         reader_nodes[i + 1].type == ReaderNodeType::List &&
         reader_nodes[i + 1].token.value == "(") {
-      
+
       // Create a synthetic Call node
       ReaderNode call_node(ReaderNodeType::Call, reader_nodes[i].token);
       call_node.children.push_back(reader_nodes[i]);
-      
+
       // Add arguments from the list
-      for (const auto& arg : reader_nodes[i + 1].children) {
+      for (const auto &arg : reader_nodes[i + 1].children) {
         call_node.children.push_back(arg);
       }
-      
+
       processed_nodes.push_back(std::move(call_node));
       ++i; // Skip the next node since we consumed it
     } else {
@@ -44,39 +45,40 @@ void ASTBuilder::preprocess_function_calls() {
       processed_nodes.push_back(std::move(processed));
     }
   }
-  
+
   reader_nodes = std::move(processed_nodes);
 }
 
-ReaderNode ASTBuilder::preprocess_node_recursively(const ReaderNode& node) {
+ReaderNode ASTBuilder::preprocess_node_recursively(const ReaderNode &node) {
   ReaderNode processed = node;
   processed.children.clear();
-  
+
   // Recursively preprocess children, looking for function call patterns
   for (size_t i = 0; i < node.children.size(); ++i) {
     if (i + 1 < node.children.size() &&
         node.children[i].type == ReaderNodeType::Ident &&
         node.children[i + 1].type == ReaderNodeType::List &&
         node.children[i + 1].token.value == "(") {
-      
+
       // Create a synthetic Call node
       ReaderNode call_node(ReaderNodeType::Call, node.children[i].token);
       call_node.children.push_back(node.children[i]);
-      
+
       // Add arguments from the list
-      for (const auto& arg : node.children[i + 1].children) {
+      for (const auto &arg : node.children[i + 1].children) {
         call_node.children.push_back(arg);
       }
-      
+
       processed.children.push_back(std::move(call_node));
       ++i; // Skip the next node since we consumed it
     } else {
       // Recursively process this child
-      ReaderNode child_processed = preprocess_node_recursively(node.children[i]);
+      ReaderNode child_processed =
+          preprocess_node_recursively(node.children[i]);
       processed.children.push_back(std::move(child_processed));
     }
   }
-  
+
   return processed;
 }
 
@@ -146,11 +148,21 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_statement() {
       current().children.size() == 2 &&
       current().children[0].type == ReaderNodeType::Ident) {
 
-    auto assignment = std::make_unique<ASTNode>(ASTNodeType::AssignmentStatement,
-                                                current().token);
+    auto assignment = std::make_unique<ASTNode>(
+        ASTNodeType::AssignmentStatement, current().token);
+    std::string var_identifier = std::string(current().children[0].value());
+    
+    // Validate identifier
+    if (!IdentifierValidator::is_valid_identifier(var_identifier)) {
+      std::string error = IdentifierValidator::get_validation_error(var_identifier);
+      throw std::runtime_error("Invalid variable name at line " + 
+                              std::to_string(current().children[0].token.line) + 
+                              ", column " + std::to_string(current().children[0].token.column) + 
+                              ": " + error);
+    }
+    
     auto var_name = std::make_unique<ASTNode>(
-        ASTNodeType::Identifier, current().children[0].token,
-        std::string(current().children[0].value()));
+        ASTNodeType::Identifier, current().children[0].token, var_identifier);
     assignment->add_child(std::move(var_name));
 
     ASTBuilder rhs_builder({current().children[1]});
@@ -199,11 +211,13 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_function_declaration() {
     // The right side of : should be the function type (-> params return_type)
     if (colon_op.children.size() >= 2) {
       const ReaderNode &func_type_node = colon_op.children[1];
-      
-      if (func_type_node.type == ReaderNodeType::BinaryOp && func_type_node.value() == "->") {
+
+      if (func_type_node.type == ReaderNodeType::BinaryOp &&
+          func_type_node.value() == "->") {
         // Create function type
-        auto func_type = std::make_unique<ASTNode>(ASTNodeType::FunctionType, func_type_node.token);
-        
+        auto func_type = std::make_unique<ASTNode>(ASTNodeType::FunctionType,
+                                                   func_type_node.token);
+
         // Parse parameters from left side of ->
         if (func_type_node.children.size() >= 1) {
           ASTBuilder param_builder({func_type_node.children[0]});
@@ -212,7 +226,7 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_function_declaration() {
             func_type->add_child(std::move(params));
           }
         }
-        
+
         // Parse return type from right side of ->
         if (func_type_node.children.size() >= 2) {
           ASTBuilder return_type_builder({func_type_node.children[1]});
@@ -221,7 +235,7 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_function_declaration() {
             func_type->add_child(std::move(return_type));
           }
         }
-        
+
         fn_node->function_type = std::move(func_type);
       }
     }
@@ -243,9 +257,10 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_struct_declaration() {
     return nullptr;
   }
 
-  auto struct_node = std::make_unique<ASTNode>(ASTNodeType::StructDeclaration, current().token);
+  auto struct_node = std::make_unique<ASTNode>(ASTNodeType::StructDeclaration,
+                                               current().token);
   advance(); // consume 'struct'
-  
+
   // Parse struct name (could be simple name or generic call)
   if (!is_at_end()) {
     if (current().type == ReaderNodeType::Ident) {
@@ -254,10 +269,10 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_struct_declaration() {
       advance(); // consume name
     } else if (current().type == ReaderNodeType::Call) {
       // Generic struct: struct Point(T, U) -> (call Point T U)
-      const auto& call_node = current();
+      const auto &call_node = current();
       if (!call_node.children.empty()) {
         struct_node->name = std::string(call_node.children[0].value());
-        
+
         // Add generic parameters
         for (size_t i = 1; i < call_node.children.size(); ++i) {
           ASTBuilder param_builder({call_node.children[i]});
@@ -270,21 +285,23 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_struct_declaration() {
       advance(); // consume call
     }
   }
-  
+
   // Parse struct body (block with field declarations)
   if (!is_at_end() && current().type == ReaderNodeType::Block) {
-    const auto& block_node = current();
-    
+    const auto &block_node = current();
+
     // Parse each field declaration
-    for (const auto& field_reader : block_node.children) {
-      if (field_reader.type == ReaderNodeType::BinaryOp && field_reader.value() == ":") {
+    for (const auto &field_reader : block_node.children) {
+      if (field_reader.type == ReaderNodeType::BinaryOp &&
+          field_reader.value() == ":") {
         // Field declaration: x: int -> (: x int)
-        auto field_node = std::make_unique<ASTNode>(ASTNodeType::FieldDeclaration, field_reader.token);
-        
+        auto field_node = std::make_unique<ASTNode>(
+            ASTNodeType::FieldDeclaration, field_reader.token);
+
         if (field_reader.children.size() >= 1) {
           field_node->name = std::string(field_reader.children[0].value());
         }
-        
+
         if (field_reader.children.size() >= 2) {
           ASTBuilder type_builder({field_reader.children[1]});
           auto field_type = type_builder.parse_type();
@@ -292,11 +309,11 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_struct_declaration() {
             field_node->add_child(std::move(field_type));
           }
         }
-        
+
         struct_node->add_child(std::move(field_node));
       }
     }
-    
+
     advance(); // consume block
   }
 
@@ -321,7 +338,8 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_let_statement() {
   // Create appropriate node type
   std::unique_ptr<ASTNode> let_node;
   if (is_mutable) {
-    let_node = std::make_unique<ASTNode>(ASTNodeType::MutableLetStatement, let_token);
+    let_node =
+        std::make_unique<ASTNode>(ASTNodeType::MutableLetStatement, let_token);
   } else {
     let_node = std::make_unique<ASTNode>(ASTNodeType::LetStatement, let_token);
   }
@@ -334,9 +352,19 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_let_statement() {
 
     // Extract variable name from left side of assignment
     if (assignment.children[0].type == ReaderNodeType::Ident) {
+      std::string let_identifier = std::string(assignment.children[0].value());
+      
+      // Validate identifier
+      if (!IdentifierValidator::is_valid_identifier(let_identifier)) {
+        std::string error = IdentifierValidator::get_validation_error(let_identifier);
+        throw std::runtime_error("Invalid let variable name at line " + 
+                                std::to_string(assignment.children[0].token.line) + 
+                                ", column " + std::to_string(assignment.children[0].token.column) + 
+                                ": " + error);
+      }
+      
       auto var_name = std::make_unique<ASTNode>(
-          ASTNodeType::Identifier, assignment.children[0].token,
-          std::string(assignment.children[0].value()));
+          ASTNodeType::Identifier, assignment.children[0].token, let_identifier);
       let_node->add_child(std::move(var_name));
 
       // Extract initialization expression from right side
@@ -421,7 +449,8 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_block() {
   const ReaderNode &block_reader = current();
   advance();
 
-  // Parse statements directly (no need to flatten since semicolons are now handled by reader)
+  // Parse statements directly (no need to flatten since semicolons are now
+  // handled by reader)
   ASTBuilder block_builder(std::vector<ReaderNode>(block_reader.children));
   while (!block_builder.is_at_end()) {
     auto stmt = block_builder.parse_statement();
@@ -438,10 +467,11 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_parameter_list() {
     return nullptr;
   }
 
-  auto param_list = std::make_unique<ASTNode>(ASTNodeType::Parameter, current().token);
+  auto param_list =
+      std::make_unique<ASTNode>(ASTNodeType::Parameter, current().token);
   const ReaderNode &list_reader = current();
   advance();
-  
+
   // Parse all parameters in the list
   for (const auto &child : list_reader.children) {
     parse_parameters_recursive(child, param_list.get());
@@ -450,7 +480,8 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_parameter_list() {
   return param_list;
 }
 
-void ASTBuilder::parse_parameters_recursive(const ReaderNode &node, ASTNode *param_list) {
+void ASTBuilder::parse_parameters_recursive(const ReaderNode &node,
+                                            ASTNode *param_list) {
   if (node.type == ReaderNodeType::List) {
     // Handle list of parameters
     for (const auto &child : node.children) {
@@ -459,18 +490,19 @@ void ASTBuilder::parse_parameters_recursive(const ReaderNode &node, ASTNode *par
   } else if (node.type == ReaderNodeType::BinaryOp && node.value() == ":") {
     // This is a typed parameter: name : type
     if (node.children.size() == 2) {
-      auto param = std::make_unique<ASTNode>(ASTNodeType::Parameter, node.token);
-      
+      auto param =
+          std::make_unique<ASTNode>(ASTNodeType::Parameter, node.token);
+
       if (node.children[0].type == ReaderNodeType::Ident) {
         param->name = std::string(node.children[0].value());
-        
+
         // Parse the type
         ASTBuilder type_builder({node.children[1]});
         auto param_type = type_builder.parse_type();
         if (param_type) {
           param->add_child(std::move(param_type));
         }
-        
+
         param_list->add_child(std::move(param));
       }
     }
@@ -482,25 +514,27 @@ void ASTBuilder::parse_parameters_recursive(const ReaderNode &node, ASTNode *par
   }
 }
 
-
 std::unique_ptr<ASTNode> ASTBuilder::parse_type() {
   if (match_type(ReaderNodeType::List)) {
     // Handle parenthesized types like ((a) -> c) and tuple types like (a, b)
     const ReaderNode &list_reader = current();
     advance();
-    
+
     if (list_reader.children.size() == 1) {
-      // Single element in parentheses - parse it as a type and mark as parenthesized
+      // Single element in parentheses - parse it as a type and mark as
+      // parenthesized
       ASTBuilder type_builder({list_reader.children[0]});
       auto type_node = type_builder.parse_type();
       if (type_node && type_node->type == ASTNodeType::FunctionType) {
-        // Mark function types as parenthesized to preserve the original parentheses
+        // Mark function types as parenthesized to preserve the original
+        // parentheses
         type_node->name = "parenthesized";
       }
       return type_node;
     } else if (list_reader.children.size() > 1) {
       // Multiple elements - this is a tuple type
-      auto tuple_type = std::make_unique<ASTNode>(ASTNodeType::TupleType, list_reader.token);
+      auto tuple_type =
+          std::make_unique<ASTNode>(ASTNodeType::TupleType, list_reader.token);
       for (const auto &child : list_reader.children) {
         ASTBuilder child_builder({child});
         auto child_type = child_builder.parse_type();
@@ -518,12 +552,14 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_type() {
                                   std::string(current().value()));
     advance();
     return type_node;
-  } else if (current().type == ReaderNodeType::BinaryOp && current().value() == "->") {
+  } else if (current().type == ReaderNodeType::BinaryOp &&
+             current().value() == "->") {
     // Function type: param_types -> return_type
-    auto func_type = std::make_unique<ASTNode>(ASTNodeType::FunctionType, current().token);
+    auto func_type =
+        std::make_unique<ASTNode>(ASTNodeType::FunctionType, current().token);
     const ReaderNode &arrow_node = current();
     advance();
-    
+
     if (arrow_node.children.size() >= 1) {
       // Parse parameter types (left side of ->)
       ASTBuilder param_builder({arrow_node.children[0]});
@@ -532,7 +568,7 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_type() {
         func_type->add_child(std::move(param_types));
       }
     }
-    
+
     if (arrow_node.children.size() >= 2) {
       // Parse return type (right side of ->)
       ASTBuilder return_builder({arrow_node.children[1]});
@@ -541,14 +577,15 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_type() {
         func_type->add_child(std::move(return_type));
       }
     }
-    
+
     return func_type;
   } else if (match_type(ReaderNodeType::Call)) {
     // Parameterized type using function call syntax: List(t)
     const ReaderNode &call_reader = current();
-    auto generic_type = std::make_unique<ASTNode>(ASTNodeType::GenericType, call_reader.token);
+    auto generic_type =
+        std::make_unique<ASTNode>(ASTNodeType::GenericType, call_reader.token);
     advance();
-    
+
     // Parse all children (type name + type parameters)
     for (const auto &child : call_reader.children) {
       ASTBuilder child_builder({child});
@@ -557,10 +594,9 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_type() {
         generic_type->add_child(std::move(parsed_child));
       }
     }
-    
+
     return generic_type;
   }
-
 
   return nullptr;
 }
@@ -604,12 +640,12 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_expression(int rightBindingPower) {
 
   // Parse prefix (left-hand side)
   std::unique_ptr<ASTNode> left = parse_prefix();
-  
+
   // Precedence climbing for infix operations
   while (!is_at_end() && rightBindingPower < get_binding_power(current())) {
     left = parse_infix(std::move(left));
   }
-  
+
   return left;
 }
 
@@ -621,15 +657,26 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_prefix() {
   const ReaderNode &current_reader = current();
 
   if (current_reader.type == ReaderNodeType::Ident) {
-    auto node = std::make_unique<ASTNode>(ASTNodeType::Identifier, current_reader.token,
-                                         std::string(current_reader.value()));
+    std::string identifier_value = std::string(current_reader.value());
+    
+    // Validate identifier
+    if (!IdentifierValidator::is_valid_identifier(identifier_value)) {
+      std::string error = IdentifierValidator::get_validation_error(identifier_value);
+      throw std::runtime_error("Invalid identifier at line " + 
+                              std::to_string(current_reader.token.line) + 
+                              ", column " + std::to_string(current_reader.token.column) + 
+                              ": " + error);
+    }
+    
+    auto node = std::make_unique<ASTNode>(ASTNodeType::Identifier, current_reader.token, identifier_value);
     advance();
     return node;
   } else if (current_reader.type == ReaderNodeType::Call) {
     // Function call from reader
-    auto call = std::make_unique<ASTNode>(ASTNodeType::FunctionCall, current_reader.token);
+    auto call = std::make_unique<ASTNode>(ASTNodeType::FunctionCall,
+                                          current_reader.token);
     advance();
-    
+
     // Parse all children (function name + arguments)
     for (const auto &child : current_reader.children) {
       ASTBuilder child_builder({child});
@@ -638,7 +685,7 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_prefix() {
         call->add_child(std::move(parsed_child));
       }
     }
-    
+
     return call;
   } else if (current_reader.type == ReaderNodeType::Literal) {
     std::unique_ptr<ASTNode> node;
@@ -650,15 +697,20 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_prefix() {
       node = std::make_unique<ASTNode>(ASTNodeType::StringLiteral,
                                        current_reader.token,
                                        std::string(current_reader.value()));
+    } else if (current_reader.token.type == TokenType::Boolean) {
+      node = std::make_unique<ASTNode>(ASTNodeType::BoolLiteral,
+                                       current_reader.token,
+                                       std::string(current_reader.value()));
     }
     advance();
     return node;
   } else if (current_reader.type == ReaderNodeType::List) {
     if (current_reader.token.value == "[") {
       // List literal
-      auto list = std::make_unique<ASTNode>(ASTNodeType::ListLiteral, current_reader.token);
+      auto list = std::make_unique<ASTNode>(ASTNodeType::ListLiteral,
+                                            current_reader.token);
       advance();
-      
+
       ASTBuilder list_builder(std::vector<ReaderNode>(current_reader.children));
       while (!list_builder.is_at_end()) {
         auto element = list_builder.parse_expression();
@@ -666,38 +718,43 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_prefix() {
           list->add_child(std::move(element));
         }
       }
-      
+
       return list;
     } else if (current_reader.token.value == "(") {
       // Parentheses - could be grouping or tuple
       advance();
       ASTBuilder list_builder(std::vector<ReaderNode>(current_reader.children));
-      
+
       if (list_builder.reader_nodes.size() == 0) {
         // Empty parentheses
-        return std::make_unique<ASTNode>(ASTNodeType::TupleLiteral, current_reader.token);
+        return std::make_unique<ASTNode>(ASTNodeType::TupleLiteral,
+                                         current_reader.token);
       } else if (list_builder.reader_nodes.size() == 1) {
         // Check if it's a comma operation (tuple)
         const ReaderNode &single_child = list_builder.reader_nodes[0];
-        if (single_child.type == ReaderNodeType::BinaryOp && single_child.value() == ",") {
+        if (single_child.type == ReaderNodeType::BinaryOp &&
+            single_child.value() == ",") {
           // Tuple literal
-          auto tuple = std::make_unique<ASTNode>(ASTNodeType::TupleLiteral, current_reader.token);
-          
-          std::function<void(const ReaderNode&)> parse_comma_elements = [&](const ReaderNode& node) {
-            if (node.type == ReaderNodeType::BinaryOp && node.value() == ",") {
-              if (node.children.size() == 2) {
-                parse_comma_elements(node.children[0]);
-                parse_comma_elements(node.children[1]);
-              }
-            } else {
-              ASTBuilder elem_builder({node});
-              auto elem = elem_builder.parse_expression();
-              if (elem) {
-                tuple->add_child(std::move(elem));
-              }
-            }
-          };
-          
+          auto tuple = std::make_unique<ASTNode>(ASTNodeType::TupleLiteral,
+                                                 current_reader.token);
+
+          std::function<void(const ReaderNode &)> parse_comma_elements =
+              [&](const ReaderNode &node) {
+                if (node.type == ReaderNodeType::BinaryOp &&
+                    node.value() == ",") {
+                  if (node.children.size() == 2) {
+                    parse_comma_elements(node.children[0]);
+                    parse_comma_elements(node.children[1]);
+                  }
+                } else {
+                  ASTBuilder elem_builder({node});
+                  auto elem = elem_builder.parse_expression();
+                  if (elem) {
+                    tuple->add_child(std::move(elem));
+                  }
+                }
+              };
+
           parse_comma_elements(single_child);
           return tuple;
         } else {
@@ -706,7 +763,8 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_prefix() {
         }
       } else {
         // Multiple elements - tuple
-        auto tuple = std::make_unique<ASTNode>(ASTNodeType::TupleLiteral, current_reader.token);
+        auto tuple = std::make_unique<ASTNode>(ASTNodeType::TupleLiteral,
+                                               current_reader.token);
         while (!list_builder.is_at_end()) {
           auto expr = list_builder.parse_expression();
           if (expr) {
@@ -720,9 +778,10 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_prefix() {
     // Handle binary operations from reader
     if (current_reader.value() == "=>") {
       // Lambda expression
-      auto lambda = std::make_unique<ASTNode>(ASTNodeType::LambdaExpression, current_reader.token);
+      auto lambda = std::make_unique<ASTNode>(ASTNodeType::LambdaExpression,
+                                              current_reader.token);
       advance();
-      
+
       if (current_reader.children.size() >= 2) {
         // Left side is the parameter(s)
         ASTBuilder param_builder({current_reader.children[0]});
@@ -730,7 +789,7 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_prefix() {
         if (param) {
           lambda->add_child(std::move(param));
         }
-        
+
         // Right side - now function calls are handled by reader
         ASTBuilder body_builder({current_reader.children[1]});
         auto body = body_builder.parse_expression();
@@ -738,54 +797,55 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_prefix() {
           lambda->add_child(std::move(body));
         }
       }
-      
+
       return lambda;
     } else {
       // Regular binary expression
-      auto binary = std::make_unique<ASTNode>(ASTNodeType::BinaryExpression,
-                                              current_reader.token,
-                                              std::string(current_reader.value()));
+      auto binary = std::make_unique<ASTNode>(
+          ASTNodeType::BinaryExpression, current_reader.token,
+          std::string(current_reader.value()));
       advance();
-      
+
       if (current_reader.children.size() >= 2) {
         ASTBuilder left_builder({current_reader.children[0]});
         auto left_operand = left_builder.parse_expression();
         if (left_operand) {
           binary->add_child(std::move(left_operand));
         }
-        
+
         ASTBuilder right_builder({current_reader.children[1]});
         auto right_operand = right_builder.parse_expression();
         if (right_operand) {
           binary->add_child(std::move(right_operand));
         }
       }
-      
+
       return binary;
     }
   }
-  
+
   advance();
   return nullptr;
 }
 
-std::unique_ptr<ASTNode> ASTBuilder::parse_infix(std::unique_ptr<ASTNode> left) {
+std::unique_ptr<ASTNode>
+ASTBuilder::parse_infix(std::unique_ptr<ASTNode> left) {
   if (is_at_end()) {
     return left;
   }
 
   const ReaderNode &op_node = current();
-  
+
   if (op_node.type == ReaderNodeType::BinaryOp) {
-    auto binary = std::make_unique<ASTNode>(ASTNodeType::BinaryExpression,
-                                            op_node.token,
-                                            std::string(op_node.value()));
+    auto binary =
+        std::make_unique<ASTNode>(ASTNodeType::BinaryExpression, op_node.token,
+                                  std::string(op_node.value()));
     advance();
-    
+
     int bp = get_binding_power(op_node);
     bool rightAssoc = (op_node.value() == "^" || op_node.value() == "=>");
     int nextBp = rightAssoc ? bp - 1 : bp;
-    
+
     auto right = parse_expression(nextBp);
     if (right) {
       binary->add_child(std::move(left));
@@ -793,6 +853,6 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_infix(std::unique_ptr<ASTNode> left) 
       return binary;
     }
   }
-  
+
   return left;
 }

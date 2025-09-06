@@ -59,11 +59,11 @@ struct ASTNode {
   Token token;
   std::vector<std::unique_ptr<ASTNode>> children;
   std::string value;
-  
+
   // Specific fields for different node types
-  std::string name;  // For identifiers, function names, etc.
-  std::unique_ptr<ASTNode> function_type;  // For function declarations
-  std::unique_ptr<ASTNode> body;  // For function declarations, blocks, etc.
+  std::string name; // For identifiers, function names, etc.
+  std::unique_ptr<ASTNode> function_type; // For function declarations
+  std::unique_ptr<ASTNode> body; // For function declarations, blocks, etc.
 
   ASTNode(ASTNodeType type, Token token, std::string value = "")
       : type(type), token(token), value(value) {}
@@ -88,7 +88,7 @@ struct ASTBuilder {
 
   std::unique_ptr<ASTNode> build();
   void preprocess_function_calls();
-  ReaderNode preprocess_node_recursively(const ReaderNode& node);
+  ReaderNode preprocess_node_recursively(const ReaderNode &node);
   std::unique_ptr<ASTNode> parse_expression(int rightBindingPower = 0);
   std::unique_ptr<ASTNode> parse_prefix();
   std::unique_ptr<ASTNode> parse_infix(std::unique_ptr<ASTNode> left);

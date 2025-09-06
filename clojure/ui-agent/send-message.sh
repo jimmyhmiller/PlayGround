@@ -24,12 +24,10 @@ if ! command -v http &> /dev/null; then
     exit 1
 fi
 
-# Send the message using httpie
+# Send the message using httpie  
+echo "{\"message\": \"$MESSAGE\", \"sender\": \"script\", \"timestamp\": $(date +%s)}" | \
 http POST "$SERVER_URL/message" \
-    message="$MESSAGE" \
-    sender:="\"script\"" \
-    timestamp:="$(date +%s)" \
-    --json \
+    Content-Type:application/json \
     --print=HhBb
 
 echo ""
