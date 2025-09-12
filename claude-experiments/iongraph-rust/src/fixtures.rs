@@ -577,3 +577,33 @@ fn apply_lir_overrides(mut block: LIRBlock, overrides: LIRBlockOverrides) -> LIR
     if let Some(instructions) = overrides.instructions { block.instructions = instructions; }
     block
 }
+
+// Create IonJSON structures for testing
+pub fn create_simple_ion_json() -> IonJSON {
+    IonJSON {
+        functions: vec![
+            Func {
+                name: "test_function".to_string(),
+                passes: vec![create_simple_pass()],
+            }
+        ],
+    }
+}
+
+pub fn create_complex_ion_json() -> IonJSON {
+    IonJSON {
+        functions: vec![
+            Func {
+                name: "test_function".to_string(),
+                passes: vec![
+                    create_simple_pass(),
+                    create_complex_pass(),
+                ],
+            },
+            Func {
+                name: "loop_function".to_string(),
+                passes: vec![create_loop_pass()],
+            }
+        ],
+    }
+}

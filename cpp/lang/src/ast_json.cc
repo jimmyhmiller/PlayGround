@@ -6,6 +6,8 @@ std::string ast_node_type_to_string(ASTNodeType type) {
   switch (type) {
   case ASTNodeType::Identifier:
     return "Identifier";
+  case ASTNodeType::IntegerLiteral:
+    return "IntegerLiteral";
   case ASTNodeType::NumberLiteral:
     return "NumberLiteral";
   case ASTNodeType::StringLiteral:
@@ -62,6 +64,8 @@ std::string ast_node_type_to_string(ASTNodeType type) {
     return "Argument";
   case ASTNodeType::StructDeclaration:
     return "StructDeclaration";
+  case ASTNodeType::StructLiteral:
+    return "StructLiteral";
   case ASTNodeType::FieldDeclaration:
     return "FieldDeclaration";
   default:

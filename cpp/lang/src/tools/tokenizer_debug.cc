@@ -6,8 +6,10 @@ std::string token_type_to_string(TokenType type) {
   switch (type) {
   case TokenType::Identifier:
     return "Identifier";
-  case TokenType::NUMBER:
-    return "NUMBER";
+  case TokenType::INTEGER:
+    return "INTEGER";
+  case TokenType::FLOAT:
+    return "FLOAT";
   case TokenType::String:
     return "String";
   case TokenType::Boolean:

@@ -10,6 +10,23 @@ CXX="c++"
 CXXFLAGS="-std=c++20 -Wall -Wextra -g"
 INCLUDES="-I${SRC_DIR}"
 
+# LLVM configuration
+LLVM_CONFIG="/opt/homebrew/opt/llvm/bin/llvm-config"
+if [ -x "$LLVM_CONFIG" ]; then
+    LLVM_CXXFLAGS="$($LLVM_CONFIG --cxxflags)"
+    LLVM_LDFLAGS="$($LLVM_CONFIG --ldflags --libs core executionengine mcjit interpreter native)"
+    # Remove conflicting flags and adjust for our project
+    LLVM_CXXFLAGS=$(echo "$LLVM_CXXFLAGS" | sed 's/-std=c++17/-std=c++20/g')
+    LLVM_CXXFLAGS=$(echo "$LLVM_CXXFLAGS" | sed 's/-fno-exceptions//g')
+    # Suppress warnings from LLVM headers using system includes
+    LLVM_CXXFLAGS=$(echo "$LLVM_CXXFLAGS" | sed 's/-I/-isystem/g')
+    echo "LLVM found: version $($LLVM_CONFIG --version)"
+else
+    echo "Warning: LLVM not found at $LLVM_CONFIG"
+    LLVM_CXXFLAGS=""
+    LLVM_LDFLAGS=""
+fi
+
 show_help() {
     echo "Usage: ./build.sh [command] [args...]"
     echo ""
@@ -20,7 +37,8 @@ show_help() {
     echo "  run               - Build (if needed) and run the project"
     echo "  ast-to-json       - Parse input from stdin and output AST as JSON"
     echo "  ast-to-code       - Parse input from stdin and generate code from AST"
-    echo "  ast-to-ssa        - Parse input from stdin and convert AST to SSA form with visualization"
+    echo "  ast-to-llvm       - Parse input from stdin and generate LLVM IR"
+    echo ""
     echo "  reader-repl       - Interactive REPL showing parsed structure"
     echo "  tokenizer-debug   - Show all tokens from input"
     echo "  tools [tool]      - Build and run a specific tool (run 'tools' with no args to see available tools)"
@@ -119,7 +137,6 @@ cmd_build() {
 cmd_test() {
     local test_name="$1"
     
-    
     mkdir -p "${BUILD_DIR}"
     
     # Build library sources (excluding main.cc, test files, and tools)
@@ -130,6 +147,36 @@ cmd_test() {
         exit 1
     fi
     
+    # Test runner with improved reporting
+    local failed_suites=0
+    local total_suites=0
+    local all_tests_passed=0
+    local all_tests_failed=0
+    local all_tests_total=0
+    
+    echo "=========================================="
+    echo "Running Test Suite"
+    echo "=========================================="
+    
+    # Function to parse test stats from output
+    parse_test_stats() {
+        local output="$1"
+        local stats_line=$(echo "$output" | grep "TEST_STATS:" | tail -1)
+        if [ -n "$stats_line" ]; then
+            local passed=$(echo "$stats_line" | sed 's/.*passed=\([0-9]*\).*/\1/')
+            local failed=$(echo "$stats_line" | sed 's/.*failed=\([0-9]*\).*/\1/')
+            local total=$(echo "$stats_line" | sed 's/.*total=\([0-9]*\).*/\1/')
+            all_tests_passed=$((all_tests_passed + passed))
+            all_tests_failed=$((all_tests_failed + failed))
+            all_tests_total=$((all_tests_total + total))
+        fi
+    }
+    
+    # Test 1: Reader tests
+    total_suites=$((total_suites + 1))
+    echo ""
+    echo "[$total_suites] Reader Tests"
+    echo "----------------------------------------"
     if [ -n "$test_name" ]; then
         # Build with individual test flag
         ${CXX} ${CXXFLAGS} ${INCLUDES} "-DRUN_INDIVIDUAL_TEST=\"$test_name\"" $lib_sources tests/test_reader.cc -o "${BUILD_DIR}/${PROJECT_NAME}_test"
@@ -138,36 +185,190 @@ cmd_test() {
         ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources tests/test_reader.cc -o "${BUILD_DIR}/${PROJECT_NAME}_test"
     fi
     
-    echo "Running reader tests..."
-    "${BUILD_DIR}/${PROJECT_NAME}_test"
+    local reader_output
+    if reader_output=$("${BUILD_DIR}/${PROJECT_NAME}_test" 2>&1); then
+        echo "$reader_output"
+        echo "✅ Reader tests PASSED"
+        parse_test_stats "$reader_output"
+    else
+        echo "$reader_output"
+        echo "❌ Reader tests FAILED"
+        failed_suites=$((failed_suites + 1))
+    fi
     
-    # Build and run AST tests
-    echo "Building AST tests..."
+    # Test 2: AST tests
+    total_suites=$((total_suites + 1))
+    echo ""
+    echo "[$total_suites] AST Tests"
+    echo "----------------------------------------"
     ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources tests/test_ast.cc -o "${BUILD_DIR}/test_ast"
     
-    echo "Running AST tests..."
-    "${BUILD_DIR}/test_ast"
+    local ast_output
+    if ast_output=$("${BUILD_DIR}/test_ast" 2>&1); then
+        echo "$ast_output"
+        echo "✅ AST tests PASSED"
+        parse_test_stats "$ast_output"
+    else
+        echo "$ast_output"
+        echo "❌ AST tests FAILED"
+        failed_suites=$((failed_suites + 1))
+    fi
     
-    # Build and run parameter tests
-    echo "Building parameter tests..."
+    # Test 3: Parameter tests
+    total_suites=$((total_suites + 1))
+    echo ""
+    echo "[$total_suites] Parameter Tests"
+    echo "----------------------------------------"
     ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources test_parameters.cc -o "${BUILD_DIR}/test_parameters"
     
-    echo "Running parameter tests..."
-    "${BUILD_DIR}/test_parameters"
+    local param_output
+    if param_output=$("${BUILD_DIR}/test_parameters" 2>&1); then
+        echo "$param_output"
+        echo "✅ Parameter tests PASSED"
+        parse_test_stats "$param_output"
+    else
+        echo "$param_output"
+        echo "❌ Parameter tests FAILED"
+        failed_suites=$((failed_suites + 1))
+        parse_test_stats "$param_output"  # Parse stats even if suite failed
+    fi
     
-    # Build and run example syntax tests
-    echo "Building example syntax tests..."
+    # Test 4: Example syntax tests
+    total_suites=$((total_suites + 1))
+    echo ""
+    echo "[$total_suites] Example Syntax Tests"
+    echo "----------------------------------------"
     ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources tests/test_example_syntax.cc -o "${BUILD_DIR}/test_example_syntax"
     
-    echo "Running example syntax tests..."
-    "${BUILD_DIR}/test_example_syntax"
+    local example_output
+    if example_output=$("${BUILD_DIR}/test_example_syntax" 2>&1); then
+        echo "$example_output"
+        echo "✅ Example syntax tests PASSED"
+        parse_test_stats "$example_output"
+    else
+        echo "$example_output"
+        echo "❌ Example syntax tests FAILED"
+        failed_suites=$((failed_suites + 1))
+        parse_test_stats "$example_output"  # Parse stats even if suite failed
+    fi
     
-    # Build and run SSA formal properties tests
-    echo "Building SSA formal properties tests..."
-    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources tests/test_ssa_formal_properties.cc -o "${BUILD_DIR}/test_ssa_formal_properties"
+    # Test 5: Identifier validation tests
+    total_suites=$((total_suites + 1))
+    echo ""
+    echo "[$total_suites] Identifier Validation Tests"
+    echo "----------------------------------------"
+    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources tests/test_identifier_validation.cc -o "${BUILD_DIR}/test_identifier_validation"
     
-    echo "Running SSA formal properties tests..."
-    "${BUILD_DIR}/test_ssa_formal_properties"
+    local identifier_output
+    if identifier_output=$("${BUILD_DIR}/test_identifier_validation" 2>&1); then
+        echo "$identifier_output"
+        echo "✅ Identifier validation tests PASSED"
+        parse_test_stats "$identifier_output"
+    else
+        echo "$identifier_output"
+        echo "❌ Identifier validation tests FAILED"
+        failed_suites=$((failed_suites + 1))
+        parse_test_stats "$identifier_output"  # Parse stats even if suite failed
+    fi
+    
+    # Test 6: Tokenizer tests
+    total_suites=$((total_suites + 1))
+    echo ""
+    echo "[$total_suites] Tokenizer Tests"
+    echo "----------------------------------------"
+    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources tests/test_tokenizer.cc -o "${BUILD_DIR}/test_tokenizer"
+    
+    local tokenizer_output
+    if tokenizer_output=$("${BUILD_DIR}/test_tokenizer" 2>&1); then
+        echo "$tokenizer_output"
+        echo "✅ Tokenizer tests PASSED"
+        parse_test_stats "$tokenizer_output"
+    else
+        echo "$tokenizer_output"
+        echo "❌ Tokenizer tests FAILED"
+        failed_suites=$((failed_suites + 1))
+        parse_test_stats "$tokenizer_output"  # Parse stats even if suite failed
+    fi
+    
+    # Test 7: Error handling and edge case tests
+    total_suites=$((total_suites + 1))
+    echo ""
+    echo "[$total_suites] Error Handling & Edge Case Tests"
+    echo "----------------------------------------"
+    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources tests/test_error_handling.cc -o "${BUILD_DIR}/test_error_handling"
+    
+    local error_output
+    if error_output=$("${BUILD_DIR}/test_error_handling" 2>&1); then
+        echo "$error_output"
+        echo "✅ Error handling tests PASSED"
+        parse_test_stats "$error_output"
+    else
+        echo "$error_output"
+        echo "❌ Error handling tests FAILED"
+        failed_suites=$((failed_suites + 1))
+        parse_test_stats "$error_output"  # Parse stats even if suite failed
+    fi
+    
+    # Test 8: LLVM tests (only if LLVM is available)
+    if [ -n "$LLVM_CXXFLAGS" ]; then
+        total_suites=$((total_suites + 1))
+        echo ""
+        echo "[$total_suites] LLVM Backend Tests"
+        echo "----------------------------------------"
+        llvm_sources=$(find "llvm" -name "*.cc" -o -name "*.cpp" 2>/dev/null | sort)
+        ${CXX} ${CXXFLAGS} ${LLVM_CXXFLAGS} ${INCLUDES} $lib_sources $llvm_sources tests/test_llvm.cc ${LLVM_LDFLAGS} -o "${BUILD_DIR}/test_llvm"
+        
+        local llvm_output
+        if llvm_output=$("${BUILD_DIR}/test_llvm" 2>&1); then
+            echo "$llvm_output"
+            echo "✅ LLVM tests PASSED"
+            parse_test_stats "$llvm_output"
+        else
+            echo "$llvm_output"
+            echo "❌ LLVM tests FAILED"
+            failed_suites=$((failed_suites + 1))
+            parse_test_stats "$llvm_output"  # Parse stats even if suite failed
+        fi
+    else
+        echo ""
+        echo "[SKIPPED] LLVM Backend Tests (LLVM not available)"
+    fi
+    
+    # Print final summary
+    echo ""
+    echo "=========================================="
+    echo "Test Suite Summary"
+    echo "=========================================="
+    local passed_suites=$((total_suites - failed_suites))
+    echo "Test suites run:    $total_suites"
+    echo "Test suites passed: $passed_suites" 
+    echo "Test suites failed: $failed_suites"
+    echo ""
+    echo "Individual Test Results:"
+    echo "Tests run:    $all_tests_total"
+    echo "Tests passed: $all_tests_passed"
+    echo "Tests failed: $all_tests_failed"
+    echo ""
+    echo "NOTE: Above numbers reflect actual individual test cases executed."
+    echo "See detailed output above for specific test failures and issues."
+    
+    if [ $failed_suites -eq 0 ] && [ $all_tests_failed -eq 0 ]; then
+        echo ""
+        echo "🎉 ALL TESTS PASSED!"
+        echo "=========================================="
+        return 0
+    else
+        echo ""
+        if [ $failed_suites -gt 0 ]; then
+            echo "💥 $failed_suites test suite(s) failed"
+        fi
+        if [ $all_tests_failed -gt 0 ]; then
+            echo "💥 $all_tests_failed individual test(s) failed"
+        fi
+        echo "Review the detailed output above to see specific failing tests."
+        echo "=========================================="
+        return 1
+    fi
 }
 
 cmd_stress() {
@@ -276,23 +477,39 @@ cmd_ast_to_code() {
     "${BUILD_DIR}/ast_to_code"
 }
 
-cmd_ast_to_ssa() {
+cmd_ast_to_llvm() {
     mkdir -p "${BUILD_DIR}"
+    
+    # Extract arguments to pass to the tool (everything after the command)
+    shift # Remove 'ast-to-llvm' from arguments
+    tool_args="$@"
+    
+    # Check if LLVM is available
+    if [ -z "$LLVM_CXXFLAGS" ]; then
+        echo "Error: LLVM not found. Please install LLVM or update LLVM_CONFIG path."
+        exit 1
+    fi
     
     # Build library sources (excluding main.cc and tools)
     lib_sources=$(find "${SRC_DIR}" -name "*.cc" -o -name "*.cpp" | grep -v main.cc | grep -v "/tools/" | sort)
+    
+    # Add LLVM sources
+    llvm_sources=$(find "llvm" -name "*.cc" -o -name "*.cpp" | sort)
     
     if [ -z "$lib_sources" ]; then
         echo "Error: No library source files found in ${SRC_DIR}"
         exit 1
     fi
     
-    # Build the ast_to_ssa tool
-    ${CXX} ${CXXFLAGS} ${INCLUDES} $lib_sources "${SRC_DIR}/tools/ast_to_ssa.cc" -o "${BUILD_DIR}/ast_to_ssa"
+    echo "Building ast_to_llvm tool with LLVM support..."
     
-    # Run the tool with stdin
-    "${BUILD_DIR}/ast_to_ssa"
+    # Build the ast_to_llvm tool with LLVM flags
+    ${CXX} ${CXXFLAGS} ${LLVM_CXXFLAGS} ${INCLUDES} $lib_sources $llvm_sources "${SRC_DIR}/tools/ast_to_llvm.cc" ${LLVM_LDFLAGS} -o "${BUILD_DIR}/ast_to_llvm"
+    
+    # Run the tool with stdin and any additional arguments
+    "${BUILD_DIR}/ast_to_llvm" $tool_args
 }
+
 
 cmd_reader_repl() {
     mkdir -p "${BUILD_DIR}"
@@ -348,8 +565,8 @@ case ${1:-help} in
     ast-to-code)
         cmd_ast_to_code
         ;;
-    ast-to-ssa)
-        cmd_ast_to_ssa
+    ast-to-llvm)
+        cmd_ast_to_llvm "$@"
         ;;
     reader-repl)
         cmd_reader_repl "$@"
