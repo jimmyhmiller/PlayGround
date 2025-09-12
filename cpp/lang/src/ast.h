@@ -11,11 +11,13 @@
 enum class ASTNodeType {
   // Literals and identifiers
   Identifier,
-  NumberLiteral,
+  IntegerLiteral,
+  NumberLiteral, // For floats
   StringLiteral,
   BoolLiteral,
   ListLiteral,
   TupleLiteral,
+  StructLiteral,
 
   // Expressions
   BinaryExpression,
@@ -95,8 +97,11 @@ struct ASTBuilder {
   std::unique_ptr<ASTNode> parse_statement();
   std::unique_ptr<ASTNode> parse_function_declaration();
   std::unique_ptr<ASTNode> parse_struct_declaration();
+  std::unique_ptr<ASTNode> parse_struct_literal();
   std::unique_ptr<ASTNode> parse_let_statement();
   std::unique_ptr<ASTNode> parse_if_statement();
+  std::unique_ptr<ASTNode> parse_prefix_if_statement();
+  std::unique_ptr<ASTNode> parse_do_block();
   std::unique_ptr<ASTNode> parse_loop_statement();
   std::unique_ptr<ASTNode> parse_block();
   std::unique_ptr<ASTNode> parse_type();
@@ -106,6 +111,7 @@ struct ASTBuilder {
   parse_call_expression(std::unique_ptr<ASTNode> callee);
   std::unique_ptr<ASTNode> parse_lambda_expression();
 
+  void validate_expression_sequence();
   int get_binding_power(const ReaderNode &node);
   bool is_at_end() const;
   const ReaderNode &current() const;

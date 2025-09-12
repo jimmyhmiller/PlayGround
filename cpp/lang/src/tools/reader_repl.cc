@@ -99,11 +99,40 @@ void print_sexpr(const ReaderNode &node) {
       print_sexpr(child);
     }
     std::cout << ")";
-  } else if (node.type == ReaderNodeType::Ident ||
-             node.type == ReaderNodeType::Literal) {
-    std::cout << node.value();
+  } else if (node.type == ReaderNodeType::Ident) {
+    if (node.children.empty()) {
+      std::cout << node.value();
+    } else {
+      std::cout << "(" << node.value();
+      for (const auto &child : node.children) {
+        std::cout << " ";
+        print_sexpr(child);
+      }
+      std::cout << ")";
+    }
+  } else if (node.type == ReaderNodeType::Literal) {
+    if (node.children.empty()) {
+      std::cout << node.value();
+    } else {
+      std::cout << "(" << node.value();
+      for (const auto &child : node.children) {
+        std::cout << " ";
+        print_sexpr(child);
+      }
+      std::cout << ")";
+    }
   } else {
-    std::cout << node.value();
+    // Generic case - any node type with potential children
+    if (node.children.empty()) {
+      std::cout << node.value();
+    } else {
+      std::cout << "(" << node.value();
+      for (const auto &child : node.children) {
+        std::cout << " ";
+        print_sexpr(child);
+      }
+      std::cout << ")";
+    }
   }
 }
 

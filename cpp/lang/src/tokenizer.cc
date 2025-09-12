@@ -13,11 +13,37 @@ Token Tokenizer::handle_whitespace(const std::string_view input) {
                start_line, start_column};
 }
 
+Token Tokenizer::handle_operator(const std::string_view input) {
+  int start = pos;
+  int start_line = line;
+  int start_column = column;
+
+  // Consume all consecutive operator characters
+  while (!at_end(input) && is_operator(input[pos])) {
+    consume(input);
+  }
+
+  return Token{TokenType::Operator, input.substr(start, pos - start),
+               start_line, start_column};
+}
+
 Token Tokenizer::next_token(const std::string_view input) {
   while (!at_end(input)) {
     char current_char = input[pos];
     if (is_whitespace(current_char)) {
       return handle_whitespace(input);
+    } else if (current_char == '/' &&
+               static_cast<size_t>(pos + 1) < input.size() &&
+               input[pos + 1] == '/') {
+      // Handle line comment
+      int start = pos;
+      int start_line = line;
+      int start_column = column;
+      while (!at_end(input) && input[pos] != '\n') {
+        consume(input);
+      }
+      return Token{TokenType::Comment, input.substr(start, pos - start),
+                   start_line, start_column};
     } else if (std::isalpha(current_char) || current_char == '_') {
       int start = pos;
       int start_line = line;
@@ -27,32 +53,40 @@ Token Tokenizer::next_token(const std::string_view input) {
         consume(input);
       }
       std::string_view token_value = input.substr(start, pos - start);
-      
+
       // Check for boolean literals
       if (token_value == "true" || token_value == "false") {
         return Token{TokenType::Boolean, token_value, start_line, start_column};
       }
-      
-      return Token{TokenType::Identifier, token_value, start_line, start_column};
+
+      return Token{TokenType::Identifier, token_value, start_line,
+                   start_column};
     } else if (std::isdigit(current_char)) {
       int start = pos;
       int start_line = line;
       int start_column = column;
+      bool is_float = false;
+
       while (!at_end(input) &&
              (std::isdigit(input[pos]) || input[pos] == '_')) {
         consume(input);
       }
+
+      // Check for decimal point to determine if it's a float
       if (!at_end(input) && input[pos] == '.' &&
           static_cast<size_t>(pos + 1) < input.size() &&
           std::isdigit(input[pos + 1])) {
+        is_float = true;
         consume(input); // consume the '.'
         while (!at_end(input) &&
                (std::isdigit(input[pos]) || input[pos] == '_')) {
           consume(input);
         }
       }
-      return Token{TokenType::NUMBER, input.substr(start, pos - start),
-                   start_line, start_column};
+
+      TokenType token_type = is_float ? TokenType::FLOAT : TokenType::INTEGER;
+      return Token{token_type, input.substr(start, pos - start), start_line,
+                   start_column};
     } else if (current_char == '"') {
       int start = pos;
       int start_line = line;
@@ -87,57 +121,7 @@ Token Tokenizer::next_token(const std::string_view input) {
       consume(input);
       return token;
     } else if (is_operator(current_char)) {
-      int start = pos;
-      int start_line = line;
-      int start_column = column;
-
-      if (current_char == '=' && static_cast<size_t>(pos + 1) < input.size() &&
-          input[pos + 1] == '=') {
-        consume(input, 2); // consume "=="
-        return Token{TokenType::Operator, input.substr(start, 2), start_line,
-                     start_column};
-      } else if (current_char == '!' &&
-                 static_cast<size_t>(pos + 1) < input.size() &&
-                 input[pos + 1] == '=') {
-        consume(input, 2); // consume "!="
-        return Token{TokenType::Operator, input.substr(start, 2), start_line,
-                     start_column};
-      } else if (current_char == '<' &&
-                 static_cast<size_t>(pos + 1) < input.size() &&
-                 input[pos + 1] == '=') {
-        consume(input, 2); // consume "<="
-        return Token{TokenType::Operator, input.substr(start, 2), start_line,
-                     start_column};
-      } else if (current_char == '>' &&
-                 static_cast<size_t>(pos + 1) < input.size() &&
-                 input[pos + 1] == '=') {
-        consume(input, 2); // consume ">="
-        return Token{TokenType::Operator, input.substr(start, 2), start_line,
-                     start_column};
-      } else if (current_char == '-' &&
-                 static_cast<size_t>(pos + 1) < input.size() &&
-                 input[pos + 1] == '>') {
-        consume(input, 2); // consume "->"
-        return Token{TokenType::Operator, input.substr(start, 2), start_line,
-                     start_column};
-      } else if (current_char == '=' &&
-                 static_cast<size_t>(pos + 1) < input.size() &&
-                 input[pos + 1] == '>') {
-        consume(input, 2); // consume "=>"
-        return Token{TokenType::Operator, input.substr(start, 2), start_line,
-                     start_column};
-      } else if (current_char == '|' &&
-                 static_cast<size_t>(pos + 1) < input.size() &&
-                 input[pos + 1] == '|') {
-        consume(input, 2); // consume "||"
-        return Token{TokenType::Operator, input.substr(start, 2), start_line,
-                     start_column};
-      } else {
-        Token token{TokenType::Operator, std::string_view(&input[pos], 1),
-                    start_line, start_column};
-        consume(input);
-        return token;
-      }
+      return handle_operator(input);
     } else {
       assert(false && "Unexpected character in input");
     }

@@ -1,10 +1,14 @@
 #include "ast.h"
 #include "identifier_validator.h"
 #include <functional>
+#include <iostream>
 
 std::unique_ptr<ASTNode> ASTBuilder::build() {
   auto program = std::make_unique<ASTNode>(ASTNodeType::Program,
                                            Token{TokenType::End, "", 0, 0});
+
+  // Validate against invalid adjacent identifier sequences
+  validate_expression_sequence();
 
   // Use proper precedence climbing
 
@@ -16,6 +20,41 @@ std::unique_ptr<ASTNode> ASTBuilder::build() {
   }
 
   return program;
+}
+
+void ASTBuilder::validate_expression_sequence() {
+  // Check for invalid adjacent identifier sequences like "a b c"
+  if (reader_nodes.size() <= 1) {
+    return; // Single expression or empty is always valid
+  }
+
+  for (size_t i = 0; i < reader_nodes.size() - 1; ++i) {
+    const ReaderNode &current_node = reader_nodes[i];
+    const ReaderNode &next_node = reader_nodes[i + 1];
+    
+    // Check for adjacent simple identifiers
+    if (current_node.type == ReaderNodeType::Ident && 
+        next_node.type == ReaderNodeType::Ident &&
+        current_node.children.empty() &&  // Simple identifier (no children)
+        next_node.children.empty()) {     // Simple identifier (no children)
+      
+      std::string current_val = std::string(current_node.value());
+      std::string next_val = std::string(next_node.value());
+      
+      // Allow valid keyword sequences
+      if ((current_val == "let" && next_val == "mut") ||
+          (current_val == "struct" && next_val != "struct")) {
+        continue; // This is a valid keyword sequence
+      }
+      
+      throw std::runtime_error(
+          "Invalid syntax: adjacent identifiers '" + 
+          current_val + "' and '" + next_val + "' at line " +
+          std::to_string(current_node.token.line) + ", column " +
+          std::to_string(current_node.token.column) + 
+          ". Use operators, separators, or proper syntax to connect expressions.");
+    }
+  }
 }
 
 void ASTBuilder::preprocess_function_calls() {
@@ -121,6 +160,25 @@ bool ASTBuilder::match_type(ReaderNodeType type) const {
 }
 
 std::unique_ptr<ASTNode> ASTBuilder::parse_statement() {
+  // Check for struct literal (pattern: identifier followed by block containing field assignments)
+  if (current().type == ReaderNodeType::Ident &&
+      current().children.empty() && // Simple identifier (no children)
+      !is_at_end() && peek().type == ReaderNodeType::Block) {
+    return parse_struct_literal();
+  }
+  
+  // Also check for the other pattern where identifier has a block child
+  if (current().type == ReaderNodeType::Ident &&
+      current().children.size() == 1 &&
+      current().children[0].type == ReaderNodeType::Block) {
+    return parse_struct_literal();
+  }
+
+  // Check for if statement as prefix operator from reader
+  if (current().type == ReaderNodeType::PrefixOp && current().value() == "if") {
+    return parse_prefix_if_statement();
+  }
+
   if (match_token("fn")) {
     return parse_function_declaration();
   }
@@ -143,6 +201,9 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_statement() {
     advance();
     return break_stmt;
   }
+  if (match_token("do")) {
+    return parse_do_block();
+  }
 
   if (current().type == ReaderNodeType::BinaryOp && current().value() == "=" &&
       current().children.size() == 2 &&
@@ -151,16 +212,26 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_statement() {
     auto assignment = std::make_unique<ASTNode>(
         ASTNodeType::AssignmentStatement, current().token);
     std::string var_identifier = std::string(current().children[0].value());
-    
+
+    // Check for reserved keywords being used as variable names
+    if (var_identifier == "let" || var_identifier == "fn" || var_identifier == "if" || 
+        var_identifier == "loop" || var_identifier == "break" || var_identifier == "struct") {
+      throw std::runtime_error(
+          "Reserved keyword '" + var_identifier + "' cannot be used as variable name at line " +
+          std::to_string(current().children[0].token.line) + ", column " +
+          std::to_string(current().children[0].token.column));
+    }
+
     // Validate identifier
     if (!IdentifierValidator::is_valid_identifier(var_identifier)) {
-      std::string error = IdentifierValidator::get_validation_error(var_identifier);
-      throw std::runtime_error("Invalid variable name at line " + 
-                              std::to_string(current().children[0].token.line) + 
-                              ", column " + std::to_string(current().children[0].token.column) + 
-                              ": " + error);
+      std::string error =
+          IdentifierValidator::get_validation_error(var_identifier);
+      throw std::runtime_error(
+          "Invalid variable name at line " +
+          std::to_string(current().children[0].token.line) + ", column " +
+          std::to_string(current().children[0].token.column) + ": " + error);
     }
-    
+
     auto var_name = std::make_unique<ASTNode>(
         ASTNodeType::Identifier, current().children[0].token, var_identifier);
     assignment->add_child(std::move(var_name));
@@ -173,6 +244,28 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_statement() {
 
     advance();
     return assignment;
+  }
+
+  // Check for malformed function declarations (: with fn on left side)
+  if (current().type == ReaderNodeType::BinaryOp && current().value() == ":" &&
+      current().children.size() >= 1 &&
+      current().children[0].type == ReaderNodeType::Ident &&
+      current().children[0].value() == "fn") {
+    throw std::runtime_error("Malformed function declaration at line " +
+                            std::to_string(current().token.line) + ", column " +
+                            std::to_string(current().token.column) + 
+                            " - function declaration should start with 'fn'");
+  }
+
+  // Check for malformed let statements (= with let on left side)
+  if (current().type == ReaderNodeType::BinaryOp && current().value() == "=" &&
+      current().children.size() >= 1 &&
+      current().children[0].type == ReaderNodeType::Ident &&
+      current().children[0].value() == "let") {
+    throw std::runtime_error("Malformed let statement at line " +
+                            std::to_string(current().token.line) + ", column " +
+                            std::to_string(current().token.column) + 
+                            " - let statement should start with 'let'");
   }
 
   auto expr = parse_expression();
@@ -192,54 +285,76 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_function_declaration() {
     return nullptr;
   }
 
-  auto fn_node = std::make_unique<ASTNode>(ASTNodeType::FunctionDeclaration,
-                                           current().token);
+  Token fn_token = current().token;
+  auto fn_node = std::make_unique<ASTNode>(ASTNodeType::FunctionDeclaration, fn_token);
   advance();
 
-  // With the new reader structure, we expect: (: name (-> params return_type))
-  if (!is_at_end() && current().type == ReaderNodeType::BinaryOp &&
-      current().value() == ":") {
-    const ReaderNode &colon_op = current();
-    advance();
-
-    // Extract function name from left side of :
-    if (colon_op.children.size() >= 1 &&
-        colon_op.children[0].type == ReaderNodeType::Ident) {
-      fn_node->name = std::string(colon_op.children[0].value());
-    }
-
-    // The right side of : should be the function type (-> params return_type)
-    if (colon_op.children.size() >= 2) {
-      const ReaderNode &func_type_node = colon_op.children[1];
-
-      if (func_type_node.type == ReaderNodeType::BinaryOp &&
-          func_type_node.value() == "->") {
-        // Create function type
-        auto func_type = std::make_unique<ASTNode>(ASTNodeType::FunctionType,
-                                                   func_type_node.token);
-
-        // Parse parameters from left side of ->
-        if (func_type_node.children.size() >= 1) {
-          ASTBuilder param_builder({func_type_node.children[0]});
-          auto params = param_builder.parse_parameter_list();
-          if (params) {
-            func_type->add_child(std::move(params));
-          }
-        }
-
-        // Parse return type from right side of ->
-        if (func_type_node.children.size() >= 2) {
-          ASTBuilder return_type_builder({func_type_node.children[1]});
-          auto return_type = return_type_builder.parse_type();
-          if (return_type) {
-            func_type->add_child(std::move(return_type));
-          }
-        }
-
-        fn_node->function_type = std::move(func_type);
-      }
-    }
+  // Validate that function declaration has a colon operator
+  if (is_at_end() || current().type != ReaderNodeType::BinaryOp || current().value() != ":") {
+    throw std::runtime_error("Incomplete function declaration: missing ':' at line " +
+                            std::to_string(fn_token.line) + ", column " +
+                            std::to_string(fn_token.column));
   }
+
+  const ReaderNode &colon_op = current();
+  advance();
+
+  // Validate function has a name (left side of :)
+  if (colon_op.children.size() < 1 || colon_op.children[0].type != ReaderNodeType::Ident) {
+    throw std::runtime_error("Function missing name at line " +
+                            std::to_string(colon_op.token.line) + ", column " +
+                            std::to_string(colon_op.token.column));
+  }
+
+  fn_node->name = std::string(colon_op.children[0].value());
+
+  // Validate function has a type (right side of :)  
+  if (colon_op.children.size() < 2) {
+    throw std::runtime_error("Function missing type at line " +
+                            std::to_string(colon_op.token.line) + ", column " +
+                            std::to_string(colon_op.token.column));
+  }
+
+  const ReaderNode &func_type_node = colon_op.children[1];
+
+  // Validate function type is arrow operator
+  if (func_type_node.type != ReaderNodeType::BinaryOp || func_type_node.value() != "->") {
+    throw std::runtime_error("Function missing '->' operator at line " +
+                            std::to_string(func_type_node.token.line) + ", column " +
+                            std::to_string(func_type_node.token.column));
+  }
+
+  // Validate arrow operator has both parameters and return type
+  if (func_type_node.children.size() < 2) {
+    throw std::runtime_error("Function missing parameter list or return type at line " +
+                            std::to_string(func_type_node.token.line) + ", column " +
+                            std::to_string(func_type_node.token.column));
+  }
+
+  // Create function type
+  auto func_type = std::make_unique<ASTNode>(ASTNodeType::FunctionType, func_type_node.token);
+
+  // Parse parameters from left side of ->
+  ASTBuilder param_builder({func_type_node.children[0]});
+  auto params = param_builder.parse_parameter_list();
+  if (!params) {
+    throw std::runtime_error("Function with malformed parameter list at line " +
+                            std::to_string(func_type_node.children[0].token.line) + ", column " +
+                            std::to_string(func_type_node.children[0].token.column));
+  }
+  func_type->add_child(std::move(params));
+
+  // Parse return type from right side of ->
+  ASTBuilder return_type_builder({func_type_node.children[1]});
+  auto return_type = return_type_builder.parse_type();
+  if (!return_type) {
+    throw std::runtime_error("Function missing return type at line " +
+                            std::to_string(func_type_node.children[1].token.line) + ", column " +
+                            std::to_string(func_type_node.children[1].token.column));
+  }
+  func_type->add_child(std::move(return_type));
+
+  fn_node->function_type = std::move(func_type);
 
   // Look for the function body (block)
   if (!is_at_end() && match_type(ReaderNodeType::Block)) {
@@ -335,49 +450,64 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_let_statement() {
     advance();
   }
 
+  // Validate that let statement has an assignment
+  if (is_at_end() || current().type != ReaderNodeType::BinaryOp || current().value() != "=") {
+    throw std::runtime_error("Incomplete let statement: missing assignment at line " +
+                            std::to_string(let_token.line) + ", column " +
+                            std::to_string(let_token.column));
+  }
+
+  const ReaderNode &assignment = current();
+
+  // Validate assignment has both left and right sides
+  if (assignment.children.size() != 2) {
+    throw std::runtime_error("Let statement missing variable name or value at line " +
+                            std::to_string(assignment.token.line) + ", column " +
+                            std::to_string(assignment.token.column));
+  }
+
+  // Validate left side is a single identifier (not multiple variables)
+  if (assignment.children[0].type != ReaderNodeType::Ident) {
+    throw std::runtime_error("Let statement missing variable name at line " +
+                            std::to_string(assignment.token.line) + ", column " +
+                            std::to_string(assignment.token.column));
+  }
+
   // Create appropriate node type
   std::unique_ptr<ASTNode> let_node;
   if (is_mutable) {
-    let_node =
-        std::make_unique<ASTNode>(ASTNodeType::MutableLetStatement, let_token);
+    let_node = std::make_unique<ASTNode>(ASTNodeType::MutableLetStatement, let_token);
   } else {
     let_node = std::make_unique<ASTNode>(ASTNodeType::LetStatement, let_token);
   }
 
-  // Check if the next expression is an assignment
-  if (!is_at_end() && current().type == ReaderNodeType::BinaryOp &&
-      current().value() == "=" && current().children.size() == 2) {
+  std::string let_identifier = std::string(assignment.children[0].value());
 
-    const ReaderNode &assignment = current();
-
-    // Extract variable name from left side of assignment
-    if (assignment.children[0].type == ReaderNodeType::Ident) {
-      std::string let_identifier = std::string(assignment.children[0].value());
-      
-      // Validate identifier
-      if (!IdentifierValidator::is_valid_identifier(let_identifier)) {
-        std::string error = IdentifierValidator::get_validation_error(let_identifier);
-        throw std::runtime_error("Invalid let variable name at line " + 
-                                std::to_string(assignment.children[0].token.line) + 
-                                ", column " + std::to_string(assignment.children[0].token.column) + 
-                                ": " + error);
-      }
-      
-      auto var_name = std::make_unique<ASTNode>(
-          ASTNodeType::Identifier, assignment.children[0].token, let_identifier);
-      let_node->add_child(std::move(var_name));
-
-      // Extract initialization expression from right side
-      ASTBuilder rhs_builder({assignment.children[1]});
-      auto init_expr = rhs_builder.parse_expression();
-      if (init_expr) {
-        let_node->add_child(std::move(init_expr));
-      }
-    }
-
-    advance(); // consume the assignment expression
+  // Validate identifier
+  if (!IdentifierValidator::is_valid_identifier(let_identifier)) {
+    std::string error = IdentifierValidator::get_validation_error(let_identifier);
+    throw std::runtime_error(
+        "Invalid let variable name at line " +
+        std::to_string(assignment.children[0].token.line) + ", column " +
+        std::to_string(assignment.children[0].token.column) + ": " + error);
   }
 
+  auto var_name = std::make_unique<ASTNode>(ASTNodeType::Identifier,
+                                            assignment.children[0].token,
+                                            let_identifier);
+  let_node->add_child(std::move(var_name));
+
+  // Extract initialization expression from right side
+  ASTBuilder rhs_builder({assignment.children[1]});
+  auto init_expr = rhs_builder.parse_expression();
+  if (!init_expr) {
+    throw std::runtime_error("Let statement missing initialization value at line " +
+                            std::to_string(assignment.children[1].token.line) + ", column " +
+                            std::to_string(assignment.children[1].token.column));
+  }
+  let_node->add_child(std::move(init_expr));
+
+  advance(); // consume the assignment expression
   return let_node;
 }
 
@@ -386,14 +516,17 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_if_statement() {
     return nullptr;
   }
 
-  auto if_node =
-      std::make_unique<ASTNode>(ASTNodeType::IfStatement, current().token);
+  Token if_token = current().token;
+  auto if_node = std::make_unique<ASTNode>(ASTNodeType::IfStatement, if_token);
   advance();
 
   auto condition = parse_expression();
-  if (condition) {
-    if_node->add_child(std::move(condition));
+  if (!condition) {
+    throw std::runtime_error("If statement missing condition at line " +
+                            std::to_string(if_token.line) + ", column " +
+                            std::to_string(if_token.column));
   }
+  if_node->add_child(std::move(condition));
 
   if (match_type(ReaderNodeType::Block)) {
     auto then_block = parse_block();
@@ -418,6 +551,99 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_if_statement() {
   }
 
   return if_node;
+}
+
+std::unique_ptr<ASTNode> ASTBuilder::parse_prefix_if_statement() {
+  // Handle if statements parsed as prefix operators by reader
+  // Pattern: (prefix-op "if" condition then-block [else-block])
+  if (current().type != ReaderNodeType::PrefixOp || current().value() != "if") {
+    return nullptr;
+  }
+
+  auto if_node =
+      std::make_unique<ASTNode>(ASTNodeType::IfStatement, current().token);
+  const ReaderNode &if_reader_node = current();
+  advance();
+
+  // Validate if statement has at least one child (condition) and it's not a block
+  if (if_reader_node.children.size() < 1) {
+    throw std::runtime_error("If statement missing condition at line " +
+                            std::to_string(if_reader_node.token.line) + ", column " +
+                            std::to_string(if_reader_node.token.column));
+  }
+
+  // Check if the first child is a block (invalid - means missing condition)
+  if (if_reader_node.children[0].type == ReaderNodeType::Block) {
+    throw std::runtime_error("If statement missing condition at line " +
+                            std::to_string(if_reader_node.token.line) + ", column " +
+                            std::to_string(if_reader_node.token.column));
+  }
+
+  // Parse condition
+  ASTBuilder condition_builder({if_reader_node.children[0]});
+  auto condition = condition_builder.parse_expression();
+  if (!condition) {
+    throw std::runtime_error("If statement missing condition at line " +
+                            std::to_string(if_reader_node.token.line) + ", column " +
+                            std::to_string(if_reader_node.token.column));
+  }
+  if_node->add_child(std::move(condition));
+
+  if (if_reader_node.children.size() >= 2) {
+    // Parse then-block - handle both Block nodes and other expressions
+    ASTBuilder then_builder({if_reader_node.children[1]});
+    auto then_block = then_builder.parse_expression();
+    if (then_block) {
+      if_node->add_child(std::move(then_block));
+    }
+  }
+
+  if (if_reader_node.children.size() >= 3) {
+    // Parse else-block - handle both Block nodes and other expressions
+    ASTBuilder else_builder({if_reader_node.children[2]});
+    auto else_block = else_builder.parse_expression();
+    if (else_block) {
+      if_node->add_child(std::move(else_block));
+    }
+  }
+
+  return if_node;
+}
+
+std::unique_ptr<ASTNode> ASTBuilder::parse_do_block() {
+  if (!match_token("do")) {
+    return nullptr;
+  }
+
+  auto do_node = std::make_unique<ASTNode>(ASTNodeType::Block, current().token);
+  const ReaderNode &do_reader_node = current();
+  advance();
+
+  // Create a new ASTBuilder with all the children to handle them as a sequence
+  ASTBuilder child_builder(std::vector<ReaderNode>(
+      do_reader_node.children.begin(), do_reader_node.children.end()));
+
+  // Parse statements from the child builder until we're done
+  while (!child_builder.is_at_end()) {
+    auto stmt = child_builder.parse_statement();
+    if (stmt) {
+      do_node->add_child(std::move(stmt));
+    } else {
+      // If we can't parse as a statement, try as an expression
+      auto expr = child_builder.parse_expression();
+      if (expr) {
+        auto expr_stmt = std::make_unique<ASTNode>(
+            ASTNodeType::ExpressionStatement, child_builder.current().token);
+        expr_stmt->add_child(std::move(expr));
+        do_node->add_child(std::move(expr_stmt));
+      } else {
+        // If neither works, just advance to avoid infinite loop
+        child_builder.advance();
+      }
+    }
+  }
+
+  return do_node;
 }
 
 std::unique_ptr<ASTNode> ASTBuilder::parse_loop_statement() {
@@ -658,17 +884,29 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_prefix() {
 
   if (current_reader.type == ReaderNodeType::Ident) {
     std::string identifier_value = std::string(current_reader.value());
-    
-    // Validate identifier
-    if (!IdentifierValidator::is_valid_identifier(identifier_value)) {
-      std::string error = IdentifierValidator::get_validation_error(identifier_value);
-      throw std::runtime_error("Invalid identifier at line " + 
-                              std::to_string(current_reader.token.line) + 
-                              ", column " + std::to_string(current_reader.token.column) + 
-                              ": " + error);
+
+    // Reject semicolons as identifiers - they should never be treated as
+    // identifiers
+    if (identifier_value == ";") {
+      throw std::runtime_error(
+          "Semicolon ';' cannot be used as an identifier at line " +
+          std::to_string(current_reader.token.line) + ", column " +
+          std::to_string(current_reader.token.column));
     }
-    
-    auto node = std::make_unique<ASTNode>(ASTNodeType::Identifier, current_reader.token, identifier_value);
+
+    // Only validate actual identifiers, not separators treated as identifiers
+    if (current_reader.token.type == TokenType::Identifier &&
+        !IdentifierValidator::is_valid_identifier(identifier_value)) {
+      std::string error =
+          IdentifierValidator::get_validation_error(identifier_value);
+      throw std::runtime_error(
+          "Invalid identifier at line " +
+          std::to_string(current_reader.token.line) + ", column " +
+          std::to_string(current_reader.token.column) + ": " + error);
+    }
+
+    auto node = std::make_unique<ASTNode>(
+        ASTNodeType::Identifier, current_reader.token, identifier_value);
     advance();
     return node;
   } else if (current_reader.type == ReaderNodeType::Call) {
@@ -689,7 +927,11 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_prefix() {
     return call;
   } else if (current_reader.type == ReaderNodeType::Literal) {
     std::unique_ptr<ASTNode> node;
-    if (current_reader.token.type == TokenType::NUMBER) {
+    if (current_reader.token.type == TokenType::INTEGER) {
+      node = std::make_unique<ASTNode>(ASTNodeType::IntegerLiteral,
+                                       current_reader.token,
+                                       std::string(current_reader.value()));
+    } else if (current_reader.token.type == TokenType::FLOAT) {
       node = std::make_unique<ASTNode>(ASTNodeType::NumberLiteral,
                                        current_reader.token,
                                        std::string(current_reader.value()));
@@ -774,6 +1016,47 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_prefix() {
         return tuple;
       }
     }
+  } else if (current_reader.type == ReaderNodeType::PrefixOp) {
+    // Handle prefix operations from reader
+    if (current_reader.value() == "if") {
+      // Parse if statement as prefix operator
+      auto if_node = std::make_unique<ASTNode>(ASTNodeType::IfStatement,
+                                               current_reader.token);
+
+      // Parse children: condition, then-block, optional else-block
+      if (current_reader.children.size() >= 1) {
+        // Parse condition
+        ASTBuilder condition_builder({current_reader.children[0]});
+        auto condition = condition_builder.parse_expression();
+        if (condition) {
+          if_node->add_child(std::move(condition));
+        }
+      }
+
+      if (current_reader.children.size() >= 2) {
+        // Parse then-block
+        ASTBuilder then_builder({current_reader.children[1]});
+        auto then_block = then_builder.parse_expression();
+        if (then_block) {
+          if_node->add_child(std::move(then_block));
+        }
+      }
+
+      if (current_reader.children.size() >= 3) {
+        // Parse else-block
+        ASTBuilder else_builder({current_reader.children[2]});
+        auto else_block = else_builder.parse_expression();
+        if (else_block) {
+          if_node->add_child(std::move(else_block));
+        }
+      }
+
+      advance();
+      return if_node;
+    }
+    // Handle other prefix operators here if needed
+    advance();
+    return nullptr;
   } else if (current_reader.type == ReaderNodeType::BinaryOp) {
     // Handle binary operations from reader
     if (current_reader.value() == "=>") {
@@ -822,6 +1105,22 @@ std::unique_ptr<ASTNode> ASTBuilder::parse_prefix() {
 
       return binary;
     }
+  } else if (current_reader.type == ReaderNodeType::Block) {
+    // Handle block nodes from reader
+    auto block_node =
+        std::make_unique<ASTNode>(ASTNodeType::Block, current_reader.token);
+
+    // Parse all children in the block
+    for (const auto &child : current_reader.children) {
+      ASTBuilder child_builder({child});
+      auto parsed_child = child_builder.parse_expression();
+      if (parsed_child) {
+        block_node->add_child(std::move(parsed_child));
+      }
+    }
+
+    advance();
+    return block_node;
   }
 
   advance();
@@ -855,4 +1154,70 @@ ASTBuilder::parse_infix(std::unique_ptr<ASTNode> left) {
   }
 
   return left;
+}
+
+std::unique_ptr<ASTNode> ASTBuilder::parse_struct_literal() {
+  if (current().type != ReaderNodeType::Ident) {
+    return nullptr;
+  }
+
+  std::string struct_name = std::string(current().value());
+  const ReaderNode *block_node = nullptr;
+
+  // Pattern 1: (ident "TypeName" (block {...})) - identifier has block as child
+  if (current().children.size() == 1 && current().children[0].type == ReaderNodeType::Block) {
+    block_node = &current().children[0];
+  }
+  // Pattern 2: (ident "TypeName") followed by (block {...}) - adjacent nodes  
+  else if (current().children.empty() && !is_at_end() && peek().type == ReaderNodeType::Block) {
+    advance(); // move past identifier
+    if (!is_at_end() && current().type == ReaderNodeType::Block) {
+      block_node = &current();
+    } else {
+      return nullptr;
+    }
+  } else {
+    return nullptr;
+  }
+
+  if (!block_node) {
+    return nullptr;
+  }
+
+  auto struct_literal = std::make_unique<ASTNode>(ASTNodeType::StructLiteral,
+                                                  current().token, struct_name);
+
+  // Parse the field assignments in the block, skipping commas
+  for (const auto &field_node : block_node->children) {
+    if (field_node.type == ReaderNodeType::BinaryOp &&
+        field_node.value() == ":" && field_node.children.size() == 2) {
+
+      // Create a field assignment node
+      auto field_assignment = std::make_unique<ASTNode>(
+          ASTNodeType::FieldDeclaration, field_node.token);
+
+      // Field name (left side of :)
+      if (field_node.children[0].type == ReaderNodeType::Ident) {
+        field_assignment->name = std::string(field_node.children[0].value());
+      }
+
+      // Field value (right side of :)
+      ASTBuilder value_builder({field_node.children[1]});
+      auto value = value_builder.parse_expression();
+      if (value) {
+        field_assignment->add_child(std::move(value));
+      }
+
+      struct_literal->add_child(std::move(field_assignment));
+    }
+    // Skip commas (they're parsed as identifiers by the reader)
+    else if (field_node.type == ReaderNodeType::Ident &&
+             field_node.value() == ",") {
+      // Skip comma separators
+      continue;
+    }
+  }
+
+  advance(); // Move past the block
+  return struct_literal;
 }

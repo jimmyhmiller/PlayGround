@@ -17,6 +17,7 @@ The "two directions" of the bidirectional type checker are `check` and `infer`. 
 The goal if this article will be to create a simple, but non-trivial type checker. But before we get to the details of the code, let's try to get the intuition for how our method is going to work on a small scale. Consider the simple expression `2 + 3` and let's tackle it from both angles. If we don't know the type of this expression, we can try to infer it.
 
 ```javascript
+// inferring type of 2 + 3
 function infer(x) {
   if (isNumber(x)) { return "int" }
   ...
@@ -34,6 +35,7 @@ if (lhs == "int" && rhs == "int") {
 Check is even easier.
 
 ```javascript
+// checking type of 2 + 3
 function check(x, type) {
   if infer(x) != type {
     throw `${x} is not an ${type}`
@@ -44,7 +46,7 @@ let lhs = check(2, "int")
 let rhs = check(3, "int")
 ```
 
-For these trivial cases, this may seem like almost nothing. But using these simple mechanisms, we can introduce a rich type system. But we do make a tradeoff, unlike Hindley Milner, we do not get complete type inference. Instead, we need to annotate functions with their types. How far you can you take type inference with a bidirectional system while keeping the deterministic and clear benefits it offers? That's unclear to me.
+For these trivial cases, this may seem like almost nothing. But using these simple mechanisms, we can introduce a rich type system. But we do make a tradeoff, unlike Hindley Milner, we do not get complete type inference. Instead, we need to annotate functions with their types. How far you can you take type inference with a bidirectional system while keeping the deterministic and clear benefits it offers? That's unclear to me.[^2]
 
 ## A Real Implementation
 
@@ -141,4 +143,13 @@ function checkSimpleProgram(sourceFile: ts.SourceFile, expectedType: Type): void
 
 
 [^1]: I was however luckily enough to find [David Christiansen's presentation](https://www.youtube.com/watch?v=utyBNDj7s2w) where he translates a bidirectional type system into code. It wasn't fully complete, but enough for me to go on. The audio has a terrible high pitch squeal, so can't recommend it as a nice listen.
+
+[^2]: I'm not exactly sure how to even phrase this question. Of course, the code inside a bidirectional type checker is turing complete, so it could do whatever it wanted to infer a type. But maybe there is some formalism we could keep to? I know in David Christiansen's paper he says this "Sometimes, explicit type annotations will need to be within a term rather
+than at the top level. In particular, explicit function abstractions that are
+being applied directly may require a type annotation....We can solve this by providing specialized inference rules for
+certain limited forms of λ-abstractions and conditionals, and we may even be
+successful in the simply-typed context. While this is useful, it will not scale
+to more interesting type systems for which type inference is undecidable. It
+may, however, be possible to make a quite useful system in practice, where
+users only need to annotate complicated code."
 

@@ -277,6 +277,7 @@ std::string generate_expression(const ASTNode *node, int /* indent */) {
   case ASTNodeType::Identifier:
     return node->value.empty() ? node->name : node->value;
 
+  case ASTNodeType::IntegerLiteral:
   case ASTNodeType::NumberLiteral:
   case ASTNodeType::StringLiteral:
     return node->value;

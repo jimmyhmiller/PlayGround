@@ -1,0 +1,11 @@
+[package]
+name = "melior-test-new"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "minimal_transform_interpreter"
+path = "src/minimal_transform_interpreter.rs"
+
+[dependencies]
+melior = "0.25.0"

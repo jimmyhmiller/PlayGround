@@ -3,10 +3,13 @@
 
 #include <string>
 #include <string_view>
+#include <unordered_set>
+#include <vector>
 
 enum class TokenType {
   Identifier,
-  NUMBER,
+  INTEGER,
+  FLOAT,
   String,
   Boolean,
   Operator,
@@ -60,6 +63,7 @@ public:
   }
 
   Token handle_whitespace(const std::string_view input);
+  Token handle_operator(const std::string_view input);
   Token next_token(const std::string_view input);
 };
 

@@ -1,0 +1,30 @@
+[package]
+name = "melior-transform-test"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "real_transform_interpreter"
+path = "src/real_transform_interpreter.rs"
+
+[[bin]]
+name = "working_transform_patterns" 
+path = "src/working_transform_patterns.rs"
+
+[[bin]]
+name = "final_transform_interpreter"
+path = "src/final_transform_interpreter.rs"
+
+[[bin]]
+name = "real_working_transform"
+path = "src/real_working_transform.rs"
+
+[[bin]]
+name = "capi_transform_interpreter"
+path = "src/capi_transform_interpreter.rs"
+
+[dependencies]
+melior = "0.25.0"
+
+[build-dependencies]
+cc = "1.0"

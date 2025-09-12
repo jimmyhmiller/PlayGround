@@ -14,6 +14,7 @@ path = "src/main_simple.rs"
 [[bin]]
 name = "simple_test"
 path = "src/simple_test.rs"
+doc = false
 
 [[bin]]
 name = "minimal_jit"
@@ -31,7 +32,58 @@ path = "src/main_jit_test.rs"
 name = "simple-jit"
 path = "src/main_simple_jit.rs"
 
+[[bin]]
+name = "check_dialects"
+path = "src/check_dialects.rs"
+
+[[bin]]
+name = "simple_demo"
+path = "src/simple_demo.rs"
+
+[[bin]]
+name = "full_pipeline_demo"
+path = "src/full_pipeline_demo.rs"
+
+[[bin]]
+name = "simple_dialect_demo"
+path = "src/simple_dialect_demo.rs"
+
+[[bin]]
+name = "working_dialect_demo"
+path = "src/working_dialect_demo.rs"
+
+[[bin]]
+name = "real_transform_demo"
+path = "src/real_transform_demo.rs"
+
+[[bin]]
+name = "proper_transform_demo"
+path = "src/proper_transform_demo.rs"
+
+[[bin]]
+name = "debug_transform"
+path = "src/debug_transform.rs"
+
+[[bin]]
+name = "working_transform_demo"
+path = "src/working_transform_demo.rs"
+
+[[bin]]
+name = "real_transform_interpreter"
+path = "src/real_transform_interpreter.rs"
+
+[[bin]]
+name = "minimal_transform_interpreter"
+path = "src/minimal_transform_interpreter.rs"
+
+[[bin]]
+name = "test_transform_api"
+path = "src/test_transform_api.rs"
+
+[[bin]]
+name = "discover_transform_interpreter"
+path = "src/discover_transform_interpreter.rs"
+
 [dependencies]
 ctor = "0.4.2"
-melior = "0.19"
-mlir-sys = "0.3"
+melior = "0.25.0"

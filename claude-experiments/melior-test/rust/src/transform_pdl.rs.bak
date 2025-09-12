@@ -1,0 +1,269 @@
+use melior::{
+    Context,
+    ir::{
+        Attribute, Block, Identifier, Location, Region, Type, Value,
+        attribute::{IntegerAttribute, StringAttribute},
+        operation::{Operation, OperationBuilder},
+        r#type::IntegerType,
+    },
+};
+
+/// Transform dialect operations for pattern matching and rewriting
+pub struct TransformDialect;
+
+impl TransformDialect {
+    /// Create a transform.sequence operation
+    pub fn create_sequence<'c>(
+        context: &'c Context,
+        location: Location<'c>,
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        let mut region = Region::new();
+        let block = Block::new(&[]);
+        region.append_block(block);
+
+        let op = OperationBuilder::new("transform.sequence", location)
+            .add_regions([region])
+            .build()?;
+
+        Ok(op)
+    }
+
+    /// Create a transform.foreach_match operation for pattern-based transformations
+    pub fn create_foreach_match<'c>(
+        context: &'c Context,
+        location: Location<'c>,
+        operand: Value<'c, '_>,
+        matcher_name: &str,
+        action_name: &str,
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        let mut region = Region::new();
+        let block = Block::new(&[]);
+        region.append_block(block);
+
+        let op = OperationBuilder::new("transform.foreach_match", location)
+            .add_operands(&[operand])
+            .add_attributes(&[
+                (
+                    Identifier::new(context, "matcher"),
+                    StringAttribute::new(context, matcher_name).into(),
+                ),
+                (
+                    Identifier::new(context, "action"),
+                    StringAttribute::new(context, action_name).into(),
+                ),
+            ])
+            .add_regions([region])
+            .build()?;
+
+        Ok(op)
+    }
+
+    /// Create a transform.alternatives operation for fallback transformations
+    pub fn create_alternatives<'c>(
+        context: &'c Context,
+        location: Location<'c>,
+        operand: Value<'c, '_>,
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        let mut region = Region::new();
+        let block = Block::new(&[]);
+        region.append_block(block);
+
+        let op = OperationBuilder::new("transform.alternatives", location)
+            .add_operands(&[operand])
+            .add_regions([region])
+            .build()?;
+
+        Ok(op)
+    }
+
+    /// Create a transform.named_sequence operation
+    pub fn create_named_sequence<'c>(
+        context: &'c Context,
+        location: Location<'c>,
+        name: &str,
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        let mut region = Region::new();
+        let block = Block::new(&[]);
+        region.append_block(block);
+
+        let op = OperationBuilder::new("transform.named_sequence", location)
+            .add_attributes(&[(
+                Identifier::new(context, "sym_name"),
+                StringAttribute::new(context, name).into(),
+            )])
+            .add_regions([region])
+            .build()?;
+
+        Ok(op)
+    }
+
+    /// Create a transform.yield operation
+    pub fn create_yield<'c>(
+        context: &'c Context,
+        location: Location<'c>,
+        operands: &[Value<'c, '_>],
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        let op = OperationBuilder::new("transform.yield", location)
+            .add_operands(operands)
+            .build()?;
+
+        Ok(op)
+    }
+}
+
+/// PDL (Pattern Description Language) operations for pattern matching
+pub struct PdlDialect;
+
+impl PdlDialect {
+    /// Create a pdl.pattern operation
+    pub fn create_pattern<'c>(
+        context: &'c Context,
+        location: Location<'c>,
+        benefit: i64,
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        let mut region = Region::new();
+        let block = Block::new(&[]);
+        region.append_block(block);
+
+        let op = OperationBuilder::new("pdl.pattern", location)
+            .add_attributes(&[(
+                Identifier::new(context, "benefit"),
+                IntegerAttribute::new(IntegerType::new(context, 64).into(), benefit).into(),
+            )])
+            .add_regions([region])
+            .build()?;
+
+        Ok(op)
+    }
+
+    /// Create a pdl.operation for matching operations
+    pub fn create_operation<'c>(
+        context: &'c Context,
+        location: Location<'c>,
+        op_name: &str,
+        operands: &[Value<'c, '_>],
+        result_types: &[Type<'c>],
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        let op = OperationBuilder::new("pdl.operation", location)
+            .add_attributes(&[(
+                Identifier::new(context, "opname"),
+                StringAttribute::new(context, op_name).into(),
+            )])
+            .add_operands(operands)
+            .add_results(result_types)
+            .build()?;
+
+        Ok(op)
+    }
+
+    /// Create a pdl.operand for matching operands
+    pub fn create_operand<'c>(
+        context: &'c Context,
+        location: Location<'c>,
+        value_type: Option<Type<'c>>,
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        let mut builder = OperationBuilder::new("pdl.operand", location);
+        
+        if let Some(t) = value_type {
+            builder = builder.add_operands(&[]);  // TODO: Add type constraint
+        }
+        
+        let op = builder.build()?;
+        Ok(op)
+    }
+
+    /// Create a pdl.type for type constraints
+    pub fn create_type<'c>(
+        context: &'c Context,
+        location: Location<'c>,
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        let op = OperationBuilder::new("pdl.type", location)
+            .build()?;
+
+        Ok(op)
+    }
+
+    /// Create a pdl.rewrite operation for pattern rewriting
+    pub fn create_rewrite<'c>(
+        context: &'c Context,
+        location: Location<'c>,
+        root: Value<'c, '_>,
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        let mut region = Region::new();
+        let block = Block::new(&[]);
+        region.append_block(block);
+
+        let op = OperationBuilder::new("pdl.rewrite", location)
+            .add_operands(&[root])
+            .add_regions([region])
+            .build()?;
+
+        Ok(op)
+    }
+
+    /// Create a pdl.replace operation for replacing matched operations
+    pub fn create_replace<'c>(
+        context: &'c Context,
+        location: Location<'c>,
+        op_to_replace: Value<'c, '_>,
+        replacement_values: &[Value<'c, '_>],
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        let op = OperationBuilder::new("pdl.replace", location)
+            .add_operands(&[&[op_to_replace], replacement_values].concat())
+            .build()?;
+
+        Ok(op)
+    }
+
+    /// Create a pdl.erase operation for erasing matched operations
+    pub fn create_erase<'c>(
+        context: &'c Context,
+        location: Location<'c>,
+        op_to_erase: Value<'c, '_>,
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        let op = OperationBuilder::new("pdl.erase", location)
+            .add_operands(&[op_to_erase])
+            .build()?;
+
+        Ok(op)
+    }
+}
+
+/// High-level builder for creating Transform + PDL integration patterns
+pub struct TransformPdlBuilder<'c> {
+    context: &'c Context,
+    location: Location<'c>,
+}
+
+impl<'c> TransformPdlBuilder<'c> {
+    pub fn new(context: &'c Context, location: Location<'c>) -> Self {
+        Self { context, location }
+    }
+
+    /// Create a simple tensor optimization pattern
+    /// Matches tensor_ops operations and applies optimizations
+    pub fn create_tensor_optimization_pattern(
+        &self,
+        operation_name: &str,
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        // Create PDL pattern for matching tensor operations
+        let pattern = PdlDialect::create_pattern(self.context, self.location, 1)?;
+        
+        // TODO: Add more sophisticated pattern matching logic
+        // This is a foundation that can be extended with specific tensor operation patterns
+        
+        Ok(pattern)
+    }
+
+    /// Create a transform sequence that applies tensor optimizations
+    pub fn create_tensor_transform_sequence(
+        &self,
+    ) -> Result<Operation<'c>, Box<dyn std::error::Error>> {
+        let sequence = TransformDialect::create_sequence(self.context, self.location)?;
+        
+        // TODO: Add specific tensor transformation steps
+        // This provides the foundation for chaining multiple optimizations
+        
+        Ok(sequence)
+    }
+}
