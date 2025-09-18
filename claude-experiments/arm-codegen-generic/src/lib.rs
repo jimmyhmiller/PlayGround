@@ -4,6 +4,7 @@ pub mod parser;
 pub mod rust_generator;
 pub mod rust_function_generator;
 pub mod cpp_function_generator;
+pub mod zig_function_generator;
 pub mod python_generator;
 
 #[derive(Debug, Clone)]
