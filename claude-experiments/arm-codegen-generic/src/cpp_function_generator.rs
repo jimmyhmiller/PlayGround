@@ -91,7 +91,7 @@ constexpr uint32_t truncate_imm(int32_t imm) {
                 let param_type = match &field.kind {
                     FieldKind::Register => "Register",
                     FieldKind::Immediate => "int32_t",
-                    FieldKind::ClassSelector(name) => {
+                    FieldKind::ClassSelector(_name) => {
                         // For C++, we'll use an enum class
                         &format!("{}Selector", instruction.name)
                     },
