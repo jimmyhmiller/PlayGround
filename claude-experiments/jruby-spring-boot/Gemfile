@@ -1,9 +1,0 @@
-source 'https://rubygems.org'
-
-# Spring Boot dependencies via JRuby's Java integration
-gem 'jar-dependencies'
-
-# Add the Spring Boot JARs as dependencies
-# These will be downloaded from Maven Central
-jar 'org.springframework.boot:spring-boot-starter-web', '3.2.0'
-jar 'org.springframework.boot:spring-boot-starter', '3.2.0'
