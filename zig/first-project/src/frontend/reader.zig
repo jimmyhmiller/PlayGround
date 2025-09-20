@@ -6,9 +6,9 @@ const Parser = parser.Parser;
 const Value = value.Value;
 
 pub const Reader = struct {
-    allocator: std.mem.Allocator,
+    allocator: *std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) Reader {
+    pub fn init(allocator: *std.mem.Allocator) Reader {
         return Reader{
             .allocator = allocator,
         };
@@ -22,7 +22,7 @@ pub const Reader = struct {
     pub fn readAllString(self: *Reader, source: []const u8) !std.ArrayList(*Value) {
         var p = Parser.init(self.allocator, source);
         var results = std.ArrayList(*Value){};
-        try p.parseAll(self.allocator, &results);
+        try p.parseAll(self.allocator.*, &results);
         return results;
     }
 
@@ -45,7 +45,8 @@ pub const Reader = struct {
 test "reader complex example" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var reader = Reader.init(arena.allocator());
+    var allocator = arena.allocator();
+    var reader = Reader.init(&allocator);
 
     const clojure_code = "(defn my-func [{:keys [a b c]}] (+ a b c))";
     const result = try reader.readString(clojure_code);
@@ -83,7 +84,8 @@ test "reader complex example" {
 test "reader multiple expressions" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var reader = Reader.init(arena.allocator());
+    var allocator = arena.allocator();
+    var reader = Reader.init(&allocator);
 
     const code = "42 :hello \"world\" (+ 1 2) [a b c]";
     const results = try reader.readAllString(code);
@@ -106,7 +108,8 @@ test "reader multiple expressions" {
 test "reader nested structures" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var reader = Reader.init(arena.allocator());
+    var allocator = arena.allocator();
+    var reader = Reader.init(&allocator);
 
     const code = "{:name \"John\" :age 30 :hobbies [\"reading\" \"coding\"]}";
     const result = try reader.readString(code);
@@ -123,7 +126,8 @@ test "reader nested structures" {
 test "reader quote" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var reader = Reader.init(arena.allocator());
+    var allocator = arena.allocator();
+    var reader = Reader.init(&allocator);
 
     const code = "'hello";
     const result = try reader.readString(code);
@@ -166,7 +170,8 @@ test "reader round-trip" {
         // Create a new arena for each test case
         var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer test_arena.deinit();
-        var reader = Reader.init(test_arena.allocator());
+        var allocator = test_arena.allocator();
+        var reader = Reader.init(&allocator);
 
         // Read the original
         const parsed = try reader.readString(original);
@@ -199,7 +204,8 @@ test "reader round-trip" {
         // Create a new arena and reader for reparsing
         var reparse_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer reparse_arena.deinit();
-        var reparse_reader = Reader.init(reparse_arena.allocator());
+        var reparse_allocator = reparse_arena.allocator();
+        var reparse_reader = Reader.init(&reparse_allocator);
 
         // Read the printed version
         const reparsed = try reparse_reader.readString(printed_copy);

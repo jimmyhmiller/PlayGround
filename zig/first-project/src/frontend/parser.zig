@@ -27,9 +27,9 @@ pub const ParseError = error{
 pub const Parser = struct {
     lexer: Lexer,
     current_token: Token,
-    allocator: std.mem.Allocator,
+    allocator: *std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, source: []const u8) Parser {
+    pub fn init(allocator: *std.mem.Allocator, source: []const u8) Parser {
         var lex = Lexer.init(source);
         const first_token = lex.nextToken();
         return Parser{
@@ -83,21 +83,21 @@ pub const Parser = struct {
 
         // Check for special symbols
         if (std.mem.eql(u8, token.lexeme, "nil")) {
-            return try value.createNil(self.allocator);
+            return try value.createNil(self.allocator.*);
         } else if (std.mem.eql(u8, token.lexeme, "true")) {
-            return try value.createSymbol(self.allocator, "true");
+            return try value.createSymbol(self.allocator.*, "true");
         } else if (std.mem.eql(u8, token.lexeme, "false")) {
-            return try value.createSymbol(self.allocator, "false");
+            return try value.createSymbol(self.allocator.*, "false");
         }
 
-        return try value.createSymbol(self.allocator, token.lexeme);
+        return try value.createSymbol(self.allocator.*, token.lexeme);
     }
 
     fn parseKeyword(self: *Parser) ParseError!*Value {
         const token = try self.expect(.keyword);
         // Remove the ':' prefix from the keyword
         const name = token.lexeme[1..];
-        return try value.createKeyword(self.allocator, name);
+        return try value.createKeyword(self.allocator.*, name);
     }
 
     fn parseString(self: *Parser) ParseError!*Value {
@@ -106,7 +106,7 @@ pub const Parser = struct {
         const content = token.lexeme[1..token.lexeme.len-1];
 
         // For now, simple handling - could expand to handle escape sequences
-        return try value.createString(self.allocator, content);
+        return try value.createString(self.allocator.*, content);
     }
 
     fn parseInt(self: *Parser) ParseError!*Value {
@@ -114,7 +114,7 @@ pub const Parser = struct {
         const int_val = std.fmt.parseInt(i64, token.lexeme, 10) catch {
             return ParseError.InvalidNumber;
         };
-        return try value.createInt(self.allocator, int_val);
+        return try value.createInt(self.allocator.*, int_val);
     }
 
     fn parseFloat(self: *Parser) ParseError!*Value {
@@ -122,7 +122,7 @@ pub const Parser = struct {
         const float_val = std.fmt.parseFloat(f64, token.lexeme) catch {
             return ParseError.InvalidNumber;
         };
-        return try value.createFloat(self.allocator, float_val);
+        return try value.createFloat(self.allocator.*, float_val);
     }
 
     fn parseList(self: *Parser) ParseError!*Value {
@@ -143,11 +143,11 @@ pub const Parser = struct {
         _ = try self.expect(.right_paren);
 
         // Build list from right to left to get correct order
-        var list = try PersistentLinkedList(*Value).empty(self.allocator);
+        var list = try PersistentLinkedList(*Value).empty(self.allocator.*);
         var i = count;
         while (i > 0) {
             i -= 1;
-            list = try list.push(self.allocator, elements[i]);
+            list = try list.push(self.allocator.*, elements[i]);
         }
 
         const val = try self.allocator.create(Value);
@@ -158,7 +158,7 @@ pub const Parser = struct {
     fn parseVector(self: *Parser) ParseError!*Value {
         _ = try self.expect(.left_bracket);
 
-        var vec = PersistentVector(*Value).init(self.allocator, null);
+        var vec = PersistentVector(*Value).init(self.allocator.*, null);
 
         while (self.current_token.type != .right_bracket and self.current_token.type != .eof) {
             const element = try self.parseExpression();
@@ -178,7 +178,7 @@ pub const Parser = struct {
     fn parseMap(self: *Parser) ParseError!*Value {
         _ = try self.expect(.left_brace);
 
-        var map_val = PersistentMap(*Value, *Value).init(self.allocator);
+        var map_val = PersistentMap(*Value, *Value).init(self.allocator.*);
 
         while (self.current_token.type != .right_brace and self.current_token.type != .eof) {
             const key = try self.parseExpression();
@@ -207,11 +207,11 @@ pub const Parser = struct {
         const quoted = try self.parseExpression();
 
         // Create (quote <expr>)
-        var list = try PersistentLinkedList(*Value).empty(self.allocator);
-        list = try list.push(self.allocator, quoted);
+        var list = try PersistentLinkedList(*Value).empty(self.allocator.*);
+        list = try list.push(self.allocator.*, quoted);
 
-        const quote_symbol = try value.createSymbol(self.allocator, "quote");
-        list = try list.push(self.allocator, quote_symbol);
+        const quote_symbol = try value.createSymbol(self.allocator.*, "quote");
+        list = try list.push(self.allocator.*, quote_symbol);
 
         const val = try self.allocator.create(Value);
         val.* = Value{ .list = list };
@@ -222,11 +222,11 @@ pub const Parser = struct {
 test "parser simple values" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
+    var allocator = arena.allocator();
 
     // Test symbol
     {
-        var parser = Parser.init(allocator, "hello");
+        var parser = Parser.init(&allocator, "hello");
         const val = try parser.parse();
         try std.testing.expect(val.isSymbol());
         try std.testing.expect(std.mem.eql(u8, val.symbol, "hello"));
@@ -234,7 +234,7 @@ test "parser simple values" {
 
     // Test keyword
     {
-        var parser = Parser.init(allocator, ":world");
+        var parser = Parser.init(&allocator, ":world");
         const val = try parser.parse();
         try std.testing.expect(val.isKeyword());
         try std.testing.expect(std.mem.eql(u8, val.keyword, "world"));
@@ -242,7 +242,7 @@ test "parser simple values" {
 
     // Test string
     {
-        var parser = Parser.init(allocator, "\"test\"");
+        var parser = Parser.init(&allocator, "\"test\"");
         const val = try parser.parse();
         try std.testing.expect(val.isString());
         try std.testing.expect(std.mem.eql(u8, val.string, "test"));
@@ -250,7 +250,7 @@ test "parser simple values" {
 
     // Test integer
     {
-        var parser = Parser.init(allocator, "42");
+        var parser = Parser.init(&allocator, "42");
         const val = try parser.parse();
         try std.testing.expect(val.isInt());
         try std.testing.expect(val.int == 42);
@@ -258,7 +258,7 @@ test "parser simple values" {
 
     // Test float
     {
-        var parser = Parser.init(allocator, "3.14");
+        var parser = Parser.init(&allocator, "3.14");
         const val = try parser.parse();
         try std.testing.expect(val.isFloat());
         try std.testing.expect(val.float == 3.14);
@@ -268,11 +268,11 @@ test "parser simple values" {
 test "parser collections" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
+    var allocator = arena.allocator();
 
     // Test empty list
     {
-        var parser = Parser.init(allocator, "()");
+        var parser = Parser.init(&allocator, "()");
         const val = try parser.parse();
         try std.testing.expect(val.isList());
         try std.testing.expect(val.list.isEmpty());
@@ -280,7 +280,7 @@ test "parser collections" {
 
     // Test simple list
     {
-        var parser = Parser.init(allocator, "(+ 1 2)");
+        var parser = Parser.init(&allocator, "(+ 1 2)");
         const val = try parser.parse();
         try std.testing.expect(val.isList());
         try std.testing.expect(val.list.len() == 3);
@@ -288,7 +288,7 @@ test "parser collections" {
 
     // Test vector
     {
-        var parser = Parser.init(allocator, "[1 2 3]");
+        var parser = Parser.init(&allocator, "[1 2 3]");
         const val = try parser.parse();
         try std.testing.expect(val.isVector());
         try std.testing.expect(val.vector.len() == 3);
@@ -296,7 +296,7 @@ test "parser collections" {
 
     // Test map
     {
-        var parser = Parser.init(allocator, "{:a 1 :b 2}");
+        var parser = Parser.init(&allocator, "{:a 1 :b 2}");
         const val = try parser.parse();
         try std.testing.expect(val.isMap());
     }

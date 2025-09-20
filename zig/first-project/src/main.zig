@@ -7,11 +7,12 @@ pub fn main() !void {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
+    var allocator = arena.allocator();
 
-    var compiler = Compiler.init(arena.allocator());
+    var compiler = Compiler.init(&allocator);
 
     // Demo: Parse the complex example
-    const clojure_code = "(def f : (-> [Int] Int) (fn [x] (+ x 1)))";
+    const clojure_code = "(def f (: (-> [Int] Int)) (fn [x] (+ x 1)))";
     std.debug.print("Parsing: {s}\n", .{clojure_code});
 
     compiler.compileString(clojure_code) catch |err| {

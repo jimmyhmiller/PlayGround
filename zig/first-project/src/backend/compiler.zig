@@ -35,9 +35,9 @@ pub const Expression = union(enum) {
 };
 
 pub const TypeChecker = struct {
-    allocator: std.mem.Allocator,
+    allocator: *std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) TypeChecker {
+    pub fn init(allocator: *std.mem.Allocator) TypeChecker {
         return TypeChecker{
             .allocator = allocator,
         };
@@ -45,9 +45,9 @@ pub const TypeChecker = struct {
 };
 
 pub const Compiler = struct {
-    allocator: std.mem.Allocator,
+    allocator: *std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) Compiler {
+    pub fn init(allocator: *std.mem.Allocator) Compiler {
         return Compiler{
             .allocator = allocator,
         };
