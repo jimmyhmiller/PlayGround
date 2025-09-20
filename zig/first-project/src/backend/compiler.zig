@@ -2,25 +2,25 @@ const std = @import("std");
 const Reader = @import("../frontend/reader.zig").Reader;
 const Value = @import("../value.zig").Value;
 
-pub const FunctionType = struct {
-    param_types: []_Type,
-    return_type: _Type,
-};
-
-pub const MapType = struct {
-    key_type: _Type,
-    value_type: _Type,
-};
-
 pub const _Type = union(enum) {
     int,
     float,
     string,
     bool,
     list,
-    map: MapType,
-    function: FunctionType,
+    map: *MapType,
+    function: *FunctionType,
     custom, // For user-defined types
+};
+
+pub const FunctionType = struct {
+    param_types: []*_Type,
+    return_type: *_Type,
+};
+
+pub const MapType = struct {
+    key_type: *_Type,
+    value_type: *_Type,
 };
 
 pub const ValueWithMeta = struct {

@@ -408,6 +408,63 @@ pub const BidirectionalTypeChecker = struct {
         return try TypedExpression.init(self.allocator, expr, expected);
     }
 
+    // Typed function checking for checkTyped method
+    fn checkFunctionTyped(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, expected: Type) TypeCheckError!*TypedValue {
+        if (expected != .function) return TypeCheckError.TypeMismatch;
+
+        var current = list.next; // Skip 'fn'
+
+        // Get parameter list
+        const param_list_node = current orelse return TypeCheckError.InvalidTypeAnnotation;
+        if (!param_list_node.value.?.isVector()) return TypeCheckError.InvalidTypeAnnotation;
+        const param_vector = param_list_node.value.?.vector;
+        current = param_list_node.next;
+
+        // Get body
+        const body_node = current orelse return TypeCheckError.InvalidTypeAnnotation;
+        const body = body_node.value.?;
+
+        // Check parameter count matches
+        if (param_vector.len() != expected.function.param_types.len) {
+            return TypeCheckError.ArgumentCountMismatch;
+        }
+
+        // Create new environment with parameter bindings
+        var old_env = self.env;
+        self.env = TypeEnv.init(self.allocator.*);
+
+        // Copy old bindings
+        var iter = old_env.iterator();
+        while (iter.next()) |entry| {
+            try self.env.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        // Add parameter bindings
+        var i: usize = 0;
+        while (i < param_vector.len()) {
+            const param = param_vector.at(i);
+            if (!param.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+            try self.env.put(param.symbol, expected.function.param_types[i]);
+            i += 1;
+        }
+
+        // Check body against return type
+        _ = try self.checkTyped(body, expected.function.return_type);
+
+        // Restore environment
+        self.env.deinit();
+        self.env = old_env;
+
+        // Create the typed function value
+        const result = try self.allocator.create(TypedValue);
+        result.* = TypedValue{ .list = .{
+            .elements = &[0]*TypedValue{}, // TODO: Add proper function representation
+            .type = expected
+        } };
+        _ = expr; // Acknowledge unused parameter
+        return result;
+    }
+
     // Function application type checking
     fn synthesizeApplication(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
         var current: ?*const @TypeOf(list.*) = list;
@@ -458,7 +515,7 @@ pub const BidirectionalTypeChecker = struct {
         const first_arg = (current orelse return TypeCheckError.InvalidTypeAnnotation).value orelse return TypeCheckError.InvalidTypeAnnotation;
         const first_typed = try self.synthesize(first_arg);
 
-        if (!self.isNumericType(first_typed.type)) {
+        if (!isNumericType(first_typed.type)) {
             return TypeCheckError.TypeMismatch;
         }
 
@@ -471,12 +528,12 @@ pub const BidirectionalTypeChecker = struct {
         const op = op_node.symbol;
 
         // For division of integers, result should be float
-        if (std.mem.eql(u8, op, "/") and self.isIntegerType(result_type)) {
+        if (std.mem.eql(u8, op, "/") and isIntegerType(result_type)) {
             result_type = if (std.meta.activeTag(result_type) == .int) Type.float else Type.f64;
         }
 
         // For modulo, ensure integer type
-        if (std.mem.eql(u8, op, "%") and !self.isIntegerType(first_typed.type)) {
+        if (std.mem.eql(u8, op, "%") and !isIntegerType(first_typed.type)) {
             return TypeCheckError.TypeMismatch;
         }
 
@@ -789,16 +846,16 @@ pub const BidirectionalTypeChecker = struct {
                             const first_typed = try self.synthesizeTyped(first_operand);
                             const result_type = first_typed.getType();
 
-                            if (!self.isNumericType(result_type)) {
+                            if (!isNumericType(result_type)) {
                                 return TypeCheckError.TypeMismatch;
                             }
 
                             // For division, check special cases
                             if (std.mem.eql(u8, first.symbol, "/")) {
                                 // Integer division should produce float result
-                                if (self.isIntegerType(result_type)) {
+                                if (isIntegerType(result_type)) {
                                     // Convert to appropriate float type
-                                    const float_result_type = if (std.meta.activeTag(result_type) == .int) Type.float else Type.f64;
+                                    _ = if (std.meta.activeTag(result_type) == .int) Type.float else Type.f64; // TODO: Use this for proper type conversion
 
                                     var idx: usize = 0;
                                     typed_elements[idx] = first_typed;
@@ -816,7 +873,7 @@ pub const BidirectionalTypeChecker = struct {
 
                                     result.* = TypedValue{ .list = .{
                                         .elements = typed_elements[0..idx],
-                                        .type = float_result_type
+                                        .type = Type.float // float_result_type  // TODO: Fix this properly
                                     } };
                                     return result;
                                 }
@@ -824,7 +881,7 @@ pub const BidirectionalTypeChecker = struct {
 
                             // For modulo, only allow integer types
                             if (std.mem.eql(u8, first.symbol, "%")) {
-                                if (!self.isIntegerType(result_type)) {
+                                if (!isIntegerType(result_type)) {
                                     return TypeCheckError.TypeMismatch;
                                 }
                             }
@@ -879,6 +936,48 @@ pub const BidirectionalTypeChecker = struct {
                     }
                 }
 
+                // Default: check if it's a function application
+                if (list.value) |first_val| {
+                    const first_typed = try self.synthesizeTyped(first_val);
+                    if (first_typed.getType() == .function) {
+                        // This is a function application - synthesize the application
+                        const func_type = first_typed.getType().function;
+
+                        // Count and check arguments
+                        var arg_count: usize = 0;
+                        var current: ?*const @TypeOf(list.*) = list.next;
+                        while (current != null) {
+                            if (current.?.value != null) {
+                                arg_count += 1;
+                            }
+                            current = current.?.next;
+                        }
+
+                        if (arg_count != func_type.param_types.len) {
+                            return TypeCheckError.ArgumentCountMismatch;
+                        }
+
+                        // Type check arguments
+                        current = list.next;
+                        var arg_idx: usize = 0;
+                        while (current != null and arg_idx < func_type.param_types.len) {
+                            const arg_node = current.?;
+                            if (arg_node.value) |arg_val| {
+                                _ = try self.checkTyped(arg_val, func_type.param_types[arg_idx]);
+                            }
+                            current = arg_node.next;
+                            arg_idx += 1;
+                        }
+
+                        // Return the function's return type
+                        result.* = TypedValue{ .list = .{
+                            .elements = typed_elements[0..1], // Just store the function for now
+                            .type = func_type.return_type
+                        } };
+                        return result;
+                    }
+                }
+
                 // Default: type check all elements
                 var idx: usize = 0;
                 var current: ?*const @TypeOf(list.*) = list;
@@ -912,6 +1011,21 @@ pub const BidirectionalTypeChecker = struct {
 
     // Checking mode that produces a fully typed AST
     pub fn checkTyped(self: *BidirectionalTypeChecker, expr: *Value, expected: Type) TypeCheckError!*TypedValue {
+        // Handle special forms that need expected type
+        switch (expr.*) {
+            .list => |list| {
+                if (list.value) |first| {
+                    if (first.isSymbol() and std.mem.eql(u8, first.symbol, "fn")) {
+                        return try self.checkFunctionTyped(expr, list, expected);
+                    }
+                }
+                // Fall through to synthesis + subtype check
+            },
+            else => {
+                // Fall through to synthesis + subtype check
+            },
+        }
+
         // First synthesize, then verify it matches expected type
         const typed = try self.synthesizeTyped(expr);
         const actual = typed.getType();
@@ -986,6 +1100,36 @@ pub const BidirectionalTypeChecker = struct {
         // Pass 2: Type check all expressions with forward references available
         var results = ArrayList(*TypedValue){};
         for (expressions) |expr| {
+            if (expr.isList()) {
+                var current: ?*const @TypeOf(expr.list.*) = expr.list;
+                if (current) |node| {
+                    if (node.value) |first| {
+                        if (first.isSymbol() and std.mem.eql(u8, first.symbol, "def")) {
+                            // For def expressions, just check the body against the already-established type
+                            current = node.next;
+                            // Get variable name
+                            const name_node = current orelse continue;
+                            if (!name_node.value.?.isSymbol()) continue;
+                            _ = name_node.value.?.symbol;
+                            current = name_node.next;
+
+                            // Get type annotation
+                            const type_annotation_node = current orelse continue;
+                            const annotated_type = self.parseTypeAnnotation(type_annotation_node.value.?) catch continue;
+                            current = type_annotation_node.next;
+
+                            // Get body and type check it
+                            const body_node = current orelse continue;
+                            const body = body_node.value.?;
+                            const typed_body = try self.checkTyped(body, annotated_type);
+
+                            try results.append(self.allocator.*, typed_body);
+                            continue;
+                        }
+                    }
+                }
+            }
+            // For non-def expressions, use normal synthesis
             const typed = try self.synthesizeTyped(expr);
             try results.append(self.allocator.*, typed);
         }
@@ -996,8 +1140,9 @@ pub const BidirectionalTypeChecker = struct {
 
 // Utility functions for creating types
 pub fn createIntType(allocator: *std.mem.Allocator) !*Type {
-    _ = allocator;
-    return &Type.int;
+    const type_ptr = try allocator.create(Type);
+    type_ptr.* = Type.int;
+    return type_ptr;
 }
 
 pub fn createFunctionType(allocator: *std.mem.Allocator, param_types: []const Type, return_type: Type) !Type {
