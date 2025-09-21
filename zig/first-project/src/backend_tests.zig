@@ -135,8 +135,9 @@ test "forward references - two-pass basic" {
     try std.testing.expect(single_pass_result == TypeChecker.TypeCheckError.UnboundVariable);
 
     // Two-pass should succeed
-    const two_pass_result = try checker.typeCheckAllTwoPass(expressions.items);
-    try std.testing.expect(two_pass_result.items.len == 2);
+    const two_pass_report = try checker.typeCheckAllTwoPass(expressions.items);
+    try std.testing.expect(two_pass_report.errors.items.len == 0);
+    try std.testing.expect(two_pass_report.typed.items.len == 2);
     try std.testing.expect(checker.env.get("x").? == .int);
     try std.testing.expect(checker.env.get("y").? == .int);
 }
@@ -156,9 +157,10 @@ test "forward references - function calling forward function" {
     ;
 
     const expressions = try reader.readAllString(code);
-    const typed = try checker.typeCheckAllTwoPass(expressions.items);
+    const typed_report = try checker.typeCheckAllTwoPass(expressions.items);
 
-    try std.testing.expect(typed.items.len == 2);
+    try std.testing.expect(typed_report.errors.items.len == 0);
+    try std.testing.expect(typed_report.typed.items.len == 2);
     try std.testing.expect(checker.env.get("f").? == .function);
     try std.testing.expect(checker.env.get("g").? == .function);
 }
@@ -179,9 +181,10 @@ test "forward references - mutual recursion" {
     ;
 
     const expressions = try reader.readAllString(code);
-    const typed = try checker.typeCheckAllTwoPass(expressions.items);
+    const typed_report = try checker.typeCheckAllTwoPass(expressions.items);
 
-    try std.testing.expect(typed.items.len == 2);
+    try std.testing.expect(typed_report.errors.items.len == 0);
+    try std.testing.expect(typed_report.typed.items.len == 2);
     try std.testing.expect(checker.env.get("even").? == .function);
     try std.testing.expect(checker.env.get("odd").? == .function);
 }
@@ -203,9 +206,10 @@ test "forward references - complex dependency chain" {
     ;
 
     const expressions = try reader.readAllString(code);
-    const typed = try checker.typeCheckAllTwoPass(expressions.items);
+    const typed_report = try checker.typeCheckAllTwoPass(expressions.items);
 
-    try std.testing.expect(typed.items.len == 4);
+    try std.testing.expect(typed_report.errors.items.len == 0);
+    try std.testing.expect(typed_report.typed.items.len == 4);
     try std.testing.expect(checker.env.get("a").? == .int);
     try std.testing.expect(checker.env.get("b").? == .int);
     try std.testing.expect(checker.env.get("c").? == .int);
@@ -230,8 +234,10 @@ test "forward references - mutual recursion with type mismatch (expected to fail
     const expressions = try reader.readAllString(code);
 
     // This should fail because evenCheck returns String but oddCheck expects Int from evenCheck call
-    const result = checker.typeCheckAllTwoPass(expressions.items);
-    try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, result);
+    const report = try checker.typeCheckAllTwoPass(expressions.items);
+    try std.testing.expect(report.errors.items.len == 2);
+    try std.testing.expect(report.errors.items[0].err == TypeChecker.TypeCheckError.TypeMismatch);
+    try std.testing.expect(report.errors.items[1].err == TypeChecker.TypeCheckError.TypeMismatch);
 }
 
 test "struct definition" {
