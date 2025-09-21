@@ -23,8 +23,9 @@ test "language showcase - verify all examples type check" {
             \\(def nothing (: Nil) nil)
         ;
         const expressions = try reader.readAllString(code);
-        const results = try checker.typeCheckAllTwoPass(expressions.items);
-        try std.testing.expect(results.items.len == 4);
+        const report = try checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expect(report.errors.items.len == 0);
+        try std.testing.expect(report.typed.items.len == 4);
     }
 
     // Specific numeric types
@@ -34,8 +35,9 @@ test "language showcase - verify all examples type check" {
             \\(def float32-val (: F32) 3.14)
         ;
         const expressions = try reader.readAllString(code);
-        const results = try checker.typeCheckAllTwoPass(expressions.items);
-        try std.testing.expect(results.items.len == expressions.items.len);
+        const report = try checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expect(report.errors.items.len == 0);
+        try std.testing.expect(report.typed.items.len == expressions.items.len);
     }
 
     // Function types
@@ -47,8 +49,9 @@ test "language showcase - verify all examples type check" {
             \\  (fn [x y] (+ x y)))
         ;
         const expressions = try reader.readAllString(code);
-        const results = try checker.typeCheckAllTwoPass(expressions.items);
-        for (results.items) |typed| {
+        const report = try checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expect(report.errors.items.len == 0);
+        for (report.typed.items) |typed| {
             try std.testing.expect(typed.getType() == .function);
         }
     }
@@ -61,8 +64,9 @@ test "language showcase - verify all examples type check" {
             \\(def result (: Int) (add 40 2))
         ;
         const expressions = try reader.readAllString(code);
-        const results = try checker.typeCheckAllTwoPass(expressions.items);
-        try std.testing.expect(results.items.len == 2);
+        const report = try checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expect(report.errors.items.len == 0);
+        try std.testing.expect(report.typed.items.len == 2);
         try std.testing.expect(checker.env.get("result").? == .int);
     }
 
@@ -74,8 +78,9 @@ test "language showcase - verify all examples type check" {
             \\(def quotient (: Float) (/ 22 7))
         ;
         const expressions = try reader.readAllString(code);
-        const results = try checker.typeCheckAllTwoPass(expressions.items);
-        try std.testing.expect(results.items.len == 3);
+        const report = try checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expect(report.errors.items.len == 0);
+        try std.testing.expect(report.typed.items.len == 3);
 
         // Verify the division returns float
         try std.testing.expect(checker.env.get("quotient").? == .float);
@@ -115,8 +120,9 @@ test "language showcase - verify all examples type check" {
             \\(def func-d (: Int) 42)
         ;
         const expressions = try reader.readAllString(code);
-        const results = try checker.typeCheckAllTwoPass(expressions.items);
-        try std.testing.expect(results.items.len == 4);
+        const report = try checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expect(report.errors.items.len == 0);
+        try std.testing.expect(report.typed.items.len == 4);
 
         // All should have Int type
         try std.testing.expect(checker.env.get("func-a").? == .int);
@@ -196,28 +202,22 @@ test "language showcase - error cases" {
         try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, result);
     }
 
-    // Function invocation with wrong argument type
+    // Function invocation errors collected from a single run
     {
         const code =
             \\(def add (: (-> [Int Int] Int))
             \\  (fn [x y] (+ x y)))
             \\(add 1 "two")
-        ;
-        const expressions = try reader.readAllString(code);
-        const result = checker.typeCheckAllTwoPass(expressions.items);
-        try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, result);
-    }
-
-    // Function invocation with wrong number of arguments
-    {
-        const code =
-            \\(def add (: (-> [Int Int] Int))
-            \\  (fn [x y] (+ x y)))
             \\(add 1)
         ;
         const expressions = try reader.readAllString(code);
-        const result = checker.typeCheckAllTwoPass(expressions.items);
-        try std.testing.expectError(TypeChecker.TypeCheckError.ArgumentCountMismatch, result);
+        const report = try checker.typeCheckAllTwoPass(expressions.items);
+
+        // First expression (the def) succeeds, the next two collect errors
+        try std.testing.expect(report.typed.items.len == 1);
+        try std.testing.expect(report.errors.items.len == 2);
+        try std.testing.expect(report.errors.items[0].err == TypeChecker.TypeCheckError.TypeMismatch);
+        try std.testing.expect(report.errors.items[1].err == TypeChecker.TypeCheckError.ArgumentCountMismatch);
     }
 
     // Undefined variable

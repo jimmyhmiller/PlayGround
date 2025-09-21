@@ -195,6 +195,17 @@ pub const TypeCheckError = error{
     OutOfMemory,
 };
 
+pub const TypeCheckErrorDetail = struct {
+    index: usize,
+    expr: *Value,
+    err: TypeCheckError,
+};
+
+pub const TypeCheckReport = struct {
+    typed: ArrayList(*TypedValue),
+    errors: ArrayList(TypeCheckErrorDetail),
+};
+
 // Bidirectional type checker
 pub const BidirectionalTypeChecker = struct {
     allocator: std.mem.Allocator,
@@ -1257,7 +1268,7 @@ pub const BidirectionalTypeChecker = struct {
     }
 
     // Two-pass type checking for forward references (fully typed)
-    pub fn typeCheckAllTwoPass(self: *BidirectionalTypeChecker, expressions: []const *Value) !ArrayList(*TypedValue) {
+    pub fn typeCheckAllTwoPass(self: *BidirectionalTypeChecker, expressions: []const *Value) !TypeCheckReport {
         // Pass 1: Collect all top-level definitions and their type signatures
         for (expressions) |expr| {
             if (expr.isList()) {
@@ -1293,7 +1304,8 @@ pub const BidirectionalTypeChecker = struct {
 
         // Pass 2: Type check all expressions with forward references available
         var results = ArrayList(*TypedValue){};
-        for (expressions) |expr| {
+        var errors = ArrayList(TypeCheckErrorDetail){};
+        for (expressions, 0..) |expr, index| {
             if (expr.isList()) {
                 var current: ?*const @TypeOf(expr.list.*) = expr.list;
                 if (current) |node| {
@@ -1320,7 +1332,15 @@ pub const BidirectionalTypeChecker = struct {
                             // Get body and type check it
                             const body_node = current orelse continue;
                             const body = body_node.value.?;
-                            const typed_body = try self.checkTyped(body, annotated_type);
+                            const typed_body = self.checkTyped(body, annotated_type) catch |err| {
+                                if (err == TypeCheckError.OutOfMemory) return err;
+                                try errors.append(self.allocator, .{
+                                    .index = index,
+                                    .expr = body,
+                                    .err = err,
+                                });
+                                continue;
+                            };
 
                             try results.append(self.allocator, typed_body);
                             continue;
@@ -1329,11 +1349,22 @@ pub const BidirectionalTypeChecker = struct {
                 }
             }
             // For non-def expressions, use normal synthesis
-            const typed = try self.synthesizeTyped(expr);
+            const typed = self.synthesizeTyped(expr) catch |err| {
+                if (err == TypeCheckError.OutOfMemory) return err;
+                try errors.append(self.allocator, .{
+                    .index = index,
+                    .expr = expr,
+                    .err = err,
+                });
+                continue;
+            };
             try results.append(self.allocator, typed);
         }
 
-        return results;
+        return TypeCheckReport{
+            .typed = results,
+            .errors = errors,
+        };
     }
 };
 
