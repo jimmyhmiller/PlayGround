@@ -1,9 +1,9 @@
 const std = @import("std");
 const lexer = @import("lexer.zig");
-const value = @import("../value.zig");
-const vector = @import("../collections/vector.zig");
-const linked_list = @import("../collections/linked_list.zig");
-const collections_map = @import("../collections/map.zig");
+const value = @import("value.zig");
+const vector = @import("collections/vector.zig");
+const linked_list = @import("collections/linked_list.zig");
+const collections_map = @import("collections/map.zig");
 
 const Lexer = lexer.Lexer;
 const Token = lexer.Token;

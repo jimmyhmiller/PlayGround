@@ -1,5 +1,5 @@
 const std = @import("std");
-const Value = @import("../value.zig").Value;
+const Value = @import("value.zig").Value;
 const ArrayList = std.ArrayList;
 const HashMap = std.HashMap;
 
@@ -32,6 +32,10 @@ pub const Type = union(enum) {
     function: *FunctionType,
     vector: *Type,
     map: *MapType,
+    struct_type: *StructType,
+
+    // Meta-type
+    type_type, // The type of types
 
     // Type variables for inference
     type_var: u32,
@@ -79,6 +83,18 @@ pub const Type = union(enum) {
                 try m.value_type.format("", .{}, writer);
                 try writer.print("}");
             },
+            .struct_type => |s| {
+                try writer.print("(Struct");
+                for (s.fields) |field| {
+                    try writer.print(" [");
+                    try writer.print("{s}", .{field.name});
+                    try writer.print(" ");
+                    try field.field_type.format("", .{}, writer);
+                    try writer.print("]");
+                }
+                try writer.print(")");
+            },
+            .type_type => try writer.print("Type"),
             .type_var => |id| try writer.print("?{d}", .{id}),
         }
     }
@@ -94,12 +110,22 @@ pub const MapType = struct {
     value_type: Type,
 };
 
+pub const StructField = struct {
+    name: []const u8,
+    field_type: Type,
+};
+
+pub const StructType = struct {
+    name: []const u8,
+    fields: []const StructField,
+};
+
 // Typed expression - decorates AST nodes with their inferred types
 pub const TypedExpression = struct {
     value: *Value,
     type: Type,
 
-    pub fn init(allocator: *std.mem.Allocator, value: *Value, type_info: Type) !*TypedExpression {
+    pub fn init(allocator: std.mem.Allocator, value: *Value, type_info: Type) !*TypedExpression {
         const typed_expr = try allocator.create(TypedExpression);
         typed_expr.* = TypedExpression{
             .value = value,
@@ -120,6 +146,7 @@ pub const TypedValue = union(enum) {
     list: struct { elements: []*TypedValue, type: Type },
     vector: struct { elements: []*TypedValue, type: Type },
     map: struct { entries: []*MapEntry, type: Type },
+    type_value: struct { value_type: Type, type: Type }, // A type as a value
 
     pub const MapEntry = struct {
         key: *TypedValue,
@@ -137,6 +164,7 @@ pub const TypedValue = union(enum) {
             .list => |v| v.type,
             .vector => |v| v.type,
             .map => |v| v.type,
+            .type_value => |v| v.type,
         };
     }
 };
@@ -169,14 +197,14 @@ pub const TypeCheckError = error{
 
 // Bidirectional type checker
 pub const BidirectionalTypeChecker = struct {
-    allocator: *std.mem.Allocator,
+    allocator: std.mem.Allocator,
     env: TypeEnv,
     next_var_id: u32,
 
-    pub fn init(allocator: *std.mem.Allocator) BidirectionalTypeChecker {
+    pub fn init(allocator: std.mem.Allocator) BidirectionalTypeChecker {
         return BidirectionalTypeChecker{
             .allocator = allocator,
-            .env = TypeEnv.init(allocator.*),
+            .env = TypeEnv.init(allocator),
             .next_var_id = 0,
         };
     }
@@ -380,7 +408,7 @@ pub const BidirectionalTypeChecker = struct {
 
         // Create new environment with parameter bindings
         var old_env = self.env;
-        self.env = TypeEnv.init(self.allocator.*);
+        self.env = TypeEnv.init(self.allocator);
 
         // Copy old bindings
         var iter = old_env.iterator();
@@ -431,7 +459,7 @@ pub const BidirectionalTypeChecker = struct {
 
         // Create new environment with parameter bindings
         var old_env = self.env;
-        self.env = TypeEnv.init(self.allocator.*);
+        self.env = TypeEnv.init(self.allocator);
 
         // Copy old bindings
         var iter = old_env.iterator();
@@ -602,6 +630,11 @@ pub const BidirectionalTypeChecker = struct {
             if (std.mem.eql(u8, type_name, "F32")) return Type.f32;
             if (std.mem.eql(u8, type_name, "F64")) return Type.f64;
 
+            // Check if it's a user-defined type in the environment
+            if (self.env.get(type_name)) |env_type| {
+                return env_type;
+            }
+
             return TypeCheckError.InvalidTypeAnnotation;
         }
 
@@ -673,6 +706,63 @@ pub const BidirectionalTypeChecker = struct {
             return Type{ .vector = vector_elem_type };
         }
 
+        if (type_expr.isList()) {
+            var current: ?*const @TypeOf(type_expr.list.*) = type_expr.list;
+
+            // Check if it's a Struct type: (Struct [field1 Type1] [field2 Type2] ...)
+            if (current) |node| {
+                if (node.value) |first| {
+                    if (first.isSymbol() and std.mem.eql(u8, first.symbol, "Struct")) {
+                        current = node.next;
+
+                        // Count fields
+                        var field_count: usize = 0;
+                        var count_current = current;
+                        while (count_current != null) {
+                            if (count_current.?.value != null) field_count += 1;
+                            count_current = count_current.?.next;
+                        }
+
+                        // Parse fields
+                        const fields = try self.allocator.alloc(StructField, field_count);
+                        var field_idx: usize = 0;
+
+                        while (current != null and field_idx < field_count) {
+                            const field_node = current.?.value orelse return TypeCheckError.InvalidTypeAnnotation;
+                            if (!field_node.isVector() or field_node.vector.len() != 2) {
+                                return TypeCheckError.InvalidTypeAnnotation;
+                            }
+
+                            const field_name_val = field_node.vector.at(0);
+                            const field_type_val = field_node.vector.at(1);
+
+                            if (!field_name_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const field_name = field_name_val.symbol;
+                            const field_type = try self.parseType(field_type_val);
+
+                            fields[field_idx] = StructField{
+                                .name = field_name,
+                                .field_type = field_type,
+                            };
+
+                            field_idx += 1;
+                            current = current.?.next;
+                        }
+
+                        // Create struct type - for now use empty name, but this should come from def
+                        const struct_type = try self.allocator.create(StructType);
+                        struct_type.* = StructType{
+                            .name = "",
+                            .fields = fields,
+                        };
+
+                        return Type{ .struct_type = struct_type };
+                    }
+                }
+            }
+        }
+
         return TypeCheckError.InvalidTypeAnnotation;
     }
 
@@ -680,8 +770,31 @@ pub const BidirectionalTypeChecker = struct {
     fn isSubtype(self: *BidirectionalTypeChecker, sub: Type, super: Type) TypeCheckError!bool {
         _ = self;
 
-        // Simple structural equality for now
-        return typesEqual(sub, super);
+        if (typesEqual(sub, super)) {
+            return true;
+        }
+
+        // General integers can flow into any specific integer type
+        if (sub == .int and isIntegerType(super)) {
+            return true;
+        }
+
+        // Specific integer types are subtypes of the generic Int
+        if (super == .int and isIntegerType(sub)) {
+            return true;
+        }
+
+        // General floats can flow into any specific float type
+        if (sub == .float and isFloatType(super)) {
+            return true;
+        }
+
+        // Specific float types are subtypes of the generic Float
+        if (super == .float and isFloatType(sub)) {
+            return true;
+        }
+
+        return false;
     }
 
     // Check if a type is numeric
@@ -721,7 +834,7 @@ pub const BidirectionalTypeChecker = struct {
             .int, .float, .string, .bool, .nil,
             .u8, .u16, .u32, .u64, .usize,
             .i8, .i16, .i32, .i64, .isize,
-            .f32, .f64 => return true,
+            .f32, .f64, .type_type => return true,
             .function => |a_func| {
                 const b_func = b.function;
                 if (a_func.param_types.len != b_func.param_types.len) return false;
@@ -737,6 +850,17 @@ pub const BidirectionalTypeChecker = struct {
                 const b_map = b.map;
                 return typesEqual(a_map.key_type, b_map.key_type) and
                        typesEqual(a_map.value_type, b_map.value_type);
+            },
+            .struct_type => |a_struct| {
+                const b_struct = b.struct_type;
+                if (!std.mem.eql(u8, a_struct.name, b_struct.name)) return false;
+                if (a_struct.fields.len != b_struct.fields.len) return false;
+
+                for (a_struct.fields, b_struct.fields) |a_field, b_field| {
+                    if (!std.mem.eql(u8, a_field.name, b_field.name)) return false;
+                    if (!typesEqual(a_field.field_type, b_field.field_type)) return false;
+                }
+                return true;
             },
             .type_var => |a_id| return a_id == b.type_var,
         }
@@ -907,7 +1031,7 @@ pub const BidirectionalTypeChecker = struct {
                             } };
                             return result;
                         } else if (std.mem.eql(u8, first.symbol, "def")) {
-                            // Handle def form: (def name (: type) body)
+                            // Handle def form: (def name value) or (def name (: type) body)
                             var current: ?*const @TypeOf(list.*) = list.next;
 
                             // Get variable name
@@ -916,21 +1040,85 @@ pub const BidirectionalTypeChecker = struct {
                             const var_name = name_node.value.?.symbol;
                             current = name_node.next;
 
-                            // Get type annotation
-                            const type_annotation_node = current orelse return TypeCheckError.InvalidTypeAnnotation;
-                            const annotated_type = try self.parseTypeAnnotation(type_annotation_node.value.?);
-                            current = type_annotation_node.next;
+                            // Get the second argument
+                            const second_node = current orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const second_val = second_node.value.?;
 
-                            // Type check body
-                            const body_node = current orelse return TypeCheckError.InvalidTypeAnnotation;
-                            const body = body_node.value.?;
-                            const typed_body = try self.checkTyped(body, annotated_type);
+                            // Check if it's a direct struct definition: (def name (Struct [x Int] [y Int]))
+                            if (second_val.isList()) {
+                                const struct_current: ?*const @TypeOf(second_val.list.*) = second_val.list;
+                                if (struct_current) |node| {
+                                    if (node.value) |struct_first| {
+                                        if (struct_first.isSymbol() and std.mem.eql(u8, struct_first.symbol, "Struct")) {
+                                            // This is a direct struct definition
+                                            var struct_type = try self.parseType(second_val);
+                                            if (struct_type == .struct_type) {
+                                                struct_type.struct_type.name = var_name;
+                                            }
 
-                            // Add binding to environment
-                            try self.env.put(var_name, annotated_type);
+                                            // Add binding to environment
+                                            try self.env.put(var_name, struct_type);
 
-                            // Return the typed body as the result
-                            return typed_body;
+                                            // Return a type value
+                                            result.* = TypedValue{ .type_value = .{
+                                                .value_type = struct_type,
+                                                .type = Type.type_type
+                                            } };
+                                            return result;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Check if it's a type annotation: (def name (: type) body)
+                            if (second_val.isList()) {
+                                const anno_current: ?*const @TypeOf(second_val.list.*) = second_val.list;
+                                if (anno_current) |node| {
+                                    if (node.value) |anno_first| {
+                                        if (anno_first.isKeyword() and std.mem.eql(u8, anno_first.keyword, "")) {
+                                            // This is a type annotation form
+                                            var annotated_type = try self.parseTypeAnnotation(second_val);
+                                            current = second_node.next;
+
+                                            // If the type is a struct, set its name to the variable name
+                                            if (annotated_type == .struct_type) {
+                                                annotated_type.struct_type.name = var_name;
+                                            }
+
+                                            // Type check body
+                                            const body_node = current orelse return TypeCheckError.InvalidTypeAnnotation;
+                                            const body = body_node.value.?;
+
+                                            // For struct type definitions, only allow nil as the body
+                                            if (annotated_type == .struct_type) {
+                                                if (!body.isNil()) {
+                                                    return TypeCheckError.TypeMismatch;
+                                                }
+                                                // Add binding to environment
+                                                try self.env.put(var_name, annotated_type);
+
+                                                // Return a typed value representing the struct type definition
+                                                result.* = TypedValue{ .nil = .{ .type = annotated_type } };
+                                                return result;
+                                            }
+
+                                            // For non-struct types, check body normally
+                                            const typed_body = try self.checkTyped(body, annotated_type);
+
+                                            // Add binding to environment
+                                            try self.env.put(var_name, annotated_type);
+
+                                            // Return the typed body as the result
+                                            return typed_body;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Fallback: regular value definition (def name value)
+                            const typed_value = try self.synthesizeTyped(second_val);
+                            try self.env.put(var_name, typed_value.getType());
+                            return typed_value;
                         }
                         // Add other special forms as needed
                     }
@@ -1045,6 +1233,7 @@ pub const BidirectionalTypeChecker = struct {
             .list => |*v| v.type = expected,
             .vector => |*v| v.type = expected,
             .map => |*v| v.type = expected,
+            .type_value => |*v| v.type = expected,
         }
 
         return typed;
@@ -1061,7 +1250,7 @@ pub const BidirectionalTypeChecker = struct {
 
         for (expressions) |expr| {
             const typed = try self.synthesizeTyped(expr);
-            try results.append(self.allocator.*, typed);
+            try results.append(self.allocator, typed);
         }
 
         return results;
@@ -1087,7 +1276,12 @@ pub const BidirectionalTypeChecker = struct {
 
                             // Get type annotation
                             const type_annotation_node = current orelse continue;
-                            const annotated_type = self.parseTypeAnnotation(type_annotation_node.value.?) catch continue;
+                            var annotated_type = self.parseTypeAnnotation(type_annotation_node.value.?) catch continue;
+
+                            // If the type is a struct, set its name to the variable name
+                            if (annotated_type == .struct_type) {
+                                annotated_type.struct_type.name = var_name;
+                            }
 
                             // Add to environment for forward references
                             try self.env.put(var_name, annotated_type);
@@ -1110,20 +1304,25 @@ pub const BidirectionalTypeChecker = struct {
                             // Get variable name
                             const name_node = current orelse continue;
                             if (!name_node.value.?.isSymbol()) continue;
-                            _ = name_node.value.?.symbol;
+                            const var_name = name_node.value.?.symbol;
                             current = name_node.next;
 
                             // Get type annotation
                             const type_annotation_node = current orelse continue;
-                            const annotated_type = self.parseTypeAnnotation(type_annotation_node.value.?) catch continue;
+                            var annotated_type = self.parseTypeAnnotation(type_annotation_node.value.?) catch continue;
                             current = type_annotation_node.next;
+
+                            // If the type is a struct, set its name to the variable name
+                            if (annotated_type == .struct_type) {
+                                annotated_type.struct_type.name = var_name;
+                            }
 
                             // Get body and type check it
                             const body_node = current orelse continue;
                             const body = body_node.value.?;
                             const typed_body = try self.checkTyped(body, annotated_type);
 
-                            try results.append(self.allocator.*, typed_body);
+                            try results.append(self.allocator, typed_body);
                             continue;
                         }
                     }
@@ -1131,7 +1330,7 @@ pub const BidirectionalTypeChecker = struct {
             }
             // For non-def expressions, use normal synthesis
             const typed = try self.synthesizeTyped(expr);
-            try results.append(self.allocator.*, typed);
+            try results.append(self.allocator, typed);
         }
 
         return results;
@@ -1139,13 +1338,13 @@ pub const BidirectionalTypeChecker = struct {
 };
 
 // Utility functions for creating types
-pub fn createIntType(allocator: *std.mem.Allocator) !*Type {
+pub fn createIntType(allocator: std.mem.Allocator) !*Type {
     const type_ptr = try allocator.create(Type);
     type_ptr.* = Type.int;
     return type_ptr;
 }
 
-pub fn createFunctionType(allocator: *std.mem.Allocator, param_types: []const Type, return_type: Type) !Type {
+pub fn createFunctionType(allocator: std.mem.Allocator, param_types: []const Type, return_type: Type) !Type {
     const func_type = try allocator.create(FunctionType);
     func_type.* = FunctionType{
         .param_types = param_types,

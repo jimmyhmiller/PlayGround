@@ -1,6 +1,6 @@
 const std = @import("std");
 const parser = @import("parser.zig");
-const value = @import("../value.zig");
+const value = @import("value.zig");
 
 const Parser = parser.Parser;
 const Value = value.Value;

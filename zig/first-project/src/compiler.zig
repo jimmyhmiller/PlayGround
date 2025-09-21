@@ -1,48 +1,6 @@
 const std = @import("std");
-const Reader = @import("../frontend/reader.zig").Reader;
-const Value = @import("../value.zig").Value;
-
-pub const _Type = union(enum) {
-    int,
-    float,
-    string,
-    bool,
-    list,
-    map: *MapType,
-    function: *FunctionType,
-    custom, // For user-defined types
-};
-
-pub const FunctionType = struct {
-    param_types: []*_Type,
-    return_type: *_Type,
-};
-
-pub const MapType = struct {
-    key_type: *_Type,
-    value_type: *_Type,
-};
-
-pub const ValueWithMeta = struct {
-    value: *Value,
-    _type: _Type,
-};
-
-pub const Expression = union(enum) {
-    def: ValueWithMeta,
-    function: ValueWithMeta,
-    sexpr: ValueWithMeta,
-};
-
-pub const TypeChecker = struct {
-    allocator: *std.mem.Allocator,
-
-    pub fn init(allocator: *std.mem.Allocator) TypeChecker {
-        return TypeChecker{
-            .allocator = allocator,
-        };
-    }
-};
+const Reader = @import("reader.zig").Reader;
+const Value = @import("value.zig").Value;
 
 pub const Compiler = struct {
     allocator: *std.mem.Allocator,

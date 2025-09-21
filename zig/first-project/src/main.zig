@@ -1,6 +1,6 @@
 const std = @import("std");
-const reader_mod = @import("frontend/reader.zig");
-const Compiler = @import("backend/compiler.zig").Compiler;
+const reader_mod = @import("reader.zig");
+const Compiler = @import("compiler.zig").Compiler;
 
 pub fn main() !void {
     std.debug.print("=== Lisp Reader Demo ===\n", .{});
