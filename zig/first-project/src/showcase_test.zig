@@ -1,0 +1,232 @@
+const std = @import("std");
+
+const TypeChecker = @import("type_checker.zig");
+const Reader = @import("reader.zig").Reader;
+
+test "language showcase - verify all examples type check" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    // Test each section of our language showcase
+
+    // Basic types
+    {
+        const code =
+            \\(def my-int (: Int) 42)
+            \\(def pi (: Float) 3.14159)
+            \\(def greeting (: String) "Hello, World!")
+            \\(def nothing (: Nil) nil)
+        ;
+        const expressions = try reader.readAllString(code);
+        const results = try checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expect(results.items.len == 4);
+    }
+
+    // Specific numeric types
+    {
+        const code =
+            \\(def byte-val (: U8) 255)
+            \\(def float32-val (: F32) 3.14)
+        ;
+        const expressions = try reader.readAllString(code);
+        const results = try checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expect(results.items.len == expressions.items.len);
+    }
+
+    // Function types
+    {
+        const code =
+            \\(def increment (: (-> [Int] Int))
+            \\  (fn [x] (+ x 1)))
+            \\(def add (: (-> [Int Int] Int))
+            \\  (fn [x y] (+ x y)))
+        ;
+        const expressions = try reader.readAllString(code);
+        const results = try checker.typeCheckAllTwoPass(expressions.items);
+        for (results.items) |typed| {
+            try std.testing.expect(typed.getType() == .function);
+        }
+    }
+
+    // Function definition and invocation
+    {
+        const code =
+            \\(def add (: (-> [Int Int] Int))
+            \\  (fn [x y] (+ x y)))
+            \\(def result (: Int) (add 40 2))
+        ;
+        const expressions = try reader.readAllString(code);
+        const results = try checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expect(results.items.len == 2);
+        try std.testing.expect(checker.env.get("result").? == .int);
+    }
+
+    // Arithmetic operations
+    {
+        const code =
+            \\(def sum (: Int) (+ 10 20 30))
+            \\(def product (: Int) (* 6 7))
+            \\(def quotient (: Float) (/ 22 7))
+        ;
+        const expressions = try reader.readAllString(code);
+        const results = try checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expect(results.items.len == 3);
+
+        // Verify the division returns float
+        try std.testing.expect(checker.env.get("quotient").? == .float);
+    }
+
+    // Vector types
+    {
+        const code = "(def int-vector (: [Int]) [1 2 3 4 5])";
+        const expr = try reader.readString(code);
+        const typed = try checker.typeCheck(expr);
+        try std.testing.expect(typed.getType() == .vector);
+    }
+
+    // Struct types
+    {
+        const code =
+            \\(def Point (Struct [x Int] [y Int]))
+            \\(def Color (Struct [r U8] [g U8] [b U8]))
+        ;
+        const expressions = try reader.readAllString(code);
+        for (expressions.items) |expr| {
+            const typed = try checker.typeCheck(expr);
+            try std.testing.expect(typed.getType() == .type_type);
+        }
+
+        // Verify structs are in environment
+        try std.testing.expect(checker.env.get("Point").? == .struct_type);
+        try std.testing.expect(checker.env.get("Color").? == .struct_type);
+    }
+
+    // Forward references - this tests two-pass compilation
+    {
+        const code =
+            \\(def func-a (: Int) func-b)
+            \\(def func-b (: Int) func-c)
+            \\(def func-c (: Int) func-d)
+            \\(def func-d (: Int) 42)
+        ;
+        const expressions = try reader.readAllString(code);
+        const results = try checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expect(results.items.len == 4);
+
+        // All should have Int type
+        try std.testing.expect(checker.env.get("func-a").? == .int);
+        try std.testing.expect(checker.env.get("func-b").? == .int);
+        try std.testing.expect(checker.env.get("func-c").? == .int);
+        try std.testing.expect(checker.env.get("func-d").? == .int);
+    }
+
+    // Higher-order functions
+    {
+        const code = "(def make-adder (: (-> [Int] (-> [Int] Int))) (fn [x] (fn [y] (+ x y))))";
+        const expr = try reader.readString(code);
+        const typed = try checker.typeCheck(expr);
+
+        // Should be a function that returns a function
+        try std.testing.expect(typed.getType() == .function);
+        const func_type = typed.getType().function;
+        try std.testing.expect(func_type.return_type == .function);
+    }
+
+    // Complex struct with nested types
+    {
+        // First define Point
+        const point_def = "(def Point (Struct [x Int] [y Int]))";
+        _ = try checker.typeCheck(try reader.readString(point_def));
+
+        // Then define Person using Point
+        const person_def = "(def Person (Struct [name String] [age U8] [location Point]))";
+        const person_expr = try reader.readString(person_def);
+        const person_typed = try checker.typeCheck(person_expr);
+
+        try std.testing.expect(person_typed.getType() == .type_type);
+
+        const person_type = checker.env.get("Person").?;
+        try std.testing.expect(person_type == .struct_type);
+        try std.testing.expect(person_type.struct_type.fields.len == 3);
+
+        // Verify field types
+        try std.testing.expect(person_type.struct_type.fields[0].field_type == .string);
+        try std.testing.expect(person_type.struct_type.fields[1].field_type == .u8);
+        try std.testing.expect(person_type.struct_type.fields[2].field_type == .struct_type);
+    }
+
+    std.debug.print("\n✅ All language showcase examples type check successfully!\n", .{});
+    std.debug.print("   Supported features:\n", .{});
+    std.debug.print("   - Basic types (Int, Float, String, Nil)\n", .{});
+    std.debug.print("   - Specific numeric types (U8, I32, F64, etc.)\n", .{});
+    std.debug.print("   - Function types and higher-order functions\n", .{});
+    std.debug.print("   - Vector types\n", .{});
+    std.debug.print("   - User-defined struct types\n", .{});
+    std.debug.print("   - Forward references (two-pass compilation)\n", .{});
+    std.debug.print("   - Type-safe arithmetic operations\n", .{});
+}
+
+test "language showcase - error cases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    // Type mismatch - assigning string to int
+    {
+        const code = "(def bad (: Int) \"not an int\")";
+        const expr = try reader.readString(code);
+        const result = checker.typeCheck(expr);
+        try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, result);
+    }
+
+    // Function definition with incorrect return type
+    {
+        const code = "(def add (: (-> [Int Int] Int)) (fn [x y] \"oops\"))";
+        const expr = try reader.readString(code);
+        const result = checker.typeCheck(expr);
+        try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, result);
+    }
+
+    // Function invocation with wrong argument type
+    {
+        const code =
+            \\(def add (: (-> [Int Int] Int))
+            \\  (fn [x y] (+ x y)))
+            \\(add 1 "two")
+        ;
+        const expressions = try reader.readAllString(code);
+        const result = checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, result);
+    }
+
+    // Function invocation with wrong number of arguments
+    {
+        const code =
+            \\(def add (: (-> [Int Int] Int))
+            \\  (fn [x y] (+ x y)))
+            \\(add 1)
+        ;
+        const expressions = try reader.readAllString(code);
+        const result = checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expectError(TypeChecker.TypeCheckError.ArgumentCountMismatch, result);
+    }
+
+    // Undefined variable
+    {
+        const code = "(def x (: Int) undefined-var)";
+        const expr = try reader.readString(code);
+        const result = checker.typeCheck(expr);
+        try std.testing.expectError(TypeChecker.TypeCheckError.UnboundVariable, result);
+    }
+
+    std.debug.print("\n✅ Type checker correctly rejects invalid programs!\n", .{});
+}
