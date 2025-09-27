@@ -111,6 +111,27 @@ test "bidirectional type checker - vectors" {
     try std.testing.expect(typed.type == .vector);
 }
 
+test "bidirectional type checker - if expression" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    // Valid if expression
+    const code = "(def result (: Int) (if (< 1 2) 42 0))";
+    const expr = try reader.readString(code);
+    _ = try checker.typeCheck(expr);
+    try std.testing.expect(checker.env.get("result").? == .int);
+
+    // Branch type mismatch should fail
+    const bad_code = "(def bad (: Int) (if (< 1 2) 1 \"nope\"))";
+    const bad_expr = try reader.readString(bad_code);
+    try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, checker.typeCheck(bad_expr));
+}
+
 test "forward references - two-pass basic" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -353,4 +374,154 @@ test "multiple structs in function signatures" {
     try std.testing.expect(color_param.fields.len == 3);
 
     try std.testing.expect(std.mem.eql(u8, point_return.name, "Point"));
+}
+
+test "enum definition" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(def Color (Enum Red Blue Green))";
+    const expr = try reader.readString(code);
+    const typed = try checker.typeCheck(expr);
+
+    try std.testing.expect(typed.getType() == .type_type);
+
+    const color_type = checker.env.get("Color").?;
+    try std.testing.expect(color_type == .enum_type);
+
+    const enum_type = color_type.enum_type;
+    try std.testing.expect(std.mem.eql(u8, enum_type.name, "Color"));
+    try std.testing.expect(enum_type.variants.len == 3);
+    try std.testing.expect(std.mem.eql(u8, enum_type.variants[0].name, "Red"));
+    try std.testing.expect(std.mem.eql(u8, enum_type.variants[1].name, "Blue"));
+    try std.testing.expect(std.mem.eql(u8, enum_type.variants[2].name, "Green"));
+
+    const red_type = checker.env.get("Color/Red").?;
+    try std.testing.expect(red_type == .enum_type);
+    try std.testing.expect(TypeChecker.BidirectionalTypeChecker.typesEqual(color_type, red_type));
+
+    const blue_type = checker.env.get("Color/Blue").?;
+    try std.testing.expect(TypeChecker.BidirectionalTypeChecker.typesEqual(color_type, blue_type));
+
+    const green_type = checker.env.get("Color/Green").?;
+    try std.testing.expect(TypeChecker.BidirectionalTypeChecker.typesEqual(color_type, green_type));
+}
+
+test "enum values and annotations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const enum_def = try reader.readString("(def Color (Enum Red Blue Green))");
+    _ = try checker.typeCheck(enum_def);
+
+    const value_def = try reader.readString("(def favoriteColor (: Color) Color/Blue)");
+    const value_typed = try checker.typeCheck(value_def);
+    try std.testing.expect(value_typed.getType() == .enum_type);
+
+    const invalid_value = try reader.readString("(def badColor (: Color) Color/Yellow)");
+    try std.testing.expectError(TypeChecker.TypeCheckError.UnboundVariable, checker.typeCheck(invalid_value));
+}
+
+test "let binding basic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(let [x (: Int) 7] (+ x 2))";
+    const expr = try reader.readString(code);
+    const typed = try checker.typeCheck(expr);
+
+    try std.testing.expect(typed.getType() == .int);
+    try std.testing.expect(checker.env.get("x") == null);
+}
+
+test "let binding multiple" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(let [x (: Int) 7 y (: Int) (+ x 3)] (+ x y))";
+    const expr = try reader.readString(code);
+    const typed = try checker.typeCheck(expr);
+
+    try std.testing.expect(typed.getType() == .int);
+}
+
+test "let binding type mismatch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(let [x (: Int) \"oops\"] x)";
+    const expr = try reader.readString(code);
+    try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, checker.typeCheck(expr));
+}
+
+test "let binding nested" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(let [x (: Int) 1] (let [y (: Int) (+ x 2)] (+ x y)))";
+    const expr = try reader.readString(code);
+    const typed = try checker.typeCheck(expr);
+
+    try std.testing.expect(typed.getType() == .int);
+    try std.testing.expect(checker.env.get("y") == null);
+}
+
+test "let binding shadow different type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(let [x (: Int) 1] (let [x (: String) \"hi\"] x))";
+    const expr = try reader.readString(code);
+    const typed = try checker.typeCheck(expr);
+
+    try std.testing.expect(typed.getType() == .string);
+}
+
+test "let binding shadow incompatible" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(let [x (: Int) 1] (let [x (: Int) \"nope\"] x))";
+    const expr = try reader.readString(code);
+    try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, checker.typeCheck(expr));
 }

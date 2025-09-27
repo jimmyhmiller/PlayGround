@@ -164,6 +164,7 @@ test "reader round-trip" {
         "{:a 1 :b 2}",
         "(defn test [x] (+ x 1))",
         "[[:nested [\"vector\"]] {:with {:nested :map}}]",
+        "(ns my.namespace)",
     };
 
     for (test_cases) |original| {

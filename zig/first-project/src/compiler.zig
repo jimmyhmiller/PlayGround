@@ -67,6 +67,9 @@ pub const Compiler = struct {
                     try self.compileExpression(entry.value);
                 }
             },
+            .namespace => |ns| {
+                std.debug.print("Encountered namespace declaration: {s}\n", .{ns.name});
+            },
             .nil => {
                 std.debug.print("Compiling nil\n", .{});
             },

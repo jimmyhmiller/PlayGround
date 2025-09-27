@@ -33,6 +33,7 @@ pub const Type = union(enum) {
     vector: *Type,
     map: *MapType,
     struct_type: *StructType,
+    enum_type: *EnumType,
 
     // Meta-type
     type_type, // The type of types
@@ -94,6 +95,13 @@ pub const Type = union(enum) {
                 }
                 try writer.print(")");
             },
+            .enum_type => |e| {
+                try writer.print("(Enum");
+                for (e.variants) |variant| {
+                    try writer.print(" {s}", .{variant.name});
+                }
+                try writer.print(")");
+            },
             .type_type => try writer.print("Type"),
             .type_var => |id| try writer.print("?{d}", .{id}),
         }
@@ -118,6 +126,16 @@ pub const StructField = struct {
 pub const StructType = struct {
     name: []const u8,
     fields: []const StructField,
+};
+
+pub const EnumVariant = struct {
+    name: []const u8,
+    qualified_name: ?[]const u8 = null,
+};
+
+pub const EnumType = struct {
+    name: []const u8,
+    variants: []EnumVariant,
 };
 
 // Typed expression - decorates AST nodes with their inferred types
@@ -147,6 +165,7 @@ pub const TypedValue = union(enum) {
     vector: struct { elements: []*TypedValue, type: Type },
     map: struct { entries: []*MapEntry, type: Type },
     type_value: struct { value_type: Type, type: Type }, // A type as a value
+    namespace: struct { name: []const u8, type: Type },
 
     pub const MapEntry = struct {
         key: *TypedValue,
@@ -165,6 +184,7 @@ pub const TypedValue = union(enum) {
             .vector => |v| v.type,
             .map => |v| v.type,
             .type_value => |v| v.type,
+            .namespace => |v| v.type,
         };
     }
 };
@@ -212,6 +232,13 @@ pub const BidirectionalTypeChecker = struct {
     env: TypeEnv,
     next_var_id: u32,
 
+    const BindingSnapshot = struct {
+        name: []const u8,
+        had_previous: bool,
+        previous: Type,
+        entry_ptr: *Type,
+    };
+
     pub fn init(allocator: std.mem.Allocator) BidirectionalTypeChecker {
         return BidirectionalTypeChecker{
             .allocator = allocator,
@@ -229,6 +256,29 @@ pub const BidirectionalTypeChecker = struct {
         const id = self.next_var_id;
         self.next_var_id += 1;
         return Type{ .type_var = id };
+    }
+
+    fn registerEnumVariants(self: *BidirectionalTypeChecker, type_name: []const u8, enum_type: *EnumType) !void {
+        enum_type.name = type_name;
+        for (enum_type.variants) |*variant| {
+            if (variant.qualified_name == null) {
+                variant.qualified_name = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ type_name, variant.name });
+            }
+            try self.env.put(variant.qualified_name.?, Type{ .enum_type = enum_type });
+        }
+    }
+
+    fn restoreBindingSnapshots(self: *BidirectionalTypeChecker, snapshots: []const BindingSnapshot) void {
+        var i: usize = snapshots.len;
+        while (i > 0) {
+            i -= 1;
+            const snapshot = snapshots[i];
+            if (snapshot.had_previous) {
+                snapshot.entry_ptr.* = snapshot.previous;
+            } else {
+                _ = self.env.remove(snapshot.name);
+            }
+        }
     }
 
     // Synthesis mode: expr ⇒ type
@@ -250,6 +300,11 @@ pub const BidirectionalTypeChecker = struct {
             },
 
             .nil => {
+                return try TypedExpression.init(self.allocator, expr, Type.nil);
+            },
+
+            .namespace => |ns| {
+                _ = ns;
                 return try TypedExpression.init(self.allocator, expr, Type.nil);
             },
 
@@ -275,8 +330,14 @@ pub const BidirectionalTypeChecker = struct {
                     if (first.isSymbol()) {
                         if (std.mem.eql(u8, first.symbol, "def")) {
                             return try self.synthesizeDef(expr, list);
+                        } else if (std.mem.eql(u8, first.symbol, "let")) {
+                            return try self.synthesizeLet(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "fn")) {
                             return TypeCheckError.CannotSynthesize; // Functions need type annotations
+                        } else if (std.mem.eql(u8, first.symbol, "if")) {
+                            return try self.synthesizeIf(expr, list);
+                        } else if (self.isComparisonOperator(first.symbol)) {
+                            return try self.synthesizeComparison(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "+") or
                                    std.mem.eql(u8, first.symbol, "-") or
                                    std.mem.eql(u8, first.symbol, "*") or
@@ -548,23 +609,47 @@ pub const BidirectionalTypeChecker = struct {
 
     // Arithmetic operations type checking
     fn synthesizeArithmetic(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
-        var current: ?*const @TypeOf(list.*) = list.next; // Skip operator
+        var operands: [64]*Value = undefined;
+        var operand_count: usize = 0;
 
-        // Get first operand to determine type
-        const first_arg = (current orelse return TypeCheckError.InvalidTypeAnnotation).value orelse return TypeCheckError.InvalidTypeAnnotation;
-        const first_typed = try self.synthesize(first_arg);
+        var merged_type_opt: ?Type = null;
 
-        if (!isNumericType(first_typed.type)) {
-            return TypeCheckError.TypeMismatch;
+        var current: ?*const @TypeOf(list.*) = list.next;
+        while (current != null) {
+            const node = current.?;
+            if (node.value) |operand| {
+                if (operand_count >= operands.len) {
+                    return TypeCheckError.InvalidTypeAnnotation;
+                }
+                operands[operand_count] = operand;
+
+                const operand_typed = try self.synthesize(operand);
+                if (!isNumericType(operand_typed.type)) {
+                    return TypeCheckError.TypeMismatch;
+                }
+
+                merged_type_opt = if (merged_type_opt) |prev|
+                    try self.mergeNumericTypes(prev, operand_typed.type)
+                else
+                    operand_typed.type;
+
+                operand_count += 1;
+            } else {
+                break;
+            }
+            current = node.next;
         }
 
-        var result_type = first_typed.type;
-        current = (current orelse return TypeCheckError.InvalidTypeAnnotation).next;
+        if (operand_count == 0) {
+            return TypeCheckError.InvalidTypeAnnotation;
+        }
 
         // Get the operator
         const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
         if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
         const op = op_node.symbol;
+
+        var result_type = merged_type_opt.?;
 
         // For division of integers, result should be float
         if (std.mem.eql(u8, op, "/") and isIntegerType(result_type)) {
@@ -572,20 +657,311 @@ pub const BidirectionalTypeChecker = struct {
         }
 
         // For modulo, ensure integer type
-        if (std.mem.eql(u8, op, "%") and !isIntegerType(first_typed.type)) {
+        if (std.mem.eql(u8, op, "%") and !isIntegerType(result_type)) {
             return TypeCheckError.TypeMismatch;
         }
 
-        // Check remaining operands
-        while (current != null) {
-            const arg = (current orelse break).value orelse break;
-            _ = try self.check(arg, first_typed.type);
-            if (current) |curr_node| {
-                current = curr_node.next;
-            }
+        if (operand_count == 1 and !std.mem.eql(u8, op, "-")) {
+            return TypeCheckError.InvalidTypeAnnotation;
+        }
+
+        var idx: usize = 0;
+        while (idx < operand_count) : (idx += 1) {
+            _ = try self.check(operands[idx], result_type);
         }
 
         return try TypedExpression.init(self.allocator, expr, result_type);
+    }
+
+    fn synthesizeComparison(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
+        const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        const op = op_node.symbol;
+
+        const left_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left_expr = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left_typed = try self.synthesize(left_expr);
+
+        const right_node = left_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const right_expr = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const right_typed = try self.synthesize(right_expr);
+
+        if (right_node.next) |tail| {
+            if (tail.value != null) {
+                return TypeCheckError.InvalidTypeAnnotation;
+            }
+        }
+
+        if (isRelationalOperator(op)) {
+            if (!isNumericType(left_typed.type) or !isNumericType(right_typed.type)) {
+                return TypeCheckError.TypeMismatch;
+            }
+
+            var compatible = try self.isSubtype(left_typed.type, right_typed.type);
+            if (!compatible) {
+                compatible = try self.isSubtype(right_typed.type, left_typed.type);
+            }
+
+            if (!compatible) {
+                return TypeCheckError.TypeMismatch;
+            }
+        } else {
+            var compatible = try self.isSubtype(left_typed.type, right_typed.type);
+            if (!compatible) {
+                compatible = try self.isSubtype(right_typed.type, left_typed.type);
+            }
+
+            if (!compatible) {
+                return TypeCheckError.TypeMismatch;
+            }
+        }
+
+        return try TypedExpression.init(self.allocator, expr, Type.bool);
+    }
+
+    fn synthesizeIf(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
+        const cond_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const cond_expr = cond_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const cond_typed = try self.synthesize(cond_expr);
+
+        if (!isTruthyType(cond_typed.type)) {
+            return TypeCheckError.TypeMismatch;
+        }
+
+        const then_node = cond_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const then_expr = then_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const then_typed = try self.synthesize(then_expr);
+
+        const else_node = then_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const else_expr = else_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const else_typed = try self.synthesize(else_expr);
+
+        if (else_node.next) |tail| {
+            if (tail.value != null) {
+                return TypeCheckError.InvalidTypeAnnotation;
+            }
+        }
+
+        const result_type = try self.mergeBranchTypes(then_typed.type, else_typed.type);
+
+        return try TypedExpression.init(self.allocator, expr, result_type);
+    }
+
+    fn synthesizeLet(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
+        var current: ?*const @TypeOf(list.*) = list.next;
+
+        const bindings_node = current orelse return TypeCheckError.InvalidTypeAnnotation;
+        const bindings_value = bindings_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        if (!bindings_value.isVector()) return TypeCheckError.InvalidTypeAnnotation;
+        const bindings_vec = bindings_value.vector;
+
+        if (bindings_vec.len() % 3 != 0) return TypeCheckError.InvalidTypeAnnotation;
+        const binding_count = bindings_vec.len() / 3;
+
+        const snapshots_storage = try self.allocator.alloc(BindingSnapshot, binding_count);
+        var inserted: usize = 0;
+        const snapshot_slice = snapshots_storage[0..binding_count];
+        errdefer self.restoreBindingSnapshots(snapshot_slice[0..inserted]);
+
+        var idx: usize = 0;
+        while (idx < binding_count) : (idx += 1) {
+            const name_val = bindings_vec.at(idx * 3);
+            const annotation_val = bindings_vec.at(idx * 3 + 1);
+            const value_val = bindings_vec.at(idx * 3 + 2);
+
+            if (!name_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+
+            const annotated_type = try self.parseTypeAnnotation(annotation_val);
+
+            _ = try self.check(value_val, annotated_type);
+
+            const entry = try self.env.getOrPut(name_val.symbol);
+            const had_previous = entry.found_existing;
+            const previous = if (had_previous) entry.value_ptr.* else Type.nil;
+            entry.value_ptr.* = annotated_type;
+
+            snapshot_slice[inserted] = BindingSnapshot{
+                .name = name_val.symbol,
+                .had_previous = had_previous,
+                .previous = previous,
+                .entry_ptr = entry.value_ptr,
+            };
+            inserted += 1;
+        }
+
+        current = bindings_node.next;
+        if (current == null) return TypeCheckError.InvalidTypeAnnotation;
+
+        var last_typed: ?*TypedExpression = null;
+        while (current != null) {
+            const node = current.?;
+            if (node.value) |body_expr| {
+                last_typed = try self.synthesize(body_expr);
+            }
+            current = node.next;
+        }
+
+        const body_typed = last_typed orelse return TypeCheckError.InvalidTypeAnnotation;
+        const result = try TypedExpression.init(self.allocator, expr, body_typed.type);
+
+        self.restoreBindingSnapshots(snapshot_slice[0..inserted]);
+
+        return result;
+    }
+
+    fn synthesizeTypedLet(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedValue {
+        var current: ?*const @TypeOf(list.*) = list.next;
+
+        const bindings_node = current orelse return TypeCheckError.InvalidTypeAnnotation;
+        const bindings_value = bindings_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        if (!bindings_value.isVector()) return TypeCheckError.InvalidTypeAnnotation;
+        const bindings_vec = bindings_value.vector;
+
+        if (bindings_vec.len() % 3 != 0) return TypeCheckError.InvalidTypeAnnotation;
+        const binding_count = bindings_vec.len() / 3;
+
+        const snapshots_storage = try self.allocator.alloc(BindingSnapshot, binding_count);
+        var inserted: usize = 0;
+        const snapshot_slice = snapshots_storage[0..binding_count];
+        errdefer self.restoreBindingSnapshots(snapshot_slice[0..inserted]);
+
+        var idx: usize = 0;
+        while (idx < binding_count) : (idx += 1) {
+            const name_val = bindings_vec.at(idx * 3);
+            const annotation_val = bindings_vec.at(idx * 3 + 1);
+            const value_val = bindings_vec.at(idx * 3 + 2);
+
+            if (!name_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+
+            const annotated_type = try self.parseTypeAnnotation(annotation_val);
+
+            _ = try self.checkTyped(value_val, annotated_type);
+
+            const entry = try self.env.getOrPut(name_val.symbol);
+            const had_previous = entry.found_existing;
+            const previous = if (had_previous) entry.value_ptr.* else Type.nil;
+            entry.value_ptr.* = annotated_type;
+
+            snapshot_slice[inserted] = BindingSnapshot{
+                .name = name_val.symbol,
+                .had_previous = had_previous,
+                .previous = previous,
+                .entry_ptr = entry.value_ptr,
+            };
+            inserted += 1;
+        }
+
+        current = bindings_node.next;
+        if (current == null) return TypeCheckError.InvalidTypeAnnotation;
+
+        var last_typed: ?*TypedValue = null;
+        while (current != null) {
+            const node = current.?;
+            if (node.value) |body_expr| {
+                last_typed = try self.synthesizeTyped(body_expr);
+            }
+            current = node.next;
+        }
+
+        const body_typed = last_typed orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        self.restoreBindingSnapshots(snapshot_slice[0..inserted]);
+
+        _ = expr;
+        return body_typed;
+    }
+
+    fn synthesizeTypedComparison(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
+        if (storage.len < 2) return TypeCheckError.InvalidTypeAnnotation;
+
+        const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        const op = op_node.symbol;
+
+        _ = expr;
+        const left_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left_expr = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left_typed = try self.synthesizeTyped(left_expr);
+        const left_type = left_typed.getType();
+
+        const right_node = left_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const right_expr = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        var right_typed: *TypedValue = undefined;
+
+        if (isRelationalOperator(op)) {
+            if (!isNumericType(left_type)) {
+                return TypeCheckError.TypeMismatch;
+            }
+
+            right_typed = try self.checkTyped(right_expr, left_type);
+        } else {
+            right_typed = try self.synthesizeTyped(right_expr);
+
+            var compatible = try self.isSubtype(left_type, right_typed.getType());
+            if (!compatible) {
+                compatible = try self.isSubtype(right_typed.getType(), left_type);
+            }
+
+            if (!compatible) {
+                return TypeCheckError.TypeMismatch;
+            }
+        }
+
+        if (right_node.next) |tail| {
+            if (tail.value != null) {
+                return TypeCheckError.InvalidTypeAnnotation;
+            }
+        }
+
+        storage[0] = left_typed;
+        storage[1] = right_typed;
+
+        const result = try self.allocator.create(TypedValue);
+        result.* = TypedValue{ .list = .{
+            .elements = storage[0..2],
+            .type = Type.bool,
+        } };
+        return result;
+    }
+
+    fn synthesizeTypedIf(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
+        if (storage.len < 3) return TypeCheckError.InvalidTypeAnnotation;
+
+        _ = expr;
+        const cond_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const cond_expr = cond_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const cond_typed = try self.synthesizeTyped(cond_expr);
+        if (!isTruthyType(cond_typed.getType())) {
+            return TypeCheckError.TypeMismatch;
+        }
+
+        const then_node = cond_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const then_expr = then_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const then_typed = try self.synthesizeTyped(then_expr);
+
+        const else_node = then_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const else_expr = else_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const else_typed = try self.synthesizeTyped(else_expr);
+
+        if (else_node.next) |tail| {
+            if (tail.value != null) {
+                return TypeCheckError.InvalidTypeAnnotation;
+            }
+        }
+
+        const result_type = try self.mergeBranchTypes(then_typed.getType(), else_typed.getType());
+
+        storage[0] = cond_typed;
+        storage[1] = then_typed;
+        storage[2] = else_typed;
+
+        const result = try self.allocator.create(TypedValue);
+        result.* = TypedValue{ .list = .{
+            .elements = storage[0..3],
+            .type = result_type,
+        } };
+        return result;
     }
 
     // Parse type annotations: (: (-> [Int] Int))
@@ -723,52 +1099,91 @@ pub const BidirectionalTypeChecker = struct {
             // Check if it's a Struct type: (Struct [field1 Type1] [field2 Type2] ...)
             if (current) |node| {
                 if (node.value) |first| {
-                    if (first.isSymbol() and std.mem.eql(u8, first.symbol, "Struct")) {
-                        current = node.next;
+                    if (first.isSymbol()) {
+                        if (std.mem.eql(u8, first.symbol, "Struct")) {
+                            current = node.next;
 
-                        // Count fields
-                        var field_count: usize = 0;
-                        var count_current = current;
-                        while (count_current != null) {
-                            if (count_current.?.value != null) field_count += 1;
-                            count_current = count_current.?.next;
-                        }
-
-                        // Parse fields
-                        const fields = try self.allocator.alloc(StructField, field_count);
-                        var field_idx: usize = 0;
-
-                        while (current != null and field_idx < field_count) {
-                            const field_node = current.?.value orelse return TypeCheckError.InvalidTypeAnnotation;
-                            if (!field_node.isVector() or field_node.vector.len() != 2) {
-                                return TypeCheckError.InvalidTypeAnnotation;
+                            // Count fields
+                            var field_count: usize = 0;
+                            var count_current = current;
+                            while (count_current != null) {
+                                if (count_current.?.value != null) field_count += 1;
+                                count_current = count_current.?.next;
                             }
 
-                            const field_name_val = field_node.vector.at(0);
-                            const field_type_val = field_node.vector.at(1);
+                            // Parse fields
+                            const fields = try self.allocator.alloc(StructField, field_count);
+                            var field_idx: usize = 0;
 
-                            if (!field_name_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+                            while (current != null and field_idx < field_count) {
+                                const field_node = current.?.value orelse return TypeCheckError.InvalidTypeAnnotation;
+                                if (!field_node.isVector() or field_node.vector.len() != 2) {
+                                    return TypeCheckError.InvalidTypeAnnotation;
+                                }
 
-                            const field_name = field_name_val.symbol;
-                            const field_type = try self.parseType(field_type_val);
+                                const field_name_val = field_node.vector.at(0);
+                                const field_type_val = field_node.vector.at(1);
 
-                            fields[field_idx] = StructField{
-                                .name = field_name,
-                                .field_type = field_type,
+                                if (!field_name_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+
+                                const field_name = field_name_val.symbol;
+                                const field_type = try self.parseType(field_type_val);
+
+                                fields[field_idx] = StructField{
+                                    .name = field_name,
+                                    .field_type = field_type,
+                                };
+
+                                field_idx += 1;
+                                current = current.?.next;
+                            }
+
+                            // Create struct type - for now use empty name, but this should come from def
+                            const struct_type = try self.allocator.create(StructType);
+                            struct_type.* = StructType{
+                                .name = "",
+                                .fields = fields,
                             };
 
-                            field_idx += 1;
-                            current = current.?.next;
+                            return Type{ .struct_type = struct_type };
+                        } else if (std.mem.eql(u8, first.symbol, "Enum")) {
+                            current = node.next;
+
+                            // Count variants
+                            var variant_count: usize = 0;
+                            var count_current = current;
+                            while (count_current != null) {
+                                if (count_current.?.value != null) variant_count += 1;
+                                count_current = count_current.?.next;
+                            }
+
+                            if (variant_count == 0) return TypeCheckError.InvalidTypeAnnotation;
+
+                            // Parse variants
+                            const variants = try self.allocator.alloc(EnumVariant, variant_count);
+                            var variant_idx: usize = 0;
+
+                            while (current != null and variant_idx < variant_count) {
+                                const variant_node = current.?.value orelse return TypeCheckError.InvalidTypeAnnotation;
+                                if (!variant_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+
+                                variants[variant_idx] = EnumVariant{
+                                    .name = variant_node.symbol,
+                                    .qualified_name = null,
+                                };
+
+                                variant_idx += 1;
+                                current = current.?.next;
+                            }
+
+                            const enum_type = try self.allocator.create(EnumType);
+                            enum_type.* = EnumType{
+                                .name = "",
+                                .variants = variants,
+                            };
+
+                            return Type{ .enum_type = enum_type };
                         }
-
-                        // Create struct type - for now use empty name, but this should come from def
-                        const struct_type = try self.allocator.create(StructType);
-                        struct_type.* = StructType{
-                            .name = "",
-                            .fields = fields,
-                        };
-
-                        return Type{ .struct_type = struct_type };
                     }
                 }
             }
@@ -805,7 +1220,63 @@ pub const BidirectionalTypeChecker = struct {
             return true;
         }
 
+        // Integers can flow into floating point types
+        if (isNumericType(sub) and !isFloatType(sub) and isFloatType(super)) {
+            return true;
+        }
+
         return false;
+    }
+
+    fn isComparisonOperator(_: *BidirectionalTypeChecker, symbol: []const u8) bool {
+        return isRelationalOperator(symbol) or isEqualityOperator(symbol);
+    }
+
+    fn isRelationalOperator(symbol: []const u8) bool {
+        return std.mem.eql(u8, symbol, "<") or
+            std.mem.eql(u8, symbol, ">") or
+            std.mem.eql(u8, symbol, "<=") or
+            std.mem.eql(u8, symbol, ">=");
+    }
+
+    fn isEqualityOperator(symbol: []const u8) bool {
+        return std.mem.eql(u8, symbol, "==") or std.mem.eql(u8, symbol, "!=");
+    }
+
+    fn isTruthyType(t: Type) bool {
+        return t == .bool or isNumericType(t);
+    }
+
+    fn mergeBranchTypes(self: *BidirectionalTypeChecker, then_type: Type, else_type: Type) TypeCheckError!Type {
+        if (try self.isSubtype(then_type, else_type)) {
+            return else_type;
+        }
+
+        if (try self.isSubtype(else_type, then_type)) {
+            return then_type;
+        }
+
+        return TypeCheckError.TypeMismatch;
+    }
+
+    fn mergeNumericTypes(self: *BidirectionalTypeChecker, a: Type, b: Type) TypeCheckError!Type {
+        if (!isNumericType(a) or !isNumericType(b)) {
+            return TypeCheckError.TypeMismatch;
+        }
+
+        if (try self.isSubtype(a, b)) {
+            return b;
+        }
+
+        if (try self.isSubtype(b, a)) {
+            return a;
+        }
+
+        if (isFloatType(a) or isFloatType(b)) {
+            return selectFloatType(a, b);
+        }
+
+        return TypeCheckError.TypeMismatch;
     }
 
     // Check if a type is numeric
@@ -873,8 +1344,38 @@ pub const BidirectionalTypeChecker = struct {
                 }
                 return true;
             },
+            .enum_type => |a_enum| {
+                const b_enum = b.enum_type;
+                if (!std.mem.eql(u8, a_enum.name, b_enum.name)) return false;
+                if (a_enum.variants.len != b_enum.variants.len) return false;
+
+                for (a_enum.variants, b_enum.variants) |a_variant, b_variant| {
+                    if (!std.mem.eql(u8, a_variant.name, b_variant.name)) return false;
+                }
+                return true;
+            },
             .type_var => |a_id| return a_id == b.type_var,
         }
+    }
+
+    fn selectFloatType(a: Type, b: Type) Type {
+        if (a == .float or b == .float) return Type.float;
+        const rank_a = floatRank(a);
+        const rank_b = floatRank(b);
+        if (rank_a >= rank_b) {
+            return if (rank_a == 64) Type.f64 else Type.f32;
+        } else {
+            return if (rank_b == 64) Type.f64 else Type.f32;
+        }
+    }
+
+    fn floatRank(t: Type) u8 {
+        return switch (t) {
+            .float => 64,
+            .f64 => 64,
+            .f32 => 32,
+            else => 0,
+        };
     }
 
     // Synthesis mode that produces a fully typed AST
@@ -899,6 +1400,11 @@ pub const BidirectionalTypeChecker = struct {
 
             .nil => {
                 result.* = TypedValue{ .nil = .{ .type = Type.nil } };
+                return result;
+            },
+
+            .namespace => |ns| {
+                result.* = TypedValue{ .namespace = .{ .name = ns.name, .type = Type.nil } };
                 return result;
             },
 
@@ -970,75 +1476,66 @@ pub const BidirectionalTypeChecker = struct {
                            std.mem.eql(u8, first.symbol, "*") or
                            std.mem.eql(u8, first.symbol, "/") or
                            std.mem.eql(u8, first.symbol, "%")) {
-                            // Arithmetic operation - determine result type from first operand
-                            var current: ?*const @TypeOf(list.*) = list.next; // Skip operator
-                            if (current == null or current.?.value == null) {
+                            var operands: [64]*Value = undefined;
+                            var operand_count: usize = 0;
+                            var merged_type_opt: ?Type = null;
+
+                            var node_iter: ?*const @TypeOf(list.*) = list.next;
+                            while (node_iter != null) {
+                                const node = node_iter.?;
+                                if (node.value) |operand| {
+                                    if (operand_count >= operands.len) {
+                                        return TypeCheckError.InvalidTypeAnnotation;
+                                    }
+                                    operands[operand_count] = operand;
+
+                                    const operand_typed = try self.synthesizeTyped(operand);
+                                    const operand_type = operand_typed.getType();
+                                    if (!isNumericType(operand_type)) {
+                                        return TypeCheckError.TypeMismatch;
+                                    }
+
+                                    merged_type_opt = if (merged_type_opt) |prev|
+                                        try self.mergeNumericTypes(prev, operand_type)
+                                    else
+                                        operand_type;
+
+                                    // destroy temporary typed value to avoid leaks
+                                    self.allocator.destroy(operand_typed);
+
+                                    operand_count += 1;
+                                } else {
+                                    break;
+                                }
+                                node_iter = node.next;
+                            }
+
+                            if (operand_count == 0) {
                                 return TypeCheckError.InvalidTypeAnnotation;
                             }
 
-                            // Get type from first operand
-                            const first_operand = current.?.value.?;
-                            const first_typed = try self.synthesizeTyped(first_operand);
-                            const result_type = first_typed.getType();
+                            var result_type = merged_type_opt.?;
 
-                            if (!isNumericType(result_type)) {
+                            if (std.mem.eql(u8, first.symbol, "/") and isIntegerType(result_type)) {
+                                result_type = if (std.meta.activeTag(result_type) == .int) Type.float else Type.f64;
+                            }
+
+                            if (std.mem.eql(u8, first.symbol, "%") and !isIntegerType(result_type)) {
                                 return TypeCheckError.TypeMismatch;
                             }
 
-                            // For division, check special cases
-                            if (std.mem.eql(u8, first.symbol, "/")) {
-                                // Integer division should produce float result
-                                if (isIntegerType(result_type)) {
-                                    // Convert to appropriate float type
-                                    _ = if (std.meta.activeTag(result_type) == .int) Type.float else Type.f64; // TODO: Use this for proper type conversion
-
-                                    var idx: usize = 0;
-                                    typed_elements[idx] = first_typed;
-                                    idx += 1;
-                                    current = current.?.next;
-
-                                    while (current != null) {
-                                        const node = current.?;
-                                        if (node.value) |val| {
-                                            typed_elements[idx] = try self.checkTyped(val, result_type);
-                                            idx += 1;
-                                        }
-                                        current = node.next;
-                                    }
-
-                                    result.* = TypedValue{ .list = .{
-                                        .elements = typed_elements[0..idx],
-                                        .type = Type.float // float_result_type  // TODO: Fix this properly
-                                    } };
-                                    return result;
-                                }
+                            if (operand_count == 1 and !std.mem.eql(u8, first.symbol, "-")) {
+                                return TypeCheckError.InvalidTypeAnnotation;
                             }
 
-                            // For modulo, only allow integer types
-                            if (std.mem.eql(u8, first.symbol, "%")) {
-                                if (!isIntegerType(result_type)) {
-                                    return TypeCheckError.TypeMismatch;
-                                }
-                            }
-
-                            // Type check remaining operands against the first operand's type
                             var idx: usize = 0;
-                            typed_elements[idx] = first_typed;
-                            idx += 1;
-                            current = current.?.next;
-
-                            while (current != null) {
-                                const node = current.?;
-                                if (node.value) |val| {
-                                    typed_elements[idx] = try self.checkTyped(val, result_type);
-                                    idx += 1;
-                                }
-                                current = node.next;
+                            while (idx < operand_count) : (idx += 1) {
+                                typed_elements[idx] = try self.checkTyped(operands[idx], result_type);
                             }
 
                             result.* = TypedValue{ .list = .{
-                                .elements = typed_elements[0..idx],
-                                .type = result_type
+                                .elements = typed_elements[0..operand_count],
+                                .type = result_type,
                             } };
                             return result;
                         } else if (std.mem.eql(u8, first.symbol, "def")) {
@@ -1057,28 +1554,42 @@ pub const BidirectionalTypeChecker = struct {
 
                             // Check if it's a direct struct definition: (def name (Struct [x Int] [y Int]))
                             if (second_val.isList()) {
-                                const struct_current: ?*const @TypeOf(second_val.list.*) = second_val.list;
-                                if (struct_current) |node| {
-                                    if (node.value) |struct_first| {
-                                        if (struct_first.isSymbol() and std.mem.eql(u8, struct_first.symbol, "Struct")) {
-                                            // This is a direct struct definition
-                                            var struct_type = try self.parseType(second_val);
-                                            if (struct_type == .struct_type) {
-                                                struct_type.struct_type.name = var_name;
+                            const struct_current: ?*const @TypeOf(second_val.list.*) = second_val.list;
+                            if (struct_current) |node| {
+                                if (node.value) |struct_first| {
+                                    if (struct_first.isSymbol()) {
+                                        if (std.mem.eql(u8, struct_first.symbol, "Struct") or std.mem.eql(u8, struct_first.symbol, "Enum")) {
+                                            var defined_type = try self.parseType(second_val);
+
+                                            switch (defined_type) {
+                                                .struct_type => {
+                                                    defined_type.struct_type.name = var_name;
+
+                                                    try self.env.put(var_name, defined_type);
+
+                                                    result.* = TypedValue{ .type_value = .{
+                                                        .value_type = defined_type,
+                                                        .type = Type.type_type,
+                                                    } };
+                                                    return result;
+                                                },
+                                                .enum_type => {
+                                                    try self.registerEnumVariants(var_name, defined_type.enum_type);
+
+                                                    try self.env.put(var_name, defined_type);
+
+                                                    result.* = TypedValue{ .type_value = .{
+                                                        .value_type = defined_type,
+                                                        .type = Type.type_type,
+                                                    } };
+                                                    return result;
+                                                },
+                                                else => {},
                                             }
-
-                                            // Add binding to environment
-                                            try self.env.put(var_name, struct_type);
-
-                                            // Return a type value
-                                            result.* = TypedValue{ .type_value = .{
-                                                .value_type = struct_type,
-                                                .type = Type.type_type
-                                            } };
-                                            return result;
                                         }
                                     }
                                 }
+                            }
                             }
 
                             // Check if it's a type annotation: (def name (: type) body)
@@ -1091,8 +1602,10 @@ pub const BidirectionalTypeChecker = struct {
                                             var annotated_type = try self.parseTypeAnnotation(second_val);
                                             current = second_node.next;
 
-                                            // If the type is a struct, set its name to the variable name
-                                            if (annotated_type == .struct_type) {
+                                            const is_struct_type_def = annotated_type == .struct_type and annotated_type.struct_type.name.len == 0;
+                                            const is_enum_type_def = annotated_type == .enum_type and annotated_type.enum_type.name.len == 0;
+
+                                            if (is_struct_type_def) {
                                                 annotated_type.struct_type.name = var_name;
                                             }
 
@@ -1101,7 +1614,7 @@ pub const BidirectionalTypeChecker = struct {
                                             const body = body_node.value.?;
 
                                             // For struct type definitions, only allow nil as the body
-                                            if (annotated_type == .struct_type) {
+                                            if (is_struct_type_def) {
                                                 if (!body.isNil()) {
                                                     return TypeCheckError.TypeMismatch;
                                                 }
@@ -1109,6 +1622,16 @@ pub const BidirectionalTypeChecker = struct {
                                                 try self.env.put(var_name, annotated_type);
 
                                                 // Return a typed value representing the struct type definition
+                                                result.* = TypedValue{ .nil = .{ .type = annotated_type } };
+                                                return result;
+                                            } else if (is_enum_type_def) {
+                                                if (!body.isNil()) {
+                                                    return TypeCheckError.TypeMismatch;
+                                                }
+
+                                                try self.registerEnumVariants(var_name, annotated_type.enum_type);
+                                                try self.env.put(var_name, annotated_type);
+
                                                 result.* = TypedValue{ .nil = .{ .type = annotated_type } };
                                                 return result;
                                             }
@@ -1130,6 +1653,12 @@ pub const BidirectionalTypeChecker = struct {
                             const typed_value = try self.synthesizeTyped(second_val);
                             try self.env.put(var_name, typed_value.getType());
                             return typed_value;
+                        } else if (std.mem.eql(u8, first.symbol, "let")) {
+                            return try self.synthesizeTypedLet(expr, list);
+                        } else if (std.mem.eql(u8, first.symbol, "if")) {
+                            return try self.synthesizeTypedIf(expr, list, typed_elements);
+                        } else if (self.isComparisonOperator(first.symbol)) {
+                            return try self.synthesizeTypedComparison(expr, list, typed_elements);
                         }
                         // Add other special forms as needed
                     }
@@ -1245,6 +1774,7 @@ pub const BidirectionalTypeChecker = struct {
             .vector => |*v| v.type = expected,
             .map => |*v| v.type = expected,
             .type_value => |*v| v.type = expected,
+            .namespace => |*v| v.type = expected,
         }
 
         return typed;
@@ -1289,9 +1819,14 @@ pub const BidirectionalTypeChecker = struct {
                             const type_annotation_node = current orelse continue;
                             var annotated_type = self.parseTypeAnnotation(type_annotation_node.value.?) catch continue;
 
-                            // If the type is a struct, set its name to the variable name
-                            if (annotated_type == .struct_type) {
+                            const is_struct_type_def = annotated_type == .struct_type and annotated_type.struct_type.name.len == 0;
+                            const is_enum_type_def = annotated_type == .enum_type and annotated_type.enum_type.name.len == 0;
+
+                            if (is_struct_type_def) {
                                 annotated_type.struct_type.name = var_name;
+                            }
+                            if (is_enum_type_def) {
+                                self.registerEnumVariants(var_name, annotated_type.enum_type) catch continue;
                             }
 
                             // Add to environment for forward references
@@ -1324,9 +1859,14 @@ pub const BidirectionalTypeChecker = struct {
                             var annotated_type = self.parseTypeAnnotation(type_annotation_node.value.?) catch continue;
                             current = type_annotation_node.next;
 
-                            // If the type is a struct, set its name to the variable name
-                            if (annotated_type == .struct_type) {
+                            const is_struct_type_def = annotated_type == .struct_type and annotated_type.struct_type.name.len == 0;
+                            const is_enum_type_def = annotated_type == .enum_type and annotated_type.enum_type.name.len == 0;
+
+                            if (is_struct_type_def) {
                                 annotated_type.struct_type.name = var_name;
+                            }
+                            if (is_enum_type_def) {
+                                self.registerEnumVariants(var_name, annotated_type.enum_type) catch continue;
                             }
 
                             // Get body and type check it
@@ -1341,6 +1881,10 @@ pub const BidirectionalTypeChecker = struct {
                                 });
                                 continue;
                             };
+
+                            if (is_struct_type_def or is_enum_type_def) {
+                                try self.env.put(var_name, annotated_type);
+                            }
 
                             try results.append(self.allocator, typed_body);
                             continue;
