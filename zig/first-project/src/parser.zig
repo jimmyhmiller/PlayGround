@@ -128,6 +128,10 @@ pub const Parser = struct {
     fn parseList(self: *Parser) ParseError!*Value {
         _ = try self.expect(.left_paren);
 
+        if (self.current_token.type == .symbol and std.mem.eql(u8, self.current_token.lexeme, "ns")) {
+            return self.parseNamespaceDecl();
+        }
+
         // Collect elements in correct order
         var elements: [64]*Value = undefined; // Fixed size buffer for simplicity
         var count: usize = 0;
@@ -153,6 +157,19 @@ pub const Parser = struct {
         const val = try self.allocator.create(Value);
         val.* = Value{ .list = list };
         return val;
+    }
+
+    fn parseNamespaceDecl(self: *Parser) ParseError!*Value {
+        _ = try self.expect(.symbol); // consume ns
+
+        const name_token = try self.expect(.symbol);
+
+        if (self.current_token.type != .right_paren) {
+            return ParseError.UnexpectedToken;
+        }
+        _ = try self.expect(.right_paren);
+
+        return try value.createNamespace(self.allocator.*, name_token.lexeme);
     }
 
     fn parseVector(self: *Parser) ParseError!*Value {
@@ -300,4 +317,16 @@ test "parser collections" {
         const val = try parser.parse();
         try std.testing.expect(val.isMap());
     }
+}
+
+test "parser namespace declaration" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var parser = Parser.init(&allocator, "(ns my.namespace)");
+    const val = try parser.parse();
+
+    try std.testing.expect(val.isNamespace());
+    try std.testing.expect(std.mem.eql(u8, val.namespace.name, "my.namespace"));
 }

@@ -17,6 +17,7 @@ const linked_list = @import("collections/linked_list.zig");
 const map = @import("collections/map.zig");
 const type_checker = @import("type_checker.zig");
 const compiler = @import("compiler.zig");
+const simple_c_compiler = @import("simple_c_compiler.zig");
 
 // Force test inclusion by referencing test blocks
 comptime {
@@ -34,6 +35,7 @@ comptime {
     std.testing.refAllDecls(map);
     std.testing.refAllDecls(type_checker);
     std.testing.refAllDecls(compiler);
+    std.testing.refAllDecls(simple_c_compiler);
 }
 
 test "test runner working" {

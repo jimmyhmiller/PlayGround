@@ -7,6 +7,10 @@ const PersistentVector = vector.PersistentVector;
 const PersistentLinkedList = linked_list.PersistentLinkedList;
 const PersistentMap = collections_map.PersistentMap;
 
+pub const NamespaceDecl = struct {
+    name: []const u8,
+};
+
 pub const Value = union(enum) {
     symbol: []const u8,
     keyword: []const u8, // keywords start with `:` but we store without the `:`
@@ -16,6 +20,7 @@ pub const Value = union(enum) {
     list: *PersistentLinkedList(*Value),
     vector: PersistentVector(*Value),
     map: PersistentMap(*Value, *Value),
+    namespace: NamespaceDecl,
     nil,
 
     pub fn format(self: Value, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -62,6 +67,9 @@ pub const Value = union(enum) {
                 }
                 try writer.print("}}", .{});
             },
+            .namespace => |ns| {
+                try writer.print("(ns {s})", .{ns.name});
+            },
             .nil => try writer.print("nil", .{}),
         }
     }
@@ -85,6 +93,7 @@ pub const Value = union(enum) {
                 break :blk v.buf.?.ptr == other.vector.buf.?.ptr;
             },
             .map => |m| m.vec.buf.?.ptr == other.map.vec.buf.?.ptr, // pointer comparison for now
+            .namespace => |ns| std.mem.eql(u8, ns.name, other.namespace.name),
             .nil => true,
         };
     }
@@ -119,6 +128,10 @@ pub const Value = union(enum) {
 
     pub fn isMap(self: *const Value) bool {
         return std.meta.activeTag(self.*) == .map;
+    }
+
+    pub fn isNamespace(self: *const Value) bool {
+        return std.meta.activeTag(self.*) == .namespace;
     }
 
     pub fn isNil(self: *const Value) bool {
@@ -188,6 +201,13 @@ pub fn createMap(allocator: std.mem.Allocator) !*Value {
     return val;
 }
 
+pub fn createNamespace(allocator: std.mem.Allocator, name: []const u8) !*Value {
+    const val = try allocator.create(Value);
+    const owned_name = try allocator.dupe(u8, name);
+    val.* = Value{ .namespace = NamespaceDecl{ .name = owned_name } };
+    return val;
+}
+
 test "value creation and formatting" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -200,6 +220,7 @@ test "value creation and formatting" {
     const int_val = try createInt(allocator, 42);
     const float_val = try createFloat(allocator, 3.14);
     const nil_val = try createNil(allocator);
+    const ns_val = try createNamespace(allocator, "my.namespace");
 
     // Test type checks
     try std.testing.expect(sym.isSymbol());
@@ -208,6 +229,7 @@ test "value creation and formatting" {
     try std.testing.expect(int_val.isInt());
     try std.testing.expect(float_val.isFloat());
     try std.testing.expect(nil_val.isNil());
+    try std.testing.expect(ns_val.isNamespace());
 
     // Test values
     try std.testing.expect(std.mem.eql(u8, sym.symbol, "hello"));
@@ -215,6 +237,7 @@ test "value creation and formatting" {
     try std.testing.expect(std.mem.eql(u8, str.string, "test"));
     try std.testing.expect(int_val.int == 42);
     try std.testing.expect(float_val.float == 3.14);
+    try std.testing.expect(std.mem.eql(u8, ns_val.namespace.name, "my.namespace"));
 
     // Test formatting (basic smoke test)
     var buf: [256]u8 = undefined;
