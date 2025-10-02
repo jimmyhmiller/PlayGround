@@ -270,20 +270,22 @@ test "struct definition" {
     var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
     defer checker.deinit();
 
-    // Test struct definition: (def Point (Struct [x Int] [y Int]))
-    const code = "(def Point (Struct [x Int] [y Int]))";
+    // Test struct definition: (def Point (: Type) (Struct [x Int] [y Int]))
+    const code = "(def Point (: Type) (Struct [x Int] [y Int]))";
     const expr = try reader.readString(code);
     const typed = try checker.typeCheck(expr);
 
     // Should successfully type check - struct type definitions return type_value with Type type
     try std.testing.expect(typed.getType() == .type_type);
 
-    // Check that the struct type is in the environment
+    // Check that the struct type is in the environment (Point has type Type)
     const point_type = checker.env.get("Point").?;
-    try std.testing.expect(point_type == .struct_type);
+    try std.testing.expect(point_type == .type_type);
 
-    // Check struct details
-    const struct_type = point_type.struct_type;
+    // Check struct details from type_defs
+    const actual_struct_type = checker.type_defs.get("Point").?;
+    try std.testing.expect(actual_struct_type == .struct_type);
+    const struct_type = actual_struct_type.struct_type;
     try std.testing.expect(std.mem.eql(u8, struct_type.name, "Point"));
     try std.testing.expect(struct_type.fields.len == 2);
     try std.testing.expect(std.mem.eql(u8, struct_type.fields[0].name, "x"));
@@ -302,7 +304,7 @@ test "structs as function arguments and return types" {
     defer checker.deinit();
 
     // First define a struct
-    const struct_def = "(def Point (Struct [x Int] [y Int]))";
+    const struct_def = "(def Point (: Type) (Struct [x Int] [y Int]))";
     const struct_expr = try reader.readString(struct_def);
     _ = try checker.typeCheck(struct_expr);
 
@@ -338,8 +340,8 @@ test "multiple structs in function signatures" {
 
     // Define two different struct types
     const struct_defs =
-        \\(def Point (Struct [x Int] [y Int]))
-        \\(def Color (Struct [r Int] [g Int] [b Int]))
+        \\(def Point (: Type) (Struct [x Int] [y Int]))
+        \\(def Color (: Type) (Struct [r Int] [g Int] [b Int]))
     ;
 
     const expressions = try reader.readAllString(struct_defs);
@@ -385,13 +387,13 @@ test "enum definition" {
     var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
     defer checker.deinit();
 
-    const code = "(def Color (Enum Red Blue Green))";
+    const code = "(def Color (: Type) (Enum Red Blue Green))";
     const expr = try reader.readString(code);
     const typed = try checker.typeCheck(expr);
 
     try std.testing.expect(typed.getType() == .type_type);
 
-    const color_type = checker.env.get("Color").?;
+    const color_type = checker.type_defs.get("Color").?;
     try std.testing.expect(color_type == .enum_type);
 
     const enum_type = color_type.enum_type;
@@ -421,7 +423,7 @@ test "enum values and annotations" {
     var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
     defer checker.deinit();
 
-    const enum_def = try reader.readString("(def Color (Enum Red Blue Green))");
+    const enum_def = try reader.readString("(def Color (: Type) (Enum Red Blue Green))");
     _ = try checker.typeCheck(enum_def);
 
     const value_def = try reader.readString("(def favoriteColor (: Color) Color/Blue)");

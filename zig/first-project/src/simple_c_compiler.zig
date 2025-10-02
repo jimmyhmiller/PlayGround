@@ -168,6 +168,16 @@ pub const SimpleCCompiler = struct {
 
         var includes = IncludeFlags{};
 
+        // Check if any expression uses 'let' - if so, include stdint headers
+        for (expressions.items) |expr| {
+            if (self.hasLet(expr)) {
+                includes.need_stdint = true;
+                includes.need_stdbool = true;
+                includes.need_stddef = true;
+                break;
+            }
+        }
+
         // First pass: emit forward declarations for functions and structs
         for (expressions.items, 0..) |expr, idx| {
             try self.emitForwardDecl(forward_writer, expr, report.typed.items[idx], &checker, &includes);
@@ -514,7 +524,7 @@ pub const SimpleCCompiler = struct {
                     if (!name_val.isSymbol()) return;
                     const name = name_val.symbol;
 
-                    // Check if this is a struct definition by looking it up in type_defs
+                    // Check if this is a struct or enum definition by looking it up in type_defs
                     if (checker.type_defs.get(name)) |type_def| {
                         if (type_def == .struct_type) {
                             // This is a struct definition - emit struct declaration
@@ -530,6 +540,19 @@ pub const SimpleCCompiler = struct {
                                 const sanitized_field = try self.sanitizeIdentifier(field.name);
                                 defer self.allocator.*.free(sanitized_field);
                                 try forward_writer.print("    {s} {s};\n", .{ field_type_str, sanitized_field });
+                            }
+                            try forward_writer.print("}} {s};\n\n", .{sanitized_name});
+                            return;
+                        } else if (type_def == .enum_type) {
+                            // This is an enum definition - emit enum declaration
+                            const sanitized_name = try self.sanitizeIdentifier(name);
+                            defer self.allocator.*.free(sanitized_name);
+
+                            try forward_writer.print("typedef enum {{\n", .{});
+                            for (type_def.enum_type.variants) |variant| {
+                                const sanitized_variant = try self.sanitizeIdentifier(variant.qualified_name.?);
+                                defer self.allocator.*.free(sanitized_variant);
+                                try forward_writer.print("    {s},\n", .{sanitized_variant});
                             }
                             try forward_writer.print("}} {s};\n\n", .{sanitized_name});
                             return;
@@ -823,6 +846,32 @@ pub const SimpleCCompiler = struct {
         try def_writer.writeAll(";\n}\n");
     }
 
+    fn hasLet(self: *SimpleCCompiler, expr: *Value) bool {
+        switch (expr.*) {
+            .list => |list| {
+                var iter = list.iterator();
+                if (iter.next()) |first| {
+                    if (first.isSymbol() and std.mem.eql(u8, first.symbol, "let")) {
+                        return true;
+                    }
+                }
+                // Check nested expressions
+                iter = list.iterator();
+                while (iter.next()) |child| {
+                    if (self.hasLet(child)) return true;
+                }
+                return false;
+            },
+            .vector => |vec| {
+                for (0..vec.len()) |i| {
+                    if (self.hasLet(vec.at(i))) return true;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
     fn sanitizeIdentifier(self: *SimpleCCompiler, name: []const u8) ![]u8 {
         // Check if it's a C keyword
         const c_keywords = [_][]const u8{
@@ -848,13 +897,13 @@ pub const SimpleCCompiler = struct {
             var result = try self.allocator.*.alloc(u8, name.len + 1);
             result[0] = '_';
             for (name, 0..) |c, i| {
-                result[i + 1] = if (c == '-' or c == '.') '_' else c;
+                result[i + 1] = if (c == '-' or c == '.' or c == '/') '_' else c;
             }
             return result;
         } else {
             var result = try self.allocator.*.alloc(u8, name.len);
             for (name, 0..) |c, i| {
-                result[i] = if (c == '-' or c == '.') '_' else c;
+                result[i] = if (c == '-' or c == '.' or c == '/') '_' else c;
             }
             return result;
         }
@@ -939,6 +988,15 @@ pub const SimpleCCompiler = struct {
             .float => |f| try writer.print("{d}", .{f.value}),
             .string => |s| try writer.print("\"{s}\"", .{s.value}),
             .symbol => |sym| {
+                // Check if this is an enum variant (has type enum_type)
+                if (sym.type == .enum_type) {
+                    // Enum variants like Color/Red become ENUM_VARIANT in C
+                    const sanitized = try self.sanitizeIdentifier(sym.name);
+                    defer self.allocator.*.free(sanitized);
+                    try writer.print("{s}", .{sanitized});
+                    return;
+                }
+
                 // Check if this symbol is in the namespace
                 if (ns_ctx.def_names.contains(sym.name)) {
                     if (ns_ctx.name) |_| {
@@ -972,6 +1030,15 @@ pub const SimpleCCompiler = struct {
             .float => |f| try writer.print("{d}", .{f}),
             .string => |s| try writer.print("\"{s}\"", .{s}),
             .symbol => |sym| {
+                // Handle boolean literals
+                if (std.mem.eql(u8, sym, "true")) {
+                    try writer.print("1", .{});
+                    return;
+                } else if (std.mem.eql(u8, sym, "false")) {
+                    try writer.print("0", .{});
+                    return;
+                }
+
                 // Check if this symbol is in the namespace
                 if (ns_ctx.def_names.contains(sym)) {
                     if (ns_ctx.name) |_| {
@@ -1025,6 +1092,90 @@ pub const SimpleCCompiler = struct {
                     return;
                 }
 
+                if (std.mem.eql(u8, op, "let")) {
+                    // Parse let bindings: (let [x (: Type) value ...] body)
+                    const bindings_val = iter.next() orelse return Error.UnsupportedExpression;
+                    if (!bindings_val.isVector()) return Error.UnsupportedExpression;
+
+                    const body_expr = iter.next() orelse return Error.UnsupportedExpression;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    const bindings_vec = bindings_val.vector;
+                    const binding_count = bindings_vec.len();
+
+                    // Process bindings in groups of 3: name, type annotation, value
+                    // Format: ({ Type name1 = value1; Type name2 = value2; ...; body; })
+                    try writer.print("({{", .{});
+
+                    var i: usize = 0;
+                    while (i < binding_count) {
+                        const name_val = bindings_vec.at(i);
+                        if (!name_val.isSymbol()) return Error.UnsupportedExpression;
+
+                        if (i + 1 >= binding_count) return Error.UnsupportedExpression;
+                        const type_annotation = bindings_vec.at(i + 1);
+                        if (!type_annotation.isList()) return Error.UnsupportedExpression;
+
+                        if (i + 2 >= binding_count) return Error.UnsupportedExpression;
+                        const value_val = bindings_vec.at(i + 2);
+
+                        // Parse the type annotation (: Type)
+                        var type_iter = type_annotation.list.iterator();
+                        const colon = type_iter.next() orelse return Error.UnsupportedExpression;
+                        if (!colon.isKeyword() or colon.keyword.len != 0) return Error.UnsupportedExpression;
+
+                        const type_val = type_iter.next() orelse return Error.UnsupportedExpression;
+                        if (!type_val.isSymbol()) return Error.UnsupportedExpression;
+
+                        // Convert the type name to C type
+                        const type_str = type_val.symbol;
+                        const c_type: []const u8 = if (std.mem.eql(u8, type_str, "Int"))
+                            int_type_name
+                        else if (std.mem.eql(u8, type_str, "Float"))
+                            "double"
+                        else if (std.mem.eql(u8, type_str, "String"))
+                            "const char *"
+                        else if (std.mem.eql(u8, type_str, "Bool"))
+                            "bool"
+                        else if (std.mem.eql(u8, type_str, "U8"))
+                            "uint8_t"
+                        else if (std.mem.eql(u8, type_str, "U16"))
+                            "uint16_t"
+                        else if (std.mem.eql(u8, type_str, "U32"))
+                            "uint32_t"
+                        else if (std.mem.eql(u8, type_str, "U64"))
+                            "uint64_t"
+                        else if (std.mem.eql(u8, type_str, "I8"))
+                            "int8_t"
+                        else if (std.mem.eql(u8, type_str, "I16"))
+                            "int16_t"
+                        else if (std.mem.eql(u8, type_str, "I32"))
+                            "int32_t"
+                        else if (std.mem.eql(u8, type_str, "I64"))
+                            "int64_t"
+                        else if (std.mem.eql(u8, type_str, "F32"))
+                            "float"
+                        else if (std.mem.eql(u8, type_str, "F64"))
+                            "double"
+                        else
+                            return Error.UnsupportedType;
+
+                        const sanitized_name = try self.sanitizeIdentifier(name_val.symbol);
+                        defer self.allocator.*.free(sanitized_name);
+
+                        try writer.print(" {s} {s} = ", .{ c_type, sanitized_name });
+                        try self.writeExpression(writer, value_val, ns_ctx);
+                        try writer.print(";", .{});
+
+                        i += 3;
+                    }
+
+                    try writer.print(" ", .{});
+                    try self.writeExpression(writer, body_expr, ns_ctx);
+                    try writer.print("; }})", .{});
+                    return;
+                }
+
                 if (self.isComparisonOperator(op)) {
                     const left = iter.next() orelse return Error.MissingOperand;
                     const right = iter.next() orelse return Error.MissingOperand;
@@ -1032,7 +1183,73 @@ pub const SimpleCCompiler = struct {
 
                     try writer.print("(", .{});
                     try self.writeExpression(writer, left, ns_ctx);
-                    try writer.print(" {s} ", .{op});
+                    // Convert = to == for C
+                    const c_op = if (std.mem.eql(u8, op, "=")) "==" else op;
+                    try writer.print(" {s} ", .{c_op});
+                    try self.writeExpression(writer, right, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (self.isLogicalOperator(op)) {
+                    if (std.mem.eql(u8, op, "not")) {
+                        // Unary operator
+                        const operand = iter.next() orelse return Error.MissingOperand;
+                        if (iter.next() != null) return Error.UnsupportedExpression;
+
+                        try writer.print("(!(", .{});
+                        try self.writeExpression(writer, operand, ns_ctx);
+                        try writer.print("))", .{});
+                        return;
+                    }
+
+                    // Binary operators: and, or
+                    const left = iter.next() orelse return Error.MissingOperand;
+                    const right = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    const c_op = if (std.mem.eql(u8, op, "and")) "&&" else "||";
+                    try writer.print("(", .{});
+                    try self.writeExpression(writer, left, ns_ctx);
+                    try writer.print(" {s} ", .{c_op});
+                    try self.writeExpression(writer, right, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (self.isBitwiseOperator(op)) {
+                    if (std.mem.eql(u8, op, "bit-not")) {
+                        // Unary operator
+                        const operand = iter.next() orelse return Error.MissingOperand;
+                        if (iter.next() != null) return Error.UnsupportedExpression;
+
+                        try writer.print("(~(", .{});
+                        try self.writeExpression(writer, operand, ns_ctx);
+                        try writer.print("))", .{});
+                        return;
+                    }
+
+                    // Binary operators
+                    const left = iter.next() orelse return Error.MissingOperand;
+                    const right = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    const c_op = if (std.mem.eql(u8, op, "bit-and"))
+                        "&"
+                    else if (std.mem.eql(u8, op, "bit-or"))
+                        "|"
+                    else if (std.mem.eql(u8, op, "bit-xor"))
+                        "^"
+                    else if (std.mem.eql(u8, op, "bit-shl"))
+                        "<<"
+                    else if (std.mem.eql(u8, op, "bit-shr"))
+                        ">>"
+                    else
+                        unreachable;
+
+                    try writer.print("(", .{});
+                    try self.writeExpression(writer, left, ns_ctx);
+                    try writer.print(" {s} ", .{c_op});
                     try self.writeExpression(writer, right, ns_ctx);
                     try writer.print(")", .{});
                     return;
@@ -1125,8 +1342,24 @@ pub const SimpleCCompiler = struct {
             std.mem.eql(u8, symbol, ">") or
             std.mem.eql(u8, symbol, "<=") or
             std.mem.eql(u8, symbol, ">=") or
+            std.mem.eql(u8, symbol, "=") or
             std.mem.eql(u8, symbol, "==") or
             std.mem.eql(u8, symbol, "!=");
+    }
+
+    fn isLogicalOperator(_: *SimpleCCompiler, symbol: []const u8) bool {
+        return std.mem.eql(u8, symbol, "and") or
+            std.mem.eql(u8, symbol, "or") or
+            std.mem.eql(u8, symbol, "not");
+    }
+
+    fn isBitwiseOperator(_: *SimpleCCompiler, symbol: []const u8) bool {
+        return std.mem.eql(u8, symbol, "bit-and") or
+            std.mem.eql(u8, symbol, "bit-or") or
+            std.mem.eql(u8, symbol, "bit-xor") or
+            std.mem.eql(u8, symbol, "bit-not") or
+            std.mem.eql(u8, symbol, "bit-shl") or
+            std.mem.eql(u8, symbol, "bit-shr");
     }
 
     fn cTypeFor(self: *SimpleCCompiler, type_info: Type, includes: *IncludeFlags) Error![]const u8 {
@@ -1179,6 +1412,7 @@ pub const SimpleCCompiler = struct {
             .f32 => "float",
             .f64 => "double",
             .struct_type => |st| st.name,
+            .enum_type => |et| et.name,
             else => Error.UnsupportedType,
         };
     }
@@ -1194,6 +1428,7 @@ pub const SimpleCCompiler = struct {
             .usize => "%zu",
             .bool => "%d",
             .string => "%s",
+            .enum_type => "%d", // Enums are represented as ints in C
             else => Error.UnsupportedType,
         };
     }
@@ -1222,10 +1457,17 @@ test "simple c compiler basic program" {
 
     const expected =
         "#include <stdio.h>\n\n"
-        ++ "long long answer = 41;\n\n"
+        ++ "typedef struct {\n"
+        ++ "    long long answer;\n"
+        ++ "} Namespace_my_app;\n\n"
+        ++ "Namespace_my_app g_my_app;\n\n\n"
+        ++ "void init_namespace_my_app(Namespace_my_app* ns) {\n"
+        ++ "    ns->answer = 41;\n"
+        ++ "}\n\n"
         ++ "int main() {\n"
+        ++ "    init_namespace_my_app(&g_my_app);\n"
         ++ "    // namespace my.app\n"
-        ++ "    printf(\"%lld\\n\", (answer + 1));\n"
+        ++ "    printf(\"%lld\\n\", (g_my_app.answer + 1));\n"
         ++ "    return 0;\n"
         ++ "}\n";
 

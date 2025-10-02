@@ -56,6 +56,13 @@ pub const Parser = struct {
 
     fn expect(self: *Parser, expected: TokenType) ParseError!Token {
         if (self.current_token.type != expected) {
+            std.debug.print("Parse error at line {d}, column {d}: Expected {s} but got {s} ('{s}')\n", .{
+                self.current_token.line,
+                self.current_token.column,
+                @tagName(expected),
+                @tagName(self.current_token.type),
+                self.current_token.lexeme
+            });
             return ParseError.UnexpectedToken;
         }
         const token = self.current_token;
@@ -112,6 +119,7 @@ pub const Parser = struct {
     fn parseInt(self: *Parser) ParseError!*Value {
         const token = try self.expect(.integer);
         const int_val = std.fmt.parseInt(i64, token.lexeme, 10) catch {
+            std.debug.print("Parse error at line {d}, column {d}: Invalid number '{s}'\n", .{ token.line, token.column, token.lexeme });
             return ParseError.InvalidNumber;
         };
         return try value.createInt(self.allocator.*, int_val);
@@ -120,6 +128,7 @@ pub const Parser = struct {
     fn parseFloat(self: *Parser) ParseError!*Value {
         const token = try self.expect(.float);
         const float_val = std.fmt.parseFloat(f64, token.lexeme) catch {
+            std.debug.print("Parse error at line {d}, column {d}: Invalid float '{s}'\n", .{ token.line, token.column, token.lexeme });
             return ParseError.InvalidNumber;
         };
         return try value.createFloat(self.allocator.*, float_val);

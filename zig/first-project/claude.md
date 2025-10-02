@@ -4,12 +4,12 @@
 - Literals: integers (generic + sized), floats (F32/F64), strings, nil
 - Symbols, keywords, namespaces `(ns …)`
 - Lists, vectors, maps
-- Struct and enum definitions with environment registration
+- Struct and enum definitions: `(def Point (: Type) (Struct [x Int] [y Int]))`
 - Function definitions `(def … (fn …))`, higher-order functions, function types `(-> …)`
 - Forward references via two-pass type checking
 - `let` bindings with type annotations and scoped environments
 - Arithmetic `+ - * / %` with numeric-type merging (ints/floats)
-- Comparison operators `< > <= >= == !=` returning `Bool`
+- Comparison operators `< > <= >= = !=` returning `Bool`
 - Conditional expressions `(if …)` with branch type unification
 - Recursive functions (verified with typed Fibonacci example)
 
@@ -36,3 +36,10 @@
 - Backend tests include arithmetic, `if`, structs/enums, forward references, lets, etc.
 - Sample typed Fibonacci demonstrates U32 recursion through both executable and bundle workflows
 
+
+# important-instruction-reminders
+Do what has been asked; nothing more, nothing less.
+NEVER create files unless they're absolutely necessary for achieving your goal.
+ALWAYS prefer editing an existing file to creating a new one.
+NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
+MUST use the scratch/ folder for all ad-hoc testing files. Never create test files in the project root.

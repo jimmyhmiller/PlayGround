@@ -314,6 +314,11 @@ pub const BidirectionalTypeChecker = struct {
             },
 
             .symbol => |name| {
+                // Handle boolean literals
+                if (std.mem.eql(u8, name, "true") or std.mem.eql(u8, name, "false")) {
+                    return try TypedExpression.init(self.allocator, expr, Type.bool);
+                }
+
                 if (self.env.get(name)) |var_type| {
                     return try TypedExpression.init(self.allocator, expr, var_type);
                 } else {
@@ -343,6 +348,12 @@ pub const BidirectionalTypeChecker = struct {
                             return try self.synthesizeIf(expr, list);
                         } else if (self.isComparisonOperator(first.symbol)) {
                             return try self.synthesizeComparison(expr, list);
+                        } else if (std.mem.eql(u8, first.symbol, "and") or
+                                   std.mem.eql(u8, first.symbol, "or") or
+                                   std.mem.eql(u8, first.symbol, "not")) {
+                            return try self.synthesizeLogical(expr, list);
+                        } else if (self.isBitwiseOperator(first.symbol)) {
+                            return try self.synthesizeBitwise(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "+") or
                                    std.mem.eql(u8, first.symbol, "-") or
                                    std.mem.eql(u8, first.symbol, "*") or
@@ -724,6 +735,105 @@ pub const BidirectionalTypeChecker = struct {
         return try TypedExpression.init(self.allocator, expr, Type.bool);
     }
 
+    fn synthesizeLogical(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
+        const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        const op = op_node.symbol;
+
+        if (std.mem.eql(u8, op, "not")) {
+            // Unary operator
+            const operand_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+            const operand_expr = operand_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+            const operand_typed = try self.synthesize(operand_expr);
+
+            if (operand_node.next) |tail| {
+                if (tail.value != null) {
+                    return TypeCheckError.InvalidTypeAnnotation;
+                }
+            }
+
+            if (!isTruthyType(operand_typed.type)) {
+                return TypeCheckError.TypeMismatch;
+            }
+
+            return try TypedExpression.init(self.allocator, expr, Type.bool);
+        }
+
+        // Binary operators: and, or
+        const left_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left_expr = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left_typed = try self.synthesize(left_expr);
+
+        const right_node = left_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const right_expr = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const right_typed = try self.synthesize(right_expr);
+
+        if (right_node.next) |tail| {
+            if (tail.value != null) {
+                return TypeCheckError.InvalidTypeAnnotation;
+            }
+        }
+
+        if (!isTruthyType(left_typed.type) or !isTruthyType(right_typed.type)) {
+            return TypeCheckError.TypeMismatch;
+        }
+
+        return try TypedExpression.init(self.allocator, expr, Type.bool);
+    }
+
+    fn synthesizeBitwise(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
+        const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        const op = op_node.symbol;
+
+        if (std.mem.eql(u8, op, "bit-not")) {
+            // Unary operator
+            const operand_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+            const operand_expr = operand_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+            const operand_typed = try self.synthesize(operand_expr);
+
+            if (operand_node.next) |tail| {
+                if (tail.value != null) {
+                    return TypeCheckError.InvalidTypeAnnotation;
+                }
+            }
+
+            if (!isIntegerType(operand_typed.type)) {
+                return TypeCheckError.TypeMismatch;
+            }
+
+            return try TypedExpression.init(self.allocator, expr, operand_typed.type);
+        }
+
+        // Binary operators: bit-and, bit-or, bit-xor, bit-shl, bit-shr
+        const left_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left_expr = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left_typed = try self.synthesize(left_expr);
+
+        const right_node = left_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const right_expr = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const right_typed = try self.synthesize(right_expr);
+
+        if (right_node.next) |tail| {
+            if (tail.value != null) {
+                return TypeCheckError.InvalidTypeAnnotation;
+            }
+        }
+
+        if (!isIntegerType(left_typed.type) or !isIntegerType(right_typed.type)) {
+            return TypeCheckError.TypeMismatch;
+        }
+
+        // For shifts, result type is left operand type
+        if (std.mem.eql(u8, op, "bit-shl") or std.mem.eql(u8, op, "bit-shr")) {
+            return try TypedExpression.init(self.allocator, expr, left_typed.type);
+        }
+
+        // For bit-and, bit-or, bit-xor, merge types like arithmetic
+        const merged_type = try self.mergeNumericTypes(left_typed.type, right_typed.type);
+        return try TypedExpression.init(self.allocator, expr, merged_type);
+    }
+
     fn synthesizeIf(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
         const cond_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
         const cond_expr = cond_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
@@ -930,6 +1040,133 @@ pub const BidirectionalTypeChecker = struct {
         return result;
     }
 
+    fn synthesizeTypedLogical(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
+        const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        const op = op_node.symbol;
+
+        _ = expr;
+
+        if (std.mem.eql(u8, op, "not")) {
+            // Unary operator
+            if (storage.len < 1) return TypeCheckError.InvalidTypeAnnotation;
+
+            const operand_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+            const operand_expr = operand_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+            const operand_typed = try self.synthesizeTyped(operand_expr);
+
+            if (!isTruthyType(operand_typed.getType())) {
+                return TypeCheckError.TypeMismatch;
+            }
+
+            storage[0] = operand_typed;
+
+            const result = try self.allocator.create(TypedValue);
+            result.* = TypedValue{ .list = .{
+                .elements = storage[0..1],
+                .type = Type.bool,
+            } };
+            return result;
+        }
+
+        // Binary operators: and, or
+        if (storage.len < 2) return TypeCheckError.InvalidTypeAnnotation;
+
+        const left_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left_expr = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left_typed = try self.synthesizeTyped(left_expr);
+
+        if (!isTruthyType(left_typed.getType())) {
+            return TypeCheckError.TypeMismatch;
+        }
+
+        const right_node = left_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const right_expr = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const right_typed = try self.synthesizeTyped(right_expr);
+
+        if (!isTruthyType(right_typed.getType())) {
+            return TypeCheckError.TypeMismatch;
+        }
+
+        storage[0] = left_typed;
+        storage[1] = right_typed;
+
+        const result = try self.allocator.create(TypedValue);
+        result.* = TypedValue{ .list = .{
+            .elements = storage[0..2],
+            .type = Type.bool,
+        } };
+        return result;
+    }
+
+    fn synthesizeTypedBitwise(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
+        const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        const op = op_node.symbol;
+
+        _ = expr;
+
+        if (std.mem.eql(u8, op, "bit-not")) {
+            // Unary operator
+            if (storage.len < 1) return TypeCheckError.InvalidTypeAnnotation;
+
+            const operand_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+            const operand_expr = operand_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+            const operand_typed = try self.synthesizeTyped(operand_expr);
+            const operand_type = operand_typed.getType();
+
+            if (!isIntegerType(operand_type)) {
+                return TypeCheckError.TypeMismatch;
+            }
+
+            storage[0] = operand_typed;
+
+            const result = try self.allocator.create(TypedValue);
+            result.* = TypedValue{ .list = .{
+                .elements = storage[0..1],
+                .type = operand_type,
+            } };
+            return result;
+        }
+
+        // Binary operators
+        if (storage.len < 2) return TypeCheckError.InvalidTypeAnnotation;
+
+        const left_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left_expr = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left_typed = try self.synthesizeTyped(left_expr);
+        const left_type = left_typed.getType();
+
+        if (!isIntegerType(left_type)) {
+            return TypeCheckError.TypeMismatch;
+        }
+
+        const right_node = left_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const right_expr = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const right_typed = try self.synthesizeTyped(right_expr);
+        const right_type = right_typed.getType();
+
+        if (!isIntegerType(right_type)) {
+            return TypeCheckError.TypeMismatch;
+        }
+
+        storage[0] = left_typed;
+        storage[1] = right_typed;
+
+        // For shifts, result type is left operand type
+        const result_type = if (std.mem.eql(u8, op, "bit-shl") or std.mem.eql(u8, op, "bit-shr"))
+            left_type
+        else
+            try self.mergeNumericTypes(left_type, right_type);
+
+        const result = try self.allocator.create(TypedValue);
+        result.* = TypedValue{ .list = .{
+            .elements = storage[0..2],
+            .type = result_type,
+        } };
+        return result;
+    }
+
     fn synthesizeTypedIf(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
         if (storage.len < 3) return TypeCheckError.InvalidTypeAnnotation;
 
@@ -1025,7 +1262,12 @@ pub const BidirectionalTypeChecker = struct {
             // Meta-type
             if (std.mem.eql(u8, type_name, "Type")) return Type.type_type;
 
-            // Check if it's a user-defined type in the environment
+            // Check if it's a user-defined type in type_defs first
+            if (self.type_defs.get(type_name)) |type_def| {
+                return type_def;
+            }
+
+            // Fall back to env for backward compatibility
             if (self.env.get(type_name)) |env_type| {
                 return env_type;
             }
@@ -1248,7 +1490,22 @@ pub const BidirectionalTypeChecker = struct {
     }
 
     fn isEqualityOperator(symbol: []const u8) bool {
-        return std.mem.eql(u8, symbol, "==") or std.mem.eql(u8, symbol, "!=");
+        return std.mem.eql(u8, symbol, "=") or std.mem.eql(u8, symbol, "==") or std.mem.eql(u8, symbol, "!=");
+    }
+
+    fn isLogicalOperator(_: *BidirectionalTypeChecker, symbol: []const u8) bool {
+        return std.mem.eql(u8, symbol, "and") or
+            std.mem.eql(u8, symbol, "or") or
+            std.mem.eql(u8, symbol, "not");
+    }
+
+    fn isBitwiseOperator(_: *BidirectionalTypeChecker, symbol: []const u8) bool {
+        return std.mem.eql(u8, symbol, "bit-and") or
+            std.mem.eql(u8, symbol, "bit-or") or
+            std.mem.eql(u8, symbol, "bit-xor") or
+            std.mem.eql(u8, symbol, "bit-not") or
+            std.mem.eql(u8, symbol, "bit-shl") or
+            std.mem.eql(u8, symbol, "bit-shr");
     }
 
     fn isTruthyType(t: Type) bool {
@@ -1417,6 +1674,12 @@ pub const BidirectionalTypeChecker = struct {
             },
 
             .symbol => |name| {
+                // Handle boolean literals
+                if (std.mem.eql(u8, name, "true") or std.mem.eql(u8, name, "false")) {
+                    result.* = TypedValue{ .symbol = .{ .name = name, .type = Type.bool } };
+                    return result;
+                }
+
                 // Check if this is a type definition first
                 if (self.type_defs.get(name)) |type_def| {
                     result.* = TypedValue{ .type_value = .{
@@ -1557,7 +1820,7 @@ pub const BidirectionalTypeChecker = struct {
                             } };
                             return result;
                         } else if (std.mem.eql(u8, first.symbol, "def")) {
-                            // Handle def form: (def name value) or (def name (: type) body)
+                            // Handle def form: (def name (: type) body)
                             var current: ?*const @TypeOf(list.*) = list.next;
 
                             // Get variable name
@@ -1566,51 +1829,9 @@ pub const BidirectionalTypeChecker = struct {
                             const var_name = name_node.value.?.symbol;
                             current = name_node.next;
 
-                            // Get the second argument
+                            // Get the second argument (must be type annotation)
                             const second_node = current orelse return TypeCheckError.InvalidTypeAnnotation;
                             const second_val = second_node.value.?;
-
-                            // Check if it's a direct struct definition: (def name (Struct [x Int] [y Int]))
-                            if (second_val.isList()) {
-                            const struct_current: ?*const @TypeOf(second_val.list.*) = second_val.list;
-                            if (struct_current) |node| {
-                                if (node.value) |struct_first| {
-                                    if (struct_first.isSymbol()) {
-                                        if (std.mem.eql(u8, struct_first.symbol, "Struct") or std.mem.eql(u8, struct_first.symbol, "Enum")) {
-                                            var defined_type = try self.parseType(second_val);
-
-                                            switch (defined_type) {
-                                                .struct_type => {
-                                                    defined_type.struct_type.name = var_name;
-
-                                                    try self.env.put(var_name, defined_type);
-                                                    try self.type_defs.put(var_name, defined_type);
-
-                                                    result.* = TypedValue{ .type_value = .{
-                                                        .value_type = defined_type,
-                                                        .type = Type.type_type,
-                                                    } };
-                                                    return result;
-                                                },
-                                                .enum_type => {
-                                                    try self.registerEnumVariants(var_name, defined_type.enum_type);
-
-                                                    try self.env.put(var_name, defined_type);
-                                                    try self.type_defs.put(var_name, defined_type);
-
-                                                    result.* = TypedValue{ .type_value = .{
-                                                        .value_type = defined_type,
-                                                        .type = Type.type_type,
-                                                    } };
-                                                    return result;
-                                                },
-                                                else => {},
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            }
 
                             // Check if it's a type annotation: (def name (: type) body)
                             if (second_val.isList()) {
@@ -1619,48 +1840,35 @@ pub const BidirectionalTypeChecker = struct {
                                     if (node.value) |anno_first| {
                                         if (anno_first.isKeyword() and std.mem.eql(u8, anno_first.keyword, "")) {
                                             // This is a type annotation form
-                                            var annotated_type = try self.parseTypeAnnotation(second_val);
+                                            const annotated_type = try self.parseTypeAnnotation(second_val);
                                             current = second_node.next;
-
-                                            const is_struct_type_def = annotated_type == .struct_type and annotated_type.struct_type.name.len == 0;
-                                            const is_enum_type_def = annotated_type == .enum_type and annotated_type.enum_type.name.len == 0;
-
-                                            if (is_struct_type_def) {
-                                                annotated_type.struct_type.name = var_name;
-                                            }
 
                                             // Type check body
                                             const body_node = current orelse return TypeCheckError.InvalidTypeAnnotation;
                                             const body = body_node.value.?;
 
-                                            // For struct type definitions, only allow nil as the body
-                                            if (is_struct_type_def) {
-                                                if (!body.isNil()) {
-                                                    return TypeCheckError.TypeMismatch;
-                                                }
-                                                // Add binding to environment
-                                                try self.env.put(var_name, annotated_type);
-
-                                                // Return a typed value representing the struct type definition
-                                                result.* = TypedValue{ .nil = .{ .type = annotated_type } };
-                                                return result;
-                                            } else if (is_enum_type_def) {
-                                                if (!body.isNil()) {
-                                                    return TypeCheckError.TypeMismatch;
-                                                }
-
-                                                try self.registerEnumVariants(var_name, annotated_type.enum_type);
-                                                try self.env.put(var_name, annotated_type);
-
-                                                result.* = TypedValue{ .nil = .{ .type = annotated_type } };
-                                                return result;
-                                            }
-
-                                            // For non-struct types, check body normally
+                                            // Check body against annotated type
                                             const typed_body = try self.checkTyped(body, annotated_type);
 
-                                            // Add binding to environment
-                                            try self.env.put(var_name, annotated_type);
+                                            // If this is a type definition (annotated_type is type_type),
+                                            // extract the actual type from typed_body and register it
+                                            if (annotated_type == .type_type) {
+                                                if (typed_body.* == .type_value) {
+                                                    const actual_type = typed_body.type_value.value_type;
+                                                    try self.env.put(var_name, annotated_type); // Point has type Type
+                                                    try self.type_defs.put(var_name, actual_type); // Point -> struct_type{Point}
+
+                                                    // Set the name if it's a struct or enum
+                                                    if (actual_type == .struct_type) {
+                                                        actual_type.struct_type.name = var_name;
+                                                    } else if (actual_type == .enum_type) {
+                                                        try self.registerEnumVariants(var_name, actual_type.enum_type);
+                                                    }
+                                                }
+                                            } else {
+                                                // Add binding to environment for non-type definitions
+                                                try self.env.put(var_name, annotated_type);
+                                            }
 
                                             // Return the typed body as the result
                                             return typed_body;
@@ -1679,6 +1887,12 @@ pub const BidirectionalTypeChecker = struct {
                             return try self.synthesizeTypedIf(expr, list, typed_elements);
                         } else if (self.isComparisonOperator(first.symbol)) {
                             return try self.synthesizeTypedComparison(expr, list, typed_elements);
+                        } else if (std.mem.eql(u8, first.symbol, "and") or
+                                   std.mem.eql(u8, first.symbol, "or") or
+                                   std.mem.eql(u8, first.symbol, "not")) {
+                            return try self.synthesizeTypedLogical(expr, list, typed_elements);
+                        } else if (self.isBitwiseOperator(first.symbol)) {
+                            return try self.synthesizeTypedBitwise(expr, list, typed_elements);
                         }
                         // Add other special forms as needed
                     }
@@ -1946,50 +2160,42 @@ pub const BidirectionalTypeChecker = struct {
                             const var_name = name_node.value.?.symbol;
                             current = name_node.next;
 
-                            // Get second argument (could be type annotation or direct type)
+                            // Get second argument (must be type annotation)
                             const second_node = current orelse continue;
                             const second_val = second_node.value.?;
 
-                            // Check if it's a direct struct/enum definition: (def Point (Struct ...))
-                            var annotated_type: Type = undefined;
-                            var is_direct_struct_or_enum = false;
+                            // Parse type annotation: (def Point (: Type) ...)
+                            const annotated_type = self.parseTypeAnnotation(second_val) catch continue;
 
-                            if (second_val.isList()) {
-                                const struct_current: ?*const @TypeOf(second_val.list.*) = second_val.list;
-                                if (struct_current) |snode| {
-                                    if (snode.value) |struct_first| {
-                                        if (struct_first.isSymbol()) {
-                                            if (std.mem.eql(u8, struct_first.symbol, "Struct") or std.mem.eql(u8, struct_first.symbol, "Enum")) {
-                                                // Direct struct/enum definition
-                                                annotated_type = self.parseType(second_val) catch continue;
-                                                is_direct_struct_or_enum = true;
-                                            }
-                                        }
+                            // If this is a type definition (: Type), peek at the body to get the actual type
+                            var actual_type = annotated_type;
+                            if (annotated_type == .type_type) {
+                                // Get the body (the third argument)
+                                const body_node = second_node.next;
+                                if (body_node) |bn| {
+                                    if (bn.value) |body_val| {
+                                        // Try to parse the body as a type (Struct or Enum)
+                                        actual_type = self.parseType(body_val) catch annotated_type;
                                     }
                                 }
                             }
 
-                            // If not direct, try parsing as type annotation
-                            if (!is_direct_struct_or_enum) {
-                                annotated_type = self.parseTypeAnnotation(second_val) catch continue;
-                            }
-
-                            const is_struct_type_def = annotated_type == .struct_type and annotated_type.struct_type.name.len == 0;
-                            const is_enum_type_def = annotated_type == .enum_type and annotated_type.enum_type.name.len == 0;
+                            const is_struct_type_def = actual_type == .struct_type and actual_type.struct_type.name.len == 0;
+                            const is_enum_type_def = actual_type == .enum_type and actual_type.enum_type.name.len == 0;
 
                             if (is_struct_type_def) {
-                                annotated_type.struct_type.name = var_name;
+                                actual_type.struct_type.name = var_name;
                             }
                             if (is_enum_type_def) {
-                                self.registerEnumVariants(var_name, annotated_type.enum_type) catch continue;
+                                self.registerEnumVariants(var_name, actual_type.enum_type) catch continue;
                             }
 
                             // Add to environment for forward references
+                            // For type definitions, store Type in env, actual type in type_defs
                             try self.env.put(var_name, annotated_type);
-                            // Only add to type_defs if this is a direct struct/enum definition
-                            // For (def Point (: Type) (Struct ...)), we'll add to type_defs in pass 2
-                            if (is_direct_struct_or_enum or is_struct_type_def or is_enum_type_def) {
-                                try self.type_defs.put(var_name, annotated_type);
+                            // Add to type_defs if this is a struct/enum type definition
+                            if (is_struct_type_def or is_enum_type_def) {
+                                try self.type_defs.put(var_name, actual_type);
                             }
                         }
                     }
@@ -2014,124 +2220,57 @@ pub const BidirectionalTypeChecker = struct {
                             const var_name = name_node.value.?.symbol;
                             current = name_node.next;
 
-                            // Get second argument (could be type annotation or direct type)
+                            // Get second argument (must be type annotation)
                             const second_node = current orelse continue;
                             const second_val = second_node.value.?;
 
-                            // Check if it's a direct struct/enum definition: (def Point (Struct ...))
-                            var annotated_type: Type = undefined;
-                            var is_direct_struct_or_enum = false;
+                            // Parse type annotation: (def name (: Type) value)
+                            const annotated_type = self.parseTypeAnnotation(second_val) catch continue;
+                            current = second_node.next;
 
-                            if (second_val.isList()) {
-                                const struct_current: ?*const @TypeOf(second_val.list.*) = second_val.list;
-                                if (struct_current) |snode| {
-                                    if (snode.value) |struct_first| {
-                                        if (struct_first.isSymbol()) {
-                                            if (std.mem.eql(u8, struct_first.symbol, "Struct") or std.mem.eql(u8, struct_first.symbol, "Enum")) {
-                                                // Direct struct/enum definition - no body to check
-                                                annotated_type = self.parseType(second_val) catch continue;
-                                                is_direct_struct_or_enum = true;
+                            const is_struct_type_def = annotated_type == .struct_type and annotated_type.struct_type.name.len == 0;
+                            const is_enum_type_def = annotated_type == .enum_type and annotated_type.enum_type.name.len == 0;
 
-                                                const is_struct_type_def = annotated_type == .struct_type and annotated_type.struct_type.name.len == 0;
-                                                const is_enum_type_def = annotated_type == .enum_type and annotated_type.enum_type.name.len == 0;
-
-                                                if (is_struct_type_def) {
-                                                    annotated_type.struct_type.name = var_name;
-                                                }
-                                                if (is_enum_type_def) {
-                                                    self.registerEnumVariants(var_name, annotated_type.enum_type) catch continue;
-                                                }
-
-                                                try self.env.put(var_name, annotated_type);
-
-                                                // Return a type_value for struct/enum definitions
-                                                const result = try self.allocator.create(TypedValue);
-                                                result.* = TypedValue{ .type_value = .{
-                                                    .value_type = annotated_type,
-                                                    .type = Type.type_type,
-                                                } };
-                                                try results.append(self.allocator, result);
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                }
+                            if (is_struct_type_def) {
+                                annotated_type.struct_type.name = var_name;
+                            }
+                            if (is_enum_type_def) {
+                                self.registerEnumVariants(var_name, annotated_type.enum_type) catch continue;
                             }
 
-                            // Check if it's a type annotation, otherwise treat as regular value def
-                            if (second_val.isList()) {
-                                const anno_current: ?*const @TypeOf(second_val.list.*) = second_val.list;
-                                if (anno_current) |anode| {
-                                    if (anode.value) |anno_first| {
-                                        if (anno_first.isKeyword() and std.mem.eql(u8, anno_first.keyword, "")) {
-                                            // This is a type annotation: (def name (: Type) value)
-                                            annotated_type = self.parseTypeAnnotation(second_val) catch continue;
-                                            current = second_node.next;
-
-                                            const is_struct_type_def = annotated_type == .struct_type and annotated_type.struct_type.name.len == 0;
-                                            const is_enum_type_def = annotated_type == .enum_type and annotated_type.enum_type.name.len == 0;
-
-                                            if (is_struct_type_def) {
-                                                annotated_type.struct_type.name = var_name;
-                                            }
-                                            if (is_enum_type_def) {
-                                                self.registerEnumVariants(var_name, annotated_type.enum_type) catch continue;
-                                            }
-
-                                            // Get body and type check it
-                                            const body_node = current orelse continue;
-                                            const body = body_node.value.?;
-                                            const typed_body = self.checkTyped(body, annotated_type) catch |err| {
-                                                if (err == TypeCheckError.OutOfMemory) return err;
-                                                try errors.append(self.allocator, .{
-                                                    .index = index,
-                                                    .expr = body,
-                                                    .err = err,
-                                                });
-                                                continue;
-                                            };
-
-                                            // If this is a type definition (annotated_type is type_type),
-                                            // extract the actual type from typed_body and register it
-                                            if (annotated_type == .type_type) {
-                                                if (typed_body.* == .type_value) {
-                                                    const actual_type = typed_body.type_value.value_type;
-                                                    try self.env.put(var_name, annotated_type); // Point has type Type
-                                                    try self.type_defs.put(var_name, actual_type); // Point -> struct_type{Point}
-
-                                                    // Set the name if it's a struct or enum
-                                                    if (actual_type == .struct_type) {
-                                                        actual_type.struct_type.name = var_name;
-                                                    } else if (actual_type == .enum_type) {
-                                                        self.registerEnumVariants(var_name, actual_type.enum_type) catch continue;
-                                                    }
-                                                }
-                                            } else if (is_struct_type_def or is_enum_type_def) {
-                                                try self.env.put(var_name, annotated_type);
-                                            }
-
-                                            try results.append(self.allocator, typed_body);
-                                            continue;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Regular value definition: (def name value)
-                            // Synthesize the value to get its type
-                            const value_typed = self.synthesizeTyped(second_val) catch |err| {
+                            // Get body and type check it
+                            const body_node = current orelse continue;
+                            const body = body_node.value.?;
+                            const typed_body = self.checkTyped(body, annotated_type) catch |err| {
                                 if (err == TypeCheckError.OutOfMemory) return err;
                                 try errors.append(self.allocator, .{
                                     .index = index,
-                                    .expr = second_val,
+                                    .expr = body,
                                     .err = err,
                                 });
                                 continue;
                             };
 
-                            // Add to environment
-                            try self.env.put(var_name, value_typed.getType());
-                            try results.append(self.allocator, value_typed);
+                            // If this is a type definition (annotated_type is type_type),
+                            // extract the actual type from typed_body and register it
+                            if (annotated_type == .type_type) {
+                                if (typed_body.* == .type_value) {
+                                    const actual_type = typed_body.type_value.value_type;
+                                    try self.env.put(var_name, annotated_type); // Point has type Type
+                                    try self.type_defs.put(var_name, actual_type); // Point -> struct_type{Point}
+
+                                    // Set the name if it's a struct or enum
+                                    if (actual_type == .struct_type) {
+                                        actual_type.struct_type.name = var_name;
+                                    } else if (actual_type == .enum_type) {
+                                        self.registerEnumVariants(var_name, actual_type.enum_type) catch continue;
+                                    }
+                                }
+                            } else if (is_struct_type_def or is_enum_type_def) {
+                                try self.env.put(var_name, annotated_type);
+                            }
+
+                            try results.append(self.allocator, typed_body);
                             continue;
                         }
                     }
