@@ -97,8 +97,8 @@ test "language showcase - verify all examples type check" {
     // Struct types
     {
         const code =
-            \\(def Point (Struct [x Int] [y Int]))
-            \\(def Color (Struct [r U8] [g U8] [b U8]))
+            \\(def Point (: Type) (Struct [x Int] [y Int]))
+            \\(def Color (: Type) (Struct [r U8] [g U8] [b U8]))
         ;
         const expressions = try reader.readAllString(code);
         for (expressions.items) |expr| {
@@ -106,9 +106,9 @@ test "language showcase - verify all examples type check" {
             try std.testing.expect(typed.getType() == .type_type);
         }
 
-        // Verify structs are in environment
-        try std.testing.expect(checker.env.get("Point").? == .struct_type);
-        try std.testing.expect(checker.env.get("Color").? == .struct_type);
+        // Verify structs are in environment (Point and Color have type Type)
+        try std.testing.expect(checker.env.get("Point").? == .type_type);
+        try std.testing.expect(checker.env.get("Color").? == .type_type);
     }
 
     // Forward references - this tests two-pass compilation
@@ -146,17 +146,17 @@ test "language showcase - verify all examples type check" {
     // Complex struct with nested types
     {
         // First define Point
-        const point_def = "(def Point (Struct [x Int] [y Int]))";
+        const point_def = "(def Point (: Type) (Struct [x Int] [y Int]))";
         _ = try checker.typeCheck(try reader.readString(point_def));
 
         // Then define Person using Point
-        const person_def = "(def Person (Struct [name String] [age U8] [location Point]))";
+        const person_def = "(def Person (: Type) (Struct [name String] [age U8] [location Point]))";
         const person_expr = try reader.readString(person_def);
         const person_typed = try checker.typeCheck(person_expr);
 
         try std.testing.expect(person_typed.getType() == .type_type);
 
-        const person_type = checker.env.get("Person").?;
+        const person_type = checker.type_defs.get("Person").?;
         try std.testing.expect(person_type == .struct_type);
         try std.testing.expect(person_type.struct_type.fields.len == 3);
 
@@ -164,6 +164,23 @@ test "language showcase - verify all examples type check" {
         try std.testing.expect(person_type.struct_type.fields[0].field_type == .string);
         try std.testing.expect(person_type.struct_type.fields[1].field_type == .u8);
         try std.testing.expect(person_type.struct_type.fields[2].field_type == .struct_type);
+    }
+
+    // Let bindings
+    {
+        const code =
+            \\(let [x (: Int) 7] (+ x 2))
+            \\(let [x (: Int) 10 y (: Int) 20] (+ x y))
+            \\(let [a (: Int) 1] (let [b (: Int) (+ a 2)] (+ a b)))
+        ;
+        const expressions = try reader.readAllString(code);
+        const report = try checker.typeCheckAllTwoPass(expressions.items);
+        try std.testing.expect(report.errors.items.len == 0);
+        try std.testing.expect(report.typed.items.len == 3);
+        // Verify all are integers
+        for (report.typed.items) |typed| {
+            try std.testing.expect(typed.getType() == .int);
+        }
     }
 
     std.debug.print("\n✅ All language showcase examples type check successfully!\n", .{});
@@ -175,6 +192,7 @@ test "language showcase - verify all examples type check" {
     std.debug.print("   - User-defined struct types\n", .{});
     std.debug.print("   - Forward references (two-pass compilation)\n", .{});
     std.debug.print("   - Type-safe arithmetic operations\n", .{});
+    std.debug.print("   - Let bindings with scoped environments\n", .{});
 }
 
 test "language showcase - error cases" {

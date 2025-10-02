@@ -73,7 +73,7 @@ pub const Lexer = struct {
                 return self.nextToken();
             },
             else => {
-                if (std.ascii.isDigit(c) or (c == '-' and self.peekNext() != 0 and std.ascii.isDigit(self.peekNext()))) {
+                if (std.ascii.isDigit(c) or (c == '-' and self.peek() != 0 and std.ascii.isDigit(self.peek()))) {
                     return self.number(start, start_line, start_column);
                 } else if (self.isSymbolStart(c)) {
                     return self.symbol(start, start_line, start_column);

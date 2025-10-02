@@ -90,13 +90,13 @@
 ;; ====================
 
 ;; Define a Point struct
-(def Point (Struct [x Int] [y Int]))
+(def Point (: Type) (Struct [x Int] [y Int]))
 
 ;; Define a Color struct
-(def Color (Struct [r U8] [g U8] [b U8]))
+(def Color (: Type) (Struct [r U8] [g U8] [b U8]))
 
 ;; Define a Rectangle struct using Point
-(def Rectangle (Struct
+(def Rectangle (: Type) (Struct
   [top-left Point]
   [width Int]
   [height Int]))
@@ -146,13 +146,13 @@
 ;; ====================
 
 ;; A Person struct with nested types
-(def Person (Struct
+(def Person (: Type) (Struct
   [name String]
   [age U8]
   [location Point]))
 
 ;; A Company struct with a vector of Persons
-(def Company (Struct
+(def Company (: Type) (Struct
   [name String]
   [employees [Person]]))
 
