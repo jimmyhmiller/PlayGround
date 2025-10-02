@@ -209,7 +209,7 @@ pub const Lexer = struct {
                c == '+' or c == '-' or c == '*' or c == '/' or c == '=' or
                c == '<' or c == '>' or c == '!' or c == '?' or c == '&' or
                c == '|' or c == '^' or c == '~' or c == '%' or c == '$' or
-               c == '_';
+               c == '_' or c == '.';
     }
 
     fn isSymbolChar(self: *const Lexer, c: u8) bool {
