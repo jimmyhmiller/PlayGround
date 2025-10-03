@@ -100,7 +100,7 @@ pub const SimpleCCompiler = struct {
 
     pub fn compileString(self: *SimpleCCompiler, source: []const u8, target: TargetKind) Error![]u8 {
         var reader_instance = Reader.init(self.allocator);
-        var expressions = reader_instance.readAllString(source) catch |err| {
+        const read_result = reader_instance.readAllString(source) catch |err| {
             return switch (err) {
                 error.UnexpectedToken => Error.UnexpectedToken,
                 error.UnterminatedString => Error.UnterminatedString,
@@ -111,7 +111,10 @@ pub const SimpleCCompiler = struct {
                 error.OutOfMemory => Error.OutOfMemory,
             };
         };
+        var expressions = read_result.values;
+        var line_numbers = read_result.line_numbers;
         defer expressions.deinit(self.allocator.*);
+        defer line_numbers.deinit(self.allocator.*);
 
         var checker = TypeChecker.init(self.allocator.*);
         defer checker.deinit();
@@ -126,14 +129,15 @@ pub const SimpleCCompiler = struct {
                     .{ expressions.items.len, report.typed.items.len });
             }
             for (report.errors.items) |detail| {
+                const line = if (detail.index < line_numbers.items.len) line_numbers.items[detail.index] else 0;
                 const maybe_str = self.formatValue(detail.expr) catch null;
                 if (maybe_str) |expr_str| {
                     defer self.allocator.*.free(expr_str);
-                    std.debug.print("Type error (expr {d}): {s} -> {s}\n",
-                        .{ detail.index, @errorName(detail.err), expr_str });
+                    std.debug.print("Type error at line {d} (expr {d}): {s} -> {s}\n",
+                        .{ line, detail.index, @errorName(detail.err), expr_str });
                 } else {
-                    std.debug.print("Type error (expr {d}): {s}\n",
-                        .{ detail.index, @errorName(detail.err) });
+                    std.debug.print("Type error at line {d} (expr {d}): {s}\n",
+                        .{ line, detail.index, @errorName(detail.err) });
                 }
             }
             return Error.TypeCheckFailed;
@@ -163,6 +167,8 @@ pub const SimpleCCompiler = struct {
                         // Skip extern declarations and directives - they're handled in forward decl pass
                         if (std.mem.eql(u8, head_val.symbol, "extern-fn") or
                             std.mem.eql(u8, head_val.symbol, "extern-type") or
+                            std.mem.eql(u8, head_val.symbol, "extern-union") or
+                            std.mem.eql(u8, head_val.symbol, "extern-struct") or
                             std.mem.eql(u8, head_val.symbol, "extern-var") or
                             std.mem.eql(u8, head_val.symbol, "include-header") or
                             std.mem.eql(u8, head_val.symbol, "link-library")) {
@@ -629,6 +635,10 @@ pub const SimpleCCompiler = struct {
                     // Create union typedef
                     try forward_writer.print("typedef union {s} {s};\n", .{ type_name, type_name });
                     return;
+                } else if (std.mem.eql(u8, head, "extern-struct")) {
+                    // extern-struct: type is defined in C header, we just acknowledge it exists
+                    // Don't generate any typedef - the C header already has it
+                    return;
                 } else if (std.mem.eql(u8, head, "extern-var")) {
                     // extern-var creates an extern variable declaration
                     const name_val = iter.next() orelse return;
@@ -776,6 +786,7 @@ pub const SimpleCCompiler = struct {
                 if (std.mem.eql(u8, head, "extern-fn") or
                     std.mem.eql(u8, head, "extern-type") or
                     std.mem.eql(u8, head, "extern-union") or
+                    std.mem.eql(u8, head, "extern-struct") or
                     std.mem.eql(u8, head, "extern-var") or
                     std.mem.eql(u8, head, "include-header") or
                     std.mem.eql(u8, head, "link-library")) {
@@ -1013,8 +1024,11 @@ pub const SimpleCCompiler = struct {
                 Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
                     const repr = try self.formatValue(fn_expr);
                     defer self.allocator.*.free(repr);
+                    const last_repr = try self.formatValue(last_expr);
+                    defer self.allocator.*.free(last_repr);
                     try def_writer.writeAll("0;\n}\n");
                     try def_writer.print("// unsupported function body: {s}\n", .{repr});
+                    std.debug.print("ERROR writing return expression: {s}\nLast expr: {s}\n", .{@errorName(err), last_repr});
                     return;
                 },
                 else => return err,
@@ -1407,6 +1421,22 @@ pub const SimpleCCompiler = struct {
                     return;
                 }
 
+                if (std.mem.eql(u8, op, "set!")) {
+                    // (set! var-name value) -> var_name = value
+                    const var_expr = iter.next() orelse return Error.UnsupportedExpression;
+                    const value_expr = iter.next() orelse return Error.UnsupportedExpression;
+
+                    if (!var_expr.isSymbol()) return Error.UnsupportedExpression;
+                    const var_name = var_expr.symbol;
+                    const sanitized_name = try self.sanitizeIdentifier(var_name);
+                    defer self.allocator.*.free(sanitized_name);
+
+                    try writer.print("({s} = ", .{sanitized_name});
+                    try self.writeExpression(writer, value_expr, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
                 if (std.mem.eql(u8, op, "let")) {
                     // Parse let bindings: (let [x (: Type) value ...] body-expr*)
                     const bindings_val = iter.next() orelse return Error.UnsupportedExpression;
@@ -1470,7 +1500,8 @@ pub const SimpleCCompiler = struct {
                             else if (std.mem.eql(u8, type_str, "F64"))
                                 "double"
                             else
-                                return Error.UnsupportedType;
+                                // Custom type (struct/enum name) - use as-is
+                                type_str;
                         } else if (type_val.isList()) blk: {
                             // Handle complex types like (Pointer SDL_Event)
                             var complex_type_iter = type_val.list.iterator();
@@ -1496,15 +1527,42 @@ pub const SimpleCCompiler = struct {
                         const sanitized_name = try self.sanitizeIdentifier(name_val.symbol);
                         defer self.allocator.*.free(sanitized_name);
 
-                        try writer.print(" {s} {s} = ", .{ c_type, sanitized_name });
-                        try self.writeExpression(writer, value_val, ns_ctx);
-                        try writer.print(";", .{});
+                        // Check if value is (uninitialized Type) - if so, don't initialize
+                        const is_uninitialized = blk: {
+                            if (value_val.isList()) {
+                                var val_iter = value_val.list.iterator();
+                                if (val_iter.next()) |first| {
+                                    if (first.isSymbol() and std.mem.eql(u8, first.symbol, "uninitialized")) {
+                                        break :blk true;
+                                    }
+                                }
+                            }
+                            break :blk false;
+                        };
+
+                        if (is_uninitialized) {
+                            // Just declare without initialization
+                            try writer.print(" {s} {s};", .{ c_type, sanitized_name });
+                        } else {
+                            // Normal initialization
+                            try writer.print(" {s} {s} = ", .{ c_type, sanitized_name });
+                            try self.writeExpression(writer, value_val, ns_ctx);
+                            try writer.print(";", .{});
+                        }
 
                         i += 3;
                     }
 
-                    // Write all body expressions
+                    // Collect all body expressions first
+                    var body_exprs = std.ArrayList(*Value){};
+                    defer body_exprs.deinit(self.allocator.*);
+
                     while (iter.next()) |body_expr| {
+                        try body_exprs.append(self.allocator.*, body_expr);
+                    }
+
+                    // Write body expressions - all get semicolons (statement expression syntax)
+                    for (body_exprs.items) |body_expr| {
                         try writer.print(" ", .{});
                         try self.writeExpression(writer, body_expr, ns_ctx);
                         try writer.print(";", .{});
