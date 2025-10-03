@@ -798,7 +798,6 @@ pub const BidirectionalTypeChecker = struct {
 
     // Typed function checking for checkTyped method
     fn checkFunctionTyped(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, expected: Type) TypeCheckError!*TypedValue {
-        std.debug.print("DEBUG: checkFunctionTyped called with expected type: {any}\n", .{expected});
         if (expected != .function) return TypeCheckError.TypeMismatch;
 
         var current = list.next; // Skip 'fn'
@@ -840,12 +839,10 @@ pub const BidirectionalTypeChecker = struct {
             const node = current.?;
             if (node.value) |body_expr| {
                 body_count += 1;
-                std.debug.print("DEBUG: Typechecking function body expr #{}\n", .{body_count});
                 last_typed = self.synthesizeTyped(body_expr) catch |err| {
                     std.debug.print("ERROR: Body expr #{} failed with error: {}\n", .{body_count, err});
                     return err;
                 };
-                std.debug.print("DEBUG: Body expr #{} has type: {any}\n", .{body_count, last_typed.?.getType()});
             }
             current = node.next;
         }
@@ -1267,7 +1264,6 @@ pub const BidirectionalTypeChecker = struct {
     }
 
     fn synthesizeTypedLet(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedValue {
-        std.debug.print("DEBUG: synthesizeTypedLet started\n", .{});
         var current: ?*const @TypeOf(list.*) = list.next;
 
         const bindings_node = current orelse return TypeCheckError.InvalidTypeAnnotation;
@@ -1318,12 +1314,10 @@ pub const BidirectionalTypeChecker = struct {
             const node = current.?;
             if (node.value) |body_expr| {
                 let_body_count += 1;
-                std.debug.print("DEBUG: Let body expr #{}\n", .{let_body_count});
                 last_typed = self.synthesizeTyped(body_expr) catch |err| {
                     std.debug.print("ERROR: Let body expr #{} failed: {}\n", .{let_body_count, err});
                     return err;
                 };
-                std.debug.print("DEBUG: Let body expr #{} type: {any}\n", .{let_body_count, last_typed.?.getType()});
             }
             current = node.next;
         }
@@ -1566,7 +1560,6 @@ pub const BidirectionalTypeChecker = struct {
             }
         }
 
-        std.debug.print("DEBUG: IF branches - then type: {any}, else type: {any}\n", .{then_typed.getType(), else_typed.getType()});
         const result_type = self.mergeBranchTypes(then_typed.getType(), else_typed.getType()) catch |err| {
             std.debug.print("ERROR: mergeBranchTypes failed: {}\n", .{err});
             return err;
@@ -2341,7 +2334,6 @@ pub const BidirectionalTypeChecker = struct {
                                             const body = body_node.value.?;
 
                                             // Check body against annotated type
-                                            std.debug.print("DEBUG: Checking def '{s}' body against type: {any}\n", .{var_name, annotated_type});
                                             const typed_body = try self.checkTyped(body, annotated_type);
 
                                             // If this is a type definition (annotated_type is type_type),
