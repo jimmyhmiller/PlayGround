@@ -6,6 +6,7 @@ const frontend_tests = @import("frontend_tests.zig");
 const backend_tests = @import("backend_tests.zig");
 const collections_tests = @import("collections/tests.zig");
 const showcase_test = @import("showcase_test.zig");
+const type_checker_comprehensive_tests = @import("type_checker_comprehensive_tests.zig");
 
 // Import all modules to include their inline tests
 const value = @import("value.zig");
@@ -26,6 +27,7 @@ comptime {
     std.testing.refAllDecls(backend_tests);
     std.testing.refAllDecls(collections_tests);
     std.testing.refAllDecls(showcase_test);
+    std.testing.refAllDecls(type_checker_comprehensive_tests);
     std.testing.refAllDecls(value);
     std.testing.refAllDecls(lexer);
     std.testing.refAllDecls(parser);
