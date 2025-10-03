@@ -147,7 +147,8 @@ test "forward references - two-pass basic" {
         \\(def y (: Int) 42)
     ;
 
-    const expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    const expressions = read_result.values;
 
     // Single-pass should fail
     var single_pass_checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
@@ -177,7 +178,8 @@ test "forward references - function calling forward function" {
         \\(def g (: (-> [Int] Int)) (fn [x] (+ x 1)))
     ;
 
-    const expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    const expressions = read_result.values;
     const typed_report = try checker.typeCheckAllTwoPass(expressions.items);
 
     try std.testing.expect(typed_report.errors.items.len == 0);
@@ -201,7 +203,8 @@ test "forward references - mutual recursion" {
         \\(def odd (: (-> [Int] Int)) (fn [n] (even n)))
     ;
 
-    const expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    const expressions = read_result.values;
     const typed_report = try checker.typeCheckAllTwoPass(expressions.items);
 
     try std.testing.expect(typed_report.errors.items.len == 0);
@@ -226,7 +229,8 @@ test "forward references - complex dependency chain" {
         \\(def d (: Int) 42)
     ;
 
-    const expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    const expressions = read_result.values;
     const typed_report = try checker.typeCheckAllTwoPass(expressions.items);
 
     try std.testing.expect(typed_report.errors.items.len == 0);
@@ -252,7 +256,8 @@ test "forward references - mutual recursion with type mismatch (expected to fail
         \\(def oddCheck (: (-> [Int] Int)) (fn [n] (evenCheck n)))
     ;
 
-    const expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    const expressions = read_result.values;
 
     // This should fail because evenCheck returns String but oddCheck expects Int from evenCheck call
     const report = try checker.typeCheckAllTwoPass(expressions.items);
@@ -344,7 +349,8 @@ test "multiple structs in function signatures" {
         \\(def Color (: Type) (Struct [r Int] [g Int] [b Int]))
     ;
 
-    const expressions = try reader.readAllString(struct_defs);
+    const read_result = try reader.readAllString(struct_defs);
+    const expressions = read_result.values;
     for (expressions.items) |expr| {
         _ = try checker.typeCheck(expr);
     }
@@ -545,7 +551,8 @@ test "pointer - basic allocation and dereference" {
         \\(def x (: (Pointer Int)) (allocate Int 42))
         \\(dereference x)
     ;
-    var expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
     defer expressions.deinit(allocator);
 
     var report = try checker.typeCheckAllTwoPass(expressions.items);
@@ -572,7 +579,8 @@ test "pointer - write and read" {
         \\(pointer-write! p 99)
         \\(dereference p)
     ;
-    var expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
     defer expressions.deinit(allocator);
 
     var report = try checker.typeCheckAllTwoPass(expressions.items);
@@ -598,7 +606,8 @@ test "pointer - address-of operation" {
         \\(def test-val (: Int) 42)
         \\(get-address test-val)
     ;
-    var expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
     defer expressions.deinit(allocator);
 
     var report = try checker.typeCheckAllTwoPass(expressions.items);
@@ -623,7 +632,8 @@ test "pointer - pointer-null" {
         \\(def p (: (Pointer Int)) pointer-null)
         \\p
     ;
-    var expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
     defer expressions.deinit(allocator);
 
     var report = try checker.typeCheckAllTwoPass(expressions.items);
@@ -649,7 +659,8 @@ test "pointer - struct field read" {
         \\(def p (: (Pointer Point)) (allocate Point (Point 10 20)))
         \\(pointer-field-read p x)
     ;
-    var expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
     defer expressions.deinit(allocator);
 
     var report = try checker.typeCheckAllTwoPass(expressions.items);
@@ -676,7 +687,8 @@ test "pointer - struct field write" {
         \\(pointer-field-write! p x 42)
         \\(pointer-field-read p x)
     ;
-    var expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
     defer expressions.deinit(allocator);
 
     var report = try checker.typeCheckAllTwoPass(expressions.items);
@@ -702,7 +714,8 @@ test "pointer - equality comparison" {
         \\(def p2 (: (Pointer Int)) p1)
         \\(pointer-equal? p1 p2)
     ;
-    var expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
     defer expressions.deinit(allocator);
 
     var report = try checker.typeCheckAllTwoPass(expressions.items);
@@ -727,7 +740,8 @@ test "pointer - deallocate" {
         \\(def p (: (Pointer Int)) (allocate Int 42))
         \\(deallocate p)
     ;
-    var expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
     defer expressions.deinit(allocator);
 
     var report = try checker.typeCheckAllTwoPass(expressions.items);
@@ -752,7 +766,8 @@ test "pointer - nested pointers" {
         \\(def p (: (Pointer (Pointer Int))) (allocate (Pointer Int) (allocate Int 42)))
         \\(dereference (dereference p))
     ;
-    var expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
     defer expressions.deinit(allocator);
 
     var report = try checker.typeCheckAllTwoPass(expressions.items);
@@ -778,7 +793,8 @@ test "pointer - function returning pointer" {
         \\(def p (: (Pointer Int)) (make-pointer 100))
         \\(dereference p)
     ;
-    var expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
     defer expressions.deinit(allocator);
 
     var report = try checker.typeCheckAllTwoPass(expressions.items);
@@ -819,7 +835,8 @@ test "pointer - type checking catches wrong pointer type assignment" {
         \\(def p (: (Pointer Int)) (allocate Int 42))
         \\(pointer-write! p "string")
     ;
-    var expressions = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
     defer expressions.deinit(allocator);
 
     var report = try checker.typeCheckAllTwoPass(expressions.items);

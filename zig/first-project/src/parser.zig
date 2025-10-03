@@ -43,10 +43,12 @@ pub const Parser = struct {
         return try self.parseExpression();
     }
 
-    pub fn parseAll(self: *Parser, allocator: std.mem.Allocator, results: *std.ArrayList(*Value)) ParseError!void {
+    pub fn parseAll(self: *Parser, allocator: std.mem.Allocator, results: *std.ArrayList(*Value), line_numbers: *std.ArrayList(u32)) ParseError!void {
         while (self.current_token.type != .eof) {
+            const line = self.current_token.line;
             const val = try self.parseExpression();
             try results.append(allocator, val);
+            try line_numbers.append(allocator, line);
         }
     }
 

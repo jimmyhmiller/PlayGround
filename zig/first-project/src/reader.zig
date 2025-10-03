@@ -19,11 +19,20 @@ pub const Reader = struct {
         return try p.parse();
     }
 
-    pub fn readAllString(self: *Reader, source: []const u8) !std.ArrayList(*Value) {
+    pub const ReadAllResult = struct {
+        values: std.ArrayList(*Value),
+        line_numbers: std.ArrayList(u32),
+    };
+
+    pub fn readAllString(self: *Reader, source: []const u8) !ReadAllResult {
         var p = Parser.init(self.allocator, source);
         var results = std.ArrayList(*Value){};
-        try p.parseAll(self.allocator.*, &results);
-        return results;
+        var line_numbers = std.ArrayList(u32){};
+        try p.parseAll(self.allocator.*, &results, &line_numbers);
+        return ReadAllResult{
+            .values = results,
+            .line_numbers = line_numbers,
+        };
     }
 
     pub fn valueToString(self: *Reader, val: *Value) ![]u8 {
@@ -88,7 +97,8 @@ test "reader multiple expressions" {
     var reader = Reader.init(&allocator);
 
     const code = "42 :hello \"world\" (+ 1 2) [a b c]";
-    const results = try reader.readAllString(code);
+    const read_result = try reader.readAllString(code);
+    const results = read_result.values;
 
     try std.testing.expect(results.items.len == 5);
 

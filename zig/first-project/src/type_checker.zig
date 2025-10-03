@@ -175,6 +175,7 @@ pub const ExternType = struct {
     name: []const u8,
     is_opaque: bool,
     is_union: bool = false,
+    fields: ?[]const StructField = null,  // For extern-struct with known fields
 };
 
 // Typed expression - decorates AST nodes with their inferred types
@@ -300,6 +301,7 @@ pub const BidirectionalTypeChecker = struct {
         try self.builtins.put("extern-fn", {});
         try self.builtins.put("extern-type", {});
         try self.builtins.put("extern-union", {});
+        try self.builtins.put("extern-struct", {});
         try self.builtins.put("extern-var", {});
         try self.builtins.put("include-header", {});
         try self.builtins.put("link-library", {});
@@ -307,6 +309,7 @@ pub const BidirectionalTypeChecker = struct {
         try self.builtins.put("fn", {});
         try self.builtins.put("if", {});
         try self.builtins.put("while", {});
+        try self.builtins.put("set!", {});
         try self.builtins.put("and", {});
         try self.builtins.put("or", {});
         try self.builtins.put("not", {});
@@ -429,9 +432,11 @@ pub const BidirectionalTypeChecker = struct {
                         } else if (std.mem.eql(u8, first.symbol, "extern-fn")) {
                             return try self.synthesizeExternFn(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "extern-type")) {
-                            return try self.synthesizeExternType(expr, list, false);
+                            return try self.synthesizeExternType(expr, list, false, false);
                         } else if (std.mem.eql(u8, first.symbol, "extern-union")) {
-                            return try self.synthesizeExternType(expr, list, true);
+                            return try self.synthesizeExternType(expr, list, true, false);
+                        } else if (std.mem.eql(u8, first.symbol, "extern-struct")) {
+                            return try self.synthesizeExternType(expr, list, false, true);
                         } else if (std.mem.eql(u8, first.symbol, "extern-var")) {
                             return try self.synthesizeExternVar(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "include-header") or
@@ -446,6 +451,8 @@ pub const BidirectionalTypeChecker = struct {
                             return try self.synthesizeIf(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "while")) {
                             return try self.synthesizeWhile(expr, list);
+                        } else if (std.mem.eql(u8, first.symbol, "set!")) {
+                            return try self.synthesizeSet(expr, list);
                         } else if (self.isComparisonOperator(first.symbol)) {
                             return try self.synthesizeComparison(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "and") or
@@ -632,21 +639,67 @@ pub const BidirectionalTypeChecker = struct {
         return try TypedExpression.init(self.allocator, expr, fn_type);
     }
 
-    // Type checking for extern-type: (extern-type SDL_Window) or (extern-union SDL_Event)
-    fn synthesizeExternType(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, is_union: bool) TypeCheckError!*TypedExpression {
-        const current: ?*const @TypeOf(list.*) = list.next;
+    // Type checking for extern-type: (extern-type SDL_Window) or (extern-union SDL_Event) or (extern-struct SDL_Event [type U32])
+    fn synthesizeExternType(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, is_union: bool, has_fields: bool) TypeCheckError!*TypedExpression {
+        var current: ?*const @TypeOf(list.*) = list.next;
 
         // Get type name
         const name_node = current orelse return TypeCheckError.InvalidTypeAnnotation;
         if (!name_node.value.?.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
         const type_name = name_node.value.?.symbol;
 
+        var fields: ?[]const StructField = null;
+
+        if (has_fields) {
+            // Parse fields similar to regular struct parsing
+            current = name_node.next;
+
+            // Count fields
+            var field_count: usize = 0;
+            var count_current = current;
+            while (count_current != null) {
+                if (count_current.?.value != null) field_count += 1;
+                count_current = count_current.?.next;
+            }
+
+            if (field_count > 0) {
+                const fields_array = try self.allocator.alloc(StructField, field_count);
+                var field_idx: usize = 0;
+
+                while (current != null and field_idx < field_count) {
+                    const field_node = current.?.value orelse return TypeCheckError.InvalidTypeAnnotation;
+                    if (!field_node.isVector() or field_node.vector.len() != 2) {
+                        return TypeCheckError.InvalidTypeAnnotation;
+                    }
+
+                    const field_name_val = field_node.vector.at(0);
+                    const field_type_val = field_node.vector.at(1);
+
+                    if (!field_name_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+
+                    const field_name = field_name_val.symbol;
+                    const field_type = try self.parseType(field_type_val);
+
+                    fields_array[field_idx] = StructField{
+                        .name = field_name,
+                        .field_type = field_type,
+                    };
+
+                    field_idx += 1;
+                    current = current.?.next;
+                }
+
+                fields = fields_array;
+            }
+        }
+
         // Create extern type
         const extern_type = try self.allocator.create(ExternType);
         extern_type.* = ExternType{
             .name = type_name,
-            .is_opaque = true,
+            .is_opaque = fields == null,  // Only opaque if no fields defined
             .is_union = is_union,
+            .fields = fields,
         };
 
         const type_val = Type{ .extern_type = extern_type };
@@ -745,6 +798,7 @@ pub const BidirectionalTypeChecker = struct {
 
     // Typed function checking for checkTyped method
     fn checkFunctionTyped(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, expected: Type) TypeCheckError!*TypedValue {
+        std.debug.print("DEBUG: checkFunctionTyped called with expected type: {any}\n", .{expected});
         if (expected != .function) return TypeCheckError.TypeMismatch;
 
         var current = list.next; // Skip 'fn'
@@ -781,10 +835,17 @@ pub const BidirectionalTypeChecker = struct {
 
         // Check all body expressions, last one must match return type
         var last_typed: ?*TypedValue = null;
+        var body_count: usize = 0;
         while (current != null) {
             const node = current.?;
             if (node.value) |body_expr| {
-                last_typed = try self.synthesizeTyped(body_expr);
+                body_count += 1;
+                std.debug.print("DEBUG: Typechecking function body expr #{}\n", .{body_count});
+                last_typed = self.synthesizeTyped(body_expr) catch |err| {
+                    std.debug.print("ERROR: Body expr #{} failed with error: {}\n", .{body_count, err});
+                    return err;
+                };
+                std.debug.print("DEBUG: Body expr #{} has type: {any}\n", .{body_count, last_typed.?.getType()});
             }
             current = node.next;
         }
@@ -792,6 +853,7 @@ pub const BidirectionalTypeChecker = struct {
         // Check that last expression matches return type
         if (last_typed) |typed| {
             if (!(try self.isSubtype(typed.getType(), expected.function.return_type))) {
+                std.debug.print("ERROR: Function body TypeMismatch - expected return: {any}, actual: {any}\n", .{expected.function.return_type, typed.getType()});
                 self.env.deinit();
                 self.env = old_env;
                 return TypeCheckError.TypeMismatch;
@@ -1120,6 +1182,28 @@ pub const BidirectionalTypeChecker = struct {
         return try TypedExpression.init(self.allocator, expr, Type.void);
     }
 
+    fn synthesizeSet(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
+        // (set! var-name value)
+        const var_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const var_expr = var_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        if (!var_expr.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        const var_name = var_expr.symbol;
+
+        // Check that the variable exists in the environment
+        const var_type = self.env.get(var_name) orelse return TypeCheckError.UnboundVariable;
+
+        const value_node = var_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const value_expr = value_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // Type check the value and ensure it matches the variable's type
+        const value_typed = try self.check(value_expr, var_type);
+        _ = value_typed;
+
+        // set! returns void/nil
+        return try TypedExpression.init(self.allocator, expr, Type.void);
+    }
+
     fn synthesizeLet(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
         var current: ?*const @TypeOf(list.*) = list.next;
 
@@ -1183,6 +1267,7 @@ pub const BidirectionalTypeChecker = struct {
     }
 
     fn synthesizeTypedLet(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedValue {
+        std.debug.print("DEBUG: synthesizeTypedLet started\n", .{});
         var current: ?*const @TypeOf(list.*) = list.next;
 
         const bindings_node = current orelse return TypeCheckError.InvalidTypeAnnotation;
@@ -1228,10 +1313,17 @@ pub const BidirectionalTypeChecker = struct {
         if (current == null) return TypeCheckError.InvalidTypeAnnotation;
 
         var last_typed: ?*TypedValue = null;
+        var let_body_count: usize = 0;
         while (current != null) {
             const node = current.?;
             if (node.value) |body_expr| {
-                last_typed = try self.synthesizeTyped(body_expr);
+                let_body_count += 1;
+                std.debug.print("DEBUG: Let body expr #{}\n", .{let_body_count});
+                last_typed = self.synthesizeTyped(body_expr) catch |err| {
+                    std.debug.print("ERROR: Let body expr #{} failed: {}\n", .{let_body_count, err});
+                    return err;
+                };
+                std.debug.print("DEBUG: Let body expr #{} type: {any}\n", .{let_body_count, last_typed.?.getType()});
             }
             current = node.next;
         }
@@ -1474,7 +1566,11 @@ pub const BidirectionalTypeChecker = struct {
             }
         }
 
-        const result_type = try self.mergeBranchTypes(then_typed.getType(), else_typed.getType());
+        std.debug.print("DEBUG: IF branches - then type: {any}, else type: {any}\n", .{then_typed.getType(), else_typed.getType()});
+        const result_type = self.mergeBranchTypes(then_typed.getType(), else_typed.getType()) catch |err| {
+            std.debug.print("ERROR: mergeBranchTypes failed: {}\n", .{err});
+            return err;
+        };
 
         storage[0] = cond_typed;
         storage[1] = then_typed;
@@ -1517,6 +1613,37 @@ pub const BidirectionalTypeChecker = struct {
         const result = try self.allocator.create(TypedValue);
         result.* = TypedValue{ .list = .{
             .elements = storage[0..elem_count],
+            .type = Type.void,
+        } };
+        return result;
+    }
+
+    fn synthesizeTypedSet(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
+        _ = expr;
+
+        // (set! var-name value)
+        const var_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const var_expr = var_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        if (!var_expr.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        const var_name = var_expr.symbol;
+
+        // Check that the variable exists in the environment
+        const var_type = self.env.get(var_name) orelse {
+            std.debug.print("ERROR: set! - Unbound variable: '{s}'\n", .{var_name});
+            return TypeCheckError.UnboundVariable;
+        };
+
+        const value_node = var_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const value_expr = value_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // Type check the value and ensure it matches the variable's type
+        const value_typed = try self.checkTyped(value_expr, var_type);
+        storage[0] = value_typed;
+
+        const result = try self.allocator.create(TypedValue);
+        result.* = TypedValue{ .list = .{
+            .elements = storage[0..1],
             .type = Type.void,
         } };
         return result;
@@ -1790,6 +1917,11 @@ pub const BidirectionalTypeChecker = struct {
             return true;
         }
 
+        // void and nil are compatible
+        if ((sub == .void and super == .nil) or (sub == .nil and super == .void)) {
+            return true;
+        }
+
         // General integers can flow into any specific integer type
         if (sub == .int and isIntegerType(super)) {
             return true;
@@ -2054,6 +2186,7 @@ pub const BidirectionalTypeChecker = struct {
                     result.* = TypedValue{ .symbol = .{ .name = name, .type = var_type } };
                     return result;
                 } else {
+                    std.debug.print("ERROR: Unbound variable: '{s}'\n", .{name});
                     return TypeCheckError.UnboundVariable;
                 }
             },
@@ -2208,6 +2341,7 @@ pub const BidirectionalTypeChecker = struct {
                                             const body = body_node.value.?;
 
                                             // Check body against annotated type
+                                            std.debug.print("DEBUG: Checking def '{s}' body against type: {any}\n", .{var_name, annotated_type});
                                             const typed_body = try self.checkTyped(body, annotated_type);
 
                                             // If this is a type definition (annotated_type is type_type),
@@ -2244,6 +2378,7 @@ pub const BidirectionalTypeChecker = struct {
                         } else if (std.mem.eql(u8, first.symbol, "extern-fn") or
                                    std.mem.eql(u8, first.symbol, "extern-type") or
                                    std.mem.eql(u8, first.symbol, "extern-union") or
+                                   std.mem.eql(u8, first.symbol, "extern-struct") or
                                    std.mem.eql(u8, first.symbol, "extern-var") or
                                    std.mem.eql(u8, first.symbol, "include-header") or
                                    std.mem.eql(u8, first.symbol, "link-library")) {
@@ -2260,6 +2395,8 @@ pub const BidirectionalTypeChecker = struct {
                             return try self.synthesizeTypedIf(expr, list, typed_elements);
                         } else if (std.mem.eql(u8, first.symbol, "while")) {
                             return try self.synthesizeTypedWhile(expr, list, typed_elements);
+                        } else if (std.mem.eql(u8, first.symbol, "set!")) {
+                            return try self.synthesizeTypedSet(expr, list, typed_elements);
                         } else if (self.isComparisonOperator(first.symbol)) {
                             return try self.synthesizeTypedComparison(expr, list, typed_elements);
                         } else if (std.mem.eql(u8, first.symbol, "and") or
@@ -2311,6 +2448,23 @@ pub const BidirectionalTypeChecker = struct {
                             result.* = TypedValue{ .list = .{
                                 .elements = typed_elements[0..1],
                                 .type = Type{ .pointer = ptr_type },
+                            }};
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "uninitialized")) {
+                            // uninitialized takes a type, returns a value of that type (uninitialized)
+                            const args_init = list.next; // Skip 'uninitialized'
+
+                            if (args_init == null) return TypeCheckError.InvalidTypeAnnotation;
+                            const type_arg_node = args_init.?;
+                            if (type_arg_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            // Parse the type argument
+                            const value_type = try self.parseType(type_arg_node.value.?);
+
+                            // Return a value of the given type (uninitialized)
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..0],
+                                .type = value_type,
                             }};
                             return result;
                         } else if (std.mem.eql(u8, first.symbol, "dereference")) {
@@ -2574,15 +2728,29 @@ pub const BidirectionalTypeChecker = struct {
                         const struct_typed = try self.synthesizeTyped(struct_expr);
                         const struct_type_result = struct_typed.getType();
 
-                        if (struct_type_result != .struct_type) {
-                            return TypeCheckError.TypeMismatch;
+                        // Find the field - works for both struct_type and extern_type with fields
+                        var field_type: ?Type = null;
+                        var fields: ?[]const StructField = null;
+
+                        if (struct_type_result == .struct_type) {
+                            fields = struct_type_result.struct_type.fields;
+                        } else if (struct_type_result == .extern_type) {
+                            fields = struct_type_result.extern_type.fields;
+                        } else if (struct_type_result == .pointer) {
+                            // Handle pointer to struct/extern type - dereference first
+                            const pointee = struct_type_result.pointer.*;
+                            if (pointee == .struct_type) {
+                                fields = pointee.struct_type.fields;
+                            } else if (pointee == .extern_type) {
+                                fields = pointee.extern_type.fields;
+                            }
                         }
 
-                        const struct_type = struct_type_result.struct_type;
+                        if (fields == null) {
+                            return TypeCheckError.TypeMismatch; // Not a struct or extern type with fields
+                        }
 
-                        // Find the field
-                        var field_type: ?Type = null;
-                        for (struct_type.fields) |field| {
+                        for (fields.?) |field| {
                             if (std.mem.eql(u8, field.name, field_name)) {
                                 field_type = field.field_type;
                                 break;
@@ -2775,6 +2943,7 @@ pub const BidirectionalTypeChecker = struct {
         const actual = typed.getType();
 
         if (!try self.isSubtype(actual, expected)) {
+            std.debug.print("ERROR: TypeMismatch - expected: {any}, actual: {any}\n", .{expected, actual});
             return TypeCheckError.TypeMismatch;
         }
 
@@ -2826,6 +2995,7 @@ pub const BidirectionalTypeChecker = struct {
                         if (first.isSymbol() and (std.mem.eql(u8, first.symbol, "extern-fn") or
                                                    std.mem.eql(u8, first.symbol, "extern-type") or
                                                    std.mem.eql(u8, first.symbol, "extern-union") or
+                                                   std.mem.eql(u8, first.symbol, "extern-struct") or
                                                    std.mem.eql(u8, first.symbol, "extern-var") or
                                                    std.mem.eql(u8, first.symbol, "include-header") or
                                                    std.mem.eql(u8, first.symbol, "link-library"))) {
@@ -2901,6 +3071,7 @@ pub const BidirectionalTypeChecker = struct {
                         if (first.isSymbol() and (std.mem.eql(u8, first.symbol, "extern-fn") or
                                                    std.mem.eql(u8, first.symbol, "extern-type") or
                                                    std.mem.eql(u8, first.symbol, "extern-union") or
+                                                   std.mem.eql(u8, first.symbol, "extern-struct") or
                                                    std.mem.eql(u8, first.symbol, "extern-var") or
                                                    std.mem.eql(u8, first.symbol, "include-header") or
                                                    std.mem.eql(u8, first.symbol, "link-library"))) {
