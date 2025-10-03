@@ -31,6 +31,17 @@
 - `--bundle` builds a macOS bundle; `--bundle --run` loads and invokes `lisp_main`
 - Type-check failures print a concise diagnostic with the problematic form
 
+## REPL Implementation Details
+- The REPL currently has **NO runtime state** - it recompiles from scratch on every input
+- Redefinition mechanism: tracks all `(def ...)` forms by name in `definitions_map`
+- On each input, concatenates ALL previous definitions + new input, recompiles to C, compiles to `.bundle`, loads and executes
+- This means:
+  - Function/struct/enum redefinitions work by replacing the definition in the map and recompiling everything
+  - No incremental compilation or state preservation between evaluations
+  - Each evaluation starts fresh - previous computation results are lost
+  - **WARNING**: This approach will NOT support proper stateful programs (e.g., counters, accumulators)
+  - Future work needed: proper runtime state management if stateful REPL is desired
+
 ## Test Coverage
 - `zig test src/test_all.zig` covers lexer, parser, reader, type checker, backend, simple C compiler
 - Backend tests include arithmetic, `if`, structs/enums, forward references, lets, etc.

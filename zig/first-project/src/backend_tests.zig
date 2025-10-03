@@ -527,3 +527,305 @@ test "let binding shadow incompatible" {
     const expr = try reader.readString(code);
     try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, checker.typeCheck(expr));
 }
+
+// ============================================================================
+// POINTER TESTS
+// ============================================================================
+
+test "pointer - basic allocation and dereference" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def x (: (Pointer Int)) (allocate Int 42))
+        \\(dereference x)
+    ;
+    var expressions = try reader.readAllString(code);
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+    // Last expression is (dereference x), which should return Int
+    const last_typed = report.typed.items[report.typed.items.len - 1];
+    try std.testing.expect(last_typed.getType() == .int);
+}
+
+test "pointer - write and read" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def p (: (Pointer Int)) (allocate Int 10))
+        \\(pointer-write! p 99)
+        \\(dereference p)
+    ;
+    var expressions = try reader.readAllString(code);
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+    const last_typed = report.typed.items[report.typed.items.len - 1];
+    try std.testing.expect(last_typed.getType() == .int);
+}
+
+test "pointer - address-of operation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def get-address (: (-> [Int] (Pointer Int))) (fn [x] (address-of x)))
+        \\(def test-val (: Int) 42)
+        \\(get-address test-val)
+    ;
+    var expressions = try reader.readAllString(code);
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+    const last_typed = report.typed.items[report.typed.items.len - 1];
+    try std.testing.expect(last_typed.getType() == .pointer);
+}
+
+test "pointer - pointer-null" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def p (: (Pointer Int)) pointer-null)
+        \\p
+    ;
+    var expressions = try reader.readAllString(code);
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+    const last_typed = report.typed.items[report.typed.items.len - 1];
+    try std.testing.expect(last_typed.getType() == .pointer);
+}
+
+test "pointer - struct field read" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def Point (: Type) (Struct [x Int] [y Int]))
+        \\(def p (: (Pointer Point)) (allocate Point (Point 10 20)))
+        \\(pointer-field-read p x)
+    ;
+    var expressions = try reader.readAllString(code);
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+    const last_typed = report.typed.items[report.typed.items.len - 1];
+    try std.testing.expect(last_typed.getType() == .int);
+}
+
+test "pointer - struct field write" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def Point (: Type) (Struct [x Int] [y Int]))
+        \\(def p (: (Pointer Point)) (allocate Point (Point 0 0)))
+        \\(pointer-field-write! p x 42)
+        \\(pointer-field-read p x)
+    ;
+    var expressions = try reader.readAllString(code);
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+    const last_typed = report.typed.items[report.typed.items.len - 1];
+    try std.testing.expect(last_typed.getType() == .int);
+}
+
+test "pointer - equality comparison" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def p1 (: (Pointer Int)) (allocate Int 42))
+        \\(def p2 (: (Pointer Int)) p1)
+        \\(pointer-equal? p1 p2)
+    ;
+    var expressions = try reader.readAllString(code);
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+    const last_typed = report.typed.items[report.typed.items.len - 1];
+    try std.testing.expect(last_typed.getType() == .bool);
+}
+
+test "pointer - deallocate" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def p (: (Pointer Int)) (allocate Int 42))
+        \\(deallocate p)
+    ;
+    var expressions = try reader.readAllString(code);
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+    const last_typed = report.typed.items[report.typed.items.len - 1];
+    try std.testing.expect(last_typed.getType() == .nil);
+}
+
+test "pointer - nested pointers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def p (: (Pointer (Pointer Int))) (allocate (Pointer Int) (allocate Int 42)))
+        \\(dereference (dereference p))
+    ;
+    var expressions = try reader.readAllString(code);
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+    const last_typed = report.typed.items[report.typed.items.len - 1];
+    try std.testing.expect(last_typed.getType() == .int);
+}
+
+test "pointer - function returning pointer" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def make-pointer (: (-> [Int] (Pointer Int))) (fn [x] (allocate Int x)))
+        \\(def p (: (Pointer Int)) (make-pointer 100))
+        \\(dereference p)
+    ;
+    var expressions = try reader.readAllString(code);
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+    const last_typed = report.typed.items[report.typed.items.len - 1];
+    try std.testing.expect(last_typed.getType() == .int);
+}
+
+test "pointer - type checking catches non-pointer dereference" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(dereference 42)";
+    const expr = try reader.readString(code);
+
+    // Should fail type checking - can't dereference an Int
+    try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, checker.typeCheck(expr));
+}
+
+test "pointer - type checking catches wrong pointer type assignment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def p (: (Pointer Int)) (allocate Int 42))
+        \\(pointer-write! p "string")
+    ;
+    var expressions = try reader.readAllString(code);
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    // Should have errors - can't write String to Pointer Int
+    try std.testing.expect(report.errors.items.len > 0);
+}

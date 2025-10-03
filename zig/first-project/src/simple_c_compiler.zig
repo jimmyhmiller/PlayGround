@@ -14,10 +14,13 @@ const IncludeFlags = struct {
     need_stdint: bool = false,
     need_stdbool: bool = false,
     need_stddef: bool = false,
+    need_stdlib: bool = false,
 };
 
 pub const SimpleCCompiler = struct {
     allocator: *std.mem.Allocator,
+    linked_libraries: std.ArrayList([]const u8),
+    include_paths: std.ArrayList([]const u8),
 
     pub const TargetKind = enum {
         executable,
@@ -63,8 +66,36 @@ pub const SimpleCCompiler = struct {
     const int_type_name = "long long";
     const int_printf_format = "%lld";
 
+    fn parseSimpleType(self: *SimpleCCompiler, type_name: []const u8) Error!Type {
+        _ = self;
+        if (std.mem.eql(u8, type_name, "U8")) return Type.u8;
+        if (std.mem.eql(u8, type_name, "U16")) return Type.u16;
+        if (std.mem.eql(u8, type_name, "U32")) return Type.u32;
+        if (std.mem.eql(u8, type_name, "U64")) return Type.u64;
+        if (std.mem.eql(u8, type_name, "I8")) return Type.i8;
+        if (std.mem.eql(u8, type_name, "I16")) return Type.i16;
+        if (std.mem.eql(u8, type_name, "I32")) return Type.i32;
+        if (std.mem.eql(u8, type_name, "I64")) return Type.i64;
+        if (std.mem.eql(u8, type_name, "CString")) return Type.c_string;
+        if (std.mem.eql(u8, type_name, "Void")) return Type.void;
+        if (std.mem.eql(u8, type_name, "Int")) return Type.int;
+        if (std.mem.eql(u8, type_name, "Float")) return Type.float;
+        if (std.mem.eql(u8, type_name, "String")) return Type.string;
+        if (std.mem.eql(u8, type_name, "Bool")) return Type.bool;
+        return Error.UnsupportedType;
+    }
+
     pub fn init(allocator: *std.mem.Allocator) SimpleCCompiler {
-        return SimpleCCompiler{ .allocator = allocator };
+        return SimpleCCompiler{
+            .allocator = allocator,
+            .linked_libraries = std.ArrayList([]const u8){},
+            .include_paths = std.ArrayList([]const u8){},
+        };
+    }
+
+    pub fn deinit(self: *SimpleCCompiler) void {
+        self.linked_libraries.deinit(self.allocator.*);
+        self.include_paths.deinit(self.allocator.*);
     }
 
     pub fn compileString(self: *SimpleCCompiler, source: []const u8, target: TargetKind) Error![]u8 {
@@ -124,10 +155,20 @@ pub const SimpleCCompiler = struct {
                 continue;
             }
 
-            // Check if this is a def
+            // Check if this is a def or extern declaration
             if (expr.* == .list) {
                 var iter = expr.list.iterator();
                 if (iter.next()) |head_val| {
+                    if (head_val.isSymbol()) {
+                        // Skip extern declarations and directives - they're handled in forward decl pass
+                        if (std.mem.eql(u8, head_val.symbol, "extern-fn") or
+                            std.mem.eql(u8, head_val.symbol, "extern-type") or
+                            std.mem.eql(u8, head_val.symbol, "extern-var") or
+                            std.mem.eql(u8, head_val.symbol, "include-header") or
+                            std.mem.eql(u8, head_val.symbol, "link-library")) {
+                            continue;
+                        }
+                    }
                     if (head_val.isSymbol() and std.mem.eql(u8, head_val.symbol, "def")) {
                         if (iter.next()) |name_val| {
                             if (name_val.isSymbol()) {
@@ -324,7 +365,7 @@ pub const SimpleCCompiler = struct {
 
                     if (maybe_value) |value_expr| {
                         // Try writeExpressionTyped first (handles structs), fall back to writeExpression
-                        self.writeExpressionTyped(init_writer, def.typed, &init_ctx) catch |err_typed| {
+                        self.writeExpressionTyped(init_writer, def.typed, &init_ctx, &includes) catch |err_typed| {
                             if (err_typed == Error.UnsupportedExpression) {
                                 self.writeExpression(init_writer, value_expr, &init_ctx) catch |err| {
                                     switch (err) {
@@ -395,10 +436,16 @@ pub const SimpleCCompiler = struct {
                                         try init_writer.print("{s} {s}", .{ param_type_str, sanitized_param });
                                     }
 
-                                    try init_writer.print(") {{\n    return ", .{});
+                                    try init_writer.print(") {{\n", .{});
 
-                                    // Get the body expression
-                                    const fn_body = fn_iter.next() orelse continue;
+                                    // Get all body expressions
+                                    var fn_body_exprs = std.ArrayList(*Value){};
+                                    defer fn_body_exprs.deinit(self.allocator.*);
+                                    while (fn_iter.next()) |body_expr| {
+                                        try fn_body_exprs.append(self.allocator.*, body_expr);
+                                    }
+
+                                    if (fn_body_exprs.items.len == 0) continue;
 
                                     // Create empty context for function bodies
                                     // Functions call each other directly, not through namespace
@@ -409,8 +456,21 @@ pub const SimpleCCompiler = struct {
                                         .def_names = &fn_def_names,
                                     };
 
-                                    // Write function body
-                                    self.writeExpression(init_writer, fn_body, &fn_ctx) catch {
+                                    // Write all body expressions except the last
+                                    for (fn_body_exprs.items[0..fn_body_exprs.items.len - 1]) |stmt| {
+                                        try init_writer.print("    ", .{});
+                                        self.writeExpression(init_writer, stmt, &fn_ctx) catch {
+                                            const repr = try self.formatValue(stmt);
+                                            defer self.allocator.*.free(repr);
+                                            try init_writer.print("/* unsupported: {s} */", .{repr});
+                                        };
+                                        try init_writer.print(";\n", .{});
+                                    }
+
+                                    // Write return statement with last expression
+                                    try init_writer.print("    return ", .{});
+                                    const last_expr = fn_body_exprs.items[fn_body_exprs.items.len - 1];
+                                    self.writeExpression(init_writer, last_expr, &fn_ctx) catch {
                                         try init_writer.print("0", .{});
                                     };
 
@@ -455,6 +515,9 @@ pub const SimpleCCompiler = struct {
         }
         if (includes.need_stddef) {
             try output.appendSlice(self.allocator.*, "#include <stddef.h>\n");
+        }
+        if (includes.need_stdlib) {
+            try output.appendSlice(self.allocator.*, "#include <stdlib.h>\n");
         }
         try output.appendSlice(self.allocator.*, "\n");
 
@@ -511,7 +574,6 @@ pub const SimpleCCompiler = struct {
     }
 
     fn emitForwardDecl(self: *SimpleCCompiler, forward_writer: anytype, expr: *Value, typed: *TypedValue, checker: *TypeChecker, includes: *IncludeFlags) Error!void {
-        _ = typed;
         switch (expr.*) {
             .list => |list| {
                 var iter = list.iterator();
@@ -519,7 +581,86 @@ pub const SimpleCCompiler = struct {
                 if (!head_val.isSymbol()) return;
 
                 const head = head_val.symbol;
-                if (std.mem.eql(u8, head, "def")) {
+
+                // Handle extern declarations
+                if (std.mem.eql(u8, head, "extern-fn")) {
+                    // Parse extern-fn declaration
+                    const name_val = iter.next() orelse return;
+                    if (!name_val.isSymbol()) return;
+                    const fn_name = name_val.symbol;
+
+                    // Get the type from the typed value
+                    if (typed.getType() == .extern_function) {
+                        const extern_fn = typed.getType().extern_function;
+                        const return_type_str = self.cTypeFor(extern_fn.return_type, includes) catch return;
+
+                        // Emit extern function declaration
+                        try forward_writer.print("extern {s} {s}(", .{ return_type_str, fn_name });
+
+                        for (extern_fn.param_types, 0..) |param_type, i| {
+                            if (i > 0) try forward_writer.print(", ", .{});
+                            const param_type_str = self.cTypeFor(param_type, includes) catch return;
+                            try forward_writer.print("{s}", .{param_type_str});
+                        }
+
+                        if (extern_fn.variadic) {
+                            if (extern_fn.param_types.len > 0) try forward_writer.print(", ", .{});
+                            try forward_writer.print("...", .{});
+                        }
+
+                        try forward_writer.print(");\n", .{});
+                    }
+                    return;
+                } else if (std.mem.eql(u8, head, "extern-type")) {
+                    // extern-type just creates a type alias or forward declaration
+                    const name_val = iter.next() orelse return;
+                    if (!name_val.isSymbol()) return;
+                    const type_name = name_val.symbol;
+
+                    // For SDL, most types are opaque structs
+                    try forward_writer.print("typedef struct {s} {s};\n", .{ type_name, type_name });
+                    return;
+                } else if (std.mem.eql(u8, head, "extern-union")) {
+                    // extern-union creates a union type forward declaration
+                    const name_val = iter.next() orelse return;
+                    if (!name_val.isSymbol()) return;
+                    const type_name = name_val.symbol;
+
+                    // Create union typedef
+                    try forward_writer.print("typedef union {s} {s};\n", .{ type_name, type_name });
+                    return;
+                } else if (std.mem.eql(u8, head, "extern-var")) {
+                    // extern-var creates an extern variable declaration
+                    const name_val = iter.next() orelse return;
+                    if (!name_val.isSymbol()) return;
+                    const var_name = name_val.symbol;
+
+                    const type_val = iter.next() orelse return;
+                    if (type_val.isSymbol()) {
+                        // Parse the type - for now just handle simple types
+                        const type_str = self.cTypeFor(try self.parseSimpleType(type_val.symbol), includes) catch return;
+                        try forward_writer.print("extern {s} {s};\n", .{ type_str, var_name });
+                    }
+                    return;
+                } else if (std.mem.eql(u8, head, "include-header")) {
+                    // Handle include-header directive
+                    const header_val = iter.next() orelse return;
+                    if (!header_val.isString()) return;
+                    const header_name = header_val.string;
+
+                    // Emit the #include directive
+                    try forward_writer.print("#include {s}\n", .{header_name});
+                    return;
+                } else if (std.mem.eql(u8, head, "link-library")) {
+                    // Collect library for linking
+                    const lib_val = iter.next() orelse return;
+                    if (!lib_val.isString()) return;
+                    const lib_name = lib_val.string;
+
+                    // Store library name for later use during compilation
+                    try self.linked_libraries.append(self.allocator.*, try self.allocator.*.dupe(u8, lib_name));
+                    return;
+                } else if (std.mem.eql(u8, head, "def")) {
                     const name_val = iter.next() orelse return;
                     if (!name_val.isSymbol()) return;
                     const name = name_val.symbol;
@@ -630,6 +771,17 @@ pub const SimpleCCompiler = struct {
                 }
 
                 const head = head_val.symbol;
+
+                // Skip extern declarations - they're already emitted in forward declarations
+                if (std.mem.eql(u8, head, "extern-fn") or
+                    std.mem.eql(u8, head, "extern-type") or
+                    std.mem.eql(u8, head, "extern-union") or
+                    std.mem.eql(u8, head, "extern-var") or
+                    std.mem.eql(u8, head, "include-header") or
+                    std.mem.eql(u8, head, "link-library")) {
+                    return;
+                }
+
                 if (std.mem.eql(u8, head, "def")) {
                     // Check if this def is in the namespace (skip if it is)
                     if (iter.next()) |name_val| {
@@ -733,7 +885,7 @@ pub const SimpleCCompiler = struct {
         try def_writer.print("{s} {s} = ", .{ c_type, sanitized_var_name });
 
         // Use writeExpressionTyped if we have the typed value, otherwise fall back to writeExpression
-        self.writeExpressionTyped(def_writer, typed, &empty_ctx) catch |err| {
+        self.writeExpressionTyped(def_writer, typed, &empty_ctx, includes) catch |err| {
             switch (err) {
                 Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
                     // Fall back to untyped version
@@ -779,8 +931,14 @@ pub const SimpleCCompiler = struct {
             return Error.InvalidFunction;
         }
 
-        const body_expr = fn_iter.next() orelse return Error.InvalidFunction;
-        if (fn_iter.next() != null) return Error.InvalidFunction;
+        // Collect all body expressions
+        var body_exprs = std.ArrayList(*Value){};
+        defer body_exprs.deinit(self.allocator.*);
+        while (fn_iter.next()) |body_expr| {
+            try body_exprs.append(self.allocator.*, body_expr);
+        }
+
+        if (body_exprs.items.len == 0) return Error.InvalidFunction;
 
         const return_type_str = self.cTypeFor(fn_type.function.return_type, includes) catch |err| {
             if (err == Error.UnsupportedType) {
@@ -830,8 +988,27 @@ pub const SimpleCCompiler = struct {
             try def_writer.print("{s} {s}", .{ param_type_buf[index], sanitized_param });
         }
         try def_writer.writeAll(") {\n");
+
+        // Emit all body expressions except the last
+        for (body_exprs.items[0..body_exprs.items.len - 1]) |stmt| {
+            try def_writer.print("    ", .{});
+            self.writeExpression(def_writer, stmt, &empty_ctx) catch |err| {
+                switch (err) {
+                    Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
+                        const repr = try self.formatValue(stmt);
+                        defer self.allocator.*.free(repr);
+                        try def_writer.print("/* unsupported: {s} */", .{repr});
+                    },
+                    else => return err,
+                }
+            };
+            try def_writer.writeAll(";\n");
+        }
+
+        // Emit return statement with last expression
         try def_writer.print("    return ", .{});
-        self.writeExpression(def_writer, body_expr, &empty_ctx) catch |err| {
+        const last_expr = body_exprs.items[body_exprs.items.len - 1];
+        self.writeExpression(def_writer, last_expr, &empty_ctx) catch |err| {
             switch (err) {
                 Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
                     const repr = try self.formatValue(fn_expr);
@@ -911,6 +1088,22 @@ pub const SimpleCCompiler = struct {
 
     fn emitPrintStatement(self: *SimpleCCompiler, body_writer: anytype, expr: *Value, typed: *TypedValue, includes: *IncludeFlags, ns_ctx: *NamespaceContext) Error!void {
         const expr_type = typed.getType();
+
+        // Don't print Nil/void statements (e.g., pointer-write!, deallocate, while loops)
+        if (expr_type == .nil or expr_type == .void) {
+            try body_writer.print("    ", .{});
+            // Try writeExpressionTyped first, fall back to writeExpression
+            self.writeExpressionTyped(body_writer, typed, ns_ctx, includes) catch |err_typed| {
+                if (err_typed == Error.UnsupportedExpression) {
+                    try self.writeExpression(body_writer, expr, ns_ctx);
+                } else {
+                    return err_typed;
+                }
+            };
+            try body_writer.print(";\n", .{});
+            return;
+        }
+
         const format = self.printfFormatFor(expr_type) catch |err| {
             if (err == Error.UnsupportedType) {
                 const repr = try self.formatValue(expr);
@@ -929,7 +1122,7 @@ pub const SimpleCCompiler = struct {
         }
 
         // Try writeExpressionTyped first, fall back to writeExpression
-        self.writeExpressionTyped(body_writer, typed, ns_ctx) catch |err_typed| {
+        self.writeExpressionTyped(body_writer, typed, ns_ctx, includes) catch |err_typed| {
             if (err_typed == Error.UnsupportedExpression) {
                 self.writeExpression(body_writer, expr, ns_ctx) catch |err| {
                     switch (err) {
@@ -953,7 +1146,7 @@ pub const SimpleCCompiler = struct {
         try body_writer.print(");\n", .{});
     }
 
-    fn writeExpressionTyped(self: *SimpleCCompiler, writer: anytype, typed: *TypedValue, ns_ctx: *NamespaceContext) Error!void {
+    fn writeExpressionTyped(self: *SimpleCCompiler, writer: anytype, typed: *TypedValue, ns_ctx: *NamespaceContext, includes: *IncludeFlags) Error!void {
         switch (typed.*) {
             .struct_instance => |si| {
                 // Emit C99 compound literal: (TypeName){field1, field2, ...}
@@ -964,22 +1157,118 @@ pub const SimpleCCompiler = struct {
                 try writer.print("({s}){{", .{sanitized_name});
                 for (si.field_values, 0..) |field_val, i| {
                     if (i > 0) try writer.print(", ", .{});
-                    try self.writeExpressionTyped(writer, field_val, ns_ctx);
+                    try self.writeExpressionTyped(writer, field_val, ns_ctx, includes);
                 }
                 try writer.print("}}", .{});
             },
             .list => |l| {
+                // Check for c-str operation first
+                if (l.elements.len == 1 and l.type == .c_string) {
+                    // c-str just passes through the string literal
+                    try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                    return;
+                }
+
+                // Check for allocate operation (by type signature)
+                // allocate creates a list with 0-1 elements and pointer type
+                if ((l.elements.len == 0 or l.elements.len == 1) and l.type == .pointer) {
+                    const ptr_type = l.type;
+                    const pointee = ptr_type.pointer.*;
+                    includes.need_stdlib = true;
+                    try writer.print("({{ ", .{});
+                    const c_type = try self.cTypeFor(pointee, includes);
+                    try writer.print("{s}* __tmp_ptr = malloc(sizeof({s})); ", .{c_type, c_type});
+
+                    // Initialize if value provided
+                    if (l.elements.len == 1) {
+                        try writer.print("*__tmp_ptr = ", .{});
+                        try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                        try writer.print("; ", .{});
+                    }
+
+                    try writer.print("__tmp_ptr; }})", .{});
+                    return;
+                }
+
+                // Check for deallocate first: 1 element (pointer), result type is nil
+                if (l.elements.len == 1 and l.elements[0].getType() == .pointer and l.type == .nil) {
+                    includes.need_stdlib = true;
+                    try writer.print("free(", .{});
+                    try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                // Check for dereference: 1 element (pointer), result type is NOT pointer and NOT nil
+                if (l.elements.len == 1 and l.elements[0].getType() == .pointer and l.type != .pointer and l.type != .nil) {
+                    try writer.print("(*", .{});
+                    try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                    try writer.print(")", .{});
+                    return;
+                }
+
                 if (l.elements.len > 0) {
                     const first = l.elements[0];
                     // Check for field access
                     if (first.* == .symbol and std.mem.eql(u8, first.symbol.name, ".")) {
                         if (l.elements.len == 3) {
-                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx);
+                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
                             if (l.elements[2].* == .symbol) {
                                 try writer.print(".{s}", .{l.elements[2].symbol.name});
                                 return;
                             }
                         }
+                    }
+                    // Check for pointer-write!: 2 elements (pointer, value), result type is nil
+                    if (l.elements.len == 2 and l.elements[0].getType() == .pointer and l.type == .nil) {
+                        try writer.print("(*", .{});
+                        try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                        try writer.print(" = ", .{});
+                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                        try writer.print(")", .{});
+                        return;
+                    }
+                    // Check for pointer-equal?: 2 elements (both pointers), result type is bool
+                    // This must come BEFORE pointer-field-read to avoid conflicts
+                    if (l.elements.len == 2 and l.elements[0].getType() == .pointer and l.elements[1].getType() == .pointer and l.type == .bool) {
+                        try writer.print("(", .{});
+                        try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                        try writer.print(" == ", .{});
+                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                        try writer.print(")", .{});
+                        return;
+                    }
+                    // Check for pointer-field-read: 2 elements (pointer to struct, field symbol)
+                    if (l.elements.len == 2 and l.elements[0].getType() == .pointer and l.elements[1].* == .symbol) {
+                        const ptr_type = l.elements[0].getType().pointer.*;
+                        if (ptr_type == .struct_type) {
+                            try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                            try writer.print("->", .{});
+                            const sanitized = try self.sanitizeIdentifier(l.elements[1].symbol.name);
+                            defer self.allocator.*.free(sanitized);
+                            try writer.print("{s}", .{sanitized});
+                            return;
+                        }
+                    }
+                    // Check for pointer-field-write!: 3 elements (pointer to struct, field symbol, value), result type is nil
+                    if (l.elements.len == 3 and l.elements[0].getType() == .pointer and l.elements[1].* == .symbol and l.type == .nil) {
+                        const ptr_type = l.elements[0].getType().pointer.*;
+                        if (ptr_type == .struct_type) {
+                            try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                            try writer.print("->", .{});
+                            const sanitized = try self.sanitizeIdentifier(l.elements[1].symbol.name);
+                            defer self.allocator.*.free(sanitized);
+                            try writer.print("{s} = ", .{sanitized});
+                            try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                            return;
+                        }
+                    }
+                    // Check for address-of: 1 element (variable symbol), result type is pointer
+                    if (l.elements.len == 1 and l.elements[0].* == .symbol and l.type == .pointer) {
+                        try writer.print("(&", .{});
+                        try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                        try writer.print(")", .{});
+                        return;
                     }
                 }
                 return Error.UnsupportedExpression;
@@ -1019,7 +1308,14 @@ pub const SimpleCCompiler = struct {
                 defer self.allocator.*.free(sanitized);
                 try writer.print("{s}", .{sanitized});
             },
-            .nil => try writer.print("0", .{}),
+            .nil => |n| {
+                // Check if this is pointer-null (has pointer type)
+                if (n.type == .pointer) {
+                    try writer.print("NULL", .{});
+                } else {
+                    try writer.print("0", .{});
+                }
+            },
             else => return Error.UnsupportedExpression,
         }
     }
@@ -1092,19 +1388,35 @@ pub const SimpleCCompiler = struct {
                     return;
                 }
 
+                if (std.mem.eql(u8, op, "while")) {
+                    const condition = iter.next() orelse return Error.UnsupportedExpression;
+
+                    // Use statement expression ({ ... })
+                    try writer.print("({{ while (", .{});
+                    try self.writeExpression(writer, condition, ns_ctx);
+                    try writer.print(") {{", .{});
+
+                    // Emit all body expressions
+                    while (iter.next()) |body_expr| {
+                        try writer.print(" ", .{});
+                        try self.writeExpression(writer, body_expr, ns_ctx);
+                        try writer.print(";", .{});
+                    }
+
+                    try writer.print(" }} }})", .{});
+                    return;
+                }
+
                 if (std.mem.eql(u8, op, "let")) {
-                    // Parse let bindings: (let [x (: Type) value ...] body)
+                    // Parse let bindings: (let [x (: Type) value ...] body-expr*)
                     const bindings_val = iter.next() orelse return Error.UnsupportedExpression;
                     if (!bindings_val.isVector()) return Error.UnsupportedExpression;
-
-                    const body_expr = iter.next() orelse return Error.UnsupportedExpression;
-                    if (iter.next() != null) return Error.UnsupportedExpression;
 
                     const bindings_vec = bindings_val.vector;
                     const binding_count = bindings_vec.len();
 
                     // Process bindings in groups of 3: name, type annotation, value
-                    // Format: ({ Type name1 = value1; Type name2 = value2; ...; body; })
+                    // Format: ({ Type name1 = value1; Type name2 = value2; ...; body1; body2; ...; })
                     try writer.print("({{", .{});
 
                     var i: usize = 0;
@@ -1125,40 +1437,61 @@ pub const SimpleCCompiler = struct {
                         if (!colon.isKeyword() or colon.keyword.len != 0) return Error.UnsupportedExpression;
 
                         const type_val = type_iter.next() orelse return Error.UnsupportedExpression;
-                        if (!type_val.isSymbol()) return Error.UnsupportedExpression;
 
-                        // Convert the type name to C type
-                        const type_str = type_val.symbol;
-                        const c_type: []const u8 = if (std.mem.eql(u8, type_str, "Int"))
-                            int_type_name
-                        else if (std.mem.eql(u8, type_str, "Float"))
-                            "double"
-                        else if (std.mem.eql(u8, type_str, "String"))
-                            "const char *"
-                        else if (std.mem.eql(u8, type_str, "Bool"))
-                            "bool"
-                        else if (std.mem.eql(u8, type_str, "U8"))
-                            "uint8_t"
-                        else if (std.mem.eql(u8, type_str, "U16"))
-                            "uint16_t"
-                        else if (std.mem.eql(u8, type_str, "U32"))
-                            "uint32_t"
-                        else if (std.mem.eql(u8, type_str, "U64"))
-                            "uint64_t"
-                        else if (std.mem.eql(u8, type_str, "I8"))
-                            "int8_t"
-                        else if (std.mem.eql(u8, type_str, "I16"))
-                            "int16_t"
-                        else if (std.mem.eql(u8, type_str, "I32"))
-                            "int32_t"
-                        else if (std.mem.eql(u8, type_str, "I64"))
-                            "int64_t"
-                        else if (std.mem.eql(u8, type_str, "F32"))
-                            "float"
-                        else if (std.mem.eql(u8, type_str, "F64"))
-                            "double"
-                        else
+                        // Parse the type - can be simple symbol or complex (Pointer T)
+                        const c_type: []const u8 = if (type_val.isSymbol()) blk: {
+                            const type_str = type_val.symbol;
+                            break :blk if (std.mem.eql(u8, type_str, "Int"))
+                                int_type_name
+                            else if (std.mem.eql(u8, type_str, "Float"))
+                                "double"
+                            else if (std.mem.eql(u8, type_str, "String"))
+                                "const char *"
+                            else if (std.mem.eql(u8, type_str, "Bool"))
+                                "bool"
+                            else if (std.mem.eql(u8, type_str, "U8"))
+                                "uint8_t"
+                            else if (std.mem.eql(u8, type_str, "U16"))
+                                "uint16_t"
+                            else if (std.mem.eql(u8, type_str, "U32"))
+                                "uint32_t"
+                            else if (std.mem.eql(u8, type_str, "U64"))
+                                "uint64_t"
+                            else if (std.mem.eql(u8, type_str, "I8"))
+                                "int8_t"
+                            else if (std.mem.eql(u8, type_str, "I16"))
+                                "int16_t"
+                            else if (std.mem.eql(u8, type_str, "I32"))
+                                "int32_t"
+                            else if (std.mem.eql(u8, type_str, "I64"))
+                                "int64_t"
+                            else if (std.mem.eql(u8, type_str, "F32"))
+                                "float"
+                            else if (std.mem.eql(u8, type_str, "F64"))
+                                "double"
+                            else
+                                return Error.UnsupportedType;
+                        } else if (type_val.isList()) blk: {
+                            // Handle complex types like (Pointer SDL_Event)
+                            var complex_type_iter = type_val.list.iterator();
+                            const first = complex_type_iter.next() orelse return Error.UnsupportedExpression;
+                            if (!first.isSymbol()) return Error.UnsupportedExpression;
+
+                            if (std.mem.eql(u8, first.symbol, "Pointer")) {
+                                const pointee = complex_type_iter.next() orelse return Error.UnsupportedExpression;
+                                if (!pointee.isSymbol()) return Error.UnsupportedExpression;
+                                const ptr_type_str = try std.fmt.allocPrint(
+                                    self.allocator.*,
+                                    "{s}*",
+                                    .{pointee.symbol}
+                                );
+                                break :blk ptr_type_str;
+                            } else {
+                                return Error.UnsupportedType;
+                            }
+                        } else {
                             return Error.UnsupportedType;
+                        };
 
                         const sanitized_name = try self.sanitizeIdentifier(name_val.symbol);
                         defer self.allocator.*.free(sanitized_name);
@@ -1170,9 +1503,14 @@ pub const SimpleCCompiler = struct {
                         i += 3;
                     }
 
-                    try writer.print(" ", .{});
-                    try self.writeExpression(writer, body_expr, ns_ctx);
-                    try writer.print("; }})", .{});
+                    // Write all body expressions
+                    while (iter.next()) |body_expr| {
+                        try writer.print(" ", .{});
+                        try self.writeExpression(writer, body_expr, ns_ctx);
+                        try writer.print(";", .{});
+                    }
+
+                    try writer.print(" }})", .{});
                     return;
                 }
 
@@ -1251,6 +1589,115 @@ pub const SimpleCCompiler = struct {
                     try self.writeExpression(writer, left, ns_ctx);
                     try writer.print(" {s} ", .{c_op});
                     try self.writeExpression(writer, right, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                // Pointer operations
+                if (std.mem.eql(u8, op, "allocate")) {
+                    // Simple allocate without initialization: (allocate Type)
+                    const type_arg = iter.next() orelse return Error.UnsupportedExpression;
+                    if (iter.next() != null) {
+                        // Has initialization value - needs writeExpressionTyped
+                        return Error.UnsupportedExpression;
+                    }
+
+                    // Generate malloc call
+                    if (!type_arg.isSymbol()) return Error.UnsupportedExpression;
+                    try writer.print("malloc(sizeof({s}))", .{type_arg.symbol});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "dereference")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(*", .{});
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-write!")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    const value_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(*", .{});
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
+                    try writer.print(" = ", .{});
+                    try self.writeExpression(writer, value_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "address-of")) {
+                    const var_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(&", .{});
+                    try self.writeExpression(writer, var_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-null")) {
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+                    try writer.print("NULL", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-field-read")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    const field_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
+                    try writer.print("->", .{});
+                    if (field_arg.isSymbol()) {
+                        const sanitized_field = try self.sanitizeIdentifier(field_arg.symbol);
+                        defer self.allocator.*.free(sanitized_field);
+                        try writer.print("{s}", .{sanitized_field});
+                    }
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-field-write!")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    const field_arg = iter.next() orelse return Error.MissingOperand;
+                    const value_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
+                    try writer.print("->", .{});
+                    if (field_arg.isSymbol()) {
+                        const sanitized_field = try self.sanitizeIdentifier(field_arg.symbol);
+                        defer self.allocator.*.free(sanitized_field);
+                        try writer.print("{s} = ", .{sanitized_field});
+                    }
+                    try self.writeExpression(writer, value_arg, ns_ctx);
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-equal?")) {
+                    const ptr1_arg = iter.next() orelse return Error.MissingOperand;
+                    const ptr2_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(", .{});
+                    try self.writeExpression(writer, ptr1_arg, ns_ctx);
+                    try writer.print(" == ", .{});
+                    try self.writeExpression(writer, ptr2_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "deallocate")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("free(", .{});
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
                     try writer.print(")", .{});
                     return;
                 }
@@ -1363,7 +1810,6 @@ pub const SimpleCCompiler = struct {
     }
 
     fn cTypeFor(self: *SimpleCCompiler, type_info: Type, includes: *IncludeFlags) Error![]const u8 {
-        _ = self;
         return switch (type_info) {
             .int => int_type_name,
             .float => "double",
@@ -1413,6 +1859,21 @@ pub const SimpleCCompiler = struct {
             .f64 => "double",
             .struct_type => |st| st.name,
             .enum_type => |et| et.name,
+            .pointer => |pointee| {
+                const pointee_c_type = try self.cTypeFor(pointee.*, includes);
+                // Allocate string for "pointee_type*"
+                const ptr_type_str = try std.fmt.allocPrint(
+                    self.allocator.*,
+                    "{s}*",
+                    .{pointee_c_type}
+                );
+                return ptr_type_str;
+            },
+            .c_string => "const char*",
+            .void => "void",
+            .nil => "void",
+            .extern_type => |et| et.name,
+            .extern_function => Error.UnsupportedType, // Can't have values of extern function type directly
             else => Error.UnsupportedType,
         };
     }
@@ -1561,6 +2022,7 @@ pub fn main() !void {
     defer allocator.free(source);
 
     var compiler = SimpleCCompiler.init(&allocator);
+    defer compiler.deinit();
     const c_source = try compiler.compileString(source, target_kind);
     defer allocator.free(c_source);
 
@@ -1608,7 +2070,18 @@ pub fn main() !void {
             try allocator.dupe(u8, bundle_name);
         defer allocator.free(bundle_path);
 
-        var cc_child = std.process.Child.init(&.{ "zig", "cc", "-dynamiclib", c_path, "-o", bundle_path }, allocator);
+        // Build command with linked libraries
+        var cc_args = std.ArrayList([]const u8){};
+        defer cc_args.deinit(allocator);
+        try cc_args.appendSlice(allocator, &.{ "zig", "cc", "-dynamiclib", c_path, "-o", bundle_path });
+
+        // Add linked libraries
+        for (compiler.linked_libraries.items) |lib| {
+            try cc_args.append(allocator, "-l");
+            try cc_args.append(allocator, lib);
+        }
+
+        var cc_child = std.process.Child.init(cc_args.items, allocator);
         cc_child.stdin_behavior = .Inherit;
         cc_child.stdout_behavior = .Inherit;
         cc_child.stderr_behavior = .Inherit;
@@ -1658,7 +2131,18 @@ pub fn main() !void {
         try allocator.dupe(u8, exe_name);
     defer allocator.free(exe_path);
 
-    var cc_child = std.process.Child.init(&.{ "zig", "cc", c_path, "-o", exe_path }, allocator);
+    // Build command with linked libraries
+    var cc_args = std.ArrayList([]const u8){};
+    defer cc_args.deinit(allocator);
+    try cc_args.appendSlice(allocator, &.{ "zig", "cc", c_path, "-o", exe_path });
+
+    // Add linked libraries
+    for (compiler.linked_libraries.items) |lib| {
+        try cc_args.append(allocator, "-l");
+        try cc_args.append(allocator, lib);
+    }
+
+    var cc_child = std.process.Child.init(cc_args.items, allocator);
     cc_child.stdin_behavior = .Inherit;
     cc_child.stdout_behavior = .Inherit;
     cc_child.stderr_behavior = .Inherit;
