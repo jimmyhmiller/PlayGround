@@ -368,6 +368,79 @@ pub const BidirectionalTypeChecker = struct {
         }
     }
 
+    // Helper: Get next node value from linked list
+    fn getNextValue(list_node: anytype) TypeCheckError!*Value {
+        const node = list_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        return node.value orelse TypeCheckError.InvalidTypeAnnotation;
+    }
+
+    // Helper: Advance to next node in linked list
+    fn advanceNode(current_ptr: anytype) TypeCheckError!void {
+        if (current_ptr.*) |curr_node| {
+            if (curr_node.next) |next_node| {
+                current_ptr.* = next_node;
+            } else {
+                return TypeCheckError.InvalidTypeAnnotation;
+            }
+        } else {
+            return TypeCheckError.InvalidTypeAnnotation;
+        }
+    }
+
+    // Helper: Get operator symbol from list head
+    fn getOperator(list: anytype) TypeCheckError![]const u8 {
+        const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        return op_node.symbol;
+    }
+
+    // Helper: Extract binary operands (left and right)
+    const BinaryOperands = struct {
+        left: *Value,
+        right: *Value,
+    };
+
+    fn getBinaryOperands(list: anytype) TypeCheckError!BinaryOperands {
+        const left_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        const right_node = left_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const right = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // Ensure no extra arguments
+        if (right_node.next) |tail| {
+            if (tail.value != null) {
+                return TypeCheckError.InvalidTypeAnnotation;
+            }
+        }
+
+        return BinaryOperands{ .left = left, .right = right };
+    }
+
+    // Helper: Extract unary operand
+    fn getUnaryOperand(list: anytype) TypeCheckError!*Value {
+        const operand_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const operand = operand_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // Ensure no extra arguments
+        if (operand_node.next) |tail| {
+            if (tail.value != null) {
+                return TypeCheckError.InvalidTypeAnnotation;
+            }
+        }
+
+        return operand;
+    }
+
+    // Helper: Check if two types are compatible (either direction)
+    fn areTypesCompatible(self: *BidirectionalTypeChecker, type1: Type, type2: Type) TypeCheckError!bool {
+        var compatible = try self.isSubtype(type1, type2);
+        if (!compatible) {
+            compatible = try self.isSubtype(type2, type1);
+        }
+        return compatible;
+    }
+
     // Synthesis mode: expr ⇒ type
     pub fn synthesize(self: *BidirectionalTypeChecker, expr: *Value) TypeCheckError!*TypedExpression {
         switch (expr.*) {
@@ -984,67 +1057,32 @@ pub const BidirectionalTypeChecker = struct {
     }
 
     fn synthesizeComparison(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
-        const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
-        const op = op_node.symbol;
+        const op = try getOperator(list);
+        const operands = try getBinaryOperands(list);
 
-        const left_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const left_expr = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        const left_typed = try self.synthesize(left_expr);
-
-        const right_node = left_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const right_expr = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        const right_typed = try self.synthesize(right_expr);
-
-        if (right_node.next) |tail| {
-            if (tail.value != null) {
-                return TypeCheckError.InvalidTypeAnnotation;
-            }
-        }
+        const left_typed = try self.synthesize(operands.left);
+        const right_typed = try self.synthesize(operands.right);
 
         if (isRelationalOperator(op)) {
             if (!isNumericType(left_typed.type) or !isNumericType(right_typed.type)) {
                 return TypeCheckError.TypeMismatch;
             }
+        }
 
-            var compatible = try self.isSubtype(left_typed.type, right_typed.type);
-            if (!compatible) {
-                compatible = try self.isSubtype(right_typed.type, left_typed.type);
-            }
-
-            if (!compatible) {
-                return TypeCheckError.TypeMismatch;
-            }
-        } else {
-            var compatible = try self.isSubtype(left_typed.type, right_typed.type);
-            if (!compatible) {
-                compatible = try self.isSubtype(right_typed.type, left_typed.type);
-            }
-
-            if (!compatible) {
-                return TypeCheckError.TypeMismatch;
-            }
+        if (!try self.areTypesCompatible(left_typed.type, right_typed.type)) {
+            return TypeCheckError.TypeMismatch;
         }
 
         return try TypedExpression.init(self.allocator, expr, Type.bool);
     }
 
     fn synthesizeLogical(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
-        const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
-        const op = op_node.symbol;
+        const op = try getOperator(list);
 
         if (std.mem.eql(u8, op, "not")) {
             // Unary operator
-            const operand_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
-            const operand_expr = operand_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-            const operand_typed = try self.synthesize(operand_expr);
-
-            if (operand_node.next) |tail| {
-                if (tail.value != null) {
-                    return TypeCheckError.InvalidTypeAnnotation;
-                }
-            }
+            const operand = try getUnaryOperand(list);
+            const operand_typed = try self.synthesize(operand);
 
             if (!isTruthyType(operand_typed.type)) {
                 return TypeCheckError.TypeMismatch;
@@ -1054,19 +1092,9 @@ pub const BidirectionalTypeChecker = struct {
         }
 
         // Binary operators: and, or
-        const left_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const left_expr = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        const left_typed = try self.synthesize(left_expr);
-
-        const right_node = left_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const right_expr = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        const right_typed = try self.synthesize(right_expr);
-
-        if (right_node.next) |tail| {
-            if (tail.value != null) {
-                return TypeCheckError.InvalidTypeAnnotation;
-            }
-        }
+        const operands = try getBinaryOperands(list);
+        const left_typed = try self.synthesize(operands.left);
+        const right_typed = try self.synthesize(operands.right);
 
         if (!isTruthyType(left_typed.type) or !isTruthyType(right_typed.type)) {
             return TypeCheckError.TypeMismatch;
@@ -1076,21 +1104,12 @@ pub const BidirectionalTypeChecker = struct {
     }
 
     fn synthesizeBitwise(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
-        const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
-        const op = op_node.symbol;
+        const op = try getOperator(list);
 
         if (std.mem.eql(u8, op, "bit-not")) {
             // Unary operator
-            const operand_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
-            const operand_expr = operand_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-            const operand_typed = try self.synthesize(operand_expr);
-
-            if (operand_node.next) |tail| {
-                if (tail.value != null) {
-                    return TypeCheckError.InvalidTypeAnnotation;
-                }
-            }
+            const operand = try getUnaryOperand(list);
+            const operand_typed = try self.synthesize(operand);
 
             if (!isIntegerType(operand_typed.type)) {
                 return TypeCheckError.TypeMismatch;
@@ -1100,19 +1119,9 @@ pub const BidirectionalTypeChecker = struct {
         }
 
         // Binary operators: bit-and, bit-or, bit-xor, bit-shl, bit-shr
-        const left_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const left_expr = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        const left_typed = try self.synthesize(left_expr);
-
-        const right_node = left_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const right_expr = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        const right_typed = try self.synthesize(right_expr);
-
-        if (right_node.next) |tail| {
-            if (tail.value != null) {
-                return TypeCheckError.InvalidTypeAnnotation;
-            }
-        }
+        const operands = try getBinaryOperands(list);
+        const left_typed = try self.synthesize(operands.left);
+        const right_typed = try self.synthesize(operands.right);
 
         if (!isIntegerType(left_typed.type) or !isIntegerType(right_typed.type)) {
             return TypeCheckError.TypeMismatch;
@@ -1181,20 +1190,16 @@ pub const BidirectionalTypeChecker = struct {
 
     fn synthesizeSet(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
         // (set! var-name value)
-        const var_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const var_expr = var_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const operands = try getBinaryOperands(list);
 
-        if (!var_expr.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
-        const var_name = var_expr.symbol;
+        if (!operands.left.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        const var_name = operands.left.symbol;
 
         // Check that the variable exists in the environment
         const var_type = self.env.get(var_name) orelse return TypeCheckError.UnboundVariable;
 
-        const value_node = var_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const value_expr = value_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-
         // Type check the value and ensure it matches the variable's type
-        const value_typed = try self.check(value_expr, var_type);
+        const value_typed = try self.check(operands.right, var_type);
         _ = value_typed;
 
         // set! returns void/nil
@@ -1332,19 +1337,13 @@ pub const BidirectionalTypeChecker = struct {
 
     fn synthesizeTypedComparison(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
         if (storage.len < 2) return TypeCheckError.InvalidTypeAnnotation;
-
-        const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
-        const op = op_node.symbol;
-
         _ = expr;
-        const left_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const left_expr = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        const left_typed = try self.synthesizeTyped(left_expr);
-        const left_type = left_typed.getType();
 
-        const right_node = left_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const right_expr = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const op = try getOperator(list);
+        const operands = try getBinaryOperands(list);
+
+        const left_typed = try self.synthesizeTyped(operands.left);
+        const left_type = left_typed.getType();
 
         var right_typed: *TypedValue = undefined;
 
@@ -1352,24 +1351,11 @@ pub const BidirectionalTypeChecker = struct {
             if (!isNumericType(left_type)) {
                 return TypeCheckError.TypeMismatch;
             }
-
-            right_typed = try self.checkTyped(right_expr, left_type);
+            right_typed = try self.checkTyped(operands.right, left_type);
         } else {
-            right_typed = try self.synthesizeTyped(right_expr);
-
-            var compatible = try self.isSubtype(left_type, right_typed.getType());
-            if (!compatible) {
-                compatible = try self.isSubtype(right_typed.getType(), left_type);
-            }
-
-            if (!compatible) {
+            right_typed = try self.synthesizeTyped(operands.right);
+            if (!try self.areTypesCompatible(left_type, right_typed.getType())) {
                 return TypeCheckError.TypeMismatch;
-            }
-        }
-
-        if (right_node.next) |tail| {
-            if (tail.value != null) {
-                return TypeCheckError.InvalidTypeAnnotation;
             }
         }
 
@@ -1385,19 +1371,15 @@ pub const BidirectionalTypeChecker = struct {
     }
 
     fn synthesizeTypedLogical(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
-        const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
-        const op = op_node.symbol;
-
         _ = expr;
+        const op = try getOperator(list);
 
         if (std.mem.eql(u8, op, "not")) {
             // Unary operator
             if (storage.len < 1) return TypeCheckError.InvalidTypeAnnotation;
 
-            const operand_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
-            const operand_expr = operand_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-            const operand_typed = try self.synthesizeTyped(operand_expr);
+            const operand = try getUnaryOperand(list);
+            const operand_typed = try self.synthesizeTyped(operand);
 
             if (!isTruthyType(operand_typed.getType())) {
                 return TypeCheckError.TypeMismatch;
@@ -1416,19 +1398,11 @@ pub const BidirectionalTypeChecker = struct {
         // Binary operators: and, or
         if (storage.len < 2) return TypeCheckError.InvalidTypeAnnotation;
 
-        const left_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const left_expr = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        const left_typed = try self.synthesizeTyped(left_expr);
+        const operands = try getBinaryOperands(list);
+        const left_typed = try self.synthesizeTyped(operands.left);
+        const right_typed = try self.synthesizeTyped(operands.right);
 
-        if (!isTruthyType(left_typed.getType())) {
-            return TypeCheckError.TypeMismatch;
-        }
-
-        const right_node = left_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const right_expr = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        const right_typed = try self.synthesizeTyped(right_expr);
-
-        if (!isTruthyType(right_typed.getType())) {
+        if (!isTruthyType(left_typed.getType()) or !isTruthyType(right_typed.getType())) {
             return TypeCheckError.TypeMismatch;
         }
 
@@ -1468,19 +1442,15 @@ pub const BidirectionalTypeChecker = struct {
     }
 
     fn synthesizeTypedBitwise(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
-        const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
-        const op = op_node.symbol;
-
         _ = expr;
+        const op = try getOperator(list);
 
         if (std.mem.eql(u8, op, "bit-not")) {
             // Unary operator
             if (storage.len < 1) return TypeCheckError.InvalidTypeAnnotation;
 
-            const operand_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
-            const operand_expr = operand_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-            const operand_typed = try self.synthesizeTyped(operand_expr);
+            const operand = try getUnaryOperand(list);
+            const operand_typed = try self.synthesizeTyped(operand);
             const operand_type = operand_typed.getType();
 
             if (!isIntegerType(operand_type)) {
@@ -1500,21 +1470,13 @@ pub const BidirectionalTypeChecker = struct {
         // Binary operators
         if (storage.len < 2) return TypeCheckError.InvalidTypeAnnotation;
 
-        const left_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const left_expr = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        const left_typed = try self.synthesizeTyped(left_expr);
+        const operands = try getBinaryOperands(list);
+        const left_typed = try self.synthesizeTyped(operands.left);
         const left_type = left_typed.getType();
-
-        if (!isIntegerType(left_type)) {
-            return TypeCheckError.TypeMismatch;
-        }
-
-        const right_node = left_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const right_expr = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-        const right_typed = try self.synthesizeTyped(right_expr);
+        const right_typed = try self.synthesizeTyped(operands.right);
         const right_type = right_typed.getType();
 
-        if (!isIntegerType(right_type)) {
+        if (!isIntegerType(left_type) or !isIntegerType(right_type)) {
             return TypeCheckError.TypeMismatch;
         }
 
@@ -1615,11 +1577,10 @@ pub const BidirectionalTypeChecker = struct {
         _ = expr;
 
         // (set! var-name value)
-        const var_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const var_expr = var_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const operands = try getBinaryOperands(list);
 
-        if (!var_expr.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
-        const var_name = var_expr.symbol;
+        if (!operands.left.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        const var_name = operands.left.symbol;
 
         // Check that the variable exists in the environment
         const var_type = self.env.get(var_name) orelse {
@@ -1627,11 +1588,8 @@ pub const BidirectionalTypeChecker = struct {
             return TypeCheckError.UnboundVariable;
         };
 
-        const value_node = var_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
-        const value_expr = value_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
-
         // Type check the value and ensure it matches the variable's type
-        const value_typed = try self.checkTyped(value_expr, var_type);
+        const value_typed = try self.checkTyped(operands.right, var_type);
         storage[0] = value_typed;
 
         const result = try self.allocator.create(TypedValue);
@@ -1654,53 +1612,62 @@ pub const BidirectionalTypeChecker = struct {
             return TypeCheckError.InvalidTypeAnnotation;
         }
 
-        if (current) |curr_node| {
-            if (curr_node.next) |next_node| {
-                current = next_node;
-            } else {
-                return TypeCheckError.InvalidTypeAnnotation;
-            }
-        } else {
-            return TypeCheckError.InvalidTypeAnnotation;
-        }
+        try advanceNode(&current);
         const type_expr = (current orelse return TypeCheckError.InvalidTypeAnnotation).value orelse return TypeCheckError.InvalidTypeAnnotation;
 
         return try self.parseType(type_expr);
+    }
+
+    // Helper: Parse primitive type name
+    fn parsePrimitiveType(type_name: []const u8) ?Type {
+        // Use a static map for cleaner code
+        const TypeMapping = struct { name: []const u8, type_value: Type };
+        const mappings = [_]TypeMapping{
+            // Legacy types
+            .{ .name = "Int", .type_value = Type.int },
+            .{ .name = "Float", .type_value = Type.float },
+            .{ .name = "String", .type_value = Type.string },
+            .{ .name = "Bool", .type_value = Type.bool },
+            .{ .name = "Nil", .type_value = Type.nil },
+            // Unsigned integers
+            .{ .name = "U8", .type_value = Type.u8 },
+            .{ .name = "U16", .type_value = Type.u16 },
+            .{ .name = "U32", .type_value = Type.u32 },
+            .{ .name = "U64", .type_value = Type.u64 },
+            .{ .name = "Usize", .type_value = Type.usize },
+            // Signed integers
+            .{ .name = "I8", .type_value = Type.i8 },
+            .{ .name = "I16", .type_value = Type.i16 },
+            .{ .name = "I32", .type_value = Type.i32 },
+            .{ .name = "I64", .type_value = Type.i64 },
+            .{ .name = "Isize", .type_value = Type.isize },
+            // Floats
+            .{ .name = "F32", .type_value = Type.f32 },
+            .{ .name = "F64", .type_value = Type.f64 },
+            // FFI types
+            .{ .name = "CString", .type_value = Type.c_string },
+            .{ .name = "Void", .type_value = Type.void },
+            // Meta-type
+            .{ .name = "Type", .type_value = Type.type_type },
+        };
+
+        for (mappings) |mapping| {
+            if (std.mem.eql(u8, type_name, mapping.name)) {
+                return mapping.type_value;
+            }
+        }
+        return null;
     }
 
     // Parse type expressions
     fn parseType(self: *BidirectionalTypeChecker, type_expr: *Value) TypeCheckError!Type {
         if (type_expr.isSymbol()) {
             const type_name = type_expr.symbol;
-            // Legacy types
-            if (std.mem.eql(u8, type_name, "Int")) return Type.int;
-            if (std.mem.eql(u8, type_name, "Float")) return Type.float;
-            if (std.mem.eql(u8, type_name, "String")) return Type.string;
-            if (std.mem.eql(u8, type_name, "Bool")) return Type.bool;
-            if (std.mem.eql(u8, type_name, "Nil")) return Type.nil;
 
-            // Specific integer types
-            if (std.mem.eql(u8, type_name, "U8")) return Type.u8;
-            if (std.mem.eql(u8, type_name, "U16")) return Type.u16;
-            if (std.mem.eql(u8, type_name, "U32")) return Type.u32;
-            if (std.mem.eql(u8, type_name, "U64")) return Type.u64;
-            if (std.mem.eql(u8, type_name, "Usize")) return Type.usize;
-            if (std.mem.eql(u8, type_name, "I8")) return Type.i8;
-            if (std.mem.eql(u8, type_name, "I16")) return Type.i16;
-            if (std.mem.eql(u8, type_name, "I32")) return Type.i32;
-            if (std.mem.eql(u8, type_name, "I64")) return Type.i64;
-            if (std.mem.eql(u8, type_name, "Isize")) return Type.isize;
-
-            // Specific float types
-            if (std.mem.eql(u8, type_name, "F32")) return Type.f32;
-            if (std.mem.eql(u8, type_name, "F64")) return Type.f64;
-
-            // FFI types
-            if (std.mem.eql(u8, type_name, "CString")) return Type.c_string;
-            if (std.mem.eql(u8, type_name, "Void")) return Type.void;
-
-            // Meta-type
-            if (std.mem.eql(u8, type_name, "Type")) return Type.type_type;
+            // Try primitive types first
+            if (parsePrimitiveType(type_name)) |primitive_type| {
+                return primitive_type;
+            }
 
             // Check if it's a user-defined type in type_defs first
             if (self.type_defs.get(type_name)) |type_def| {
@@ -1722,28 +1689,12 @@ pub const BidirectionalTypeChecker = struct {
             if (head.isSymbol()) {
                 if (std.mem.eql(u8, head.symbol, "->")) {
                     // Function type: (-> [param_types] return_type)
-                    if (current) |curr_node| {
-            if (curr_node.next) |next_node| {
-                current = next_node;
-            } else {
-                return TypeCheckError.InvalidTypeAnnotation;
-            }
-        } else {
-            return TypeCheckError.InvalidTypeAnnotation;
-        }
+                    try advanceNode(&current);
                     const param_list = (current orelse return TypeCheckError.InvalidTypeAnnotation).value orelse return TypeCheckError.InvalidTypeAnnotation;
 
                     if (!param_list.isVector()) return TypeCheckError.InvalidTypeAnnotation;
 
-                    if (current) |curr_node| {
-            if (curr_node.next) |next_node| {
-                current = next_node;
-            } else {
-                return TypeCheckError.InvalidTypeAnnotation;
-            }
-        } else {
-            return TypeCheckError.InvalidTypeAnnotation;
-        }
+                    try advanceNode(&current);
                     const return_type_expr = (current orelse return TypeCheckError.InvalidTypeAnnotation).value orelse return TypeCheckError.InvalidTypeAnnotation;
 
                     // Parse parameter types
