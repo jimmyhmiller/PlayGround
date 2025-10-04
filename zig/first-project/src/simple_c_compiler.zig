@@ -127,16 +127,30 @@ pub const SimpleCCompiler = struct {
             if (report.errors.items.len == 0) {
                 std.debug.print("Type check failed: expected {d} typed expressions, got {d}\n",
                     .{ expressions.items.len, report.typed.items.len });
+
+                // Show all expressions with their status
+                std.debug.print("\nExpression details:\n", .{});
+                for (expressions.items, 0..) |expr, idx| {
+                    const line = if (idx < line_numbers.items.len) line_numbers.items[idx] else 0;
+                    const maybe_str = self.formatValue(expr) catch null;
+                    if (maybe_str) |expr_str| {
+                        defer self.allocator.*.free(expr_str);
+                        const status = if (idx < report.typed.items.len) "✓" else "✗";
+                        std.debug.print("  {s} Line {d} (expr #{d}): {s}\n", .{ status, line, idx, expr_str });
+                    }
+                }
+                std.debug.print("\nNote: {d} expressions type-checked successfully, {d} failed\n",
+                    .{ report.typed.items.len, expressions.items.len - report.typed.items.len });
             }
             for (report.errors.items) |detail| {
                 const line = if (detail.index < line_numbers.items.len) line_numbers.items[detail.index] else 0;
                 const maybe_str = self.formatValue(detail.expr) catch null;
                 if (maybe_str) |expr_str| {
                     defer self.allocator.*.free(expr_str);
-                    std.debug.print("Type error at line {d} (expr {d}): {s} -> {s}\n",
+                    std.debug.print("Type error at line {d} (expr #{d}): {s} -> {s}\n",
                         .{ line, detail.index, @errorName(detail.err), expr_str });
                 } else {
-                    std.debug.print("Type error at line {d} (expr {d}): {s}\n",
+                    std.debug.print("Type error at line {d} (expr #{d}): {s}\n",
                         .{ line, detail.index, @errorName(detail.err) });
                 }
             }
@@ -285,14 +299,15 @@ pub const SimpleCCompiler = struct {
                     try ns_writer.print(");\n", .{});
                 } else {
                     // Regular variable
-                    const c_type = self.cTypeFor(def.var_type, &includes) catch |err| {
+                    try ns_writer.print("    ", .{});
+                    self.emitArrayDecl(ns_writer, sanitized_field, def.var_type, &includes) catch |err| {
                         if (err == Error.UnsupportedType) {
-                            try ns_writer.print("    // unsupported type for: {s}\n", .{def.name});
+                            try ns_writer.print("// unsupported type for: {s}\n", .{def.name});
                             continue;
                         }
                         return err;
                     };
-                    try ns_writer.print("    {s} {s};\n", .{ c_type, sanitized_field });
+                    try ns_writer.print(";\n", .{});
                 }
             }
             try ns_writer.print("}} Namespace_{s};\n\n", .{sanitized_ns});
@@ -345,6 +360,30 @@ pub const SimpleCCompiler = struct {
                 if (def.var_type == .function) {
                     // For functions, just assign the address of the static function
                     try init_writer.print("    ns->{s} = &{s};\n", .{ sanitized_field, sanitized_field });
+                } else if (def.var_type == .array) {
+                    // Arrays can't be assigned in C, so we need to copy element by element
+                    // For now, generate a loop to initialize the array
+                    const array_type = def.var_type.array;
+
+                    // Check if there's an init value
+                    const typed_list = def.typed.list;
+                    const has_init = typed_list.elements.len == 3; // array op has 3 elements when initialized
+
+                    if (has_init) {
+                        try init_writer.print("    for (size_t __i_{s} = 0; __i_{s} < {d}; __i_{s}++) {{\n", .{ sanitized_field, sanitized_field, array_type.size, sanitized_field });
+                        try init_writer.print("        ns->{s}[__i_{s}] = ", .{ sanitized_field, sanitized_field });
+                        self.writeExpressionTyped(init_writer, typed_list.elements[2], &init_ctx, &includes) catch |err| {
+                            switch (err) {
+                                Error.UnsupportedExpression => {
+                                    try init_writer.print("0;\n    }}\n", .{});
+                                    continue;
+                                },
+                                else => return err,
+                            }
+                        };
+                        try init_writer.print(";\n    }}\n", .{});
+                    }
+                    // If no init value, array is left uninitialized (or zero-initialized by C)
                 } else {
                     // For regular variables, evaluate the expression
                     try init_writer.print("    ns->{s} = ", .{sanitized_field});
@@ -684,13 +723,14 @@ pub const SimpleCCompiler = struct {
 
                             try forward_writer.print("typedef struct {{\n", .{});
                             for (type_def.struct_type.fields) |field| {
-                                const field_type_str = self.cTypeFor(field.field_type, includes) catch {
-                                    try forward_writer.print("    // unsupported field type: {s}\n", .{field.name});
-                                    continue;
-                                };
                                 const sanitized_field = try self.sanitizeIdentifier(field.name);
                                 defer self.allocator.*.free(sanitized_field);
-                                try forward_writer.print("    {s} {s};\n", .{ field_type_str, sanitized_field });
+                                try forward_writer.print("    ", .{});
+                                self.emitArrayDecl(forward_writer, sanitized_field, field.field_type, includes) catch {
+                                    try forward_writer.print("// unsupported field type: {s}\n", .{field.name});
+                                    continue;
+                                };
+                                try forward_writer.print(";\n", .{});
                             }
                             try forward_writer.print("}} {s};\n\n", .{sanitized_name});
                             return;
@@ -1284,6 +1324,128 @@ pub const SimpleCCompiler = struct {
                         try writer.print(")", .{});
                         return;
                     }
+                    // Check for array operations by first element symbol
+                    if (l.elements.len > 0 and l.elements[0].* == .symbol) {
+                        const op = l.elements[0].symbol.name;
+
+                        // array-ref: (array-ref array index) -> array[index]
+                        if (std.mem.eql(u8, op, "array-ref") and l.elements.len == 3) {
+                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                            try writer.print("[", .{});
+                            try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                            try writer.print("]", .{});
+                            return;
+                        }
+
+                        // array-set!: (array-set! array index value) -> array[index] = value
+                        if (std.mem.eql(u8, op, "array-set!") and l.elements.len == 4 and l.type == .nil) {
+                            try writer.print("(", .{});
+                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                            try writer.print("[", .{});
+                            try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                            try writer.print("] = ", .{});
+                            try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                            try writer.print(")", .{});
+                            return;
+                        }
+
+                        // array-length: (array-length array) -> compile-time size constant
+                        if (std.mem.eql(u8, op, "array-length") and l.elements.len == 2) {
+                            // The type checker already validated this is an array
+                            // We return the compile-time constant from the array type
+                            const array_type = l.elements[1].getType();
+                            if (array_type == .array) {
+                                try writer.print("{d}", .{array_type.array.size});
+                                return;
+                            }
+                        }
+
+                        // array: (array Type Size [InitValue])
+                        // For typed arrays, we need to check if result type is array
+                        if (std.mem.eql(u8, op, "array") and l.type == .array) {
+                            const array_type = l.type.array;
+                            const elem_c_type = try self.cTypeFor(array_type.element_type, includes);
+
+                            // Check if there's an init value (element count is 3)
+                            if (l.elements.len == 3) {
+                                // Initialized array: {init_val, init_val, ...}
+                                try writer.print("({{ {s} __tmp_arr[{d}]; for (size_t __i = 0; __i < {d}; __i++) __tmp_arr[__i] = ", .{elem_c_type, array_type.size, array_type.size});
+                                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                                try writer.print("; __tmp_arr; }})", .{});
+                            } else {
+                                // Uninitialized array - just declare it
+                                try writer.print("({{ {s} __tmp_arr[{d}]; __tmp_arr; }})", .{elem_c_type, array_type.size});
+                            }
+                            return;
+                        }
+
+                        // array-ptr: (array-ptr array index) -> &array[index]
+                        if (std.mem.eql(u8, op, "array-ptr") and l.elements.len == 3) {
+                            try writer.print("(&", .{});
+                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                            try writer.print("[", .{});
+                            try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                            try writer.print("])", .{});
+                            return;
+                        }
+
+                        // allocate-array: (allocate-array Type Size [InitValue])
+                        if (std.mem.eql(u8, op, "allocate-array") and l.type == .pointer) {
+                            const elem_type = l.type.pointer.*;
+                            const elem_c_type = try self.cTypeFor(elem_type, includes);
+                            includes.need_stdlib = true;
+
+                            // Size is in l.elements[1]
+                            const size_typed = l.elements[1];
+
+                            if (l.elements.len == 3) {
+                                // With initialization
+                                try writer.print("({{ {s}* __arr = ({s}*)malloc(", .{elem_c_type, elem_c_type});
+                                try self.writeExpressionTyped(writer, size_typed, ns_ctx, includes);
+                                try writer.print(" * sizeof({s})); for (size_t __i = 0; __i < ", .{elem_c_type});
+                                try self.writeExpressionTyped(writer, size_typed, ns_ctx, includes);
+                                try writer.print("; __i++) __arr[__i] = ", .{});
+                                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                                try writer.print("; __arr; }})", .{});
+                            } else {
+                                // Without initialization
+                                try writer.print("({s}*)malloc(", .{elem_c_type});
+                                try self.writeExpressionTyped(writer, size_typed, ns_ctx, includes);
+                                try writer.print(" * sizeof({s}))", .{elem_c_type});
+                            }
+                            return;
+                        }
+
+                        // deallocate-array: free(ptr)
+                        if (std.mem.eql(u8, op, "deallocate-array") and l.elements.len == 2) {
+                            includes.need_stdlib = true;
+                            try writer.print("free(", .{});
+                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                            try writer.print(")", .{});
+                            return;
+                        }
+
+                        // pointer-index-read: ptr[index]
+                        if (std.mem.eql(u8, op, "pointer-index-read") and l.elements.len == 3) {
+                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                            try writer.print("[", .{});
+                            try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                            try writer.print("]", .{});
+                            return;
+                        }
+
+                        // pointer-index-write!: ptr[index] = value
+                        if (std.mem.eql(u8, op, "pointer-index-write!") and l.elements.len == 4 and l.type == .nil) {
+                            try writer.print("(", .{});
+                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                            try writer.print("[", .{});
+                            try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                            try writer.print("] = ", .{});
+                            try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                            try writer.print(")", .{});
+                            return;
+                        }
+                    }
                 }
                 return Error.UnsupportedExpression;
             },
@@ -1418,6 +1580,89 @@ pub const SimpleCCompiler = struct {
                     }
 
                     try writer.print(" }} }})", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "c-for")) {
+                    // (c-for [var (: Type) init] condition step body*)
+
+                    const init_binding = iter.next() orelse return Error.UnsupportedExpression;
+                    if (!init_binding.isVector() or init_binding.vector.len() != 3)
+                        return Error.UnsupportedExpression;
+
+                    const var_name = init_binding.vector.at(0);
+                    if (!var_name.isSymbol()) return Error.UnsupportedExpression;
+
+                    const type_annotation = init_binding.vector.at(1);
+                    const init_value = init_binding.vector.at(2);
+
+                    const condition = iter.next() orelse return Error.UnsupportedExpression;
+                    const step = iter.next() orelse return Error.UnsupportedExpression;
+
+                    // Parse the type annotation (: Type)
+                    if (!type_annotation.isList()) return Error.UnsupportedExpression;
+                    var type_iter = type_annotation.list.iterator();
+                    const colon = type_iter.next() orelse return Error.UnsupportedExpression;
+                    if (!colon.isKeyword() or colon.keyword.len != 0) return Error.UnsupportedExpression;
+
+                    const type_val = type_iter.next() orelse return Error.UnsupportedExpression;
+
+                    // Get C type from type value
+                    const c_type: []const u8 = if (type_val.isSymbol()) blk: {
+                        const type_str = type_val.symbol;
+                        break :blk if (std.mem.eql(u8, type_str, "Int"))
+                            int_type_name
+                        else if (std.mem.eql(u8, type_str, "Float"))
+                            "double"
+                        else if (std.mem.eql(u8, type_str, "U8"))
+                            "uint8_t"
+                        else if (std.mem.eql(u8, type_str, "U16"))
+                            "uint16_t"
+                        else if (std.mem.eql(u8, type_str, "U32"))
+                            "uint32_t"
+                        else if (std.mem.eql(u8, type_str, "U64"))
+                            "uint64_t"
+                        else if (std.mem.eql(u8, type_str, "I8"))
+                            "int8_t"
+                        else if (std.mem.eql(u8, type_str, "I16"))
+                            "int16_t"
+                        else if (std.mem.eql(u8, type_str, "I32"))
+                            "int32_t"
+                        else if (std.mem.eql(u8, type_str, "I64"))
+                            "int64_t"
+                        else if (std.mem.eql(u8, type_str, "F32"))
+                            "float"
+                        else if (std.mem.eql(u8, type_str, "F64"))
+                            "double"
+                        else
+                            return Error.UnsupportedExpression;
+                    } else {
+                        return Error.UnsupportedExpression;
+                    };
+
+                    const sanitized_var = try self.sanitizeIdentifier(var_name.symbol);
+                    defer self.allocator.*.free(sanitized_var);
+
+                    // Emit: ({ for (Type var = init; cond; step) { body } })
+                    try writer.print("({{ for ({s} {s} = ", .{ c_type, sanitized_var });
+                    try self.writeExpression(writer, init_value, ns_ctx);
+                    try writer.print("; ", .{});
+                    try self.writeExpression(writer, condition, ns_ctx);
+                    try writer.print("; ", .{});
+
+                    if (!step.isNil()) {
+                        try self.writeExpression(writer, step, ns_ctx);
+                    }
+
+                    try writer.print(") {{ ", .{});
+
+                    // Emit body
+                    while (iter.next()) |body_expr| {
+                        try self.writeExpression(writer, body_expr, ns_ctx);
+                        try writer.print("; ", .{});
+                    }
+
+                    try writer.print("}} }})", .{});
                     return;
                 }
 
@@ -1699,6 +1944,85 @@ pub const SimpleCCompiler = struct {
                     return;
                 }
 
+                // Array operations for writeExpression
+                if (std.mem.eql(u8, op, "array-ref")) {
+                    const array_arg = iter.next() orelse return Error.MissingOperand;
+                    const index_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try self.writeExpression(writer, array_arg, ns_ctx);
+                    try writer.print("[", .{});
+                    try self.writeExpression(writer, index_arg, ns_ctx);
+                    try writer.print("]", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "array-set!")) {
+                    const array_arg = iter.next() orelse return Error.MissingOperand;
+                    const index_arg = iter.next() orelse return Error.MissingOperand;
+                    const value_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(", .{});
+                    try self.writeExpression(writer, array_arg, ns_ctx);
+                    try writer.print("[", .{});
+                    try self.writeExpression(writer, index_arg, ns_ctx);
+                    try writer.print("] = ", .{});
+                    try self.writeExpression(writer, value_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "array-length")) {
+                    _ = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    // For writeExpression we don't have type info, so we can't get the actual size
+                    // This should ideally use writeExpressionTyped instead
+                    return Error.UnsupportedExpression;
+                }
+
+                if (std.mem.eql(u8, op, "array-ptr")) {
+                    const array_arg = iter.next() orelse return Error.MissingOperand;
+                    const index_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(&", .{});
+                    try self.writeExpression(writer, array_arg, ns_ctx);
+                    try writer.print("[", .{});
+                    try self.writeExpression(writer, index_arg, ns_ctx);
+                    try writer.print("])", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-index-read")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    const index_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
+                    try writer.print("[", .{});
+                    try self.writeExpression(writer, index_arg, ns_ctx);
+                    try writer.print("]", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-index-write!")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    const index_arg = iter.next() orelse return Error.MissingOperand;
+                    const value_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(", .{});
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
+                    try writer.print("[", .{});
+                    try self.writeExpression(writer, index_arg, ns_ctx);
+                    try writer.print("] = ", .{});
+                    try self.writeExpression(writer, value_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
                 if (std.mem.eql(u8, op, "pointer-null")) {
                     if (iter.next() != null) return Error.UnsupportedExpression;
                     try writer.print("NULL", .{});
@@ -1867,6 +2191,37 @@ pub const SimpleCCompiler = struct {
             std.mem.eql(u8, symbol, "bit-shr");
     }
 
+    // Helper to emit array declarations which have special C syntax: type name[size]
+    // For multi-dimensional arrays, we need to emit: type name[size1][size2]...
+    fn emitArrayDecl(self: *SimpleCCompiler, writer: anytype, var_name: []const u8, var_type: Type, includes: *IncludeFlags) Error!void {
+        if (var_type == .array) {
+            // Get the base element type and collect all array dimensions
+            var current_type = var_type;
+            var dimensions: [16]usize = undefined; // Support up to 16 dimensions
+            var dim_count: usize = 0;
+
+            // Traverse nested array types to collect dimensions
+            while (current_type == .array and dim_count < 16) {
+                dimensions[dim_count] = current_type.array.size;
+                dim_count += 1;
+                current_type = current_type.array.element_type;
+            }
+
+            // Emit the base type
+            const base_c_type = try self.cTypeFor(current_type, includes);
+            try writer.print("{s} {s}", .{ base_c_type, var_name });
+
+            // Emit all dimensions: [size1][size2]...
+            var i: usize = 0;
+            while (i < dim_count) : (i += 1) {
+                try writer.print("[{d}]", .{dimensions[i]});
+            }
+        } else {
+            const c_type = try self.cTypeFor(var_type, includes);
+            try writer.print("{s} {s}", .{ c_type, var_name });
+        }
+    }
+
     fn cTypeFor(self: *SimpleCCompiler, type_info: Type, includes: *IncludeFlags) Error![]const u8 {
         return switch (type_info) {
             .int => int_type_name,
@@ -1932,6 +2287,7 @@ pub const SimpleCCompiler = struct {
             .nil => "void",
             .extern_type => |et| et.name,
             .extern_function => Error.UnsupportedType, // Can't have values of extern function type directly
+            .array => Error.UnsupportedType, // Arrays need special declaration syntax, handled separately
             else => Error.UnsupportedType,
         };
     }
