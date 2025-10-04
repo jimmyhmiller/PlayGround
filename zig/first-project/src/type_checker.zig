@@ -35,6 +35,7 @@ pub const Type = union(enum) {
     struct_type: *StructType,
     enum_type: *EnumType,
     pointer: *Type,
+    array: *ArrayType,
 
     // Meta-type
     type_type, // The type of types
@@ -114,6 +115,11 @@ pub const Type = union(enum) {
                 try pointee.format("", .{}, writer);
                 try writer.print(")");
             },
+            .array => |a| {
+                try writer.print("(Array ");
+                try a.element_type.format("", .{}, writer);
+                try writer.print(" {d})", .{a.size});
+            },
             .type_type => try writer.print("Type"),
             .type_var => |id| try writer.print("?{d}", .{id}),
             .extern_function => |f| {
@@ -176,6 +182,11 @@ pub const ExternType = struct {
     is_opaque: bool,
     is_union: bool = false,
     fields: ?[]const StructField = null,  // For extern-struct with known fields
+};
+
+pub const ArrayType = struct {
+    element_type: Type,
+    size: usize,
 };
 
 // Typed expression - decorates AST nodes with their inferred types
@@ -330,6 +341,16 @@ pub const BidirectionalTypeChecker = struct {
         try self.builtins.put("^", {});
         try self.builtins.put("<<", {});
         try self.builtins.put(">>", {});
+        // Array operations
+        try self.builtins.put("array", {});
+        try self.builtins.put("array-ref", {});
+        try self.builtins.put("array-set!", {});
+        try self.builtins.put("array-length", {});
+        try self.builtins.put("array-ptr", {});
+        try self.builtins.put("allocate-array", {});
+        try self.builtins.put("deallocate-array", {});
+        try self.builtins.put("pointer-index-read", {});
+        try self.builtins.put("pointer-index-write!", {});
     }
 
     pub fn deinit(self: *BidirectionalTypeChecker) void {
@@ -1844,6 +1865,47 @@ pub const BidirectionalTypeChecker = struct {
                             ptr_type.* = pointee_type;
 
                             return Type{ .pointer = ptr_type };
+                        } else if (std.mem.eql(u8, first.symbol, "Array")) {
+                            // (Array ElementType Size) - array type constructor
+                            current = node.next;
+
+                            if (current == null) {
+                                return TypeCheckError.InvalidTypeAnnotation; // Missing element type
+                            }
+
+                            const elem_type_node = current.?;
+                            if (elem_type_node.value == null) {
+                                return TypeCheckError.InvalidTypeAnnotation;
+                            }
+
+                            const element_type = try self.parseType(elem_type_node.value.?);
+
+                            // Get size
+                            current = elem_type_node.next;
+                            if (current == null) {
+                                return TypeCheckError.InvalidTypeAnnotation; // Missing array size
+                            }
+
+                            const size_node = current.?;
+                            if (size_node.value == null) {
+                                return TypeCheckError.InvalidTypeAnnotation;
+                            }
+
+                            // Size must be an integer literal
+                            if (!size_node.value.?.isInt()) {
+                                return TypeCheckError.InvalidTypeAnnotation;
+                            }
+
+                            const size: usize = @intCast(size_node.value.?.int);
+
+                            // Create array type
+                            const array_type = try self.allocator.create(ArrayType);
+                            array_type.* = ArrayType{
+                                .element_type = element_type,
+                                .size = size,
+                            };
+
+                            return Type{ .array = array_type };
                         }
                     }
                 }
@@ -2039,6 +2101,12 @@ pub const BidirectionalTypeChecker = struct {
             .pointer => |a_pointee| {
                 if (b != .pointer) return false;
                 return typesEqual(a_pointee.*, b.pointer.*);
+            },
+            .array => |a_array| {
+                if (b != .array) return false;
+                const b_array = b.array;
+                if (a_array.size != b_array.size) return false;
+                return typesEqual(a_array.element_type, b_array.element_type);
             },
             .extern_function => |a_extern| {
                 if (b != .extern_function) return false;
@@ -2646,6 +2714,359 @@ pub const BidirectionalTypeChecker = struct {
                             typed_elements[0] = typed_ptr;
                             result.* = TypedValue{ .list = .{
                                 .elements = typed_elements[0..1],
+                                .type = Type.nil,
+                            }};
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "array")) {
+                            // (array Type Size [InitValue])
+                            var args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const type_node = args.?;
+                            if (type_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            // Parse element type from type expression
+                            const elem_type = try self.parseType(type_node.value.?);
+
+                            args = type_node.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const size_node = args.?;
+                            if (size_node.value == null or !size_node.value.?.isInt()) {
+                                return TypeCheckError.InvalidTypeAnnotation;
+                            }
+                            const size: usize = @intCast(size_node.value.?.int);
+
+                            // Check for optional init value
+                            var element_count: usize = 2;
+                            args = size_node.next;
+                            if (args != null and args.?.value != null) {
+                                // Type check init value
+                                const init_typed = try self.checkTyped(args.?.value.?, elem_type);
+                                typed_elements[2] = init_typed;
+                                element_count = 3;
+                            }
+
+                            // Create array type
+                            const array_type = try self.allocator.create(ArrayType);
+                            array_type.* = ArrayType{
+                                .element_type = elem_type,
+                                .size = size,
+                            };
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "array", .type = Type.nil } };
+                            typed_elements[1] = try self.allocator.create(TypedValue);
+                            typed_elements[1].* = TypedValue{ .int = .{ .value = @intCast(size), .type = Type.int } };
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..element_count],
+                                .type = Type{ .array = array_type },
+                            }};
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "array-ref")) {
+                            // (array-ref array index)
+                            var args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const array_node = args.?;
+                            if (array_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const array_typed = try self.synthesizeTyped(array_node.value.?);
+                            const array_type = array_typed.getType();
+
+                            if (array_type != .array) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            args = array_node.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const index_node = args.?;
+                            if (index_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const index_typed = try self.synthesizeTyped(index_node.value.?);
+                            const index_type = index_typed.getType();
+
+                            // Index must be an integer type
+                            if (!isIntegerType(index_type) and index_type != .int) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "array-ref", .type = Type.nil } };
+                            typed_elements[1] = array_typed;
+                            typed_elements[2] = index_typed;
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..3],
+                                .type = array_type.array.element_type,
+                            }};
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "array-set!")) {
+                            // (array-set! array index value)
+                            var args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const array_node = args.?;
+                            if (array_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const array_typed = try self.synthesizeTyped(array_node.value.?);
+                            const array_type = array_typed.getType();
+
+                            if (array_type != .array) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            args = array_node.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const index_node = args.?;
+                            if (index_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const index_typed = try self.synthesizeTyped(index_node.value.?);
+                            const index_type = index_typed.getType();
+
+                            // Index must be an integer type
+                            if (!isIntegerType(index_type) and index_type != .int) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            args = index_node.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const value_node = args.?;
+                            if (value_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            // Check that value has the right type for the array
+                            const value_typed = try self.checkTyped(value_node.value.?, array_type.array.element_type);
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "array-set!", .type = Type.nil } };
+                            typed_elements[1] = array_typed;
+                            typed_elements[2] = index_typed;
+                            typed_elements[3] = value_typed;
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..4],
+                                .type = Type.nil,
+                            }};
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "array-length")) {
+                            // (array-length array)
+                            const args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const array_node = args.?;
+                            if (array_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const array_typed = try self.synthesizeTyped(array_node.value.?);
+                            const array_type = array_typed.getType();
+
+                            if (array_type != .array) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "array-length", .type = Type.nil } };
+                            typed_elements[1] = array_typed;
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..2],
+                                .type = Type.int,
+                            }};
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "array-ptr")) {
+                            // (array-ptr array index) -> (Pointer ElementType)
+                            var args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const array_node = args.?;
+                            if (array_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const array_typed = try self.synthesizeTyped(array_node.value.?);
+                            const array_type = array_typed.getType();
+
+                            if (array_type != .array) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            args = array_node.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const index_node = args.?;
+                            if (index_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const index_typed = try self.synthesizeTyped(index_node.value.?);
+                            const index_type = index_typed.getType();
+
+                            // Index must be an integer type
+                            if (!isIntegerType(index_type) and index_type != .int) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            // Create pointer to element type
+                            const ptr_type = try self.allocator.create(Type);
+                            ptr_type.* = array_type.array.element_type;
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "array-ptr", .type = Type.nil } };
+                            typed_elements[1] = array_typed;
+                            typed_elements[2] = index_typed;
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..3],
+                                .type = Type{ .pointer = ptr_type },
+                            }};
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "allocate-array")) {
+                            // (allocate-array Type Size [InitValue]) -> (Pointer Type)
+                            var args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const type_node = args.?;
+                            if (type_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            // Parse element type
+                            const elem_type = try self.parseType(type_node.value.?);
+
+                            args = type_node.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const size_node = args.?;
+                            if (size_node.value == null or !size_node.value.?.isInt()) {
+                                return TypeCheckError.InvalidTypeAnnotation;
+                            }
+
+                            // Check for optional init value
+                            var element_count: usize = 2;
+                            args = size_node.next;
+                            if (args != null and args.?.value != null) {
+                                // Type check init value
+                                const init_typed = try self.checkTyped(args.?.value.?, elem_type);
+                                typed_elements[2] = init_typed;
+                                element_count = 3;
+                            }
+
+                            // Create pointer to element type
+                            const ptr_type = try self.allocator.create(Type);
+                            ptr_type.* = elem_type;
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "allocate-array", .type = Type.nil } };
+                            typed_elements[1] = try self.allocator.create(TypedValue);
+                            typed_elements[1].* = TypedValue{ .int = .{ .value = size_node.value.?.int, .type = Type.int } };
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..element_count],
+                                .type = Type{ .pointer = ptr_type },
+                            }};
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "deallocate-array")) {
+                            // (deallocate-array ptr)
+                            const args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const ptr_node = args.?;
+                            if (ptr_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const ptr_typed = try self.synthesizeTyped(ptr_node.value.?);
+                            if (ptr_typed.getType() != .pointer) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "deallocate-array", .type = Type.nil } };
+                            typed_elements[1] = ptr_typed;
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..2],
+                                .type = Type.nil,
+                            }};
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "pointer-index-read")) {
+                            // (pointer-index-read ptr index) -> ElementType
+                            var args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const ptr_node = args.?;
+                            if (ptr_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const ptr_typed = try self.synthesizeTyped(ptr_node.value.?);
+                            const ptr_type = ptr_typed.getType();
+
+                            if (ptr_type != .pointer) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            args = ptr_node.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const index_node = args.?;
+                            if (index_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const index_typed = try self.synthesizeTyped(index_node.value.?);
+                            const index_type = index_typed.getType();
+
+                            if (!isIntegerType(index_type) and index_type != .int) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "pointer-index-read", .type = Type.nil } };
+                            typed_elements[1] = ptr_typed;
+                            typed_elements[2] = index_typed;
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..3],
+                                .type = ptr_type.pointer.*,
+                            }};
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "pointer-index-write!")) {
+                            // (pointer-index-write! ptr index value) -> Nil
+                            var args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const ptr_node = args.?;
+                            if (ptr_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const ptr_typed = try self.synthesizeTyped(ptr_node.value.?);
+                            const ptr_type = ptr_typed.getType();
+
+                            if (ptr_type != .pointer) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            args = ptr_node.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const index_node = args.?;
+                            if (index_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const index_typed = try self.synthesizeTyped(index_node.value.?);
+                            const index_type = index_typed.getType();
+
+                            if (!isIntegerType(index_type) and index_type != .int) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            args = index_node.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const value_node = args.?;
+                            if (value_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            // Check that value has the right type
+                            const value_typed = try self.checkTyped(value_node.value.?, ptr_type.pointer.*);
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "pointer-index-write!", .type = Type.nil } };
+                            typed_elements[1] = ptr_typed;
+                            typed_elements[2] = index_typed;
+                            typed_elements[3] = value_typed;
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..4],
                                 .type = Type.nil,
                             }};
                             return result;
