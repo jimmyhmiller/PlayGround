@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) void {
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
             // this package, which is why in this case we don't have to give it a name.
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/root.zig"),
             // Target and optimization levels must be explicitly wired in when
             // defining an executable or library (in the root module), and you
             // can also hardcode a specific target for an executable or library
@@ -135,89 +135,6 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
-    // Create shared modules for imports
-    const value_mod = b.createModule(.{
-        .root_source_file = b.path("src/value.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const parser_mod = b.createModule(.{
-        .root_source_file = b.path("src/parser.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "value", .module = value_mod },
-        },
-    });
-
-    const reader_mod = b.createModule(.{
-        .root_source_file = b.path("src/reader.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "value", .module = value_mod },
-            .{ .name = "parser", .module = parser_mod },
-        },
-    });
-
-    const type_checker_mod = b.createModule(.{
-        .root_source_file = b.path("src/type_checker.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "value", .module = value_mod },
-        },
-    });
-
-    // Add module-specific tests
-    const frontend_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/frontend_tests.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_frontend_tests = b.addRunArtifact(frontend_tests);
-
-    const backend_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/backend_tests.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "value", .module = value_mod },
-                .{ .name = "reader", .module = reader_mod },
-                .{ .name = "type_checker", .module = type_checker_mod },
-            },
-        }),
-    });
-    const run_backend_tests = b.addRunArtifact(backend_tests);
-
-    const collections_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/collections/tests.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_collections_tests = b.addRunArtifact(collections_tests);
-
-    // Add showcase test
-    const showcase_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/showcase_test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "value", .module = value_mod },
-                .{ .name = "reader", .module = reader_mod },
-                .{ .name = "type_checker", .module = type_checker_mod },
-            },
-        }),
-    });
-    const run_showcase_tests = b.addRunArtifact(showcase_tests);
-
     // Add comprehensive test executable for all tests
     const all_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -234,10 +151,6 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
-    test_step.dependOn(&run_frontend_tests.step);
-    test_step.dependOn(&run_backend_tests.step);
-    test_step.dependOn(&run_collections_tests.step);
-    test_step.dependOn(&run_showcase_tests.step);
     test_step.dependOn(&run_all_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
