@@ -40,7 +40,7 @@ fn runFile(allocator: std.mem.Allocator, filename: []const u8) !void {
 
     var counter: usize = 0;
 
-    for (expressions.items) |expr| {
+    for (expressions.values.items) |expr| {
         const expr_str = try r.valueToString(expr);
         // expr_str is allocated with parse_allocator, will be freed with arena
 
