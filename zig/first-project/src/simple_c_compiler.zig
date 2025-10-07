@@ -3,12 +3,14 @@ const builtin = @import("builtin");
 const reader = @import("reader.zig");
 const value = @import("value.zig");
 const type_checker = @import("type_checker.zig");
+const macro_expander = @import("macro_expander.zig");
 
 const Reader = reader.Reader;
 const Value = value.Value;
 const TypeChecker = type_checker.BidirectionalTypeChecker;
 const Type = type_checker.Type;
 const TypedValue = type_checker.TypedValue;
+const MacroExpander = macro_expander.MacroExpander;
 
 const IncludeFlags = struct {
     need_stdint: bool = false,
@@ -116,20 +118,39 @@ pub const SimpleCCompiler = struct {
         defer expressions.deinit(self.allocator.*);
         defer line_numbers.deinit(self.allocator.*);
 
+        // MACRO EXPANSION PHASE: Expand all macros before type checking
+        var expander = MacroExpander.init(self.allocator.*);
+        defer expander.deinit();
+
+        var expanded_expressions = std.ArrayList(*Value){};
+        defer expanded_expressions.deinit(self.allocator.*);
+
+        for (expressions.items) |expr| {
+            const expanded = expander.expand(expr) catch |err| {
+                std.debug.print("Macro expansion error: {s}\n", .{@errorName(err)});
+                return Error.UnsupportedExpression;
+            };
+            // Skip macro definitions - they shouldn't be type-checked or code-generated
+            // They're only needed during the expansion phase
+            if (!expanded.isMacro()) {
+                try expanded_expressions.append(self.allocator.*, expanded);
+            }
+        }
+
         var checker = TypeChecker.init(self.allocator.*);
         defer checker.deinit();
 
-        var report = try checker.typeCheckAllTwoPass(expressions.items);
+        var report = try checker.typeCheckAllTwoPass(expanded_expressions.items);
         defer report.typed.deinit(self.allocator.*);
         defer report.errors.deinit(self.allocator.*);
 
-        if (report.errors.items.len != 0 or report.typed.items.len != expressions.items.len) {
+        if (report.errors.items.len != 0 or report.typed.items.len != expanded_expressions.items.len) {
             if (report.errors.items.len == 0) {
-                std.debug.print("Type check failed: expected {d} typed expressions, got {d}\n", .{ expressions.items.len, report.typed.items.len });
+                std.debug.print("Type check failed: expected {d} typed expressions, got {d}\n", .{ expanded_expressions.items.len, report.typed.items.len });
 
                 // Show all expressions with their status
                 std.debug.print("\nExpression details:\n", .{});
-                for (expressions.items, 0..) |expr, idx| {
+                for (expanded_expressions.items, 0..) |expr, idx| {
                     const line = if (idx < line_numbers.items.len) line_numbers.items[idx] else 0;
                     const maybe_str = self.formatValue(expr) catch null;
                     if (maybe_str) |expr_str| {
@@ -138,7 +159,7 @@ pub const SimpleCCompiler = struct {
                         std.debug.print("  {s} Line {d} (expr #{d}): {s}\n", .{ status, line, idx, expr_str });
                     }
                 }
-                std.debug.print("\nNote: {d} expressions type-checked successfully, {d} failed\n", .{ report.typed.items.len, expressions.items.len - report.typed.items.len });
+                std.debug.print("\nNote: {d} expressions type-checked successfully, {d} failed\n", .{ report.typed.items.len, expanded_expressions.items.len - report.typed.items.len });
             }
             for (report.errors.items) |detail| {
                 const line = if (detail.index < line_numbers.items.len) line_numbers.items[detail.index] else 0;
@@ -167,8 +188,9 @@ pub const SimpleCCompiler = struct {
         var non_def_exprs = std.ArrayList(struct { expr: *Value, typed: *TypedValue, idx: usize }){};
         defer non_def_exprs.deinit(self.allocator.*);
 
-        for (expressions.items, 0..) |expr, idx| {
-            const typed_val = report.typed.items[idx];
+        // Note: expanded_expressions and report.typed have the same length
+        // because we filtered out macros before type checking
+        for (expanded_expressions.items, report.typed.items) |expr, typed_val| {
 
             // Check for namespace declaration
             if (expr.* == .namespace) {
@@ -217,7 +239,7 @@ pub const SimpleCCompiler = struct {
             }
 
             // Not a namespace or def - it's a regular expression
-            try non_def_exprs.append(self.allocator.*, .{ .expr = expr, .typed = typed_val, .idx = idx });
+            try non_def_exprs.append(self.allocator.*, .{ .expr = expr, .typed = typed_val, .idx = 0 }); // idx not needed for non-defs
         }
 
         var forward_decls = std.ArrayList(u8){};
@@ -234,7 +256,7 @@ pub const SimpleCCompiler = struct {
         var includes = IncludeFlags{};
 
         // Check if any expression uses 'let' - if so, include stdint headers
-        for (expressions.items) |expr| {
+        for (expanded_expressions.items) |expr| {
             if (self.hasLet(expr)) {
                 includes.need_stdint = true;
                 includes.need_stdbool = true;
@@ -244,8 +266,8 @@ pub const SimpleCCompiler = struct {
         }
 
         // First pass: emit forward declarations for functions and structs
-        for (expressions.items, 0..) |expr, idx| {
-            try self.emitForwardDecl(forward_writer, expr, report.typed.items[idx], &checker, &includes);
+        for (expanded_expressions.items, report.typed.items) |expr, typed_val| {
+            try self.emitForwardDecl(forward_writer, expr, typed_val, &checker, &includes);
         }
 
         // Create empty context for non-namespace code (used in emitDefinition/emitFunctionDefinition)
@@ -577,8 +599,7 @@ pub const SimpleCCompiler = struct {
         };
 
         // Second pass: emit full definitions and expressions (skip namespace defs)
-        for (expressions.items, 0..) |expr, idx| {
-            const typed_val = report.typed.items[idx];
+        for (expanded_expressions.items, report.typed.items) |expr, typed_val| {
             try self.emitTopLevel(prelude_writer, body_writer, expr, typed_val, &checker, &includes, &ns_ctx);
         }
 
@@ -1430,17 +1451,17 @@ pub const SimpleCCompiler = struct {
                             const elem_c_type = try self.cTypeFor(elem_type, includes);
                             includes.need_stdlib = true;
 
-                            // Size is in l.elements[1]
-                            const size_typed = l.elements[1];
+                            // Size is in l.elements[2] (after symbol and type)
+                            const size_typed = l.elements[2];
 
-                            if (l.elements.len == 3) {
+                            if (l.elements.len == 4) {
                                 // With initialization
                                 try writer.print("({{ {s}* __arr = ({s}*)malloc(", .{ elem_c_type, elem_c_type });
                                 try self.writeExpressionTyped(writer, size_typed, ns_ctx, includes);
                                 try writer.print(" * sizeof({s})); for (size_t __i = 0; __i < ", .{elem_c_type});
                                 try self.writeExpressionTyped(writer, size_typed, ns_ctx, includes);
                                 try writer.print("; __i++) __arr[__i] = ", .{});
-                                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                                try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
                                 try writer.print("; __arr; }})", .{});
                             } else {
                                 // Without initialization
@@ -1533,6 +1554,10 @@ pub const SimpleCCompiler = struct {
 
     fn writeExpression(self: *SimpleCCompiler, writer: anytype, expr: *Value, ns_ctx: *NamespaceContext) Error!void {
         switch (expr.*) {
+            .macro_def => |_| {
+                // Macros should have been expanded already, this shouldn't happen
+                return Error.UnsupportedExpression;
+            },
             .int => |i| try writer.print("{d}", .{i}),
             .float => |f| try writer.print("{d}", .{f}),
             .string => |s| try writer.print("\"{s}\"", .{s}),
@@ -2112,6 +2137,66 @@ pub const SimpleCCompiler = struct {
                     try writer.print("free(", .{});
                     try self.writeExpression(writer, ptr_arg, ns_ctx);
                     try writer.print(")", .{});
+                    return;
+                }
+
+                // C emission primitives
+                if (std.mem.eql(u8, op, "c-binary-op")) {
+                    const op_str_val = iter.next() orelse return Error.MissingOperand;
+                    if (!op_str_val.isString()) return Error.UnsupportedExpression;
+                    const c_op = op_str_val.string;
+
+                    const left_arg = iter.next() orelse return Error.MissingOperand;
+                    const right_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(", .{});
+                    try self.writeExpression(writer, left_arg, ns_ctx);
+                    try writer.print(" {s} ", .{c_op});
+                    try self.writeExpression(writer, right_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "c-unary-op")) {
+                    const op_str_val = iter.next() orelse return Error.MissingOperand;
+                    if (!op_str_val.isString()) return Error.UnsupportedExpression;
+                    const c_op = op_str_val.string;
+
+                    const operand_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("({s}(", .{c_op});
+                    try self.writeExpression(writer, operand_arg, ns_ctx);
+                    try writer.print("))", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "c-fold-binary-op")) {
+                    const op_str_val = iter.next() orelse return Error.MissingOperand;
+                    if (!op_str_val.isString()) return Error.UnsupportedExpression;
+                    const c_op = op_str_val.string;
+
+                    var operands: [64]*Value = undefined;
+                    var count: usize = 0;
+                    while (iter.next()) |operand| {
+                        if (count >= operands.len) return Error.UnsupportedExpression;
+                        operands[count] = operand;
+                        count += 1;
+                    }
+
+                    if (count == 0) return Error.MissingOperand;
+
+                    try writer.writeAll("(");
+                    try self.writeExpression(writer, operands[0], ns_ctx);
+
+                    var idx: usize = 1;
+                    while (idx < count) : (idx += 1) {
+                        try writer.print(" {s} ", .{c_op});
+                        try self.writeExpression(writer, operands[idx], ns_ctx);
+                    }
+
+                    try writer.writeAll(")");
                     return;
                 }
 

@@ -306,7 +306,10 @@ pub const BidirectionalTypeChecker = struct {
             .errors = ArrayList(TypeCheckErrorDetail){},
             .index = 0,
         };
-        checker.initBuiltins() catch {};
+        checker.initBuiltins() catch |err| {
+            std.debug.print("FATAL: Failed to initialize builtins: {}\n", .{err});
+            @panic("Could not initialize type checker builtins");
+        };
         return checker;
     }
 
@@ -356,6 +359,10 @@ pub const BidirectionalTypeChecker = struct {
         try self.builtins.put("deallocate-array", {});
         try self.builtins.put("pointer-index-read", {});
         try self.builtins.put("pointer-index-write!", {});
+        // C emission primitives
+        try self.builtins.put("c-binary-op", {});
+        try self.builtins.put("c-unary-op", {});
+        try self.builtins.put("c-fold-binary-op", {});
     }
 
     pub fn deinit(self: *BidirectionalTypeChecker) void {
@@ -494,6 +501,12 @@ pub const BidirectionalTypeChecker = struct {
                 return try TypedExpression.init(self.allocator, expr, Type.nil);
             },
 
+            .macro_def => |m| {
+                // Macros should have been expanded already, this is an error
+                _ = m;
+                return TypeCheckError.InvalidTypeAnnotation;
+            },
+
             .symbol => |name| {
                 // Handle boolean literals
                 if (std.mem.eql(u8, name, "true") or std.mem.eql(u8, name, "false")) {
@@ -578,6 +591,12 @@ pub const BidirectionalTypeChecker = struct {
                             std.mem.eql(u8, first.symbol, "%"))
                         {
                             return try self.synthesizeArithmetic(expr, list);
+                        } else if (std.mem.eql(u8, first.symbol, "c-binary-op")) {
+                            return try self.synthesizeCBinaryOp(expr, list);
+                        } else if (std.mem.eql(u8, first.symbol, "c-unary-op")) {
+                            return try self.synthesizeCUnaryOp(expr, list);
+                        } else if (std.mem.eql(u8, first.symbol, "c-fold-binary-op")) {
+                            return try self.synthesizeCFoldBinaryOp(expr, list);
                         }
                     }
                 }
@@ -1175,6 +1194,133 @@ pub const BidirectionalTypeChecker = struct {
         // For bit-and, bit-or, bit-xor, merge types like arithmetic
         const merged_type = try self.mergeNumericTypes(left_typed.type, right_typed.type);
         return try TypedExpression.init(self.allocator, expr, merged_type);
+    }
+
+    // C emission primitives - minimal type checking, trust macro expansion
+    fn synthesizeCBinaryOp(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
+        // (c-binary-op "op-string" left right)
+        var current = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // Get operator string (must be a string literal)
+        const op_node = current.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        if (!op_node.isString()) return TypeCheckError.InvalidTypeAnnotation;
+        const op = op_node.string;
+
+        current = current.next orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // Get left operand
+        const left = current.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const left_typed = try self.synthesize(left);
+
+        current = current.next orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // Get right operand
+        const right = current.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const right_typed = try self.synthesize(right);
+
+        // Ensure no extra arguments
+        if (current.next) |tail| {
+            if (tail.value != null) {
+                return TypeCheckError.InvalidTypeAnnotation;
+            }
+        }
+
+        // Determine result type based on operator
+        const result_type: Type = if (isComparisonOp(op) or isLogicalOp(op))
+            Type.bool
+        else if (isArithmeticOp(op)) blk: {
+            // For arithmetic, merge types
+            const merged = try self.mergeNumericTypes(left_typed.type, right_typed.type);
+            // Division of integers produces float
+            if (std.mem.eql(u8, op, "/") and isIntegerType(merged)) {
+                break :blk if (std.meta.activeTag(merged) == .int) Type.float else Type.f64;
+            }
+            break :blk merged;
+        } else if (isBitwiseOp(op))
+            try self.mergeNumericTypes(left_typed.type, right_typed.type)
+        else
+            // Unknown operator, use left type
+            left_typed.type;
+
+        return try TypedExpression.init(self.allocator, expr, result_type);
+    }
+
+    fn synthesizeCUnaryOp(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
+        // (c-unary-op "op-string" operand)
+        var current = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // Get operator string
+        const op_node = current.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        if (!op_node.isString()) return TypeCheckError.InvalidTypeAnnotation;
+        const op = op_node.string;
+
+        current = current.next orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // Get operand
+        const operand = current.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const operand_typed = try self.synthesize(operand);
+
+        // Ensure no extra arguments
+        if (current.next) |tail| {
+            if (tail.value != null) {
+                return TypeCheckError.InvalidTypeAnnotation;
+            }
+        }
+
+        // Result type is same as operand for unary ops (-, ~)
+        // For !, result is bool
+        const result_type: Type = if (std.mem.eql(u8, op, "!"))
+            Type.bool
+        else
+            operand_typed.type;
+
+        return try TypedExpression.init(self.allocator, expr, result_type);
+    }
+
+    fn synthesizeCFoldBinaryOp(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
+        // (c-fold-binary-op "op-string" arg1 arg2 arg3 ...)
+        var current_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // Get operator string
+        const op_node = current_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        if (!op_node.isString()) return TypeCheckError.InvalidTypeAnnotation;
+        const op = op_node.string;
+
+        current_node = current_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // Type check all operands and merge types
+        var merged_type_opt: ?Type = null;
+        var operand_count: usize = 0;
+
+        var current_opt: ?*const @TypeOf(current_node.*) = current_node;
+        while (current_opt) |node| {
+            if (node.value) |operand| {
+                const operand_typed = try self.synthesize(operand);
+
+                merged_type_opt = if (merged_type_opt) |prev|
+                    try self.mergeNumericTypes(prev, operand_typed.type)
+                else
+                    operand_typed.type;
+
+                operand_count += 1;
+            } else {
+                break;
+            }
+            current_opt = node.next;
+        }
+
+        if (operand_count == 0) {
+            return TypeCheckError.InvalidTypeAnnotation;
+        }
+
+        var result_type = merged_type_opt.?;
+
+        // For division of integers, result should be float
+        if (std.mem.eql(u8, op, "/") and isIntegerType(result_type)) {
+            result_type = if (std.meta.activeTag(result_type) == .int) Type.float else Type.f64;
+        }
+
+        return try TypedExpression.init(self.allocator, expr, result_type);
     }
 
     fn synthesizeIf(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
@@ -2227,6 +2373,37 @@ pub const BidirectionalTypeChecker = struct {
         };
     }
 
+    // Helper functions for C emission primitives
+    fn isComparisonOp(op: []const u8) bool {
+        return std.mem.eql(u8, op, "<") or
+            std.mem.eql(u8, op, ">") or
+            std.mem.eql(u8, op, "<=") or
+            std.mem.eql(u8, op, ">=") or
+            std.mem.eql(u8, op, "==") or
+            std.mem.eql(u8, op, "!=");
+    }
+
+    fn isLogicalOp(op: []const u8) bool {
+        return std.mem.eql(u8, op, "&&") or
+            std.mem.eql(u8, op, "||");
+    }
+
+    fn isArithmeticOp(op: []const u8) bool {
+        return std.mem.eql(u8, op, "+") or
+            std.mem.eql(u8, op, "-") or
+            std.mem.eql(u8, op, "*") or
+            std.mem.eql(u8, op, "/") or
+            std.mem.eql(u8, op, "%");
+    }
+
+    fn isBitwiseOp(op: []const u8) bool {
+        return std.mem.eql(u8, op, "&") or
+            std.mem.eql(u8, op, "|") or
+            std.mem.eql(u8, op, "^") or
+            std.mem.eql(u8, op, "<<") or
+            std.mem.eql(u8, op, ">>");
+    }
+
     // Type equality
     pub fn typesEqual(a: Type, b: Type) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
@@ -2342,6 +2519,12 @@ pub const BidirectionalTypeChecker = struct {
             .nil => {
                 result.* = TypedValue{ .nil = .{ .type = Type.nil } };
                 return result;
+            },
+
+            .macro_def => |m| {
+                // Macros should have been expanded already
+                _ = m;
+                return TypeCheckError.InvalidTypeAnnotation;
             },
 
             .namespace => |ns| {
@@ -2479,6 +2662,144 @@ pub const BidirectionalTypeChecker = struct {
 
                             if (operand_count == 1 and !std.mem.eql(u8, first.symbol, "-")) {
                                 return TypeCheckError.InvalidTypeAnnotation;
+                            }
+
+                            var idx: usize = 0;
+                            while (idx < operand_count) : (idx += 1) {
+                                typed_elements[idx] = try self.checkTyped(operands[idx], result_type);
+                            }
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..operand_count],
+                                .type = result_type,
+                            } };
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "c-binary-op")) {
+                            // (c-binary-op "op" left right)
+                            var node_iter: ?*const @TypeOf(list.*) = list.next;
+
+                            // Get operator string
+                            const op_node = node_iter orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const op_val = op_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+                            if (!op_val.isString()) return TypeCheckError.InvalidTypeAnnotation;
+                            const op = op_val.string;
+                            node_iter = op_node.next;
+
+                            // Get left operand
+                            const left_node = node_iter orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const left = left_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const left_typed = try self.synthesizeTyped(left);
+                            const left_type = left_typed.getType();
+                            node_iter = left_node.next;
+
+                            // Get right operand
+                            const right_node = node_iter orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const right = right_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const right_typed = try self.synthesizeTyped(right);
+                            const right_type = right_typed.getType();
+
+                            // Determine result type and operand check type
+                            const result_type: Type = if (isComparisonOp(op))
+                                Type.bool
+                            else if (isLogicalOp(op))
+                                Type.bool
+                            else if (isArithmeticOp(op)) blk: {
+                                const merged = try self.mergeNumericTypes(left_type, right_type);
+                                if (std.mem.eql(u8, op, "/") and isIntegerType(merged)) {
+                                    break :blk if (std.meta.activeTag(merged) == .int) Type.float else Type.f64;
+                                }
+                                break :blk merged;
+                            } else if (isBitwiseOp(op))
+                                try self.mergeNumericTypes(left_type, right_type)
+                            else
+                                left_type;
+
+                            // For comparison ops, check operands against their merged type, not bool
+                            const operand_check_type: Type = if (isComparisonOp(op))
+                                try self.mergeNumericTypes(left_type, right_type)
+                            else
+                                result_type;
+
+                            typed_elements[0] = try self.checkTyped(left, operand_check_type);
+                            typed_elements[1] = try self.checkTyped(right, operand_check_type);
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..2],
+                                .type = result_type,
+                            } };
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "c-unary-op")) {
+                            // (c-unary-op "op" operand)
+                            var node_iter: ?*const @TypeOf(list.*) = list.next;
+
+                            // Get operator string
+                            const op_node = node_iter orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const op_val = op_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+                            if (!op_val.isString()) return TypeCheckError.InvalidTypeAnnotation;
+                            const op = op_val.string;
+                            node_iter = op_node.next;
+
+                            // Get operand
+                            const operand_node = node_iter orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const operand = operand_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const operand_typed = try self.synthesizeTyped(operand);
+                            const operand_type = operand_typed.getType();
+
+                            // Determine result type
+                            const result_type: Type = if (std.mem.eql(u8, op, "!"))
+                                Type.bool
+                            else
+                                operand_type;
+
+                            typed_elements[0] = try self.checkTyped(operand, result_type);
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..1],
+                                .type = result_type,
+                            } };
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "c-fold-binary-op")) {
+                            // (c-fold-binary-op "op" arg1 arg2 arg3 ...)
+                            var node_iter: ?*const @TypeOf(list.*) = list.next;
+
+                            // Get operator string
+                            const op_node = node_iter orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const op_val = op_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+                            if (!op_val.isString()) return TypeCheckError.InvalidTypeAnnotation;
+                            const op = op_val.string;
+                            node_iter = op_node.next;
+
+                            // Type check all operands and merge types
+                            var operands: [64]*Value = undefined;
+                            var operand_count: usize = 0;
+                            var merged_type_opt: ?Type = null;
+
+                            while (node_iter) |node| {
+                                if (node.value) |operand| {
+                                    if (operand_count >= operands.len) return TypeCheckError.InvalidTypeAnnotation;
+                                    operands[operand_count] = operand;
+
+                                    const operand_typed = try self.synthesizeTyped(operand);
+                                    const operand_type = operand_typed.getType();
+
+                                    merged_type_opt = if (merged_type_opt) |prev|
+                                        try self.mergeNumericTypes(prev, operand_type)
+                                    else
+                                        operand_type;
+
+                                    self.allocator.destroy(operand_typed);
+                                    operand_count += 1;
+                                } else {
+                                    break;
+                                }
+                                node_iter = node.next;
+                            }
+
+                            if (operand_count == 0) return TypeCheckError.InvalidTypeAnnotation;
+
+                            var result_type = merged_type_opt.?;
+                            if (std.mem.eql(u8, op, "/") and isIntegerType(result_type)) {
+                                result_type = if (std.meta.activeTag(result_type) == .int) Type.float else Type.f64;
                             }
 
                             var idx: usize = 0;
@@ -3049,6 +3370,190 @@ pub const BidirectionalTypeChecker = struct {
                                 .type = Type.int,
                             } };
                             return result;
+                        } else if (std.mem.eql(u8, first.symbol, "array-ptr")) {
+                            // (array-ptr array index) -> (Pointer ElementType)
+                            const args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const array_node = args.?;
+                            if (array_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const index_node = array_node.next;
+                            if (index_node == null or index_node.?.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const array_typed = try self.synthesizeTyped(array_node.value.?);
+                            const index_typed = try self.synthesizeTyped(index_node.?.value.?);
+
+                            const array_type = array_typed.getType();
+                            const index_type = index_typed.getType();
+
+                            if (array_type != .array) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            if (!isIntegerType(index_type) and index_type != .int) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            // Create pointer to element type
+                            const element_type_ptr = try self.allocator.create(Type);
+                            element_type_ptr.* = array_type.array.element_type;
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "array-ptr", .type = Type.nil } };
+                            typed_elements[1] = array_typed;
+                            typed_elements[2] = index_typed;
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..3],
+                                .type = Type{ .pointer = element_type_ptr },
+                            } };
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "allocate-array")) {
+                            // (allocate-array Type size) or (allocate-array Type size init-value)
+                            // Returns (Pointer Type)
+                            const args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const type_node = args.?;
+                            if (type_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const size_node = type_node.next;
+                            if (size_node == null or size_node.?.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            // Optional init value
+                            const init_node = size_node.?.next;
+
+                            const element_type = try self.parseType(type_node.value.?);
+                            const size_typed = try self.synthesizeTyped(size_node.?.value.?);
+
+                            const size_type = size_typed.getType();
+                            if (!isIntegerType(size_type) and size_type != .int) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            var element_count: usize = 3;
+                            if (init_node != null and init_node.?.value != null) {
+                                const init_typed = try self.checkTyped(init_node.?.value.?, element_type);
+                                typed_elements[3] = init_typed;
+                                element_count = 4;
+                            }
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "allocate-array", .type = Type.nil } };
+                            typed_elements[1] = try self.allocator.create(TypedValue);
+                            typed_elements[1].* = TypedValue{ .type_value = .{ .value_type = element_type, .type = Type.type_type } };
+                            typed_elements[2] = size_typed;
+
+                            const element_type_ptr = try self.allocator.create(Type);
+                            element_type_ptr.* = element_type;
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..element_count],
+                                .type = Type{ .pointer = element_type_ptr },
+                            } };
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "deallocate-array")) {
+                            // (deallocate-array pointer) -> Nil
+                            const args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const ptr_node = args.?;
+                            if (ptr_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const ptr_typed = try self.synthesizeTyped(ptr_node.value.?);
+                            const ptr_type = ptr_typed.getType();
+
+                            if (ptr_type != .pointer) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "deallocate-array", .type = Type.nil } };
+                            typed_elements[1] = ptr_typed;
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..2],
+                                .type = Type.nil,
+                            } };
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "pointer-index-read")) {
+                            // (pointer-index-read pointer index) -> ElementType
+                            const args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const ptr_node = args.?;
+                            if (ptr_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const index_node = ptr_node.next;
+                            if (index_node == null or index_node.?.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const ptr_typed = try self.synthesizeTyped(ptr_node.value.?);
+                            const index_typed = try self.synthesizeTyped(index_node.?.value.?);
+
+                            const ptr_type = ptr_typed.getType();
+                            const index_type = index_typed.getType();
+
+                            if (ptr_type != .pointer) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            if (!isIntegerType(index_type) and index_type != .int) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "pointer-index-read", .type = Type.nil } };
+                            typed_elements[1] = ptr_typed;
+                            typed_elements[2] = index_typed;
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..3],
+                                .type = ptr_type.pointer.*,
+                            } };
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "pointer-index-write!")) {
+                            // (pointer-index-write! pointer index value) -> Nil
+                            const args = list.next;
+                            if (args == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const ptr_node = args.?;
+                            if (ptr_node.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const index_node = ptr_node.next;
+                            if (index_node == null or index_node.?.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const value_node = index_node.?.next;
+                            if (value_node == null or value_node.?.value == null) return TypeCheckError.InvalidTypeAnnotation;
+
+                            const ptr_typed = try self.synthesizeTyped(ptr_node.value.?);
+                            const index_typed = try self.synthesizeTyped(index_node.?.value.?);
+
+                            const ptr_type = ptr_typed.getType();
+                            const index_type = index_typed.getType();
+
+                            if (ptr_type != .pointer) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            if (!isIntegerType(index_type) and index_type != .int) {
+                                return TypeCheckError.TypeMismatch;
+                            }
+
+                            const element_type = ptr_type.pointer.*;
+                            const value_typed = try self.checkTyped(value_node.?.value.?, element_type);
+
+                            typed_elements[0] = try self.allocator.create(TypedValue);
+                            typed_elements[0].* = TypedValue{ .symbol = .{ .name = "pointer-index-write!", .type = Type.nil } };
+                            typed_elements[1] = ptr_typed;
+                            typed_elements[2] = index_typed;
+                            typed_elements[3] = value_typed;
+
+                            result.* = TypedValue{ .list = .{
+                                .elements = typed_elements[0..4],
+                                .type = Type.nil,
+                            } };
+                            return result;
                         }
                         // Add other special forms as needed
                     }
@@ -3237,6 +3742,11 @@ pub const BidirectionalTypeChecker = struct {
     pub fn checkTyped(self: *BidirectionalTypeChecker, expr: *Value, expected: Type) TypeCheckError!*TypedValue {
         // Handle special forms that need expected type
         switch (expr.*) {
+            .macro_def => |m| {
+                // Macros should have been expanded already
+                _ = m;
+                return TypeCheckError.InvalidTypeAnnotation;
+            },
             .symbol => |name| {
                 // Check for pointer-null constant
                 if (std.mem.eql(u8, name, "pointer-null")) {

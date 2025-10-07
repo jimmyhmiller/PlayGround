@@ -56,17 +56,19 @@ fn evalExpression(
     definitions_order: *std.ArrayList([]const u8),
     counter: *usize,
 ) !void {
-    // Check if this is a definition and extract the name
-    const is_definition = std.mem.startsWith(u8, input, "(def ");
+    // Check if this is a definition (def or defmacro) and extract the name
+    const is_def = std.mem.startsWith(u8, input, "(def ");
+    const is_defmacro = std.mem.startsWith(u8, input, "(defmacro ");
+    const is_definition = is_def or is_defmacro;
     var def_name: ?[]const u8 = null;
     var existing_key: ?[]const u8 = null;
 
     if (is_definition) {
-        // Extract name from (def name ...)
-        var start: usize = 5; // After "(def "
+        // Extract name from (def name ...) or (defmacro name ...)
+        var start: usize = if (is_def) 5 else 10; // After "(def " or "(defmacro "
         while (start < input.len and input[start] == ' ') start += 1;
         var end = start;
-        while (end < input.len and input[end] != ' ' and input[end] != ')') end += 1;
+        while (end < input.len and input[end] != ' ' and input[end] != ')' and input[end] != '[') end += 1;
         if (end > start) {
             def_name = input[start..end];
             // Check if this name already exists
@@ -307,17 +309,19 @@ pub fn main() !void {
         // Check for exit command
         if (std.mem.eql(u8, input, "(exit)")) break;
 
-        // Check if this is a definition and extract the name
-        const is_definition = std.mem.startsWith(u8, input, "(def ");
+        // Check if this is a definition (def or defmacro) and extract the name
+        const is_def = std.mem.startsWith(u8, input, "(def ");
+        const is_defmacro = std.mem.startsWith(u8, input, "(defmacro ");
+        const is_definition = is_def or is_defmacro;
         var def_name: ?[]const u8 = null;
         var existing_key: ?[]const u8 = null;
 
         if (is_definition) {
-            // Extract name from (def name ...)
-            var start: usize = 5; // After "(def "
+            // Extract name from (def name ...) or (defmacro name ...)
+            var start: usize = if (is_def) 5 else 10; // After "(def " or "(defmacro "
             while (start < input.len and input[start] == ' ') start += 1;
             var end = start;
-            while (end < input.len and input[end] != ' ' and input[end] != ')') end += 1;
+            while (end < input.len and input[end] != ' ' and input[end] != ')' and input[end] != '[') end += 1;
             if (end > start) {
                 def_name = input[start..end];
                 // Check if this name already exists
