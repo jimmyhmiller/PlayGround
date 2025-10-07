@@ -11,6 +11,12 @@ pub const NamespaceDecl = struct {
     name: []const u8,
 };
 
+pub const MacroDecl = struct {
+    name: []const u8,
+    params: PersistentVector(*Value), // Parameter list
+    body: *Value, // Macro body (unevaluated)
+};
+
 pub const Value = union(enum) {
     symbol: []const u8,
     keyword: []const u8, // keywords start with `:` but we store without the `:`
@@ -21,6 +27,7 @@ pub const Value = union(enum) {
     vector: PersistentVector(*Value),
     map: PersistentMap(*Value, *Value),
     namespace: NamespaceDecl,
+    macro_def: MacroDecl,
     nil,
 
     pub fn format(self: Value, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -70,6 +77,15 @@ pub const Value = union(enum) {
             .namespace => |ns| {
                 try writer.print("(ns {s})", .{ns.name});
             },
+            .macro_def => |m| {
+                try writer.print("(defmacro {s} [", .{m.name});
+                const param_slice = m.params.slice();
+                for (param_slice, 0..) |param, i| {
+                    if (i > 0) try writer.print(" ", .{});
+                    try param.format("", .{}, writer);
+                }
+                try writer.print("] ...)", .{});
+            },
             .nil => try writer.print("nil", .{}),
         }
     }
@@ -94,6 +110,7 @@ pub const Value = union(enum) {
             },
             .map => |m| m.vec.buf.?.ptr == other.map.vec.buf.?.ptr, // pointer comparison for now
             .namespace => |ns| std.mem.eql(u8, ns.name, other.namespace.name),
+            .macro_def => |m| std.mem.eql(u8, m.name, other.macro_def.name),
             .nil => true,
         };
     }
@@ -136,6 +153,10 @@ pub const Value = union(enum) {
 
     pub fn isNil(self: *const Value) bool {
         return std.meta.activeTag(self.*) == .nil;
+    }
+
+    pub fn isMacro(self: *const Value) bool {
+        return std.meta.activeTag(self.*) == .macro_def;
     }
 };
 
@@ -208,6 +229,17 @@ pub fn createNamespace(allocator: std.mem.Allocator, name: []const u8) !*Value {
     return val;
 }
 
+pub fn createMacro(allocator: std.mem.Allocator, name: []const u8, params: PersistentVector(*Value), body: *Value) !*Value {
+    const val = try allocator.create(Value);
+    const owned_name = try allocator.dupe(u8, name);
+    val.* = Value{ .macro_def = MacroDecl{
+        .name = owned_name,
+        .params = params,
+        .body = body,
+    } };
+    return val;
+}
+
 test "value creation and formatting" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -244,4 +276,28 @@ test "value creation and formatting" {
     var stream = std.io.fixedBufferStream(&buf);
     try sym.format("", .{}, stream.writer());
     try std.testing.expect(std.mem.startsWith(u8, buf[0..stream.pos], "hello"));
+}
+
+test "macro value creation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Create macro parameters: [x y]
+    var params = PersistentVector(*Value).init(allocator, null);
+    const x_param = try createSymbol(allocator, "x");
+    const y_param = try createSymbol(allocator, "y");
+    params = try params.push(x_param);
+    params = try params.push(y_param);
+
+    // Create a simple body (just a symbol for now)
+    const body = try createSymbol(allocator, "body-expr");
+
+    // Create macro
+    const macro_val = try createMacro(allocator, "test-macro", params, body);
+
+    // Test type check
+    try std.testing.expect(macro_val.isMacro());
+    try std.testing.expect(std.mem.eql(u8, macro_val.macro_def.name, "test-macro"));
+    try std.testing.expect(macro_val.macro_def.params.len() == 2);
 }

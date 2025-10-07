@@ -99,6 +99,52 @@
 - Basic namespace support with `(ns ...)`
 - Qualified name resolution for enum variants
 
+### Macros (Compile-Time Metaprogramming)
+- **Macro definitions**: `(defmacro name [params] body)`
+  - Compile-time code transformations (AST → AST)
+  - Template-based expansion with parameter substitution
+  - Recursive expansion (macros can call other macros)
+- **Syntax-quote templates**:
+  - `` `expr `` or `(syntax-quote expr)` - Quote code structure
+  - `~x` or `(unquote x)` - Substitute parameter value
+  - `~@xs` or `(unquote-splicing xs)` - Splice list elements into surrounding context
+- **Hygiene support**:
+  - **Manual gensym**:
+    - `(gensym)` - Generate unique symbol with default prefix "G"
+    - `(gensym "prefix")` - Generate unique symbol with custom prefix
+    - `(gensym symbol)` - Generate unique symbol using symbol name as prefix
+    - Creates symbols like `prefix__0`, `prefix__1`, etc.
+  - **Auto-gensym (Clojure-style)**:
+    - `sym#` - Automatically generates unique symbol inside syntax-quote
+    - All instances of the same `sym#` within one syntax-quote get the same unique symbol
+    - Different `sym#` names get different unique symbols
+    - Each syntax-quote expansion gets fresh auto-gensyms
+    - Example: `` `(let [x# 5] (+ x# x#)) `` expands to `(let [x__0 5] (+ x__0 x__0))`
+- **Expansion pipeline**: Parse → **Expand Macros** → Type Check → Codegen
+  - Macros expand before type checking
+  - Expanded code is fully type-checked
+- **Examples**:
+  ```clojure
+  (defmacro add1 [x] `(+ ~x 1))
+  (def result (: Int) (add1 5))  ; expands to (+ 5 1)
+
+  (defmacro sum-list [xs] `(+ ~@xs))
+  (sum-list (1 2 3))  ; expands to (+ 1 2 3)
+
+  ; Manual gensym
+  (defmacro let-unique [var val body]
+    `(let [(gensym "tmp") ~val] ~body))  ; generates unique binding
+
+  ; Auto-gensym (preferred for hygiene)
+  (defmacro swap [a b]
+    `(let [tmp# ~a]
+       (set! ~a ~b)
+       (set! ~b tmp#)))  ; tmp# is unique, prevents variable capture
+  ```
+- **Limitations**:
+  - No `macroexpand`/`macroexpand-all` introspection yet
+  - No variadic macros (`& rest`) yet
+
 ## Type System
 
 ### Type Checking
@@ -155,11 +201,13 @@
 - **Interactive environment** with live evaluation
 - **Implementation approach**:
   - NO runtime state - recompiles from scratch each input
-  - `definitions_map` tracks all `(def ...)` forms by name
+  - `definitions_map` tracks all `(def ...)` and `(defmacro ...)` forms by name
   - Concatenates ALL previous definitions + new input
   - Recompiles to C → builds `.bundle` → loads and executes
 - **Capabilities**:
   - Function/struct/enum redefinitions (replaces in map, recompiles)
+  - **Macro definitions** and redefinitions fully supported
+  - Macro composition (macros using other macros)
   - No incremental compilation
   - Each evaluation starts fresh
 - **Limitations**:
@@ -171,7 +219,7 @@
 
 ### Test Suite
 - **Main test runner**: `zig test src/test_all.zig`
-- **184 test cases** covering all major features
+- **260 test cases** covering all major features
 - **Test categories**:
   - Lexer and parser tests
   - Reader tests (S-expression parsing)
@@ -188,6 +236,23 @@
     - Pointer indexing (`pointer-index-read`, `pointer-index-write!`)
     - Array pointer operations (`array-ptr`)
     - Arrays in struct fields
+  - **Macro tests** (30 tests):
+    - Macro definition and expansion
+    - Syntax-quote, unquote, unquote-splicing
+    - Nested macros and macros using other macros
+    - Mixed quoted/unquoted elements
+    - Error handling for misplaced unquote forms
+    - Vector and nested structure support
+    - **Gensym tests** (8 tests):
+      - Manual gensym: Basic unique symbol generation
+      - Manual gensym: Without arguments (default prefix)
+      - Manual gensym: With string prefix
+      - Manual gensym: Inside syntax-quote
+      - Manual gensym: Multiple calls generate different symbols
+      - Auto-gensym: Same `sym#` gets same unique symbol
+      - Auto-gensym: Different `sym#` get different symbols
+      - Auto-gensym: Scoped per syntax-quote expansion
+    - Integration tests with full compilation
   - Function application tests
   - Control flow tests
 

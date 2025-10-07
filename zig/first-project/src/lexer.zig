@@ -18,6 +18,9 @@ pub const TokenType = enum {
 
     // Special
     quote, // '
+    syntax_quote, // `
+    unquote, // ~
+    unquote_splicing, // ~@
 
     // Meta
     eof,
@@ -63,6 +66,15 @@ pub const Lexer = struct {
             '{' => self.makeTokenAt(.left_brace, start, start_line, start_column),
             '}' => self.makeTokenAt(.right_brace, start, start_line, start_column),
             '\'' => self.makeTokenAt(.quote, start, start_line, start_column),
+            '`' => self.makeTokenAt(.syntax_quote, start, start_line, start_column),
+            '~' => {
+                // Check for ~@ (unquote-splicing)
+                if (!self.isAtEnd() and self.peek() == '@') {
+                    _ = self.advance();
+                    return self.makeTokenAt(.unquote_splicing, start, start_line, start_column);
+                }
+                return self.makeTokenAt(.unquote, start, start_line, start_column);
+            },
             '"' => self.string(start, start_line, start_column),
             ':' => self.keyword(start, start_line, start_column),
             ';' => {
@@ -208,7 +220,7 @@ pub const Lexer = struct {
         return std.ascii.isAlphabetic(c) or
             c == '+' or c == '-' or c == '*' or c == '/' or c == '=' or
             c == '<' or c == '>' or c == '!' or c == '?' or c == '&' or
-            c == '|' or c == '^' or c == '~' or c == '%' or c == '$' or
+            c == '|' or c == '^' or c == '%' or c == '$' or
             c == '_' or c == '.';
     }
 

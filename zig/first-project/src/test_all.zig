@@ -9,9 +9,11 @@ const showcase_test = @import("showcase_test.zig");
 const type_checker_comprehensive_tests = @import("type_checker_comprehensive_tests.zig");
 const struct_field_access_tests = @import("struct_field_access_tests.zig");
 const array_tests = @import("array_tests.zig");
+const macro_comprehensive_tests = @import("macro_comprehensive_tests.zig");
 
 // Import all modules to include their inline tests
 const value = @import("value.zig");
+const macro_expander = @import("macro_expander.zig");
 const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 const reader = @import("reader.zig");
@@ -31,6 +33,7 @@ comptime {
     std.testing.refAllDecls(type_checker_comprehensive_tests);
     std.testing.refAllDecls(struct_field_access_tests);
     std.testing.refAllDecls(array_tests);
+    std.testing.refAllDecls(macro_comprehensive_tests);
     std.testing.refAllDecls(value);
     std.testing.refAllDecls(lexer);
     std.testing.refAllDecls(parser);
@@ -40,6 +43,7 @@ comptime {
     std.testing.refAllDecls(map);
     std.testing.refAllDecls(type_checker);
     std.testing.refAllDecls(simple_c_compiler);
+    std.testing.refAllDecls(macro_expander);
 }
 
 test "test runner working" {

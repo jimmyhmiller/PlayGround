@@ -77,6 +77,9 @@ pub const Parser = struct {
             .left_bracket => self.parseVector(),
             .left_brace => self.parseMap(),
             .quote => self.parseQuote(),
+            .syntax_quote => self.parseSyntaxQuote(),
+            .unquote => self.parseUnquote(),
+            .unquote_splicing => self.parseUnquoteSplicing(),
             else => ParseError.UnexpectedToken,
         };
     }
@@ -234,6 +237,57 @@ pub const Parser = struct {
 
         const quote_symbol = try value.createSymbol(self.allocator.*, "quote");
         list = try list.push(self.allocator.*, quote_symbol);
+
+        const val = try self.allocator.create(Value);
+        val.* = Value{ .list = list };
+        return val;
+    }
+
+    fn parseSyntaxQuote(self: *Parser) ParseError!*Value {
+        _ = try self.expect(.syntax_quote);
+
+        const quoted = try self.parseExpression();
+
+        // Create (syntax-quote <expr>)
+        var list = try PersistentLinkedList(*Value).empty(self.allocator.*);
+        list = try list.push(self.allocator.*, quoted);
+
+        const syntax_quote_symbol = try value.createSymbol(self.allocator.*, "syntax-quote");
+        list = try list.push(self.allocator.*, syntax_quote_symbol);
+
+        const val = try self.allocator.create(Value);
+        val.* = Value{ .list = list };
+        return val;
+    }
+
+    fn parseUnquote(self: *Parser) ParseError!*Value {
+        _ = try self.expect(.unquote);
+
+        const unquoted = try self.parseExpression();
+
+        // Create (unquote <expr>)
+        var list = try PersistentLinkedList(*Value).empty(self.allocator.*);
+        list = try list.push(self.allocator.*, unquoted);
+
+        const unquote_symbol = try value.createSymbol(self.allocator.*, "unquote");
+        list = try list.push(self.allocator.*, unquote_symbol);
+
+        const val = try self.allocator.create(Value);
+        val.* = Value{ .list = list };
+        return val;
+    }
+
+    fn parseUnquoteSplicing(self: *Parser) ParseError!*Value {
+        _ = try self.expect(.unquote_splicing);
+
+        const unquoted = try self.parseExpression();
+
+        // Create (unquote-splicing <expr>)
+        var list = try PersistentLinkedList(*Value).empty(self.allocator.*);
+        list = try list.push(self.allocator.*, unquoted);
+
+        const unquote_splicing_symbol = try value.createSymbol(self.allocator.*, "unquote-splicing");
+        list = try list.push(self.allocator.*, unquote_splicing_symbol);
 
         const val = try self.allocator.create(Value);
         val.* = Value{ .list = list };
