@@ -1631,3 +1631,576 @@ test "edge case - enum with many variants" {
     const typed = try checker.typeCheck(expr);
     try std.testing.expect(typed.getType() == .type_type);
 }
+
+// ============================================================================
+// C-FOR LOOP TESTS
+// ============================================================================
+
+test "c-for - basic loop with U32" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) 0] (< i 10) (+ i 1) nil)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - loop with I32" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: I32) -5] (< i 5) (+ i 1) nil)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - loop with U64" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [counter (: U64) 0] (< counter 100) (+ counter 1) nil)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - loop with generic Int" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: Int) 0] (< i 10) (+ i 1) nil)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - loop with float counter" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [x (: F32) 0.0] (< x 10.0) (+ x 0.5) nil)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - loop with nil step" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) 0] (< i 10) nil nil)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - loop with multiple body expressions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) 0] (< i 10) (+ i 1) (+ i 2) (+ i 3))";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - loop variable accessible in condition" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) 0] (< i 10) (+ i 1) nil)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - loop variable accessible in step" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) 0] (< i 10) (* i 2) nil)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - loop variable accessible in body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) 0] (< i 10) (+ i 1) (+ i 5))";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - nested loops" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) 0] (< i 10) (+ i 1) (c-for [j (: U32) 0] (< j 5) (+ j 1) nil))";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - loop with set! in body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(let [x (: U32) 0]
+        \\  (c-for [i (: U32) 0] (< i 10) (+ i 1)
+        \\    (set! x (+ x i))))
+    ;
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - countdown loop" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: I32) 10] (> i 0) (- i 1) nil)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - loop with all integer sizes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const test_cases = [_][]const u8{
+        "(c-for [i (: U8) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: U16) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: U32) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: U64) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: I8) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: I16) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: I32) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: I64) 0] (< i 10) (+ i 1) nil)",
+    };
+
+    for (test_cases) |code| {
+        const expr = try reader.readString(code);
+        const typed = try checker.synthesizeTyped(expr);
+        try std.testing.expect(typed.getType() == .void);
+    }
+}
+
+test "c-for - ERROR: invalid binding format" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32)] (< i 10) (+ i 1) nil)";
+    const expr = try reader.readString(code);
+    try std.testing.expectError(TypeChecker.TypeCheckError.InvalidTypeAnnotation, checker.synthesizeTyped(expr));
+}
+
+test "c-for - ERROR: non-symbol variable name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [42 (: U32) 0] (< i 10) (+ i 1) nil)";
+    const expr = try reader.readString(code);
+    try std.testing.expectError(TypeChecker.TypeCheckError.InvalidTypeAnnotation, checker.synthesizeTyped(expr));
+}
+
+test "c-for - ERROR: type mismatch in init" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) \"hello\"] (< i 10) (+ i 1) nil)";
+    const expr = try reader.readString(code);
+    try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, checker.synthesizeTyped(expr));
+}
+
+test "c-for - ERROR: non-truthy condition" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) 0] \"not truthy\" (+ i 1) nil)";
+    const expr = try reader.readString(code);
+    try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, checker.synthesizeTyped(expr));
+}
+
+test "c-for - ERROR: missing condition" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) 0])";
+    const expr = try reader.readString(code);
+    try std.testing.expectError(TypeChecker.TypeCheckError.InvalidTypeAnnotation, checker.synthesizeTyped(expr));
+}
+
+test "c-for - ERROR: missing step" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) 0] (< i 10))";
+    const expr = try reader.readString(code);
+    try std.testing.expectError(TypeChecker.TypeCheckError.InvalidTypeAnnotation, checker.synthesizeTyped(expr));
+}
+
+test "c-for - with array operations in body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(let [arr (: (Array U32 10)) (array U32 10 0)]
+        \\  (c-for [i (: U32) 0] (< i 10) (+ i 1)
+        \\    (array-set! arr i (* i 2))))
+    ;
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - with pointer operations in body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(let [ptr (: (Pointer U32)) (allocate U32 0)]
+        \\  (c-for [i (: U32) 0] (< i 10) (+ i 1)
+        \\    (pointer-write! ptr i)))
+    ;
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - with struct field access in body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code_def = "(def Point (: Type) (Struct [x U32] [y U32]))";
+    const def_expr = try reader.readString(code_def);
+    _ = try checker.synthesizeTyped(def_expr);
+
+    const code =
+        \\(let [p (: Point) (Point 0 0)]
+        \\  (c-for [i (: U32) 0] (< i 10) (+ i 1)
+        \\    (. p x)))
+    ;
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - with function call in body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code_def = "(def helper (: (-> [U32] U32)) (fn [x] (* x 2)))";
+    const def_expr = try reader.readString(code_def);
+    _ = try checker.synthesizeTyped(def_expr);
+
+    const code = "(c-for [i (: U32) 0] (< i 10) (+ i 1) (helper i))";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - returns void type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(let [x (: U32) (c-for [i (: U32) 0] (< i 10) (+ i 1) nil)]
+        \\  x)
+    ;
+    const expr = try reader.readString(code);
+    // This should fail because c-for returns void, not U32
+    try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, checker.synthesizeTyped(expr));
+}
+
+test "c-for - with complex step expression" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) 0] (< i 100) (* (+ i 1) 2) nil)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - with boolean operators in condition" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) 0] (and (< i 10) (!= i 5)) (+ i 1) nil)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - variable shadowing outer binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(let [i (: U32) 42]
+        \\  (c-for [i (: U32) 0] (< i 10) (+ i 1)
+        \\    (+ i 1)))
+    ;
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - nested with variable shadowing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(c-for [i (: U32) 0] (< i 10) (+ i 1)
+        \\  (c-for [i (: U32) 0] (< i 5) (+ i 1)
+        \\    (+ i 1)))
+    ;
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - with let binding in body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(c-for [i (: U32) 0] (< i 10) (+ i 1)
+        \\  (let [temp (: U32) (* i 2)]
+        \\    (+ temp 1)))
+    ;
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - with if expression in body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(c-for [i (: U32) 0] (< i 10) (+ i 1)
+        \\  (if (< i 5) (+ i 1) (+ i 2)))
+    ;
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - with while loop in body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(c-for [i (: U32) 0] (< i 10) (+ i 1)
+        \\  (let [j (: U32) 0]
+        \\    (while (< j 5)
+        \\      (set! j (+ j 1)))))
+    ;
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - step can be any type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(c-for [i (: U32) 0] (< i 10) \"not a number\" nil)";
+    const expr = try reader.readString(code);
+    // Step expression type check should succeed (any type allowed)
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - with multiple expressions in body returning different types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(c-for [i (: U32) 0] (< i 10) (+ i 1)
+        \\  (+ i 1)
+        \\  true
+        \\  "hello")
+    ;
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .void);
+}

@@ -268,11 +268,11 @@ pub const TypeCheckError = error{
     OutOfMemory,
 };
 
-pub const TypeCheckErrorDetail = struct {
-    index: usize,
-    expr: *Value,
-    err: TypeCheckError,
+pub const ErrorInfo = union(enum) {
+    unbound: struct { name: []const u8 },
 };
+
+pub const TypeCheckErrorDetail = struct { index: usize, expr: *Value, err: TypeCheckError, info: ?ErrorInfo };
 
 pub const TypeCheckReport = struct {
     typed: ArrayList(*TypedValue),
@@ -287,6 +287,7 @@ pub const BidirectionalTypeChecker = struct {
     builtins: std.StringHashMap(void), // Set of builtin special forms
     next_var_id: u32,
     errors: ArrayList(TypeCheckErrorDetail),
+    index: usize,
 
     const BindingSnapshot = struct {
         name: []const u8,
@@ -303,6 +304,7 @@ pub const BidirectionalTypeChecker = struct {
             .builtins = std.StringHashMap(void).init(allocator),
             .next_var_id = 0,
             .errors = ArrayList(TypeCheckErrorDetail){},
+            .index = 0,
         };
         checker.initBuiltins() catch {};
         return checker;
@@ -322,6 +324,7 @@ pub const BidirectionalTypeChecker = struct {
         try self.builtins.put("fn", {});
         try self.builtins.put("if", {});
         try self.builtins.put("while", {});
+        try self.builtins.put("c-for", {});
         try self.builtins.put("set!", {});
         try self.builtins.put("and", {});
         try self.builtins.put("or", {});
@@ -507,7 +510,14 @@ pub const BidirectionalTypeChecker = struct {
                 if (self.env.get(name)) |var_type| {
                     return try TypedExpression.init(self.allocator, expr, var_type);
                 } else {
-                    return TypeCheckError.UnboundVariable;
+                    const err = TypeCheckError.UnboundVariable;
+                    try self.errors.append(self.allocator, .{
+                        .index = self.index,
+                        .expr = expr,
+                        .err = err,
+                        .info = ErrorInfo{ .unbound = .{ .name = name } },
+                    });
+                    return err;
                 }
             },
 
@@ -548,6 +558,8 @@ pub const BidirectionalTypeChecker = struct {
                             return try self.synthesizeIf(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "while")) {
                             return try self.synthesizeWhile(expr, list);
+                        } else if (std.mem.eql(u8, first.symbol, "c-for")) {
+                            return try self.synthesizeCFor(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "set!")) {
                             return try self.synthesizeSet(expr, list);
                         } else if (self.isComparisonOperator(first.symbol)) {
@@ -1216,6 +1228,78 @@ pub const BidirectionalTypeChecker = struct {
         return try TypedExpression.init(self.allocator, expr, Type.void);
     }
 
+    fn synthesizeCFor(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
+        // (c-for [var (: Type) init] condition step body*)
+        const init_binding_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const init_binding_value = init_binding_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        if (!init_binding_value.isVector() or init_binding_value.vector.len() != 3) {
+            return TypeCheckError.InvalidTypeAnnotation;
+        }
+
+        const var_name_val = init_binding_value.vector.at(0);
+        const annotation_val = init_binding_value.vector.at(1);
+        const init_val = init_binding_value.vector.at(2);
+
+        if (!var_name_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        const var_name = var_name_val.symbol;
+
+        // Parse type annotation
+        const var_type = try self.parseTypeAnnotation(annotation_val);
+
+        // Check init value against the declared type
+        _ = try self.check(init_val, var_type);
+
+        // Save current binding (if any) to restore later
+        const entry = try self.env.getOrPut(var_name);
+        const had_previous = entry.found_existing;
+        const previous = if (had_previous) entry.value_ptr.* else Type.nil;
+        entry.value_ptr.* = var_type;
+
+        const snapshot = BindingSnapshot{
+            .name = var_name,
+            .had_previous = had_previous,
+            .previous = previous,
+            .entry_ptr = entry.value_ptr,
+        };
+
+        errdefer self.restoreBindingSnapshots(&[_]BindingSnapshot{snapshot});
+
+        // Get condition
+        const cond_node = init_binding_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const cond_expr = cond_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const cond_typed = try self.synthesize(cond_expr);
+
+        if (!isTruthyType(cond_typed.type)) {
+            self.restoreBindingSnapshots(&[_]BindingSnapshot{snapshot});
+            return TypeCheckError.TypeMismatch;
+        }
+
+        // Get step expression
+        const step_node = cond_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const step_expr = step_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // Type check step expression (can be nil for empty step)
+        if (!step_expr.isNil()) {
+            _ = try self.synthesize(step_expr);
+        }
+
+        // Type check all body expressions
+        var current = step_node.next;
+        while (current) |node| {
+            if (node.value) |body_expr| {
+                _ = try self.synthesize(body_expr);
+            }
+            current = node.next;
+        }
+
+        // Restore binding
+        self.restoreBindingSnapshots(&[_]BindingSnapshot{snapshot});
+
+        // c-for loops always return void
+        return try TypedExpression.init(self.allocator, expr, Type.void);
+    }
+
     fn synthesizeSet(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
         // (set! var-name value)
         const operands = try getBinaryOperands(list);
@@ -1592,6 +1676,96 @@ pub const BidirectionalTypeChecker = struct {
         }
 
         storage[0] = cond_typed;
+
+        const result = try self.allocator.create(TypedValue);
+        result.* = TypedValue{ .list = .{
+            .elements = storage[0..elem_count],
+            .type = Type.void,
+        } };
+        return result;
+    }
+
+    fn synthesizeTypedCFor(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
+        _ = expr;
+
+        // (c-for [var (: Type) init] condition step body*)
+        const init_binding_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const init_binding_value = init_binding_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        if (!init_binding_value.isVector() or init_binding_value.vector.len() != 3) {
+            return TypeCheckError.InvalidTypeAnnotation;
+        }
+
+        const var_name_val = init_binding_value.vector.at(0);
+        const annotation_val = init_binding_value.vector.at(1);
+        const init_val = init_binding_value.vector.at(2);
+
+        if (!var_name_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        const var_name = var_name_val.symbol;
+
+        // Parse type annotation
+        const var_type = try self.parseTypeAnnotation(annotation_val);
+
+        // Check init value against the declared type
+        const init_typed = try self.checkTyped(init_val, var_type);
+
+        // Save current binding (if any) to restore later
+        const entry = try self.env.getOrPut(var_name);
+        const had_previous = entry.found_existing;
+        const previous = if (had_previous) entry.value_ptr.* else Type.nil;
+        entry.value_ptr.* = var_type;
+
+        const snapshot = BindingSnapshot{
+            .name = var_name,
+            .had_previous = had_previous,
+            .previous = previous,
+            .entry_ptr = entry.value_ptr,
+        };
+
+        errdefer self.restoreBindingSnapshots(&[_]BindingSnapshot{snapshot});
+
+        // Get condition
+        const cond_node = init_binding_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const cond_expr = cond_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+        const cond_typed = try self.synthesizeTyped(cond_expr);
+
+        if (!isTruthyType(cond_typed.getType())) {
+            self.restoreBindingSnapshots(&[_]BindingSnapshot{snapshot});
+            return TypeCheckError.TypeMismatch;
+        }
+
+        // Get step expression
+        const step_node = cond_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+        const step_expr = step_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // Type check step expression (can be nil for empty step)
+        const step_typed = if (!step_expr.isNil())
+            try self.synthesizeTyped(step_expr)
+        else
+            blk: {
+                const nil_typed = try self.allocator.create(TypedValue);
+                nil_typed.* = TypedValue{ .nil = .{ .type = Type.nil } };
+                break :blk nil_typed;
+            };
+
+        // Type check all body expressions
+        var current = step_node.next;
+        var elem_count: usize = 3; // Start at 3 for init, cond, step
+        while (current) |node| {
+            if (node.value) |body_expr| {
+                if (elem_count >= storage.len) return TypeCheckError.InvalidTypeAnnotation;
+                storage[elem_count] = try self.synthesizeTyped(body_expr);
+                elem_count += 1;
+            }
+            current = node.next;
+        }
+
+        // Restore binding
+        self.restoreBindingSnapshots(&[_]BindingSnapshot{snapshot});
+
+        storage[0] = init_typed;
+        storage[1] = cond_typed;
+        storage[2] = step_typed;
 
         const result = try self.allocator.create(TypedValue);
         result.* = TypedValue{ .list = .{
@@ -2402,6 +2576,8 @@ pub const BidirectionalTypeChecker = struct {
                             return try self.synthesizeTypedIf(expr, list, typed_elements);
                         } else if (std.mem.eql(u8, first.symbol, "while")) {
                             return try self.synthesizeTypedWhile(expr, list, typed_elements);
+                        } else if (std.mem.eql(u8, first.symbol, "c-for")) {
+                            return try self.synthesizeTypedCFor(expr, list, typed_elements);
                         } else if (std.mem.eql(u8, first.symbol, "set!")) {
                             return try self.synthesizeTypedSet(expr, list, typed_elements);
                         } else if (self.isComparisonOperator(first.symbol)) {
@@ -3227,6 +3403,7 @@ pub const BidirectionalTypeChecker = struct {
         var results = ArrayList(*TypedValue){};
 
         for (expressions, 0..) |expr, index| {
+            self.index = index;
             if (expr.isList()) {
                 var current: ?*const @TypeOf(expr.list.*) = expr.list;
                 if (current) |node| {
@@ -3247,6 +3424,7 @@ pub const BidirectionalTypeChecker = struct {
                                     .index = index,
                                     .expr = expr,
                                     .err = err,
+                                    .info = null,
                                 });
                                 continue;
                             };
@@ -3274,6 +3452,7 @@ pub const BidirectionalTypeChecker = struct {
                                     .index = index,
                                     .expr = second_val,
                                     .err = err,
+                                    .info = null,
                                 });
                                 continue;
                             };
@@ -3298,6 +3477,7 @@ pub const BidirectionalTypeChecker = struct {
                                     .index = index,
                                     .expr = body,
                                     .err = err,
+                                    .info = null,
                                 });
                                 continue;
                             };
@@ -3334,6 +3514,7 @@ pub const BidirectionalTypeChecker = struct {
                     .index = index,
                     .expr = expr,
                     .err = err,
+                    .info = null,
                 });
                 continue;
             };

@@ -9,15 +9,15 @@ pub const TokenType = enum {
     float,
 
     // Delimiters
-    left_paren,    // (
-    right_paren,   // )
-    left_bracket,  // [
+    left_paren, // (
+    right_paren, // )
+    left_bracket, // [
     right_bracket, // ]
-    left_brace,    // {
-    right_brace,   // }
+    left_brace, // {
+    right_brace, // }
 
     // Special
-    quote,         // '
+    quote, // '
 
     // Meta
     eof,
@@ -128,7 +128,7 @@ pub const Lexer = struct {
     fn makeToken(self: *const Lexer, token_type: TokenType) Token {
         return Token{
             .type = token_type,
-            .lexeme = if (self.current > 0) self.source[self.current-1..self.current] else "",
+            .lexeme = if (self.current > 0) self.source[self.current - 1 .. self.current] else "",
             .line = self.line,
             .column = self.column,
         };
@@ -206,10 +206,10 @@ pub const Lexer = struct {
 
     fn isSymbolStart(_: *const Lexer, c: u8) bool {
         return std.ascii.isAlphabetic(c) or
-               c == '+' or c == '-' or c == '*' or c == '/' or c == '=' or
-               c == '<' or c == '>' or c == '!' or c == '?' or c == '&' or
-               c == '|' or c == '^' or c == '~' or c == '%' or c == '$' or
-               c == '_' or c == '.';
+            c == '+' or c == '-' or c == '*' or c == '/' or c == '=' or
+            c == '<' or c == '>' or c == '!' or c == '?' or c == '&' or
+            c == '|' or c == '^' or c == '~' or c == '%' or c == '$' or
+            c == '_' or c == '.';
     }
 
     fn isSymbolChar(self: *const Lexer, c: u8) bool {
@@ -258,27 +258,27 @@ test "lexer complex example" {
 
     // (defn my-func [{:keys [a b c]}] (+ a b c))
     const tokens = [_]TokenType{
-        .left_paren,   // (
-        .symbol,       // defn
-        .symbol,       // my-func
+        .left_paren, // (
+        .symbol, // defn
+        .symbol, // my-func
         .left_bracket, // [
-        .left_brace,   // {
-        .keyword,      // :keys
+        .left_brace, // {
+        .keyword, // :keys
         .left_bracket, // [
-        .symbol,       // a
-        .symbol,       // b
-        .symbol,       // c
+        .symbol, // a
+        .symbol, // b
+        .symbol, // c
         .right_bracket, // ]
-        .right_brace,   // }
+        .right_brace, // }
         .right_bracket, // ]
-        .left_paren,   // (
-        .symbol,       // +
-        .symbol,       // a
-        .symbol,       // b
-        .symbol,       // c
-        .right_paren,  // )
-        .right_paren,  // )
-        .eof
+        .left_paren, // (
+        .symbol, // +
+        .symbol, // a
+        .symbol, // b
+        .symbol, // c
+        .right_paren, // )
+        .right_paren, // )
+        .eof,
     };
 
     for (tokens, 0..) |expected_type, i| {

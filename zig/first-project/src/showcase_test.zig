@@ -23,7 +23,7 @@ test "language showcase - verify all examples type check" {
             \\(def nothing (: Nil) nil)
         ;
         const read_result = try reader.readAllString(code);
-    const expressions = read_result.values;
+        const expressions = read_result.values;
         const report = try checker.typeCheckAllTwoPass(expressions.items);
         try std.testing.expect(report.errors.items.len == 0);
         try std.testing.expect(report.typed.items.len == 4);
@@ -36,7 +36,7 @@ test "language showcase - verify all examples type check" {
             \\(def float32-val (: F32) 3.14)
         ;
         const read_result = try reader.readAllString(code);
-    const expressions = read_result.values;
+        const expressions = read_result.values;
         const report = try checker.typeCheckAllTwoPass(expressions.items);
         try std.testing.expect(report.errors.items.len == 0);
         try std.testing.expect(report.typed.items.len == expressions.items.len);
@@ -51,7 +51,7 @@ test "language showcase - verify all examples type check" {
             \\  (fn [x y] (+ x y)))
         ;
         const read_result = try reader.readAllString(code);
-    const expressions = read_result.values;
+        const expressions = read_result.values;
         const report = try checker.typeCheckAllTwoPass(expressions.items);
         try std.testing.expect(report.errors.items.len == 0);
         for (report.typed.items) |typed| {
@@ -67,7 +67,7 @@ test "language showcase - verify all examples type check" {
             \\(def result (: Int) (add 40 2))
         ;
         const read_result = try reader.readAllString(code);
-    const expressions = read_result.values;
+        const expressions = read_result.values;
         const report = try checker.typeCheckAllTwoPass(expressions.items);
         try std.testing.expect(report.errors.items.len == 0);
         try std.testing.expect(report.typed.items.len == 2);
@@ -82,7 +82,7 @@ test "language showcase - verify all examples type check" {
             \\(def quotient (: Float) (/ 22 7))
         ;
         const read_result = try reader.readAllString(code);
-    const expressions = read_result.values;
+        const expressions = read_result.values;
         const report = try checker.typeCheckAllTwoPass(expressions.items);
         try std.testing.expect(report.errors.items.len == 0);
         try std.testing.expect(report.typed.items.len == 3);
@@ -106,7 +106,7 @@ test "language showcase - verify all examples type check" {
             \\(def Color (: Type) (Struct [r U8] [g U8] [b U8]))
         ;
         const read_result = try reader.readAllString(code);
-    const expressions = read_result.values;
+        const expressions = read_result.values;
         for (expressions.items) |expr| {
             const typed = try checker.typeCheck(expr);
             try std.testing.expect(typed.getType() == .type_type);
@@ -126,7 +126,7 @@ test "language showcase - verify all examples type check" {
             \\(def func-d (: Int) 42)
         ;
         const read_result = try reader.readAllString(code);
-    const expressions = read_result.values;
+        const expressions = read_result.values;
         const report = try checker.typeCheckAllTwoPass(expressions.items);
         try std.testing.expect(report.errors.items.len == 0);
         try std.testing.expect(report.typed.items.len == 4);
@@ -181,7 +181,7 @@ test "language showcase - verify all examples type check" {
             \\(let [a (: Int) 1] (let [b (: Int) (+ a 2)] (+ a b)))
         ;
         const read_result = try reader.readAllString(code);
-    const expressions = read_result.values;
+        const expressions = read_result.values;
         const report = try checker.typeCheckAllTwoPass(expressions.items);
         try std.testing.expect(report.errors.items.len == 0);
         try std.testing.expect(report.typed.items.len == 3);
@@ -237,7 +237,7 @@ test "language showcase - error cases" {
             \\(add 1)
         ;
         const read_result = try reader.readAllString(code);
-    const expressions = read_result.values;
+        const expressions = read_result.values;
         const report = try checker.typeCheckAllTwoPass(expressions.items);
 
         // First expression (the def) succeeds, the next two collect errors
