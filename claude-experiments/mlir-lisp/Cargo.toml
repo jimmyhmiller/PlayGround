@@ -1,0 +1,16 @@
+[package]
+name = "mlir-lisp"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "mlir_lisp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mlir-lisp"
+path = "src/main.rs"
+
+[dependencies]
+melior = "0.25"
+nom = "7.1"
