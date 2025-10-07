@@ -20,6 +20,8 @@ pub struct Emitter<'c> {
     values: HashMap<String, melior::ir::Value<'c, 'c>>,
     /// Block table mapping block names to their MLIR blocks
     blocks: HashMap<String, BlockRef<'c, 'c>>,
+    /// Counter for generating unique SSA value names
+    value_counter: std::cell::RefCell<usize>,
 }
 
 impl<'c> Emitter<'c> {
@@ -28,7 +30,39 @@ impl<'c> Emitter<'c> {
             ctx,
             values: HashMap::new(),
             blocks: HashMap::new(),
+            value_counter: std::cell::RefCell::new(0),
         }
+    }
+
+    /// Generate a unique SSA value name
+    fn gensym(&self) -> String {
+        let mut counter = self.value_counter.borrow_mut();
+        let id = *counter;
+        *counter += 1;
+        format!("%val_{}", id)
+    }
+
+    /// Generate a unique SSA value name with a prefix
+    pub fn generate_name(&self, prefix: &str) -> String {
+        let mut counter = self.value_counter.borrow_mut();
+        let id = *counter;
+        *counter += 1;
+        format!("%{}_{}", prefix, id)
+    }
+
+    /// Get MLIR context
+    pub fn context(&self) -> &'c melior::Context {
+        self.ctx.context()
+    }
+
+    /// Register a value in the symbol table
+    pub fn register_value(&mut self, name: String, value: melior::ir::Value<'c, 'c>) {
+        self.values.insert(name, value);
+    }
+
+    /// Get a value from the symbol table
+    pub fn get_value(&self, name: &str) -> Option<melior::ir::Value<'c, 'c>> {
+        self.values.get(name).copied()
     }
 
     /// Parse a type from a symbol (e.g., "i32" -> IntegerType(32))
@@ -269,7 +303,8 @@ impl<'c> Emitter<'c> {
             Value::List(elements) if !elements.is_empty() => {
                 match &elements[0] {
                     Value::Symbol(s) if s == "op" => {
-                        self.emit_op_form(block, &elements[1..])
+                        self.emit_op_form(block, &elements[1..])?;
+                        Ok(())
                     }
                     Value::Symbol(s) if s == "block" => {
                         Err("block special form not supported in this context".to_string())
@@ -289,7 +324,18 @@ impl<'c> Emitter<'c> {
     }
 
     /// Emit operation using (op name :attrs {...} :results [...] :as %name) syntax
-    fn emit_op_form(&mut self, block: &Block<'c>, args: &[Value]) -> Result<(), String> {
+    /// Returns the name of the result value if the operation produces one
+    fn emit_op_form(&mut self, block: &Block<'c>, args: &[Value]) -> Result<Option<String>, String> {
+        self.emit_op_form_impl(block, args)
+    }
+
+    /// Public version of emit_op_form for use by expression compiler
+    pub fn emit_op_form_public(&mut self, block: &Block<'c>, args: &[Value]) -> Result<Option<String>, String> {
+        self.emit_op_form_impl(block, args)
+    }
+
+    /// Implementation of emit_op_form
+    fn emit_op_form_impl(&mut self, block: &Block<'c>, args: &[Value]) -> Result<Option<String>, String> {
         if args.is_empty() {
             return Err("op form requires operation name".to_string());
         }
@@ -332,7 +378,8 @@ impl<'c> Emitter<'c> {
                     i += 2;
                 }
                 Value::Keyword(kw) if kw == "operands" && i + 1 < args.len() => {
-                    // Parse operands from vector
+                    // Parse operands from vector - for now, only support symbols
+                    // Nested expressions will be handled by macro expansion
                     if let Value::Vector(operand_names) = &args[i + 1] {
                         for op_name in operand_names {
                             if let Value::Symbol(name) = op_name {
@@ -423,15 +470,19 @@ impl<'c> Emitter<'c> {
         let op = builder.build()
             .map_err(|e| format!("Failed to build operation: {:?}", e))?;
 
-        // Store result value if named
-        if let Some(name) = result_name {
+        // Store result value with given name or auto-generate one
+        let result_name_used = if !results.is_empty() {
+            let name = result_name.unwrap_or_else(|| self.gensym());
             if let Ok(result_val) = op.result(0) {
-                self.values.insert(name, result_val.into());
+                self.values.insert(name.clone(), result_val.into());
             }
-        }
+            Some(name)
+        } else {
+            None
+        };
 
         block.append_operation(op);
-        Ok(())
+        Ok(result_name_used)
     }
 
     /// Emit operation using direct syntax: (arith.constant :value 10)
@@ -439,7 +490,8 @@ impl<'c> Emitter<'c> {
         // For now, just forward to emit_op_form style
         let mut new_args = vec![Value::Symbol(op_name.to_string())];
         new_args.extend_from_slice(args);
-        self.emit_op_form(block, &new_args)
+        self.emit_op_form(block, &new_args)?;
+        Ok(())
     }
 
     /// Parse an attribute from a keyword-value pair

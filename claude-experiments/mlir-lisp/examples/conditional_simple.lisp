@@ -3,9 +3,21 @@
 ;; Returns 100 from true branch, 200 from false branch
 
 (block entry []
-  ;; Create a boolean constant (1 = true, 0 = false)
+  ;; Create two constants to compare
   (op arith.constant
-      :attrs {:value 1}
+      :attrs {:value 42}
+      :results [i32]
+      :as %val1)
+
+  (op arith.constant
+      :attrs {:value 10}
+      :results [i32]
+      :as %val2)
+
+  ;; Create a boolean by comparing (42 > 10 = true)
+  (op arith.cmpi
+      :attrs {:predicate "sgt"}
+      :operands [%val1 %val2]
       :results [i1]
       :as %condition)
 
