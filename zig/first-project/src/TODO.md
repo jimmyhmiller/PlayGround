@@ -1,0 +1,1 @@
+* ~~Add c-for to type checker to actually test it~~ ✓ DONE

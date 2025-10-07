@@ -66,7 +66,7 @@ pub fn PersistentVector(comptime T: type) type {
                 return PersistentVector(T).init(self.alloc, null);
             }
             const new_buf = try self.alloc.alloc(T, old_len - 1);
-            @memcpy(new_buf, self.buf.?[0..old_len - 1]);
+            @memcpy(new_buf, self.buf.?[0 .. old_len - 1]);
             return PersistentVector(T).init(self.alloc, new_buf);
         }
 

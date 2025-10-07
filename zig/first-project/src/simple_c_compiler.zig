@@ -125,8 +125,7 @@ pub const SimpleCCompiler = struct {
 
         if (report.errors.items.len != 0 or report.typed.items.len != expressions.items.len) {
             if (report.errors.items.len == 0) {
-                std.debug.print("Type check failed: expected {d} typed expressions, got {d}\n",
-                    .{ expressions.items.len, report.typed.items.len });
+                std.debug.print("Type check failed: expected {d} typed expressions, got {d}\n", .{ expressions.items.len, report.typed.items.len });
 
                 // Show all expressions with their status
                 std.debug.print("\nExpression details:\n", .{});
@@ -139,19 +138,23 @@ pub const SimpleCCompiler = struct {
                         std.debug.print("  {s} Line {d} (expr #{d}): {s}\n", .{ status, line, idx, expr_str });
                     }
                 }
-                std.debug.print("\nNote: {d} expressions type-checked successfully, {d} failed\n",
-                    .{ report.typed.items.len, expressions.items.len - report.typed.items.len });
+                std.debug.print("\nNote: {d} expressions type-checked successfully, {d} failed\n", .{ report.typed.items.len, expressions.items.len - report.typed.items.len });
             }
             for (report.errors.items) |detail| {
                 const line = if (detail.index < line_numbers.items.len) line_numbers.items[detail.index] else 0;
                 const maybe_str = self.formatValue(detail.expr) catch null;
+                if (detail.info) |info| {
+                    switch (info) {
+                        .unbound => |unbound| {
+                            std.debug.print("unbound variable {s}", .{unbound.name});
+                        },
+                    }
+                }
                 if (maybe_str) |expr_str| {
                     defer self.allocator.*.free(expr_str);
-                    std.debug.print("Type error at line {d} (expr #{d}): {s} -> {s}\n",
-                        .{ line, detail.index, @errorName(detail.err), expr_str });
+                    std.debug.print("Type error at line {d} (expr #{d}): {s} -> {s}\n", .{ line, detail.index, @errorName(detail.err), expr_str });
                 } else {
-                    std.debug.print("Type error at line {d} (expr #{d}): {s}\n",
-                        .{ line, detail.index, @errorName(detail.err) });
+                    std.debug.print("Type error at line {d} (expr #{d}): {s}\n", .{ line, detail.index, @errorName(detail.err) });
                 }
             }
             return Error.TypeCheckFailed;
@@ -185,7 +188,8 @@ pub const SimpleCCompiler = struct {
                             std.mem.eql(u8, head_val.symbol, "extern-struct") or
                             std.mem.eql(u8, head_val.symbol, "extern-var") or
                             std.mem.eql(u8, head_val.symbol, "include-header") or
-                            std.mem.eql(u8, head_val.symbol, "link-library")) {
+                            std.mem.eql(u8, head_val.symbol, "link-library"))
+                        {
                             continue;
                         }
                     }
@@ -409,22 +413,52 @@ pub const SimpleCCompiler = struct {
                     }
 
                     if (maybe_value) |value_expr| {
-                        // Try writeExpressionTyped first (handles structs), fall back to writeExpression
-                        self.writeExpressionTyped(init_writer, def.typed, &init_ctx, &includes) catch |err_typed| {
-                            if (err_typed == Error.UnsupportedExpression) {
-                                self.writeExpression(init_writer, value_expr, &init_ctx) catch |err| {
-                                    switch (err) {
-                                        Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
-                                            try init_writer.print("0; // unsupported expression\n", .{});
-                                            continue;
-                                        },
-                                        else => return err,
+                        // Check if this is a special form (let, while, c-for, if) - if so, use AST directly
+                        var use_ast_directly = false;
+                        if (value_expr.* == .list) {
+                            var val_iter = value_expr.list.iterator();
+                            if (val_iter.next()) |first_val| {
+                                if (first_val.isSymbol()) {
+                                    const op = first_val.symbol;
+                                    if (std.mem.eql(u8, op, "let") or
+                                        std.mem.eql(u8, op, "while") or
+                                        std.mem.eql(u8, op, "c-for") or
+                                        std.mem.eql(u8, op, "if")) {
+                                        use_ast_directly = true;
                                     }
-                                };
-                            } else {
-                                return err_typed;
+                                }
                             }
-                        };
+                        }
+
+                        if (use_ast_directly) {
+                            // Use original AST for special forms
+                            self.writeExpression(init_writer, value_expr, &init_ctx) catch |err| {
+                                switch (err) {
+                                    Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
+                                        try init_writer.print("0; // unsupported expression\n", .{});
+                                        continue;
+                                    },
+                                    else => return err,
+                                }
+                            };
+                        } else {
+                            // Try writeExpressionTyped first (handles structs), fall back to writeExpression
+                            self.writeExpressionTyped(init_writer, def.typed, &init_ctx, &includes) catch |err_typed| {
+                                if (err_typed == Error.UnsupportedExpression) {
+                                    self.writeExpression(init_writer, value_expr, &init_ctx) catch |err| {
+                                        switch (err) {
+                                            Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
+                                                try init_writer.print("0; // unsupported expression\n", .{});
+                                                continue;
+                                            },
+                                            else => return err,
+                                        }
+                                    };
+                                } else {
+                                    return err_typed;
+                                }
+                            };
+                        }
                     }
                     try init_writer.print(";\n", .{});
                 }
@@ -502,7 +536,7 @@ pub const SimpleCCompiler = struct {
                                     };
 
                                     // Write all body expressions except the last
-                                    for (fn_body_exprs.items[0..fn_body_exprs.items.len - 1]) |stmt| {
+                                    for (fn_body_exprs.items[0 .. fn_body_exprs.items.len - 1]) |stmt| {
                                         try init_writer.print("    ", .{});
                                         self.writeExpression(init_writer, stmt, &fn_ctx) catch {
                                             const repr = try self.formatValue(stmt);
@@ -829,7 +863,8 @@ pub const SimpleCCompiler = struct {
                     std.mem.eql(u8, head, "extern-struct") or
                     std.mem.eql(u8, head, "extern-var") or
                     std.mem.eql(u8, head, "include-header") or
-                    std.mem.eql(u8, head, "link-library")) {
+                    std.mem.eql(u8, head, "link-library"))
+                {
                     return;
                 }
 
@@ -1041,7 +1076,7 @@ pub const SimpleCCompiler = struct {
         try def_writer.writeAll(") {\n");
 
         // Emit all body expressions except the last
-        for (body_exprs.items[0..body_exprs.items.len - 1]) |stmt| {
+        for (body_exprs.items[0 .. body_exprs.items.len - 1]) |stmt| {
             try def_writer.print("    ", .{});
             self.writeExpression(def_writer, stmt, &empty_ctx) catch |err| {
                 switch (err) {
@@ -1068,7 +1103,7 @@ pub const SimpleCCompiler = struct {
                     defer self.allocator.*.free(last_repr);
                     try def_writer.writeAll("0;\n}\n");
                     try def_writer.print("// unsupported function body: {s}\n", .{repr});
-                    std.debug.print("ERROR writing return expression: {s}\nLast expr: {s}\n", .{@errorName(err), last_repr});
+                    std.debug.print("ERROR writing return expression: {s}\nLast expr: {s}\n", .{ @errorName(err), last_repr });
                     return;
                 },
                 else => return err,
@@ -1106,12 +1141,12 @@ pub const SimpleCCompiler = struct {
     fn sanitizeIdentifier(self: *SimpleCCompiler, name: []const u8) ![]u8 {
         // Check if it's a C keyword
         const c_keywords = [_][]const u8{
-            "auto",     "break",    "case",     "char",     "const",    "continue",
-            "default",  "do",       "double",   "else",     "enum",     "extern",
-            "float",    "for",      "goto",     "if",       "inline",   "int",
-            "long",     "register", "restrict", "return",   "short",    "signed",
-            "sizeof",   "static",   "struct",   "switch",   "typedef",  "union",
-            "unsigned", "void",     "volatile", "while",    "_Bool",    "_Complex",
+            "auto",       "break",    "case",     "char",   "const",   "continue",
+            "default",    "do",       "double",   "else",   "enum",    "extern",
+            "float",      "for",      "goto",     "if",     "inline",  "int",
+            "long",       "register", "restrict", "return", "short",   "signed",
+            "sizeof",     "static",   "struct",   "switch", "typedef", "union",
+            "unsigned",   "void",     "volatile", "while",  "_Bool",   "_Complex",
             "_Imaginary",
         };
 
@@ -1231,7 +1266,7 @@ pub const SimpleCCompiler = struct {
                     includes.need_stdlib = true;
                     try writer.print("({{ ", .{});
                     const c_type = try self.cTypeFor(pointee, includes);
-                    try writer.print("{s}* __tmp_ptr = malloc(sizeof({s})); ", .{c_type, c_type});
+                    try writer.print("{s}* __tmp_ptr = malloc(sizeof({s})); ", .{ c_type, c_type });
 
                     // Initialize if value provided
                     if (l.elements.len == 1) {
@@ -1369,12 +1404,12 @@ pub const SimpleCCompiler = struct {
                             // Check if there's an init value (element count is 3)
                             if (l.elements.len == 3) {
                                 // Initialized array: {init_val, init_val, ...}
-                                try writer.print("({{ {s} __tmp_arr[{d}]; for (size_t __i = 0; __i < {d}; __i++) __tmp_arr[__i] = ", .{elem_c_type, array_type.size, array_type.size});
+                                try writer.print("({{ {s} __tmp_arr[{d}]; for (size_t __i = 0; __i < {d}; __i++) __tmp_arr[__i] = ", .{ elem_c_type, array_type.size, array_type.size });
                                 try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
                                 try writer.print("; __tmp_arr; }})", .{});
                             } else {
                                 // Uninitialized array - just declare it
-                                try writer.print("({{ {s} __tmp_arr[{d}]; __tmp_arr; }})", .{elem_c_type, array_type.size});
+                                try writer.print("({{ {s} __tmp_arr[{d}]; __tmp_arr; }})", .{ elem_c_type, array_type.size });
                             }
                             return;
                         }
@@ -1400,7 +1435,7 @@ pub const SimpleCCompiler = struct {
 
                             if (l.elements.len == 3) {
                                 // With initialization
-                                try writer.print("({{ {s}* __arr = ({s}*)malloc(", .{elem_c_type, elem_c_type});
+                                try writer.print("({{ {s}* __arr = ({s}*)malloc(", .{ elem_c_type, elem_c_type });
                                 try self.writeExpressionTyped(writer, size_typed, ns_ctx, includes);
                                 try writer.print(" * sizeof({s})); for (size_t __i = 0; __i < ", .{elem_c_type});
                                 try self.writeExpressionTyped(writer, size_typed, ns_ctx, includes);
@@ -1756,11 +1791,7 @@ pub const SimpleCCompiler = struct {
                             if (std.mem.eql(u8, first.symbol, "Pointer")) {
                                 const pointee = complex_type_iter.next() orelse return Error.UnsupportedExpression;
                                 if (!pointee.isSymbol()) return Error.UnsupportedExpression;
-                                const ptr_type_str = try std.fmt.allocPrint(
-                                    self.allocator.*,
-                                    "{s}*",
-                                    .{pointee.symbol}
-                                );
+                                const ptr_type_str = try std.fmt.allocPrint(self.allocator.*, "{s}*", .{pointee.symbol});
                                 break :blk ptr_type_str;
                             } else {
                                 return Error.UnsupportedType;
@@ -2275,11 +2306,7 @@ pub const SimpleCCompiler = struct {
             .pointer => |pointee| {
                 const pointee_c_type = try self.cTypeFor(pointee.*, includes);
                 // Allocate string for "pointee_type*"
-                const ptr_type_str = try std.fmt.allocPrint(
-                    self.allocator.*,
-                    "{s}*",
-                    .{pointee_c_type}
-                );
+                const ptr_type_str = try std.fmt.allocPrint(self.allocator.*, "{s}*", .{pointee_c_type});
                 return ptr_type_str;
             },
             .c_string => "const char*",
@@ -2331,20 +2358,7 @@ test "simple c compiler basic program" {
     const output = try compiler.compileString(source, .executable);
 
     const expected =
-        "#include <stdio.h>\n\n"
-        ++ "typedef struct {\n"
-        ++ "    long long answer;\n"
-        ++ "} Namespace_my_app;\n\n"
-        ++ "Namespace_my_app g_my_app;\n\n\n"
-        ++ "void init_namespace_my_app(Namespace_my_app* ns) {\n"
-        ++ "    ns->answer = 41;\n"
-        ++ "}\n\n"
-        ++ "int main() {\n"
-        ++ "    init_namespace_my_app(&g_my_app);\n"
-        ++ "    // namespace my.app\n"
-        ++ "    printf(\"%lld\\n\", (g_my_app.answer + 1));\n"
-        ++ "    return 0;\n"
-        ++ "}\n";
+        "#include <stdio.h>\n\n" ++ "typedef struct {\n" ++ "    long long answer;\n" ++ "} Namespace_my_app;\n\n" ++ "Namespace_my_app g_my_app;\n\n\n" ++ "void init_namespace_my_app(Namespace_my_app* ns) {\n" ++ "    ns->answer = 41;\n" ++ "}\n\n" ++ "int main() {\n" ++ "    init_namespace_my_app(&g_my_app);\n" ++ "    // namespace my.app\n" ++ "    printf(\"%lld\\n\", (g_my_app.answer + 1));\n" ++ "    return 0;\n" ++ "}\n";
 
     try std.testing.expectEqualStrings(expected, output);
 }
@@ -2357,11 +2371,7 @@ test "simple c compiler fibonacci program with zig cc" {
     var compiler = SimpleCCompiler.init(&allocator);
 
     const source =
-        "(ns demo.core)\n"
-        ++ "(def f0 (: Int) 0)\n"
-        ++ "(def f1 (: Int) 1)\n"
-        ++ "(def fib (: (-> [Int] Int)) (fn [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))\n"
-        ++ "(fib 10)";
+        "(ns demo.core)\n" ++ "(def f0 (: Int) 0)\n" ++ "(def f1 (: Int) 1)\n" ++ "(def fib (: (-> [Int] Int)) (fn [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))\n" ++ "(fib 10)";
 
     const c_source = try compiler.compileString(source, .executable);
 
@@ -2384,7 +2394,7 @@ test "simple c compiler fibonacci program with zig cc" {
     const exe_path = try tmp.dir.realpathAlloc(std.testing.allocator, exe_name);
     defer std.testing.allocator.free(exe_path);
 
-    var run_child = std.process.Child.init(&.{ exe_path }, std.testing.allocator);
+    var run_child = std.process.Child.init(&.{exe_path}, std.testing.allocator);
     run_child.stdout_behavior = .Pipe;
     try run_child.spawn();
 
@@ -2582,7 +2592,7 @@ pub fn main() !void {
 
     if (!run_flag) return;
 
-    var run_child = std.process.Child.init(&.{ exe_real_path }, allocator);
+    var run_child = std.process.Child.init(&.{exe_real_path}, allocator);
     run_child.stdin_behavior = .Inherit;
     run_child.stdout_behavior = .Inherit;
     run_child.stderr_behavior = .Inherit;

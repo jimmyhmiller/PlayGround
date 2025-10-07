@@ -58,13 +58,7 @@ pub const Parser = struct {
 
     fn expect(self: *Parser, expected: TokenType) ParseError!Token {
         if (self.current_token.type != expected) {
-            std.debug.print("Parse error at line {d}, column {d}: Expected {s} but got {s} ('{s}')\n", .{
-                self.current_token.line,
-                self.current_token.column,
-                @tagName(expected),
-                @tagName(self.current_token.type),
-                self.current_token.lexeme
-            });
+            std.debug.print("Parse error at line {d}, column {d}: Expected {s} but got {s} ('{s}')\n", .{ self.current_token.line, self.current_token.column, @tagName(expected), @tagName(self.current_token.type), self.current_token.lexeme });
             return ParseError.UnexpectedToken;
         }
         const token = self.current_token;
@@ -112,7 +106,7 @@ pub const Parser = struct {
     fn parseString(self: *Parser) ParseError!*Value {
         const token = try self.expect(.string);
         // Remove quotes and handle escape sequences
-        const content = token.lexeme[1..token.lexeme.len-1];
+        const content = token.lexeme[1 .. token.lexeme.len - 1];
 
         // For now, simple handling - could expand to handle escape sequences
         return try value.createString(self.allocator.*, content);

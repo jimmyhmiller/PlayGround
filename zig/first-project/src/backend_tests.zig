@@ -846,3 +846,108 @@ test "pointer - type checking catches wrong pointer type assignment" {
     // Should have errors - can't write String to Pointer Int
     try std.testing.expect(report.errors.items.len > 0);
 }
+
+// ============================================================================
+// C-FOR BACKEND CODE GENERATION TESTS
+// ============================================================================
+
+test "c-for - compiles with U32" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    const code = "(c-for [i (: U32) 0] (< i 10) (+ i 1) nil)";
+    const expr = try reader.readString(code);
+
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+    const typed = try checker.typeCheck(expr);
+
+    // Verify it type-checked as void
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - compiles with different integer types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+
+    const test_cases = [_][]const u8{
+        "(c-for [i (: U8) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: U16) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: U32) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: U64) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: I8) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: I16) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: I32) 0] (< i 10) (+ i 1) nil)",
+        "(c-for [i (: I64) 0] (< i 10) (+ i 1) nil)",
+    };
+
+    for (test_cases) |tc| {
+        const expr = try reader.readString(tc);
+
+        var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+        defer checker.deinit();
+        const typed = try checker.typeCheck(expr);
+
+        try std.testing.expect(typed.getType() == .void);
+    }
+}
+
+test "c-for - compiles with float types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+
+    const test_cases = [_][]const u8{
+        "(c-for [x (: F32) 0.0] (< x 10.0) (+ x 0.5) nil)",
+        "(c-for [x (: F64) 0.0] (< x 10.0) (+ x 0.5) nil)",
+    };
+
+    for (test_cases) |tc| {
+        const expr = try reader.readString(tc);
+
+        var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+        defer checker.deinit();
+        const typed = try checker.typeCheck(expr);
+
+        try std.testing.expect(typed.getType() == .void);
+    }
+}
+
+test "c-for - compiles with nil step" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    const code = "(c-for [i (: U32) 0] (< i 10) nil nil)";
+    const expr = try reader.readString(code);
+
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+    const typed = try checker.typeCheck(expr);
+
+    try std.testing.expect(typed.getType() == .void);
+}
+
+test "c-for - compiles nested loops" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    const code = "(c-for [i (: U32) 0] (< i 10) (+ i 1) (c-for [j (: U32) 0] (< j 5) (+ j 1) nil))";
+    const expr = try reader.readString(code);
+
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+    const typed = try checker.typeCheck(expr);
+
+    try std.testing.expect(typed.getType() == .void);
+}
