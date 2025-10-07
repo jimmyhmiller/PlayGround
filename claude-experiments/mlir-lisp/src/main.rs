@@ -1,4 +1,4 @@
-use mlir_lisp::{parser, mlir_context::MlirContext, emitter::Emitter, macro_expander::MacroExpander};
+use mlir_lisp::{parser, mlir_context::MlirContext, emitter::Emitter, macro_expander::MacroExpander, expr_compiler::ExprCompiler, function_registry::FunctionRegistry};
 use melior::{
     pass::PassManager,
     ExecutionEngine,
@@ -6,6 +6,55 @@ use melior::{
 };
 use std::fs;
 use std::env;
+
+/// Parse function signature from defn form (for registration)
+/// Returns: (name, arg_types, return_type)
+fn parse_defn_signature<'c>(
+    emitter: &Emitter<'c>,
+    args: &[parser::Value],
+) -> Result<Option<(String, Vec<melior::ir::Type<'c>>, melior::ir::Type<'c>)>, Box<dyn std::error::Error>> {
+    if args.len() < 2 {
+        return Ok(None);
+    }
+
+    // Parse function name
+    let name = match &args[0] {
+        parser::Value::Symbol(s) => s.clone(),
+        _ => return Ok(None),
+    };
+
+    // Parse argument types
+    let mut arg_types = vec![];
+    if let parser::Value::Vector(params) = &args[1] {
+        for param in params {
+            if let parser::Value::Symbol(param_str) = param {
+                let parts: Vec<&str> = param_str.split(':').collect();
+                if parts.len() == 2 {
+                    arg_types.push(emitter.parse_type(parts[1])?);
+                } else {
+                    // Default to i32
+                    arg_types.push(emitter.parse_type("i32")?);
+                }
+            }
+        }
+    }
+
+    // Parse return type (if specified)
+    let ret_type = if args.len() > 2 {
+        if let parser::Value::Symbol(s) = &args[2] {
+            match emitter.parse_type(s) {
+                Ok(t) => t,
+                Err(_) => emitter.parse_type("i32")?,
+            }
+        } else {
+            emitter.parse_type("i32")?
+        }
+    } else {
+        emitter.parse_type("i32")?
+    };
+
+    Ok(Some((name, arg_types, ret_type)))
+}
 
 /// Process a defmacro form
 /// Syntax: (defmacro name [params...] body)
@@ -51,6 +100,7 @@ fn emit_defn<'c>(
     emitter: &mut Emitter<'c>,
     module: &melior::ir::Module<'c>,
     args: &[parser::Value],
+    registry: &FunctionRegistry<'c>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() < 3 {
         return Err("defn requires at least: name, args vector, return type".into());
@@ -62,37 +112,58 @@ fn emit_defn<'c>(
         _ => return Err("defn name must be a symbol".into()),
     };
 
-    // Parse arguments [x:i32 y:i32]
+    // Parse arguments [x:i32 y:i32] or [x y] (defaults to i32)
     let mut arg_names = vec![];
     let mut arg_types = vec![];
     if let parser::Value::Vector(params) = &args[1] {
         for param in params {
             if let parser::Value::Symbol(param_str) = param {
-                // Parse "x:i32" format
+                // Parse "x:i32" format or just "x" (defaults to i32)
                 let parts: Vec<&str> = param_str.split(':').collect();
-                if parts.len() != 2 {
-                    return Err(format!("Argument must be in format name:type, got: {}", param_str).into());
+                if parts.len() == 2 {
+                    arg_names.push(parts[0].to_string());
+                    arg_types.push(emitter.parse_type(parts[1])?);
+                } else if parts.len() == 1 {
+                    // Default to i32
+                    arg_names.push(parts[0].to_string());
+                    arg_types.push(emitter.parse_type("i32")?);
+                } else {
+                    return Err(format!("Argument must be name or name:type, got: {}", param_str).into());
                 }
-                arg_names.push(parts[0].to_string());
-                arg_types.push(emitter.parse_type(parts[1])?);
             } else {
-                return Err("Arguments must be symbols in name:type format".into());
+                return Err("Arguments must be symbols".into());
             }
         }
     } else {
         return Err("defn arguments must be a vector".into());
     }
 
-    // Parse return type
-    let ret_type = match &args[2] {
-        parser::Value::Symbol(s) => emitter.parse_type(s)?,
-        _ => return Err("defn return type must be a symbol".into()),
+    // Parse return type - if args[2] is a symbol that looks like a type, use it
+    // Otherwise, default to i32 and args[2] is part of the body
+    let (ret_type, body_start) = if args.len() > 2 {
+        if let parser::Value::Symbol(s) = &args[2] {
+            // Check if this looks like a type
+            match emitter.parse_type(s) {
+                Ok(t) => (t, 3),
+                Err(_) => (emitter.parse_type("i32")?, 2), // Not a type, part of body
+            }
+        } else {
+            // Not a symbol, must be part of body
+            (emitter.parse_type("i32")?, 2)
+        }
+    } else {
+        // Only 2 args means args[2] onwards is the body (starting at index 2)
+        (emitter.parse_type("i32")?, 2)
     };
 
-    // Body starts at index 3
-    let body = &args[3..];
+    // Body starts at body_start
+    let body = &args[body_start..];
 
-    // Check if body uses blocks
+    if body.is_empty() {
+        return Err("defn requires a body".into());
+    }
+
+    // Check if body uses blocks or is a single expression
     let has_blocks = body.iter().any(|v| {
         if let parser::Value::List(elements) = v {
             if let Some(parser::Value::Symbol(s)) = elements.first() {
@@ -102,11 +173,91 @@ fn emit_defn<'c>(
         false
     });
 
-    if has_blocks {
+    // Check if body is a single expression (natural syntax)
+    let is_single_expr = body.len() == 1 && !has_blocks;
+
+    if is_single_expr {
+        // Expression-based function
+        emit_expr_function(emitter, module, name, &arg_names, &arg_types, ret_type, &body[0], registry)?;
+    } else if has_blocks {
         emitter.emit_function_with_blocks_and_args(module, name, &arg_names, &arg_types, ret_type, body)?;
     } else {
         emitter.emit_function_with_args(module, name, &arg_names, &arg_types, ret_type, body)?;
     }
+
+    Ok(())
+}
+
+/// Emit a function with a single expression body (natural syntax)
+fn emit_expr_function<'c>(
+    emitter: &mut Emitter<'c>,
+    module: &melior::ir::Module<'c>,
+    name: &str,
+    arg_names: &[String],
+    arg_types: &[melior::ir::Type<'c>],
+    ret_type: melior::ir::Type<'c>,
+    body_expr: &parser::Value,
+    registry: &FunctionRegistry<'c>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use melior::ir::{
+        attribute::TypeAttribute,
+        operation::OperationBuilder,
+        r#type::FunctionType,
+        Block, BlockLike, Identifier, Location, Region, RegionLike,
+    };
+
+    // Create function type
+    let func_type = FunctionType::new(emitter.context(), arg_types, &[ret_type]);
+
+    // Create function
+    let region = Region::new();
+    let block_args: Vec<_> = arg_types.iter()
+        .map(|t| (*t, Location::unknown(emitter.context())))
+        .collect();
+    let entry_block_value = Block::new(&block_args);
+    region.append_block(entry_block_value);
+
+    // Get the block reference
+    let entry_block = region.first_block()
+        .ok_or("Failed to get entry block")?;
+
+    // Register function arguments in symbol table
+    for (i, arg_name) in arg_names.iter().enumerate() {
+        if let Ok(arg_val) = entry_block.argument(i) {
+            emitter.register_value(arg_name.clone(), arg_val.into());
+        }
+    }
+
+    // Compile the expression
+    let result_name = ExprCompiler::compile_expr(emitter, &entry_block, body_expr, registry)?;
+
+    // Emit return
+    let return_val = emitter.get_value(&result_name)
+        .ok_or(format!("Cannot find result value: {}", result_name))?;
+
+    let return_op = OperationBuilder::new("func.return", Location::unknown(emitter.context()))
+        .add_operands(&[return_val])
+        .build()
+        .map_err(|e| format!("Failed to build return: {:?}", e))?;
+
+    unsafe { entry_block.append_operation(return_op); }
+
+    let function = OperationBuilder::new("func.func", Location::unknown(emitter.context()))
+        .add_attributes(&[
+            (
+                Identifier::new(emitter.context(), "sym_name"),
+                melior::ir::attribute::StringAttribute::new(emitter.context(), name).into(),
+            ),
+            (
+                Identifier::new(emitter.context(), "function_type"),
+                TypeAttribute::new(func_type.into()).into(),
+            ),
+        ])
+        .add_regions([region])
+        .build()
+        .map_err(|e| format!("Failed to build function: {:?}", e))?;
+
+    module.body().append_operation(function);
 
     Ok(())
 }
@@ -275,6 +426,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
+    // PHASE 1: Register all function signatures (for forward references and recursion)
+    let mut registry = FunctionRegistry::new();
+    for value in &values {
+        if let parser::Value::List(elements) = value {
+            if let Some(parser::Value::Symbol(s)) = elements.first() {
+                if s == "defn" {
+                    // Parse function signature and register it
+                    match parse_defn_signature(&emitter, &elements[1..]) {
+                        Ok(Some((name, arg_types, ret_type))) => {
+                            registry.register(name, arg_types, ret_type);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            return Err(format!("Error parsing defn signature: {}", e).into());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Check if we have defn forms (function definitions)
     let has_defn = values.iter().any(|v| {
         if let parser::Value::List(elements) = v {
@@ -301,7 +473,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        emit_defn(&mut emitter, &module, &elements[1..])?;
+                        emit_defn(&mut emitter, &module, &elements[1..], &registry)?;
                     }
                 }
             }
@@ -337,6 +509,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Lower to LLVM dialect and execute
     println!("Lowering to LLVM...");
     let pm = PassManager::new(ctx.context());
+    // First convert SCF (Structured Control Flow) to CF (Control Flow)
+    pm.add_pass(melior::pass::conversion::create_scf_to_control_flow());
+    // Then lower everything to LLVM
     pm.add_pass(melior::pass::conversion::create_arith_to_llvm());
     pm.add_pass(melior::pass::conversion::create_control_flow_to_llvm());
     pm.add_pass(melior::pass::conversion::create_func_to_llvm());

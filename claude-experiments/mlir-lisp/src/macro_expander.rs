@@ -92,6 +92,15 @@ impl MacroExpander {
                             }
                             return self.expand_quasiquote(&elements[1]);
                         }
+                        // "if" is now handled at the expression compiler level using scf.if
+                        // No macro expansion needed
+                        // "if" => {
+                        //     // Expand if to block-based control flow
+                        //     if elements.len() != 4 {
+                        //         return Err("if requires: condition, then-expr, else-expr".into());
+                        //     }
+                        //     return self.expand_if(&elements[1], &elements[2], &elements[3]);
+                        // }
                         _ => {}
                     }
                 }
@@ -247,6 +256,45 @@ impl MacroExpander {
             }
             _ => Ok(template.clone()),
         }
+    }
+
+    /// Expand if to block-based control flow
+    /// (if cond then else) =>
+    /// (block entry [] cond-ops (cf.cond_br cond then else))
+    /// (block then [] then-ops (cf.br exit [result]))
+    /// (block else [] else-ops (cf.br exit [result]))
+    /// (block exit [type] (return ^0))
+    fn expand_if(&self, cond: &Value, then_expr: &Value, else_expr: &Value) -> Result<Value, String> {
+        // Generate unique block names
+        let entry = self.gensym("if_entry");
+        let then_block = self.gensym("then");
+        let else_block = self.gensym("else");
+        let exit_block = self.gensym("exit");
+        let cond_name = self.gensym("cond");
+        let then_result = self.gensym("then_result");
+        let else_result = self.gensym("else_result");
+
+        // Expand the sub-expressions
+        let cond_expanded = self.expand(cond)?;
+        let then_expanded = self.expand(then_expr)?;
+        let else_expanded = self.expand(else_expr)?;
+
+        // Build the block structure
+        // For now, return a special marker that tells the emitter to handle this specially
+        // Actually, let's return the block structure that the emitter expects
+
+        // Return a special list that marks this as an if-blocks form
+        Ok(Value::List(vec![
+            Value::Symbol("if-blocks".to_string()),
+            Value::Symbol(entry.clone()),
+            Value::Symbol(then_block.clone()),
+            Value::Symbol(else_block.clone()),
+            Value::Symbol(exit_block.clone()),
+            Value::Symbol(cond_name.clone()),
+            cond_expanded,
+            then_expanded,
+            else_expanded,
+        ]))
     }
 
     /// Expand all top-level forms
