@@ -53,6 +53,313 @@ impl MacroExpander {
         // For now, users can write their own macros using defmacro
     }
 
+    /// Check if a form is an IRDL dialect definition
+    fn is_irdl_form(&self, form: &Value) -> Option<&str> {
+        if let Value::List(elements) = form {
+            if let Some(Value::Symbol(name)) = elements.first() {
+                match name.as_str() {
+                    "defirdl-dialect" => return Some("defirdl-dialect"),
+                    "defirdl-op" => return Some("defirdl-op"),
+                    "import-dialect" => return Some("import-dialect"),
+                    "export-dialect" => return Some("export-dialect"),
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// Expand defirdl-dialect form
+    /// (defirdl-dialect name :namespace "ns" :description "desc" (defirdl-op ...) ...)
+    /// Expands to IRDL operations that register the dialect
+    fn expand_irdl_dialect(&self, elements: &[Value]) -> Result<Value, String> {
+        if elements.len() < 2 {
+            return Err("defirdl-dialect requires at least a name".into());
+        }
+
+        let dialect_name = match &elements[1] {
+            Value::Symbol(s) => s.clone(),
+            _ => return Err("defirdl-dialect name must be a symbol".into()),
+        };
+
+        let mut namespace = dialect_name.clone();
+        let mut description = String::new();
+        let mut ops = Vec::new();
+
+        // Parse keyword arguments and operations
+        let mut i = 2;
+        while i < elements.len() {
+            match &elements[i] {
+                Value::Keyword(kw) if kw == "namespace" => {
+                    if i + 1 < elements.len() {
+                        if let Value::String(s) = &elements[i + 1] {
+                            namespace = s.clone();
+                        }
+                        i += 2;
+                    } else {
+                        return Err(":namespace requires a value".into());
+                    }
+                }
+                Value::Keyword(kw) if kw == "description" => {
+                    if i + 1 < elements.len() {
+                        if let Value::String(s) = &elements[i + 1] {
+                            description = s.clone();
+                        }
+                        i += 2;
+                    } else {
+                        return Err(":description requires a value".into());
+                    }
+                }
+                Value::List(_) => {
+                    // This is an operation definition - expand it
+                    let expanded_op = self.expand_irdl_op(
+                        if let Value::List(op_elements) = &elements[i] {
+                            op_elements
+                        } else {
+                            &[]
+                        }
+                    )?;
+                    ops.push(expanded_op);
+                    i += 1;
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        // Generate IRDL IR
+        // We'll create a special form that the emitter recognizes
+        Ok(Value::List(vec![
+            Value::Symbol("irdl-dialect-definition".to_string()),
+            Value::String(dialect_name),
+            Value::String(namespace),
+            Value::String(description),
+            Value::Vector(ops),
+        ]))
+    }
+
+    /// Expand defirdl-op form
+    /// (defirdl-op name :operands [...] :results [...] :attributes [...] :traits [...])
+    /// Returns metadata for the operation
+    fn expand_irdl_op(&self, elements: &[Value]) -> Result<Value, String> {
+        if elements.len() < 2 {
+            return Err("defirdl-op requires at least a name".into());
+        }
+
+        let op_name = match &elements[1] {
+            Value::Symbol(s) => s.clone(),
+            _ => return Err("defirdl-op name must be a symbol".into()),
+        };
+
+        // Parse all keyword arguments
+        let mut summary = String::new();
+        let mut description = String::new();
+        let mut operands = Vec::new();
+        let mut results = Vec::new();
+        let mut attributes = Vec::new();
+        let mut traits = Vec::new();
+        let mut constraints = Vec::new();
+
+        let mut i = 2;
+        while i < elements.len() {
+            match &elements[i] {
+                Value::Keyword(kw) => {
+                    if i + 1 < elements.len() {
+                        match kw.as_str() {
+                            "summary" => {
+                                if let Value::String(s) = &elements[i + 1] {
+                                    summary = s.clone();
+                                }
+                            }
+                            "description" => {
+                                if let Value::String(s) = &elements[i + 1] {
+                                    description = s.clone();
+                                }
+                            }
+                            "operands" => {
+                                if let Value::Vector(v) = &elements[i + 1] {
+                                    operands = v.clone();
+                                }
+                            }
+                            "results" => {
+                                if let Value::Vector(v) = &elements[i + 1] {
+                                    results = v.clone();
+                                }
+                            }
+                            "attributes" => {
+                                if let Value::Vector(v) = &elements[i + 1] {
+                                    attributes = v.clone();
+                                }
+                            }
+                            "traits" => {
+                                if let Value::Vector(v) = &elements[i + 1] {
+                                    traits = v.clone();
+                                }
+                            }
+                            "constraints" => {
+                                if let Value::Vector(v) = &elements[i + 1] {
+                                    constraints = v.clone();
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 2;
+                    } else {
+                        return Err(format!(":{} requires a value", kw));
+                    }
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        // Return operation metadata
+        Ok(Value::List(vec![
+            Value::Symbol("irdl-op-definition".to_string()),
+            Value::String(op_name),
+            Value::Map(vec![
+                (Value::Keyword("summary".to_string()), Value::String(summary)),
+                (Value::Keyword("description".to_string()), Value::String(description)),
+                (Value::Keyword("operands".to_string()), Value::Vector(operands)),
+                (Value::Keyword("results".to_string()), Value::Vector(results)),
+                (Value::Keyword("attributes".to_string()), Value::Vector(attributes)),
+                (Value::Keyword("traits".to_string()), Value::Vector(traits)),
+                (Value::Keyword("constraints".to_string()), Value::Vector(constraints)),
+            ]),
+        ]))
+    }
+
+    /// Expand deftransform form
+    /// (deftransform name :description "..." body)
+    /// Expands to transform.sequence IR
+    fn expand_deftransform(&self, elements: &[Value]) -> Result<Value, String> {
+        if elements.len() < 3 {
+            return Err("deftransform requires name and body".into());
+        }
+
+        let transform_name = match &elements[1] {
+            Value::Symbol(s) => s.clone(),
+            _ => return Err("deftransform name must be a symbol".into()),
+        };
+
+        let mut description = String::new();
+        let mut body = None;
+
+        let mut i = 2;
+        while i < elements.len() {
+            match &elements[i] {
+                Value::Keyword(kw) if kw == "description" => {
+                    if i + 1 < elements.len() {
+                        if let Value::String(s) = &elements[i + 1] {
+                            description = s.clone();
+                        }
+                        i += 2;
+                    } else {
+                        return Err(":description requires a value".into());
+                    }
+                }
+                _ => {
+                    // Assume this is the body
+                    body = Some(elements[i].clone());
+                    i += 1;
+                }
+            }
+        }
+
+        let body = body.ok_or("deftransform requires a body")?;
+
+        Ok(Value::List(vec![
+            Value::Symbol("transform-definition".to_string()),
+            Value::String(transform_name),
+            Value::String(description),
+            body,
+        ]))
+    }
+
+    /// Expand defpdl-pattern form
+    /// (defpdl-pattern name :benefit N :match ... :rewrite ...)
+    /// Expands to PDL pattern IR
+    fn expand_pdl_pattern(&self, elements: &[Value]) -> Result<Value, String> {
+        if elements.len() < 2 {
+            return Err("defpdl-pattern requires at least a name".into());
+        }
+
+        let pattern_name = match &elements[1] {
+            Value::Symbol(s) => s.clone(),
+            _ => return Err("defpdl-pattern name must be a symbol".into()),
+        };
+
+        let mut benefit = 1;
+        let mut description = String::new();
+        let mut match_body = None;
+        let mut rewrite_body = None;
+        let mut constraint_body = Vec::new();
+
+        let mut i = 2;
+        while i < elements.len() {
+            match &elements[i] {
+                Value::Keyword(kw) => {
+                    match kw.as_str() {
+                        "benefit" => {
+                            if i + 1 < elements.len() {
+                                if let Value::Integer(n) = &elements[i + 1] {
+                                    benefit = *n;
+                                }
+                                i += 2;
+                            }
+                        }
+                        "description" => {
+                            if i + 1 < elements.len() {
+                                if let Value::String(s) = &elements[i + 1] {
+                                    description = s.clone();
+                                }
+                                i += 2;
+                            }
+                        }
+                        "match" => {
+                            if i + 1 < elements.len() {
+                                match_body = Some(elements[i + 1].clone());
+                                i += 2;
+                            }
+                        }
+                        "rewrite" => {
+                            if i + 1 < elements.len() {
+                                rewrite_body = Some(elements[i + 1].clone());
+                                i += 2;
+                            }
+                        }
+                        "constraint" => {
+                            if i + 1 < elements.len() {
+                                constraint_body.push(elements[i + 1].clone());
+                                i += 2;
+                            }
+                        }
+                        _ => {
+                            i += 1;
+                        }
+                    }
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        Ok(Value::List(vec![
+            Value::Symbol("pdl-pattern-definition".to_string()),
+            Value::String(pattern_name),
+            Value::Map(vec![
+                (Value::Keyword("benefit".to_string()), Value::Integer(benefit)),
+                (Value::Keyword("description".to_string()), Value::String(description)),
+                (Value::Keyword("match".to_string()), match_body.unwrap_or(Value::List(vec![]))),
+                (Value::Keyword("rewrite".to_string()), rewrite_body.unwrap_or(Value::List(vec![]))),
+                (Value::Keyword("constraints".to_string()), Value::Vector(constraint_body)),
+            ]),
+        ]))
+    }
+
     /// Define a macro
     pub fn define_macro(&mut self, name: String, params: Vec<String>, body: Value) {
         self.macros.insert(name, Macro { params, body });
@@ -91,6 +398,26 @@ impl MacroExpander {
                                 return Err("quasiquote requires exactly one argument".into());
                             }
                             return self.expand_quasiquote(&elements[1]);
+                        }
+                        "defirdl-dialect" => {
+                            // Expand IRDL dialect definition
+                            return self.expand_irdl_dialect(elements);
+                        }
+                        "defirdl-op" => {
+                            // Expand IRDL operation definition
+                            return self.expand_irdl_op(elements);
+                        }
+                        "deftransform" => {
+                            // Expand Transform dialect transformation
+                            return self.expand_deftransform(elements);
+                        }
+                        "defpdl-pattern" => {
+                            // Expand PDL pattern definition
+                            return self.expand_pdl_pattern(elements);
+                        }
+                        "import-dialect" | "export-dialect" | "import-transform" | "export-transform" | "export-pattern" => {
+                            // Pass through for now - will be handled by runtime
+                            return Ok(form.clone());
                         }
                         // "if" is now handled at the expression compiler level using scf.if
                         // No macro expansion needed
