@@ -11,6 +11,42 @@ path = "src/lib.rs"
 name = "mlir-lisp"
 path = "src/main.rs"
 
+[[example]]
+name = "custom_dialect_example"
+path = "examples/custom_dialect_example.rs"
+
+[[example]]
+name = "dialect_lowering_demo"
+path = "examples/dialect_lowering_demo.rs"
+
+[[example]]
+name = "highlevel_pipeline"
+path = "examples/highlevel_pipeline.rs"
+
+[[example]]
+name = "transform_dialect_demo"
+path = "examples/transform_dialect_demo.rs"
+
+[[example]]
+name = "meta_circular_demo"
+path = "examples/meta_circular_demo.rs"
+
+[[example]]
+name = "test_irdl_macros"
+path = "examples/test_irdl_macros.rs"
+
+[[example]]
+name = "complete_irdl_system"
+path = "examples/complete_irdl_system.rs"
+
+[[example]]
+name = "self_contained_demo"
+path = "examples/self_contained_demo.rs"
+
+[[example]]
+name = "modular_demo"
+path = "examples/modular_demo.rs"
+
 [dependencies]
 melior = "0.25"
 nom = "7.1"
