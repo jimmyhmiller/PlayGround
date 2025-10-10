@@ -364,6 +364,8 @@ pub const BidirectionalTypeChecker = struct {
         try self.builtins.put("c-binary-op", {});
         try self.builtins.put("c-unary-op", {});
         try self.builtins.put("c-fold-binary-op", {});
+        // FFI primitives
+        try self.builtins.put("printf", {});
     }
 
     pub fn deinit(self: *BidirectionalTypeChecker) void {
@@ -1808,6 +1810,57 @@ pub const BidirectionalTypeChecker = struct {
         return result;
     }
 
+    fn synthesizeTypedPrintf(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
+        _ = expr;
+
+        // printf takes: format string (required) and variable number of arguments
+        // printf returns I32 (number of characters printed)
+        var arg_node_opt = list.next;
+        if (arg_node_opt == null) {
+            return TypeCheckError.InvalidTypeAnnotation;
+        }
+
+        var arg_count: usize = 0;
+
+        // Type check all arguments
+        while (arg_node_opt) |node| {
+            // Skip empty nodes (sentinels at end of list)
+            if (node.tag == .empty) break;
+
+            const arg_expr = node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+            // First argument should be a c-string or string
+            if (arg_count == 0) {
+                const fmt_typed = try self.synthesizeTyped(arg_expr);
+                const fmt_type = fmt_typed.getType();
+                if (fmt_type != .c_string and fmt_type != .string) {
+                    return TypeCheckError.TypeMismatch;
+                }
+                storage[arg_count] = fmt_typed;
+            } else {
+                // Rest of the arguments can be any type (printf is variadic)
+                const arg_typed = try self.synthesizeTyped(arg_expr);
+                storage[arg_count] = arg_typed;
+            }
+
+            arg_count += 1;
+            if (arg_count >= storage.len) break;
+            arg_node_opt = node.next;
+        }
+
+        if (arg_count == 0) {
+            return TypeCheckError.InvalidTypeAnnotation;
+        }
+
+        // Return type is I32 (number of characters printed)
+        const result = try self.allocator.create(TypedValue);
+        result.* = TypedValue{ .list = .{
+            .elements = storage[0..arg_count],
+            .type = Type.i32,
+        } };
+        return result;
+    }
+
     fn synthesizeTypedBitwise(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
         _ = expr;
         const op = try getOperator(list);
@@ -3058,6 +3111,9 @@ pub const BidirectionalTypeChecker = struct {
                         } else if (std.mem.eql(u8, first.symbol, "c-str")) {
                             // c-str takes a string literal and returns CString (const char*)
                             return try self.synthesizeTypedCStr(expr, list, typed_elements);
+                        } else if (std.mem.eql(u8, first.symbol, "printf")) {
+                            // printf takes format string and variable arguments, returns I32
+                            return try self.synthesizeTypedPrintf(expr, list, typed_elements);
                         } else if (std.mem.eql(u8, first.symbol, "allocate")) {
                             // allocate takes a type and a value, returns (Pointer T)
                             const args_init = list.next; // Skip 'allocate'

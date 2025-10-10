@@ -80,7 +80,10 @@ pub const Parser = struct {
             .syntax_quote => self.parseSyntaxQuote(),
             .unquote => self.parseUnquote(),
             .unquote_splicing => self.parseUnquoteSplicing(),
-            else => ParseError.UnexpectedToken,
+            else => {
+                std.debug.print("Parse error at line {d}, column {d}: Unexpected token {s} ('{s}')\n", .{ self.current_token.line, self.current_token.column, @tagName(self.current_token.type), self.current_token.lexeme });
+                return ParseError.UnexpectedToken;
+            },
         };
     }
 

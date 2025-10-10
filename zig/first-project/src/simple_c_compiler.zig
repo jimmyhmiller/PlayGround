@@ -17,6 +17,7 @@ const IncludeFlags = struct {
     need_stdbool: bool = false,
     need_stddef: bool = false,
     need_stdlib: bool = false,
+    need_stdio: bool = false,
 };
 
 pub const SimpleCCompiler = struct {
@@ -415,9 +416,6 @@ pub const SimpleCCompiler = struct {
                     }
                     // If no init value, array is left uninitialized (or zero-initialized by C)
                 } else {
-                    // For regular variables, evaluate the expression
-                    try init_writer.print("    ns->{s} = ", .{sanitized_field});
-
                     // Get the value expression from the def
                     var iter = def.expr.list.iterator();
                     _ = iter.next(); // skip 'def'
@@ -439,35 +437,47 @@ pub const SimpleCCompiler = struct {
                     }
 
                     if (maybe_value) |value_expr| {
-                        // Check if this is a special form (let, while, c-for, if) - if so, use AST directly
-                        var use_ast_directly = false;
-                        if (value_expr.* == .list) {
-                            var val_iter = value_expr.list.iterator();
-                            if (val_iter.next()) |first_val| {
-                                if (first_val.isSymbol()) {
-                                    const op = first_val.symbol;
-                                    if (std.mem.eql(u8, op, "let") or
-                                        std.mem.eql(u8, op, "while") or
-                                        std.mem.eql(u8, op, "c-for") or
-                                        std.mem.eql(u8, op, "if")) {
-                                        use_ast_directly = true;
-                                    }
+                        // Check if this is a let expression - handle it specially using compound statement
+                        var is_let = false;
+                        if (value_expr.isList()) {
+                            var check_iter = value_expr.list.iterator();
+                            if (check_iter.next()) |first| {
+                                if (first.isSymbol() and std.mem.eql(u8, first.symbol, "let")) {
+                                    is_let = true;
                                 }
                             }
                         }
 
-                        // Use typed AST for code generation
-                        self.writeExpressionTyped(init_writer, def.typed, &init_ctx, &includes) catch |err| {
-                            switch (err) {
-                                Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
-                                    try init_writer.print("0; // unsupported expression\n", .{});
-                                    continue;
-                                },
-                                else => return err,
-                            }
-                        };
+                        if (is_let) {
+                            // Emit let as compound statement expression: ns->field = ({ bindings; body; });
+                            try init_writer.print("    ns->{s} = ", .{sanitized_field});
+                            self.emitLetAsCompoundStatement(init_writer, value_expr, def.typed, &init_ctx, &includes) catch |err| {
+                                switch (err) {
+                                    Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm, Error.InvalidDefinition => {
+                                        try init_writer.print("0; // unsupported let expression\n", .{});
+                                        continue;
+                                    },
+                                    else => return err,
+                                }
+                            };
+                            try init_writer.print(";\n", .{});
+                        } else {
+                            // For regular variables, evaluate the expression
+                            try init_writer.print("    ns->{s} = ", .{sanitized_field});
+
+                            // Use typed AST for code generation
+                            self.writeExpressionTyped(init_writer, def.typed, &init_ctx, &includes) catch |err| {
+                                switch (err) {
+                                    Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
+                                        try init_writer.print("0; // unsupported expression\n", .{});
+                                        continue;
+                                    },
+                                    else => return err,
+                                }
+                            };
+                            try init_writer.print(";\n", .{});
+                        }
                     }
-                    try init_writer.print(";\n", .{});
                 }
             }
 
@@ -1050,6 +1060,400 @@ pub const SimpleCCompiler = struct {
         }
     }
 
+    // Helper to emit let expressions as C compound statement expressions: ({ stmts; result; })
+    // This handles nested lets recursively by relying on writeExpressionTyped for the body
+    fn emitLetAsCompoundStatement(self: *SimpleCCompiler, writer: anytype, value_expr: *Value, typed: *TypedValue, ns_ctx: *NamespaceContext, includes: *IncludeFlags) Error!void {
+        _ = typed; // We'll use the untyped AST structure and recurse via writeExpressionTyped for typed code generation
+
+        // Check if this is a let expression
+        if (!value_expr.isList()) return Error.InvalidDefinition;
+
+        var expr_iter = value_expr.list.iterator();
+        const first = expr_iter.next() orelse return Error.InvalidDefinition;
+        if (!first.isSymbol() or !std.mem.eql(u8, first.symbol, "let")) {
+            return Error.InvalidDefinition;
+        }
+
+        // Get the bindings vector
+        const bindings_val = expr_iter.next() orelse return Error.InvalidDefinition;
+        if (!bindings_val.isVector()) return Error.InvalidDefinition;
+        const bindings_vec = bindings_val.vector;
+
+        if (bindings_vec.len() % 3 != 0) return Error.InvalidDefinition;
+        const binding_count = bindings_vec.len() / 3;
+
+        // Start compound statement expression
+        try writer.print("({{ ", .{});
+
+        // Emit each binding as a C variable declaration
+        var idx: usize = 0;
+        while (idx < binding_count) : (idx += 1) {
+            const name_val = bindings_vec.at(idx * 3);
+            const annotation_val = bindings_vec.at(idx * 3 + 1);
+            const init_val = bindings_vec.at(idx * 3 + 2);
+
+            if (!name_val.isSymbol()) return Error.InvalidDefinition;
+            const var_name = name_val.symbol;
+
+            // Parse type annotation to get C type
+            const var_type = try self.parseTypeFromAnnotation(annotation_val);
+            const sanitized = try self.sanitizeIdentifier(var_name);
+            defer self.allocator.*.free(sanitized);
+
+            // Special handling for function pointer types
+            // Function pointer: int32_t (*varname)(int32_t, int32_t) = ...
+            // vs regular type: int32_t varname = ...
+            const is_fn_ptr = (var_type == .pointer and var_type.pointer.* == .function) or var_type == .function;
+
+            if (is_fn_ptr) {
+                // For function pointers, we need to inject the variable name into the type
+                // Type format: "RetType (*)(Params)" -> "RetType (*varname)(Params)"
+                const fn_type = if (var_type == .pointer) var_type.pointer.function else var_type.function;
+                const ret_c_type = try self.cTypeFor(fn_type.return_type, includes);
+
+                // Build parameter list
+                var params_list = std.ArrayList(u8){};
+                defer params_list.deinit(self.allocator.*);
+                var params_writer = params_list.writer(self.allocator.*);
+
+                for (fn_type.param_types, 0..) |param_type, i| {
+                    if (i > 0) try params_writer.print(", ", .{});
+                    const param_c_type = try self.cTypeFor(param_type, includes);
+                    try params_writer.print("{s}", .{param_c_type});
+                }
+
+                // Emit: RetType (*varname)(Params) =
+                try writer.print("{s} (*{s})({s}) = ", .{ ret_c_type, sanitized, params_list.items });
+            } else {
+                const c_type = try self.cTypeFor(var_type, includes);
+                try writer.print("{s} {s} = ", .{ c_type, sanitized });
+            }
+
+            // Recursively emit the init value - it might be a nested let!
+            // For now, emit it as untyped (this is a limitation - we'd need the type checker's typed values for each binding)
+            try self.emitUntypedValueExpression(writer, init_val, ns_ctx, includes);
+            try writer.print("; ", .{});
+        }
+
+        // Emit the body - collect all expressions first
+        var body_exprs = std.ArrayList(*Value){};
+        defer body_exprs.deinit(self.allocator.*);
+
+        while (expr_iter.next()) |body_expr| {
+            try body_exprs.append(self.allocator.*, body_expr);
+        }
+
+        if (body_exprs.items.len == 0) return Error.InvalidDefinition;
+
+        // Emit all but the last expression as statements (with semicolons)
+        for (body_exprs.items[0..body_exprs.items.len - 1]) |stmt_expr| {
+            try self.emitUntypedValueExpression(writer, stmt_expr, ns_ctx, includes);
+            try writer.print("; ", .{});
+        }
+
+        // Emit the final expression as the return value (no semicolon)
+        const final_expr = body_exprs.items[body_exprs.items.len - 1];
+        try self.emitUntypedValueExpression(writer, final_expr, ns_ctx, includes);
+
+        // Close compound statement expression
+        try writer.print("; }})", .{});
+    }
+
+    // Simplified helper to emit untyped value expressions
+    fn emitUntypedValueExpression(self: *SimpleCCompiler, writer: anytype, expr: *Value, ns_ctx: *NamespaceContext, includes: *IncludeFlags) Error!void {
+        if (expr.isSymbol()) {
+            // Handle special symbols
+            if (std.mem.eql(u8, expr.symbol, "pointer-null")) {
+                try writer.print("NULL", .{});
+                return;
+            }
+            if (std.mem.eql(u8, expr.symbol, "true")) {
+                try writer.print("true", .{});
+                return;
+            }
+            if (std.mem.eql(u8, expr.symbol, "false")) {
+                try writer.print("false", .{});
+                return;
+            }
+
+            // Check if this symbol is a namespace field
+            if (ns_ctx.def_names.contains(expr.symbol)) {
+                if (ns_ctx.name) |_| {
+                    const sanitized_field = try self.sanitizeIdentifier(expr.symbol);
+                    defer self.allocator.*.free(sanitized_field);
+
+                    if (ns_ctx.in_init_function) {
+                        // In init function, use ns->field
+                        try writer.print("ns->{s}", .{sanitized_field});
+                    } else {
+                        // In regular code, use g_namespace.field
+                        const sanitized_ns = try self.sanitizeIdentifier(ns_ctx.name.?);
+                        defer self.allocator.*.free(sanitized_ns);
+                        try writer.print("g_{s}.{s}", .{ sanitized_ns, sanitized_field });
+                    }
+                    return;
+                }
+            }
+
+            const sanitized = try self.sanitizeIdentifier(expr.symbol);
+            defer self.allocator.*.free(sanitized);
+            try writer.print("{s}", .{sanitized});
+        } else if (expr.isInt()) {
+            try writer.print("{d}", .{expr.int});
+        } else if (expr.isFloat()) {
+            try writer.print("{d}", .{expr.float});
+        } else if (expr.isString()) {
+            try writer.print("\"{s}\"", .{expr.string});
+        } else if (expr.isList()) {
+            var list_iter = expr.list.iterator();
+            const first = list_iter.next() orelse return Error.MissingOperand;
+
+            if (first.isSymbol()) {
+                const op = first.symbol;
+
+                // Handle nested let recursively
+                if (std.mem.eql(u8, op, "let")) {
+                    // Recursively emit nested let as compound statement
+                    try self.emitLetAsCompoundStatement(writer, expr, undefined, ns_ctx, includes);
+                    return;
+                }
+
+                // Handle cast: (cast TargetType value)
+                if (std.mem.eql(u8, op, "cast")) {
+                    const type_expr = list_iter.next() orelse return Error.MissingOperand;
+                    const value_expr = list_iter.next() orelse return Error.MissingOperand;
+
+                    // Parse the target type
+                    const target_type = try self.parseTypeFromAnnotation_Simple(type_expr);
+                    const c_type = try self.cTypeFor(target_type, includes);
+
+                    // Emit cast: (TargetType)(value)
+                    try writer.print("(({s})(", .{c_type});
+                    try self.emitUntypedValueExpression(writer, value_expr, ns_ctx, includes);
+                    try writer.print("))", .{});
+                    return;
+                }
+
+                // Handle c-str: (c-str string) - cast string literal to const char*
+                if (std.mem.eql(u8, op, "c-str")) {
+                    const str_expr = list_iter.next() orelse return Error.MissingOperand;
+                    try writer.print("((const char*)", .{});
+                    try self.emitUntypedValueExpression(writer, str_expr, ns_ctx, includes);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                // Handle arithmetic operators
+                if (std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or
+                    std.mem.eql(u8, op, "*") or std.mem.eql(u8, op, "/") or
+                    std.mem.eql(u8, op, "%")) {
+                    try writer.print("(", .{});
+                    var first_arg = true;
+                    while (list_iter.next()) |arg| {
+                        if (!first_arg) {
+                            try writer.print(" {s} ", .{op});
+                        }
+                        try self.emitUntypedValueExpression(writer, arg, ns_ctx, includes);
+                        first_arg = false;
+                    }
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                // Assume it's a function call
+                const sanitized = try self.sanitizeIdentifier(op);
+                defer self.allocator.*.free(sanitized);
+                try writer.print("{s}(", .{sanitized});
+                var first_arg = true;
+                while (list_iter.next()) |arg| {
+                    if (!first_arg) {
+                        try writer.print(", ", .{});
+                    }
+                    try self.emitUntypedValueExpression(writer, arg, ns_ctx, includes);
+                    first_arg = false;
+                }
+                try writer.print(")", .{});
+                return;
+            }
+            std.debug.print("ERROR: Unsupported list form in let binding\n", .{});
+            return Error.UnsupportedExpression;
+        } else {
+            std.debug.print("ERROR: Unsupported value type in let: {s}\n", .{@tagName(expr.*)});
+            return Error.UnsupportedExpression;
+        }
+    }
+
+    // Helper to parse type from type annotation expression
+    fn parseTypeFromAnnotation(self: *SimpleCCompiler, annotation: *Value) Error!Type {
+        // Type annotation is (: Type)
+        if (!annotation.isList()) {
+            std.debug.print("ERROR: Type annotation is not a list: {s}\n", .{@tagName(annotation.*)});
+            return Error.InvalidTypeAnnotation;
+        }
+        var iter = annotation.list.iterator();
+        const first = iter.next() orelse {
+            std.debug.print("ERROR: Empty type annotation list\n", .{});
+            return Error.InvalidTypeAnnotation;
+        };
+        if (!first.isKeyword() or first.keyword.len != 0) {
+            std.debug.print("ERROR: Type annotation doesn't start with ':' keyword, got: {s}\n", .{@tagName(first.*)});
+            return Error.InvalidTypeAnnotation;
+        }
+
+        const type_expr = iter.next() orelse {
+            std.debug.print("ERROR: Type annotation missing type expression after ':'\n", .{});
+            return Error.InvalidTypeAnnotation;
+        };
+
+        // Parse basic types
+        if (type_expr.isSymbol()) {
+            const type_name = type_expr.symbol;
+            if (std.mem.eql(u8, type_name, "Int")) return Type.int;
+            if (std.mem.eql(u8, type_name, "Float")) return Type.float;
+            if (std.mem.eql(u8, type_name, "Bool")) return Type.bool;
+            if (std.mem.eql(u8, type_name, "String")) return Type.string;
+            if (std.mem.eql(u8, type_name, "I8")) return Type.i8;
+            if (std.mem.eql(u8, type_name, "I16")) return Type.i16;
+            if (std.mem.eql(u8, type_name, "I32")) return Type.i32;
+            if (std.mem.eql(u8, type_name, "I64")) return Type.i64;
+            if (std.mem.eql(u8, type_name, "U8")) return Type.u8;
+            if (std.mem.eql(u8, type_name, "U16")) return Type.u16;
+            if (std.mem.eql(u8, type_name, "U32")) return Type.u32;
+            if (std.mem.eql(u8, type_name, "U64")) return Type.u64;
+            if (std.mem.eql(u8, type_name, "F32")) return Type.f32;
+            if (std.mem.eql(u8, type_name, "F64")) return Type.f64;
+
+            // For unknown type names, treat them as extern types
+            // This is a hack - we create an extern type with the given name
+            const extern_type_ptr = try self.allocator.*.create(type_checker.ExternType);
+            extern_type_ptr.* = .{
+                .name = type_name,
+                .is_opaque = true, // Assume opaque since we don't have field info
+            };
+            return Type{ .extern_type = extern_type_ptr };
+        }
+
+        // For complex types (like Pointer, Array, etc.), we'd need more parsing
+        if (type_expr.isList()) {
+            var type_iter = type_expr.list.iterator();
+            if (type_iter.next()) |first_type| {
+                if (first_type.isSymbol()) {
+                    const type_constructor = first_type.symbol;
+
+                    // Handle (Pointer T)
+                    if (std.mem.eql(u8, type_constructor, "Pointer")) {
+                        const pointee_expr = type_iter.next() orelse {
+                            std.debug.print("ERROR: Pointer type missing pointee type\n", .{});
+                            return Error.InvalidTypeAnnotation;
+                        };
+                        const pointee_type = try self.parseTypeFromAnnotation_Simple(pointee_expr);
+                        const pointee_ptr = try self.allocator.*.create(Type);
+                        pointee_ptr.* = pointee_type;
+                        return Type{ .pointer = pointee_ptr };
+                    }
+
+                    std.debug.print("ERROR: Unsupported type constructor: {s}\n", .{type_constructor});
+                    return Error.InvalidTypeAnnotation;
+                }
+            }
+        }
+
+        std.debug.print("ERROR: Complex type annotation not supported yet: {s}\n", .{@tagName(type_expr.*)});
+        return Error.InvalidTypeAnnotation;
+    }
+
+    // Simplified type parser for pointee types (no type annotation wrapper)
+    fn parseTypeFromAnnotation_Simple(self: *SimpleCCompiler, type_expr: *Value) Error!Type {
+        if (type_expr.isSymbol()) {
+            const type_name = type_expr.symbol;
+            if (std.mem.eql(u8, type_name, "Int")) return Type.int;
+            if (std.mem.eql(u8, type_name, "Float")) return Type.float;
+            if (std.mem.eql(u8, type_name, "Bool")) return Type.bool;
+            if (std.mem.eql(u8, type_name, "String")) return Type.string;
+            if (std.mem.eql(u8, type_name, "Nil")) return Type.nil;
+            if (std.mem.eql(u8, type_name, "I8")) return Type.i8;
+            if (std.mem.eql(u8, type_name, "I16")) return Type.i16;
+            if (std.mem.eql(u8, type_name, "I32")) return Type.i32;
+            if (std.mem.eql(u8, type_name, "I64")) return Type.i64;
+            if (std.mem.eql(u8, type_name, "U8")) return Type.u8;
+            if (std.mem.eql(u8, type_name, "U16")) return Type.u16;
+            if (std.mem.eql(u8, type_name, "U32")) return Type.u32;
+            if (std.mem.eql(u8, type_name, "U64")) return Type.u64;
+            if (std.mem.eql(u8, type_name, "F32")) return Type.f32;
+            if (std.mem.eql(u8, type_name, "F64")) return Type.f64;
+
+            // For unknown type names, treat them as extern types
+            const extern_type_ptr = try self.allocator.*.create(type_checker.ExternType);
+            extern_type_ptr.* = .{
+                .name = type_name,
+                .is_opaque = true,
+            };
+            return Type{ .extern_type = extern_type_ptr };
+        }
+
+        // Handle nested complex types like (Pointer (Pointer T))
+        if (type_expr.isList()) {
+            var type_iter = type_expr.list.iterator();
+            if (type_iter.next()) |first_type| {
+                if (first_type.isSymbol()) {
+                    const type_constructor = first_type.symbol;
+
+                    // Handle (Pointer T) recursively
+                    if (std.mem.eql(u8, type_constructor, "Pointer")) {
+                        const pointee_expr = type_iter.next() orelse {
+                            std.debug.print("ERROR: Pointer type missing pointee type\n", .{});
+                            return Error.InvalidTypeAnnotation;
+                        };
+                        const pointee_type = try self.parseTypeFromAnnotation_Simple(pointee_expr);
+                        const pointee_ptr = try self.allocator.*.create(Type);
+                        pointee_ptr.* = pointee_type;
+                        return Type{ .pointer = pointee_ptr };
+                    }
+
+                    // Handle (-> [param_types...] return_type)
+                    if (std.mem.eql(u8, type_constructor, "->")) {
+                        const params_expr = type_iter.next() orelse {
+                            std.debug.print("ERROR: Function type missing parameter list\n", .{});
+                            return Error.InvalidTypeAnnotation;
+                        };
+                        const return_expr = type_iter.next() orelse {
+                            std.debug.print("ERROR: Function type missing return type\n", .{});
+                            return Error.InvalidTypeAnnotation;
+                        };
+
+                        // Parse parameter types
+                        if (!params_expr.isVector()) {
+                            std.debug.print("ERROR: Function parameter list must be a vector\n", .{});
+                            return Error.InvalidTypeAnnotation;
+                        }
+                        const params_vec = params_expr.vector;
+                        const param_types = try self.allocator.*.alloc(Type, params_vec.len());
+                        for (0..params_vec.len()) |i| {
+                            param_types[i] = try self.parseTypeFromAnnotation_Simple(params_vec.at(i));
+                        }
+
+                        // Parse return type
+                        const return_type = try self.parseTypeFromAnnotation_Simple(return_expr);
+
+                        // Create FunctionType on heap (Type.function expects *FunctionType)
+                        const fn_type_ptr = try self.allocator.*.create(type_checker.FunctionType);
+                        fn_type_ptr.* = type_checker.FunctionType{
+                            .param_types = param_types,
+                            .return_type = return_type,
+                        };
+                        return Type{ .function = fn_type_ptr };
+                    }
+
+                    std.debug.print("ERROR: Unsupported type constructor in simple parser: {s}\n", .{type_constructor});
+                    return Error.InvalidTypeAnnotation;
+                }
+            }
+        }
+
+        std.debug.print("ERROR: Unsupported simple type: {s}\n", .{@tagName(type_expr.*)});
+        return Error.InvalidTypeAnnotation;
+    }
+
     fn sanitizeIdentifier(self: *SimpleCCompiler, name: []const u8) ![]u8 {
         // Check if it's a C keyword
         const c_keywords = [_][]const u8{
@@ -1174,23 +1578,34 @@ pub const SimpleCCompiler = struct {
 
                 // Check for allocate operation (by type signature)
                 // allocate creates a list with 0-1 elements and pointer type
+                // BUT: distinguish from function calls that return pointers
+                // Function calls have the function as the first element
                 if ((l.elements.len == 0 or l.elements.len == 1) and l.type == .pointer) {
-                    const ptr_type = l.type;
-                    const pointee = ptr_type.pointer.*;
-                    includes.need_stdlib = true;
-                    try writer.print("({{ ", .{});
-                    const c_type = try self.cTypeFor(pointee, includes);
-                    try writer.print("{s}* __tmp_ptr = malloc(sizeof({s})); ", .{ c_type, c_type });
+                    // If we have 1 element and it's a symbol with function/pointer type, it's a function call, not allocate
+                    const is_function_call = if (l.elements.len == 1)
+                        (l.elements[0].getType() == .function or
+                         (l.elements[0].getType() == .pointer and l.elements[0].getType().pointer.* == .function))
+                    else
+                        false;
 
-                    // Initialize if value provided
-                    if (l.elements.len == 1) {
-                        try writer.print("*__tmp_ptr = ", .{});
-                        try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
-                        try writer.print("; ", .{});
+                    if (!is_function_call) {
+                        const ptr_type = l.type;
+                        const pointee = ptr_type.pointer.*;
+                        includes.need_stdlib = true;
+                        try writer.print("({{ ", .{});
+                        const c_type = try self.cTypeFor(pointee, includes);
+                        try writer.print("{s}* __tmp_ptr = malloc(sizeof({s})); ", .{ c_type, c_type });
+
+                        // Initialize if value provided
+                        if (l.elements.len == 1) {
+                            try writer.print("*__tmp_ptr = ", .{});
+                            try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                            try writer.print("; ", .{});
+                        }
+
+                        try writer.print("__tmp_ptr; }})", .{});
+                        return;
                     }
-
-                    try writer.print("__tmp_ptr; }})", .{});
-                    return;
                 }
 
                 // Check for deallocate first: 1 element (pointer), result type is nil
@@ -1277,11 +1692,18 @@ pub const SimpleCCompiler = struct {
                         }
                     }
                     // Check for address-of: 1 element (variable symbol), result type is pointer
+                    // BUT: exclude function calls (symbol with function type)
                     if (l.elements.len == 1 and l.elements[0].* == .symbol and l.type == .pointer) {
-                        try writer.print("(&", .{});
-                        try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
-                        try writer.print(")", .{});
-                        return;
+                        const sym_type = l.elements[0].symbol.type;
+                        const is_function_sym = sym_type == .function or
+                            (sym_type == .pointer and sym_type.pointer.* == .function);
+
+                        if (!is_function_sym) {
+                            try writer.print("(&", .{});
+                            try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                            try writer.print(")", .{});
+                            return;
+                        }
                     }
                     // Check for array operations by first element symbol
                     if (l.elements.len > 0 and l.elements[0].* == .symbol) {
@@ -1401,6 +1823,20 @@ pub const SimpleCCompiler = struct {
                             try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
                             try writer.print("] = ", .{});
                             try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                            try writer.print(")", .{});
+                            return;
+                        }
+
+                        // printf: (printf format-string ...args) -> printf(format, args...)
+                        if (std.mem.eql(u8, op, "printf") and l.type == .i32) {
+                            try writer.print("printf(", .{});
+
+                            // Emit all arguments (format string + variadic args)
+                            for (l.elements[1..], 0..) |arg, i| {
+                                if (i > 0) try writer.print(", ", .{});
+                                try self.writeExpressionTyped(writer, arg, ns_ctx, includes);
+                            }
+
                             try writer.print(")", .{});
                             return;
                         }
@@ -1788,11 +2224,54 @@ pub const SimpleCCompiler = struct {
             .f64 => "double",
             .struct_type => |st| st.name,
             .enum_type => |et| et.name,
+            .function => |fn_type| {
+                // Function pointer: ReturnType (*)(Param1Type, Param2Type, ...)
+                const ret_c_type = try self.cTypeFor(fn_type.return_type, includes);
+
+                // Build parameter list
+                var params_list = std.ArrayList([]const u8){};
+                defer params_list.deinit(self.allocator.*);
+
+                for (fn_type.param_types) |param_type| {
+                    const param_c_type = try self.cTypeFor(param_type, includes);
+                    try params_list.append(self.allocator.*, param_c_type);
+                }
+
+                // Join with ", "
+                const params = try std.mem.join(self.allocator.*, ", ", params_list.items);
+                defer self.allocator.free(params);
+
+                // Format final string
+                return try std.fmt.allocPrint(self.allocator.*, "{s} (*)({s})", .{ ret_c_type, params });
+            },
             .pointer => |pointee| {
-                const pointee_c_type = try self.cTypeFor(pointee.*, includes);
-                // Allocate string for "pointee_type*"
-                const ptr_type_str = try std.fmt.allocPrint(self.allocator.*, "{s}*", .{pointee_c_type});
-                return ptr_type_str;
+                // Special handling for pointer to function type
+                // In Lisp: (Pointer (-> [Args] Return)) represents a function pointer
+                // In C: ReturnType (*)(Args) is a function pointer
+                if (pointee.* == .function) {
+                    const fn_type = pointee.function;
+                    const ret_c_type = try self.cTypeFor(fn_type.return_type, includes);
+
+                    // Build parameter list
+                    var params_list = std.ArrayList([]const u8){};
+                    defer params_list.deinit(self.allocator.*);
+
+                    for (fn_type.param_types) |param_type| {
+                        const param_c_type = try self.cTypeFor(param_type, includes);
+                        try params_list.append(self.allocator.*, param_c_type);
+                    }
+
+                    const params = try std.mem.join(self.allocator.*, ", ", params_list.items);
+                    defer self.allocator.free(params);
+
+                    // Function pointer: ReturnType (*)(Params)
+                    return try std.fmt.allocPrint(self.allocator.*, "{s} (*)({s})", .{ ret_c_type, params });
+                } else {
+                    const pointee_c_type = try self.cTypeFor(pointee.*, includes);
+                    // Allocate string for "pointee_type*"
+                    const ptr_type_str = try std.fmt.allocPrint(self.allocator.*, "{s}*", .{pointee_c_type});
+                    return ptr_type_str;
+                }
             },
             .c_string => "const char*",
             .void => "void",
