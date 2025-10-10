@@ -476,7 +476,31 @@ pub const SimpleCCompiler = struct {
             // Emit static function definitions
             for (namespace_defs.items) |def| {
                 if (def.var_type == .function) {
-                    // Extract the function expression from the def (untyped AST)
+                    const sanitized_name = try self.sanitizeIdentifier(def.name);
+                    defer self.allocator.*.free(sanitized_name);
+
+                    // Use typed AST - extract from def.typed
+                    // def.typed is a list like (fn [params...] body...)
+                    if (def.typed.* != .list) continue;
+                    const typed_list = def.typed.list;
+                    if (typed_list.elements.len < 2) continue; // Need at least 'fn' and params
+
+                    // typed_list.elements[0] is the 'fn' symbol
+                    // typed_list.elements[1] is the params vector
+                    const params_typed = typed_list.elements[1];
+                    if (params_typed.* != .vector) continue;
+
+                    // Get all body expressions from typed AST (everything after params)
+                    const typed_body_count = typed_list.elements.len - 2;
+                    if (typed_body_count == 0) continue;
+
+                    // Emit the function
+                    const fn_type = def.var_type.function;
+                    const return_type_str = self.cTypeFor(fn_type.return_type, &includes) catch continue;
+
+                    try init_writer.print("static {s} {s}(", .{ return_type_str, sanitized_name });
+
+                    // Get param names from untyped AST for now
                     var def_iter = def.expr.list.iterator();
                     _ = def_iter.next(); // skip 'def'
                     _ = def_iter.next(); // skip name
@@ -491,19 +515,49 @@ pub const SimpleCCompiler = struct {
                             }
                         }
                     }
+                    if (maybe_fn_expr == null or !maybe_fn_expr.?.isList()) continue;
+                    var fn_iter = maybe_fn_expr.?.list.iterator();
+                    _ = fn_iter.next(); // skip 'fn'
+                    const params_val = fn_iter.next() orelse continue;
+                    if (!params_val.isVector()) continue;
+                    const params_vec = params_val.vector;
 
-                    // Extract the typed function expression from def.typed
-                    // def.typed is the typed body from the type checker (not the full def form)
-                    // It should be a list: (fn [params...] body...)
-                    const fn_typed = def.typed;
-
-                    if (maybe_fn_expr) |fn_expr| {
-                        // Use emitFunctionDefinition which handles both untyped and typed AST
-                        self.emitFunctionDefinition(init_writer, def.name, fn_expr, fn_typed, def.var_type, &includes) catch |err| {
-                            std.debug.print("Failed to emit namespace function {s}: {}\n", .{ def.name, err });
-                            continue;
-                        };
+                    for (fn_type.param_types, 0..) |param_type, i| {
+                        if (i > 0) try init_writer.print(", ", .{});
+                        const param_type_str = self.cTypeFor(param_type, &includes) catch continue;
+                        const param_val = params_vec.at(i);
+                        const sanitized_param = try self.sanitizeIdentifier(param_val.symbol);
+                        defer self.allocator.*.free(sanitized_param);
+                        try init_writer.print("{s} {s}", .{ param_type_str, sanitized_param });
                     }
+
+                    try init_writer.print(") {{\n", .{});
+
+                    // Create empty context for function bodies
+                    var fn_def_names = std.StringHashMap(void).init(self.allocator.*);
+                    defer fn_def_names.deinit();
+                    var fn_ctx = NamespaceContext{
+                        .name = null,
+                        .def_names = &fn_def_names,
+                    };
+
+                    // Write all body expressions except the last using typed AST
+                    for (typed_list.elements[2 .. typed_list.elements.len - 1]) |typed_stmt| {
+                        try init_writer.print("    ", .{});
+                        self.writeExpressionTyped(init_writer, typed_stmt, &fn_ctx, &includes) catch {
+                            try init_writer.print("/* unsupported statement */", .{});
+                        };
+                        try init_writer.print(";\n", .{});
+                    }
+
+                    // Write return statement with last expression using typed AST
+                    try init_writer.print("    return ", .{});
+                    const last_typed_expr = typed_list.elements[typed_list.elements.len - 1];
+                    self.writeExpressionTyped(init_writer, last_typed_expr, &fn_ctx, &includes) catch {
+                        try init_writer.print("0", .{});
+                    };
+
+                    try init_writer.print(";\n}}\n", .{});
                 }
             }
         }
@@ -1204,12 +1258,19 @@ pub const SimpleCCompiler = struct {
 
                 // Check for cast: 2 elements (cast marker symbol, value)
                 // cast generates: ((TargetType)value)
-                if (l.elements.len == 2 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "cast")) {
-                    const c_type = try self.cTypeFor(l.type, includes);
-                    try writer.print("(({s})", .{c_type});
-                    try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                    try writer.print(")", .{});
-                    return;
+                if (l.elements.len == 2) {
+                    std.debug.print("DEBUG TYPED: List with 2 elements, first = {s}\n", .{@tagName(l.elements[0].*)});
+                    if (l.elements[0].* == .symbol) {
+                        std.debug.print("DEBUG TYPED: Symbol name = '{s}'\n", .{l.elements[0].symbol.name});
+                        if (std.mem.eql(u8, l.elements[0].symbol.name, "cast")) {
+                            std.debug.print("DEBUG TYPED: Matched cast!\n", .{});
+                            const c_type = try self.cTypeFor(l.type, includes);
+                            try writer.print("(({s})", .{c_type});
+                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                            try writer.print(")", .{});
+                            return;
+                        }
+                    }
                 }
 
                 // Check for dereference: 1 element (pointer), result type is NOT pointer and NOT nil
@@ -1407,84 +1468,6 @@ pub const SimpleCCompiler = struct {
                     }
                 }
 
-                // Check for if expression (represented as 3-element list without 'if' symbol)
-                // Pattern: [cond, then, else] where cond is typically a list (comparison/function call)
-                if (l.elements.len == 3 and l.elements[0].* == .list) {
-                    // This is likely an if expression (cond then else)
-                    // Emit as C ternary: (cond ? then : else)
-                    try writer.print("(", .{});
-                    try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
-                    try writer.print(" ? ", .{});
-                    try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                    try writer.print(" : ", .{});
-                    try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                    try writer.print(")", .{});
-                    return;
-                }
-
-                // Check for arithmetic/comparison/logical operators
-                if (l.elements.len > 0 and l.elements[0].* == .symbol) {
-                    const op = l.elements[0].symbol.name;
-
-                    // Arithmetic operators: +, -, *, /, %
-                    if (std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or
-                        std.mem.eql(u8, op, "*") or std.mem.eql(u8, op, "/") or std.mem.eql(u8, op, "%")) {
-                        if (l.elements.len < 2) return Error.UnsupportedExpression;
-
-                        // Handle unary minus
-                        if (std.mem.eql(u8, op, "-") and l.elements.len == 2) {
-                            try writer.print("(-(", .{});
-                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                            try writer.print("))", .{});
-                            return;
-                        }
-
-                        try writer.print("(", .{});
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        var i: usize = 2;
-                        while (i < l.elements.len) : (i += 1) {
-                            try writer.print(" {s} ", .{op});
-                            try self.writeExpressionTyped(writer, l.elements[i], ns_ctx, includes);
-                        }
-                        try writer.print(")", .{});
-                        return;
-                    }
-
-                    // Comparison operators
-                    if (std.mem.eql(u8, op, "<") or std.mem.eql(u8, op, ">") or
-                        std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, ">=") or
-                        std.mem.eql(u8, op, "=") or std.mem.eql(u8, op, "!=")) {
-                        if (l.elements.len != 3) return Error.UnsupportedExpression;
-                        const c_op = if (std.mem.eql(u8, op, "=")) "==" else op;
-                        try writer.print("(", .{});
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        try writer.print(" {s} ", .{c_op});
-                        try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                        try writer.print(")", .{});
-                        return;
-                    }
-
-                    // Logical operators
-                    if (std.mem.eql(u8, op, "and") or std.mem.eql(u8, op, "or")) {
-                        if (l.elements.len != 3) return Error.UnsupportedExpression;
-                        const c_op = if (std.mem.eql(u8, op, "and")) "&&" else "||";
-                        try writer.print("(", .{});
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        try writer.print(" {s} ", .{c_op});
-                        try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                        try writer.print(")", .{});
-                        return;
-                    }
-
-                    if (std.mem.eql(u8, op, "not")) {
-                        if (l.elements.len != 2) return Error.UnsupportedExpression;
-                        try writer.print("(!(", .{});
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        try writer.print("))", .{});
-                        return;
-                    }
-                }
-
                 // Check if this is a function or function pointer application
                 // Function application has type .function or .pointer(.function) for the first element
                 if (l.elements.len > 0) {
@@ -1574,6 +1557,763 @@ pub const SimpleCCompiler = struct {
     }
 
     // writeExpression has been removed - all code generation now uses writeExpressionTyped with the typed AST
+
+    fn isArithmeticOperator(_: *SimpleCCompiler, symbol: []const u8) bool {
+                // Handle pointer-null
+                if (std.mem.eql(u8, sym, "pointer-null")) {
+                    try writer.print("NULL", .{});
+                    return;
+                }
+
+                // Handle boolean literals
+                if (std.mem.eql(u8, sym, "true")) {
+                    try writer.print("1", .{});
+                    return;
+                } else if (std.mem.eql(u8, sym, "false")) {
+                    try writer.print("0", .{});
+                    return;
+                }
+
+                // Check if this symbol is in the namespace
+                if (ns_ctx.def_names.contains(sym)) {
+                    if (ns_ctx.name) |_| {
+                        const sanitized_field = try self.sanitizeIdentifier(sym);
+                        defer self.allocator.*.free(sanitized_field);
+
+                        if (ns_ctx.in_init_function) {
+                            // In init function, use ns->field
+                            try writer.print("ns->{s}", .{sanitized_field});
+                        } else {
+                            // In regular code, use g_namespace.field
+                            const sanitized_ns = try self.sanitizeIdentifier(ns_ctx.name.?);
+                            defer self.allocator.*.free(sanitized_ns);
+                            try writer.print("g_{s}.{s}", .{ sanitized_ns, sanitized_field });
+                        }
+                        return;
+                    }
+                }
+                const sanitized = try self.sanitizeIdentifier(sym);
+                defer self.allocator.*.free(sanitized);
+                try writer.print("{s}", .{sanitized});
+            },
+            .keyword => |kw| try writer.print(":{s}", .{kw}),
+            .nil => try writer.print("0", .{}),
+            .namespace => |ns| try writer.print("/* namespace {s} */", .{ns.name}),
+            .vector => {
+                return Error.UnsupportedExpression;
+            },
+            .map => {
+                return Error.UnsupportedExpression;
+            },
+            .list => |list| {
+                var iter = list.iterator();
+                const head_val = iter.next() orelse return Error.UnsupportedExpression;
+                if (!head_val.isSymbol()) {
+                    std.debug.print("DEBUG writeExpression: List head is not symbol, type={s}\n", .{@tagName(head_val.*)});
+                    return Error.UnsupportedExpression;
+                }
+                const op = head_val.symbol;
+                std.debug.print("DEBUG writeExpression: Processing list with op='{s}'\n", .{op});
+
+                if (std.mem.eql(u8, op, "c-str")) {
+                    // c-str just passes through the string literal
+                    const str_expr = iter.next() orelse return Error.UnsupportedExpression;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+                    try self.writeExpression(writer, str_expr, ns_ctx);
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "cast")) {
+                    std.debug.print("DEBUG: Found cast in writeExpression\n", .{});
+                    // cast: (cast TargetType value)
+                    const type_expr = iter.next() orelse return Error.UnsupportedExpression;
+                    const value_expr = iter.next() orelse return Error.UnsupportedExpression;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    // Parse the type expression and convert to C type string
+                    try writer.print("((", .{});
+                    try self.writeTypeAsCast(writer, type_expr);
+                    try writer.print(")", .{});
+                    try self.writeExpression(writer, value_expr, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "if")) {
+                    const condition = iter.next() orelse return Error.InvalidIfForm;
+                    const then_expr = iter.next() orelse return Error.InvalidIfForm;
+                    const else_expr = iter.next() orelse return Error.InvalidIfForm;
+                    if (iter.next() != null) return Error.InvalidIfForm;
+
+                    try writer.print("((", .{});
+                    try self.writeExpression(writer, condition, ns_ctx);
+                    try writer.print(") ? (", .{});
+                    try self.writeExpression(writer, then_expr, ns_ctx);
+                    try writer.print(") : (", .{});
+                    try self.writeExpression(writer, else_expr, ns_ctx);
+                    try writer.print("))", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "while")) {
+                    const condition = iter.next() orelse return Error.UnsupportedExpression;
+
+                    // Use statement expression ({ ... })
+                    try writer.print("({{ while (", .{});
+                    try self.writeExpression(writer, condition, ns_ctx);
+                    try writer.print(") {{", .{});
+
+                    // Emit all body expressions
+                    while (iter.next()) |body_expr| {
+                        try writer.print(" ", .{});
+                        try self.writeExpression(writer, body_expr, ns_ctx);
+                        try writer.print(";", .{});
+                    }
+
+                    try writer.print(" }} }})", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "c-for")) {
+                    // (c-for [var (: Type) init] condition step body*)
+
+                    const init_binding = iter.next() orelse return Error.UnsupportedExpression;
+                    if (!init_binding.isVector() or init_binding.vector.len() != 3)
+                        return Error.UnsupportedExpression;
+
+                    const var_name = init_binding.vector.at(0);
+                    if (!var_name.isSymbol()) return Error.UnsupportedExpression;
+
+                    const type_annotation = init_binding.vector.at(1);
+                    const init_value = init_binding.vector.at(2);
+
+                    const condition = iter.next() orelse return Error.UnsupportedExpression;
+                    const step = iter.next() orelse return Error.UnsupportedExpression;
+
+                    // Parse the type annotation (: Type)
+                    if (!type_annotation.isList()) return Error.UnsupportedExpression;
+                    var type_iter = type_annotation.list.iterator();
+                    const colon = type_iter.next() orelse return Error.UnsupportedExpression;
+                    if (!colon.isKeyword() or colon.keyword.len != 0) return Error.UnsupportedExpression;
+
+                    const type_val = type_iter.next() orelse return Error.UnsupportedExpression;
+
+                    // Get C type from type value
+                    const c_type: []const u8 = if (type_val.isSymbol()) blk: {
+                        const type_str = type_val.symbol;
+                        break :blk if (std.mem.eql(u8, type_str, "Int"))
+                            int_type_name
+                        else if (std.mem.eql(u8, type_str, "Float"))
+                            "double"
+                        else if (std.mem.eql(u8, type_str, "U8"))
+                            "uint8_t"
+                        else if (std.mem.eql(u8, type_str, "U16"))
+                            "uint16_t"
+                        else if (std.mem.eql(u8, type_str, "U32"))
+                            "uint32_t"
+                        else if (std.mem.eql(u8, type_str, "U64"))
+                            "uint64_t"
+                        else if (std.mem.eql(u8, type_str, "I8"))
+                            "int8_t"
+                        else if (std.mem.eql(u8, type_str, "I16"))
+                            "int16_t"
+                        else if (std.mem.eql(u8, type_str, "I32"))
+                            "int32_t"
+                        else if (std.mem.eql(u8, type_str, "I64"))
+                            "int64_t"
+                        else if (std.mem.eql(u8, type_str, "F32"))
+                            "float"
+                        else if (std.mem.eql(u8, type_str, "F64"))
+                            "double"
+                        else
+                            return Error.UnsupportedExpression;
+                    } else {
+                        return Error.UnsupportedExpression;
+                    };
+
+                    const sanitized_var = try self.sanitizeIdentifier(var_name.symbol);
+                    defer self.allocator.*.free(sanitized_var);
+
+                    // Emit: ({ for (Type var = init; cond; step) { body } })
+                    try writer.print("({{ for ({s} {s} = ", .{ c_type, sanitized_var });
+                    try self.writeExpression(writer, init_value, ns_ctx);
+                    try writer.print("; ", .{});
+                    try self.writeExpression(writer, condition, ns_ctx);
+                    try writer.print("; ", .{});
+
+                    if (!step.isNil()) {
+                        try self.writeExpression(writer, step, ns_ctx);
+                    }
+
+                    try writer.print(") {{ ", .{});
+
+                    // Emit body
+                    while (iter.next()) |body_expr| {
+                        try self.writeExpression(writer, body_expr, ns_ctx);
+                        try writer.print("; ", .{});
+                    }
+
+                    try writer.print("}} }})", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "set!")) {
+                    // (set! var-name value) -> var_name = value
+                    const var_expr = iter.next() orelse return Error.UnsupportedExpression;
+                    const value_expr = iter.next() orelse return Error.UnsupportedExpression;
+
+                    if (!var_expr.isSymbol()) return Error.UnsupportedExpression;
+                    const var_name = var_expr.symbol;
+                    const sanitized_name = try self.sanitizeIdentifier(var_name);
+                    defer self.allocator.*.free(sanitized_name);
+
+                    try writer.print("({s} = ", .{sanitized_name});
+                    try self.writeExpression(writer, value_expr, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "let")) {
+                    // Parse let bindings: (let [x (: Type) value ...] body-expr*)
+                    const bindings_val = iter.next() orelse return Error.UnsupportedExpression;
+                    if (!bindings_val.isVector()) return Error.UnsupportedExpression;
+
+                    const bindings_vec = bindings_val.vector;
+                    const binding_count = bindings_vec.len();
+
+                    // Process bindings in groups of 3: name, type annotation, value
+                    // Format: ({ Type name1 = value1; Type name2 = value2; ...; body1; body2; ...; })
+                    try writer.print("({{", .{});
+
+                    var i: usize = 0;
+                    while (i < binding_count) {
+                        const name_val = bindings_vec.at(i);
+                        if (!name_val.isSymbol()) return Error.UnsupportedExpression;
+
+                        if (i + 1 >= binding_count) return Error.UnsupportedExpression;
+                        const type_annotation = bindings_vec.at(i + 1);
+                        if (!type_annotation.isList()) return Error.UnsupportedExpression;
+
+                        if (i + 2 >= binding_count) return Error.UnsupportedExpression;
+                        const value_val = bindings_vec.at(i + 2);
+
+                        // Parse the type annotation (: Type)
+                        var type_iter = type_annotation.list.iterator();
+                        const colon = type_iter.next() orelse return Error.UnsupportedExpression;
+                        if (!colon.isKeyword() or colon.keyword.len != 0) return Error.UnsupportedExpression;
+
+                        const type_val = type_iter.next() orelse return Error.UnsupportedExpression;
+
+                        // Parse the type - can be simple symbol or complex (Pointer T)
+                        const c_type: []const u8 = if (type_val.isSymbol()) blk: {
+                            const type_str = type_val.symbol;
+                            break :blk if (std.mem.eql(u8, type_str, "Int"))
+                                int_type_name
+                            else if (std.mem.eql(u8, type_str, "Float"))
+                                "double"
+                            else if (std.mem.eql(u8, type_str, "String"))
+                                "const char *"
+                            else if (std.mem.eql(u8, type_str, "Bool"))
+                                "bool"
+                            else if (std.mem.eql(u8, type_str, "U8"))
+                                "uint8_t"
+                            else if (std.mem.eql(u8, type_str, "U16"))
+                                "uint16_t"
+                            else if (std.mem.eql(u8, type_str, "U32"))
+                                "uint32_t"
+                            else if (std.mem.eql(u8, type_str, "U64"))
+                                "uint64_t"
+                            else if (std.mem.eql(u8, type_str, "I8"))
+                                "int8_t"
+                            else if (std.mem.eql(u8, type_str, "I16"))
+                                "int16_t"
+                            else if (std.mem.eql(u8, type_str, "I32"))
+                                "int32_t"
+                            else if (std.mem.eql(u8, type_str, "I64"))
+                                "int64_t"
+                            else if (std.mem.eql(u8, type_str, "F32"))
+                                "float"
+                            else if (std.mem.eql(u8, type_str, "F64"))
+                                "double"
+                            else
+                                // Custom type (struct/enum name) - use as-is
+                                type_str;
+                        } else if (type_val.isList()) blk: {
+                            // Handle complex types like (Pointer SDL_Event)
+                            var complex_type_iter = type_val.list.iterator();
+                            const first = complex_type_iter.next() orelse return Error.UnsupportedExpression;
+                            if (!first.isSymbol()) return Error.UnsupportedExpression;
+
+                            if (std.mem.eql(u8, first.symbol, "Pointer")) {
+                                const pointee = complex_type_iter.next() orelse return Error.UnsupportedExpression;
+                                if (!pointee.isSymbol()) return Error.UnsupportedExpression;
+                                const pointee_type = if (std.mem.eql(u8, pointee.symbol, "Nil")) "void" else pointee.symbol;
+                                const ptr_type_str = try std.fmt.allocPrint(self.allocator.*, "{s}*", .{pointee_type});
+                                break :blk ptr_type_str;
+                            } else {
+                                return Error.UnsupportedType;
+                            }
+                        } else {
+                            return Error.UnsupportedType;
+                        };
+
+                        const sanitized_name = try self.sanitizeIdentifier(name_val.symbol);
+                        defer self.allocator.*.free(sanitized_name);
+
+                        // Check if value is (uninitialized Type) - if so, don't initialize
+                        const is_uninitialized = blk: {
+                            if (value_val.isList()) {
+                                var val_iter = value_val.list.iterator();
+                                if (val_iter.next()) |first| {
+                                    if (first.isSymbol() and std.mem.eql(u8, first.symbol, "uninitialized")) {
+                                        break :blk true;
+                                    }
+                                }
+                            }
+                            break :blk false;
+                        };
+
+                        if (is_uninitialized) {
+                            // Just declare without initialization
+                            try writer.print(" {s} {s};", .{ c_type, sanitized_name });
+                        } else {
+                            // Normal initialization
+                            std.debug.print("DEBUG let binding: About to write value for '{s}', value type={s}\n", .{sanitized_name, @tagName(value_val.*)});
+                            try writer.print(" {s} {s} = ", .{ c_type, sanitized_name });
+                            try self.writeExpression(writer, value_val, ns_ctx);
+                            try writer.print(";", .{});
+                        }
+
+                        i += 3;
+                    }
+
+                    // Collect all body expressions first
+                    var body_exprs = std.ArrayList(*Value){};
+                    defer body_exprs.deinit(self.allocator.*);
+
+                    while (iter.next()) |body_expr| {
+                        try body_exprs.append(self.allocator.*, body_expr);
+                    }
+
+                    // Write body expressions - all get semicolons (statement expression syntax)
+                    for (body_exprs.items) |body_expr| {
+                        try writer.print(" ", .{});
+                        try self.writeExpression(writer, body_expr, ns_ctx);
+                        try writer.print(";", .{});
+                    }
+
+                    try writer.print(" }})", .{});
+                    return;
+                }
+
+                if (self.isComparisonOperator(op)) {
+                    const left = iter.next() orelse return Error.MissingOperand;
+                    const right = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(", .{});
+                    try self.writeExpression(writer, left, ns_ctx);
+                    // Convert = to == for C
+                    const c_op = if (std.mem.eql(u8, op, "=")) "==" else op;
+                    try writer.print(" {s} ", .{c_op});
+                    try self.writeExpression(writer, right, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (self.isLogicalOperator(op)) {
+                    if (std.mem.eql(u8, op, "not")) {
+                        // Unary operator
+                        const operand = iter.next() orelse return Error.MissingOperand;
+                        if (iter.next() != null) return Error.UnsupportedExpression;
+
+                        try writer.print("(!(", .{});
+                        try self.writeExpression(writer, operand, ns_ctx);
+                        try writer.print("))", .{});
+                        return;
+                    }
+
+                    // Binary operators: and, or
+                    const left = iter.next() orelse return Error.MissingOperand;
+                    const right = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    const c_op = if (std.mem.eql(u8, op, "and")) "&&" else "||";
+                    try writer.print("(", .{});
+                    try self.writeExpression(writer, left, ns_ctx);
+                    try writer.print(" {s} ", .{c_op});
+                    try self.writeExpression(writer, right, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (self.isBitwiseOperator(op)) {
+                    if (std.mem.eql(u8, op, "bit-not")) {
+                        // Unary operator
+                        const operand = iter.next() orelse return Error.MissingOperand;
+                        if (iter.next() != null) return Error.UnsupportedExpression;
+
+                        try writer.print("(~(", .{});
+                        try self.writeExpression(writer, operand, ns_ctx);
+                        try writer.print("))", .{});
+                        return;
+                    }
+
+                    // Binary operators
+                    const left = iter.next() orelse return Error.MissingOperand;
+                    const right = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    const c_op = if (std.mem.eql(u8, op, "bit-and"))
+                        "&"
+                    else if (std.mem.eql(u8, op, "bit-or"))
+                        "|"
+                    else if (std.mem.eql(u8, op, "bit-xor"))
+                        "^"
+                    else if (std.mem.eql(u8, op, "bit-shl"))
+                        "<<"
+                    else if (std.mem.eql(u8, op, "bit-shr"))
+                        ">>"
+                    else
+                        unreachable;
+
+                    try writer.print("(", .{});
+                    try self.writeExpression(writer, left, ns_ctx);
+                    try writer.print(" {s} ", .{c_op});
+                    try self.writeExpression(writer, right, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                // Pointer operations
+                if (std.mem.eql(u8, op, "allocate")) {
+                    // Simple allocate without initialization: (allocate Type)
+                    const type_arg = iter.next() orelse return Error.UnsupportedExpression;
+                    if (iter.next() != null) {
+                        // Has initialization value - needs writeExpressionTyped
+                        return Error.UnsupportedExpression;
+                    }
+
+                    // Generate malloc call
+                    if (!type_arg.isSymbol()) return Error.UnsupportedExpression;
+                    try writer.print("malloc(sizeof({s}))", .{type_arg.symbol});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "dereference")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(*", .{});
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-write!")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    const value_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(*", .{});
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
+                    try writer.print(" = ", .{});
+                    try self.writeExpression(writer, value_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "address-of")) {
+                    const var_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(&", .{});
+                    try self.writeExpression(writer, var_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                // Array operations for writeExpression
+                if (std.mem.eql(u8, op, "array-ref")) {
+                    const array_arg = iter.next() orelse return Error.MissingOperand;
+                    const index_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try self.writeExpression(writer, array_arg, ns_ctx);
+                    try writer.print("[", .{});
+                    try self.writeExpression(writer, index_arg, ns_ctx);
+                    try writer.print("]", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "array-set!")) {
+                    const array_arg = iter.next() orelse return Error.MissingOperand;
+                    const index_arg = iter.next() orelse return Error.MissingOperand;
+                    const value_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(", .{});
+                    try self.writeExpression(writer, array_arg, ns_ctx);
+                    try writer.print("[", .{});
+                    try self.writeExpression(writer, index_arg, ns_ctx);
+                    try writer.print("] = ", .{});
+                    try self.writeExpression(writer, value_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "array-length")) {
+                    _ = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    // For writeExpression we don't have type info, so we can't get the actual size
+                    // This should ideally use writeExpressionTyped instead
+                    return Error.UnsupportedExpression;
+                }
+
+                if (std.mem.eql(u8, op, "array-ptr")) {
+                    const array_arg = iter.next() orelse return Error.MissingOperand;
+                    const index_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(&", .{});
+                    try self.writeExpression(writer, array_arg, ns_ctx);
+                    try writer.print("[", .{});
+                    try self.writeExpression(writer, index_arg, ns_ctx);
+                    try writer.print("])", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-index-read")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    const index_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
+                    try writer.print("[", .{});
+                    try self.writeExpression(writer, index_arg, ns_ctx);
+                    try writer.print("]", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-index-write!")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    const index_arg = iter.next() orelse return Error.MissingOperand;
+                    const value_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(", .{});
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
+                    try writer.print("[", .{});
+                    try self.writeExpression(writer, index_arg, ns_ctx);
+                    try writer.print("] = ", .{});
+                    try self.writeExpression(writer, value_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-null")) {
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+                    try writer.print("NULL", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-field-read")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    const field_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
+                    try writer.print("->", .{});
+                    if (field_arg.isSymbol()) {
+                        const sanitized_field = try self.sanitizeIdentifier(field_arg.symbol);
+                        defer self.allocator.*.free(sanitized_field);
+                        try writer.print("{s}", .{sanitized_field});
+                    }
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-field-write!")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    const field_arg = iter.next() orelse return Error.MissingOperand;
+                    const value_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
+                    try writer.print("->", .{});
+                    if (field_arg.isSymbol()) {
+                        const sanitized_field = try self.sanitizeIdentifier(field_arg.symbol);
+                        defer self.allocator.*.free(sanitized_field);
+                        try writer.print("{s} = ", .{sanitized_field});
+                    }
+                    try self.writeExpression(writer, value_arg, ns_ctx);
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "pointer-equal?")) {
+                    const ptr1_arg = iter.next() orelse return Error.MissingOperand;
+                    const ptr2_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(", .{});
+                    try self.writeExpression(writer, ptr1_arg, ns_ctx);
+                    try writer.print(" == ", .{});
+                    try self.writeExpression(writer, ptr2_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "deallocate")) {
+                    const ptr_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("free(", .{});
+                    try self.writeExpression(writer, ptr_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                // C emission primitives
+                if (std.mem.eql(u8, op, "c-binary-op")) {
+                    const op_str_val = iter.next() orelse return Error.MissingOperand;
+                    if (!op_str_val.isString()) return Error.UnsupportedExpression;
+                    const c_op = op_str_val.string;
+
+                    const left_arg = iter.next() orelse return Error.MissingOperand;
+                    const right_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("(", .{});
+                    try self.writeExpression(writer, left_arg, ns_ctx);
+                    try writer.print(" {s} ", .{c_op});
+                    try self.writeExpression(writer, right_arg, ns_ctx);
+                    try writer.print(")", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "c-unary-op")) {
+                    const op_str_val = iter.next() orelse return Error.MissingOperand;
+                    if (!op_str_val.isString()) return Error.UnsupportedExpression;
+                    const c_op = op_str_val.string;
+
+                    const operand_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    try writer.print("({s}(", .{c_op});
+                    try self.writeExpression(writer, operand_arg, ns_ctx);
+                    try writer.print("))", .{});
+                    return;
+                }
+
+                if (std.mem.eql(u8, op, "c-fold-binary-op")) {
+                    const op_str_val = iter.next() orelse return Error.MissingOperand;
+                    if (!op_str_val.isString()) return Error.UnsupportedExpression;
+                    const c_op = op_str_val.string;
+
+                    var operands: [64]*Value = undefined;
+                    var count: usize = 0;
+                    while (iter.next()) |operand| {
+                        if (count >= operands.len) return Error.UnsupportedExpression;
+                        operands[count] = operand;
+                        count += 1;
+                    }
+
+                    if (count == 0) return Error.MissingOperand;
+
+                    try writer.writeAll("(");
+                    try self.writeExpression(writer, operands[0], ns_ctx);
+
+                    var idx: usize = 1;
+                    while (idx < count) : (idx += 1) {
+                        try writer.print(" {s} ", .{c_op});
+                        try self.writeExpression(writer, operands[idx], ns_ctx);
+                    }
+
+                    try writer.writeAll(")");
+                    return;
+                }
+
+                if (self.isArithmeticOperator(op)) {
+                    var operands: [64]*Value = undefined;
+                    var count: usize = 0;
+                    while (iter.next()) |operand| {
+                        if (count >= operands.len) return Error.UnsupportedExpression;
+                        operands[count] = operand;
+                        count += 1;
+                    }
+
+                    if (count == 0) return Error.MissingOperand;
+
+                    if (std.mem.eql(u8, op, "-") and count == 1) {
+                        try writer.writeAll("(-(");
+                        try self.writeExpression(writer, operands[0], ns_ctx);
+                        try writer.writeAll("))");
+                        return;
+                    }
+
+                    if (count == 1) return Error.MissingOperand;
+
+                    try writer.writeAll("(");
+                    try self.writeExpression(writer, operands[0], ns_ctx);
+
+                    var idx: usize = 1;
+                    while (idx < count) : (idx += 1) {
+                        try writer.print(" {s} ", .{op});
+                        try self.writeExpression(writer, operands[idx], ns_ctx);
+                    }
+
+                    try writer.writeAll(")");
+                    return;
+                }
+
+                // Field access: (. struct-expr field-name)
+                if (std.mem.eql(u8, op, ".")) {
+                    const struct_arg = iter.next() orelse return Error.MissingOperand;
+                    const field_arg = iter.next() orelse return Error.MissingOperand;
+                    if (iter.next() != null) return Error.UnsupportedExpression;
+
+                    if (!field_arg.isSymbol()) return Error.UnsupportedExpression;
+
+                    try self.writeExpression(writer, struct_arg, ns_ctx);
+                    try writer.print(".{s}", .{field_arg.symbol});
+                    return;
+                }
+
+                // Check if this is struct construction by looking up the op in type_defs
+                // We need the checker for this, but writeExpression doesn't have it
+                // For now, just emit as function call and we'll fix this separately
+
+                const sanitized_op = try self.sanitizeIdentifier(op);
+                defer self.allocator.*.free(sanitized_op);
+
+                // Check if this is a namespace function
+                if (ns_ctx.def_names.contains(op) and ns_ctx.name != null) {
+                    const sanitized_ns = try self.sanitizeIdentifier(ns_ctx.name.?);
+                    defer self.allocator.*.free(sanitized_ns);
+                    try writer.print("g_{s}.{s}(", .{ sanitized_ns, sanitized_op });
+                } else {
+                    try writer.print("{s}(", .{sanitized_op});
+                }
+                var is_first = true;
+                while (iter.next()) |arg| {
+                    if (!is_first) {
+                        try writer.print(", ", .{});
+                    }
+                    try self.writeExpression(writer, arg, ns_ctx);
+                    is_first = false;
+                }
+                try writer.writeAll(")");
+            },
+        }
+    }
+
+    fn isArithmeticOperator(_: *SimpleCCompiler, symbol: []const u8) bool {
+        return std.mem.eql(u8, symbol, "+") or
+            std.mem.eql(u8, symbol, "-") or
+            std.mem.eql(u8, symbol, "*") or
+            std.mem.eql(u8, symbol, "/") or
+            std.mem.eql(u8, symbol, "%");
+    }
 
     fn isComparisonOperator(_: *SimpleCCompiler, symbol: []const u8) bool {
         return std.mem.eql(u8, symbol, "<") or
