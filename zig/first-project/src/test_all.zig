@@ -10,6 +10,7 @@ const type_checker_comprehensive_tests = @import("type_checker_comprehensive_tes
 const struct_field_access_tests = @import("struct_field_access_tests.zig");
 const array_tests = @import("array_tests.zig");
 const macro_comprehensive_tests = @import("macro_comprehensive_tests.zig");
+const c_api_tests = @import("c_api_tests.zig");
 
 // Import all modules to include their inline tests
 const value = @import("value.zig");
@@ -22,6 +23,7 @@ const linked_list = @import("collections/linked_list.zig");
 const map = @import("collections/map.zig");
 const type_checker = @import("type_checker.zig");
 const simple_c_compiler = @import("simple_c_compiler.zig");
+const c_api = @import("c_api.zig");
 
 // Force test inclusion by referencing test blocks
 comptime {
@@ -34,6 +36,7 @@ comptime {
     std.testing.refAllDecls(struct_field_access_tests);
     std.testing.refAllDecls(array_tests);
     std.testing.refAllDecls(macro_comprehensive_tests);
+    std.testing.refAllDecls(c_api_tests);
     std.testing.refAllDecls(value);
     std.testing.refAllDecls(lexer);
     std.testing.refAllDecls(parser);
@@ -44,6 +47,7 @@ comptime {
     std.testing.refAllDecls(type_checker);
     std.testing.refAllDecls(simple_c_compiler);
     std.testing.refAllDecls(macro_expander);
+    std.testing.refAllDecls(c_api);
 }
 
 test "test runner working" {
