@@ -1,0 +1,50 @@
+{
+  "name": "Comments added around code",
+  "description": "Adding comments around code should not orphan notes",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/commented.rs",
+      "content": "fn process_data(data: &str) -> String {\n    data.to_uppercase()\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "add_note",
+      "file": "src/commented.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Data processing function",
+      "author": "Documenter",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/commented.rs",
+      "content": "/// Processes the input data\n/// Returns uppercase version\nfn process_data(data: &str) -> String {\n    data.to_uppercase()\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added doc comments"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Data processing function",
+      "file": "src/commented.rs",
+      "line": 3,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "name": "Unicode and special characters",
+  "description": "Test that notes can contain Unicode and special characters",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/i18n.rs",
+      "content": "pub fn greet(name: &str) -> String {\n    format!(\"Hello, {}!\", name)\n}\n\npub fn calculate(x: i32) -> i32 {\n    x * 2\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add i18n module"
+    },
+    {
+      "action": "add_note",
+      "file": "src/i18n.rs",
+      "line": 1,
+      "column": 0,
+      "content": "This function supports Unicode: 你好, مرحبا, שלום, Привет, こんにちは",
+      "author": "Intl Team",
+      "collection": "default"
+    },
+    {
+      "action": "add_note",
+      "file": "src/i18n.rs",
+      "line": 5,
+      "column": 0,
+      "content": "Special chars: !@#$%^&*(){}[]<>?/|\\~`+=",
+      "author": "Test User",
+      "collection": "default"
+    },
+    {
+      "action": "add_note",
+      "file": "src/i18n.rs",
+      "line": 2,
+      "column": 4,
+      "content": "Emoji support: 🚀 🎉 💡 ✅ ❌ 🔥",
+      "author": "Dev",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "This function supports Unicode: 你好, مرحبا, שלום, Привет, こんにちは",
+      "file": "src/i18n.rs",
+      "is_orphaned": false,
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Special chars: !@#$%^&*(){}[]<>?/|\\~`+=",
+      "file": "src/i18n.rs",
+      "is_orphaned": false,
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Emoji support: 🚀 🎉 💡 ✅ ❌ 🔥",
+      "file": "src/i18n.rs",
+      "is_orphaned": false,
+      "collection": "default"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 3,
+      "collection": "default"
+    }
+  ]
+}

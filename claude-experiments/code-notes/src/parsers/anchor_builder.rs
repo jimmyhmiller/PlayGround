@@ -21,6 +21,9 @@ impl<'a> AnchorBuilder<'a> {
             .map_err(|e| anyhow!("Failed to extract node text: {}", e))?
             .to_string();
 
+        let normalized_text = CodeAnchor::normalize_text(&node_text);
+        let semantic_id = self.extract_semantic_id(node);
+
         let start_position = node.start_position();
         let line_number = start_position.row;
         let column = start_position.column;
@@ -36,6 +39,8 @@ impl<'a> AnchorBuilder<'a> {
             column,
             ast_path,
             context,
+            semantic_id,
+            normalized_text,
         })
     }
 
@@ -59,21 +64,19 @@ impl<'a> AnchorBuilder<'a> {
         let mut alternatives = Vec::new();
 
         // Add parent node as alternative
-        if let Some(parent) = node.parent() {
-            if let Ok(anchor) = self.build_anchor(parent) {
+        if let Some(parent) = node.parent()
+            && let Ok(anchor) = self.build_anchor(parent) {
                 alternatives.push(anchor);
             }
-        }
 
         // Add named siblings as alternatives
         if let Some(parent) = node.parent() {
             let mut cursor = parent.walk();
             for sibling in parent.named_children(&mut cursor) {
-                if sibling.id() != node.id() {
-                    if let Ok(anchor) = self.build_anchor(sibling) {
+                if sibling.id() != node.id()
+                    && let Ok(anchor) = self.build_anchor(sibling) {
                         alternatives.push(anchor);
                     }
-                }
             }
         }
 
@@ -118,6 +121,77 @@ impl<'a> AnchorBuilder<'a> {
         }
 
         context
+    }
+
+    /// Extract semantic identifier from a node
+    /// This finds the "name" of functions, classes, variables, etc.
+    fn extract_semantic_id(&self, node: Node) -> Option<String> {
+        let kind = node.kind();
+
+        // Handle different node types across languages
+        match kind {
+            // Rust function definitions
+            "function_item" => self.find_child_text(node, "identifier"),
+
+            // Rust struct/enum/trait definitions
+            "struct_item" | "enum_item" | "trait_item" | "impl_item" => {
+                self.find_child_text(node, "type_identifier")
+            }
+
+            // Python function definitions
+            "function_definition" => self.find_child_text(node, "identifier"),
+
+            // Python class definitions
+            "class_definition" => self.find_child_text(node, "identifier"),
+
+            // JavaScript/TypeScript function declarations
+            "function_declaration" | "method_definition" | "function_signature" => {
+                self.find_child_text(node, "identifier")
+                    .or_else(|| self.find_child_text(node, "property_identifier"))
+            }
+
+            // JavaScript/TypeScript class declarations
+            "class_declaration" => self.find_child_text(node, "identifier")
+                .or_else(|| self.find_child_text(node, "type_identifier")),
+
+            // Generic identifier nodes - use their own text
+            "identifier" | "type_identifier" | "property_identifier" => {
+                node.utf8_text(self.source.as_bytes()).ok().map(|s| s.to_string())
+            }
+
+            // Variable declarations
+            "let_declaration" | "const_declaration" | "variable_declaration" => {
+                self.find_child_text(node, "identifier")
+            }
+
+            _ => None,
+        }
+    }
+
+    /// Find a child node of a specific kind and return its text
+    fn find_child_text(&self, node: Node, child_kind: &str) -> Option<String> {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == child_kind {
+                return child.utf8_text(self.source.as_bytes()).ok().map(|s| s.to_string());
+            }
+            // Recursively search in children (but only one level deep)
+            if let Some(text) = self.find_child_text_shallow(child, child_kind) {
+                return Some(text);
+            }
+        }
+        None
+    }
+
+    /// Helper for shallow recursive search
+    fn find_child_text_shallow(&self, node: Node, child_kind: &str) -> Option<String> {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == child_kind {
+                return child.utf8_text(self.source.as_bytes()).ok().map(|s| s.to_string());
+            }
+        }
+        None
     }
 }
 
@@ -166,7 +240,19 @@ impl<'a> AnchorMatcher<'a> {
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            self.find_candidates(child, kind, results);
+            AnchorMatcher::find_candidates_helper(child, kind, results);
+        }
+    }
+
+    // Helper function to avoid recursion warning on self parameter
+    fn find_candidates_helper(node: Node<'a>, kind: &str, results: &mut Vec<Node<'a>>) {
+        if node.kind() == kind {
+            results.push(node);
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            Self::find_candidates_helper(child, kind, results);
         }
     }
 }

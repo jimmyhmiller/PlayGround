@@ -1,0 +1,50 @@
+{
+  "name": "TypeScript file migration",
+  "description": "Test that notes on TypeScript code with types migrate correctly",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/math.ts",
+      "content": "function square(n: number): number {\n  return n * n;\n}\n\nfunction cube(n: number): number {\n  return n * n * n;\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial TypeScript code"
+    },
+    {
+      "action": "add_note",
+      "file": "src/math.ts",
+      "line": 1,
+      "column": 0,
+      "content": "Squares a number",
+      "author": "TSDev",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/math.ts",
+      "content": "// Mathematical operations\n\nfunction square(n: number): number {\n  return n * n;\n}\n\nfunction cube(n: number): number {\n  return n * n * n;\n}\n\nexport { square, cube };\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added exports"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Squares a number",
+      "file": "src/math.ts",
+      "line": 3,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

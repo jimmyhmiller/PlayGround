@@ -1,0 +1,64 @@
+{
+  "name": "Mixed migration results",
+  "description": "Some notes migrate successfully while others become orphaned",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/mixed.rs",
+      "content": "fn stable_function() {\n    println!(\"Stable\");\n}\n\nfn unstable_function() {\n    println!(\"Unstable\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "add_note",
+      "file": "src/mixed.rs",
+      "line": 1,
+      "column": 0,
+      "content": "This will stay",
+      "author": "Dev1",
+      "collection": "default"
+    },
+    {
+      "action": "add_note",
+      "file": "src/mixed.rs",
+      "line": 5,
+      "column": 0,
+      "content": "This will be orphaned",
+      "author": "Dev2",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/mixed.rs",
+      "content": "// Added header\n\nfn stable_function() {\n    println!(\"Stable\");\n}\n\nfn completely_different() {\n    println!(\"New logic\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Kept stable, changed unstable"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "This will stay",
+      "file": "src/mixed.rs",
+      "line": 3,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_note",
+      "content": "This will be orphaned",
+      "is_orphaned": true
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 2,
+      "successful": 1,
+      "failed": 1
+    }
+  ]
+}

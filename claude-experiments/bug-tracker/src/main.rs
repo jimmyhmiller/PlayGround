@@ -4,9 +4,12 @@ use goofy_animals::generate_name;
 use rand::rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::process::Command;
 
 #[derive(Parser)]
 #[command(name = "bug-tracker")]
@@ -47,6 +50,22 @@ enum Commands {
         /// Tags (comma-separated)
         #[arg(long)]
         tags: Option<String>,
+
+        /// Minimal reproducing case
+        #[arg(short = 'r', long)]
+        repro: Option<String>,
+
+        /// Code snippet demonstrating the bug
+        #[arg(long)]
+        code_snippet: Option<String>,
+
+        /// Additional metadata in JSON format (e.g., '{"version":"1.2.3","platform":"linux"}')
+        #[arg(long)]
+        metadata: Option<String>,
+
+        /// Enable AI quality check validation
+        #[arg(long)]
+        validate: bool,
     },
 
     /// Close a bug by its ID
@@ -74,7 +93,7 @@ enum Commands {
     },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct BugEntry {
     id: String,
     timestamp: String,
@@ -84,6 +103,9 @@ struct BugEntry {
     context: Option<String>,
     severity: String,
     tags: Vec<String>,
+    repro: Option<String>,
+    code_snippet: Option<String>,
+    metadata: HashMap<String, Value>,
 }
 
 fn main() {
@@ -98,8 +120,24 @@ fn main() {
             context,
             severity,
             tags,
+            repro,
+            code_snippet,
+            metadata,
+            validate,
         } => {
-            if let Err(e) = add_bug(project, title, description, file, context, severity, tags) {
+            if let Err(e) = add_bug(
+                project,
+                title,
+                description,
+                file,
+                context,
+                severity,
+                tags,
+                repro,
+                code_snippet,
+                metadata,
+                validate,
+            ) {
                 eprintln!("Error adding bug: {}", e);
                 std::process::exit(1);
             }
@@ -125,6 +163,77 @@ fn main() {
     }
 }
 
+fn validate_bug_report(bug: &BugEntry) -> Result<bool, Box<dyn std::error::Error>> {
+    let bug_json = serde_json::to_string_pretty(&bug)?;
+
+    let system_prompt = r#"You are a Bug Report Quality Analyst. Your job is to review bug reports and ensure they contain sufficient information to be actionable.
+
+A good bug report should have:
+1. A clear, descriptive title
+2. A detailed description of the issue
+3. Context about where the bug occurs (file, function, etc.)
+4. Appropriate severity level
+5. If applicable: reproduction steps, code snippets, or relevant metadata
+
+Respond with a JSON object in this format:
+{
+  "approved": true/false,
+  "feedback": "Detailed feedback on what's missing or why it's approved"
+}
+
+If the bug report is minimal but acceptable (e.g., for a simple issue), you can approve it.
+If it lacks critical information that would make it hard to fix, reject it with specific feedback."#;
+
+    let user_prompt = format!("Please review this bug report:\n\n{}", bug_json);
+
+    // Call claude CLI - use full path from HOME
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/jimmyhmiller".to_string());
+    let claude_path = format!("{}/.claude/local/claude", home);
+
+    let output = Command::new(&claude_path)
+        .arg("--print")
+        .arg("--append-system-prompt")
+        .arg(system_prompt)
+        .arg(user_prompt)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        eprintln!("Claude CLI failed with status: {:?}", output.status);
+        eprintln!("STDOUT: {}", stdout);
+        eprintln!("STDERR: {}", stderr);
+        return Err("Failed to run claude CLI for validation".into());
+    }
+
+    let response = String::from_utf8_lossy(&output.stdout);
+
+    // Try to extract JSON from the response
+    let json_start = response.find('{');
+    let json_end = response.rfind('}');
+
+    if let (Some(start), Some(end)) = (json_start, json_end) {
+        let json_str = &response[start..=end];
+        let validation: Value = serde_json::from_str(json_str)?;
+
+        let approved = validation["approved"].as_bool().unwrap_or(false);
+        let feedback = validation["feedback"].as_str().unwrap_or("No feedback provided");
+
+        println!("\n=== Bug Report Quality Check ===");
+        println!("{}", feedback);
+        println!("================================\n");
+
+        if !approved {
+            println!("Bug report needs improvement. Please provide more details.");
+            return Ok(false);
+        }
+    } else {
+        eprintln!("Warning: Could not parse validation response, proceeding anyway");
+    }
+
+    Ok(true)
+}
+
 fn add_bug(
     project: Option<PathBuf>,
     title: String,
@@ -133,6 +242,10 @@ fn add_bug(
     context: Option<String>,
     severity: String,
     tags: Option<String>,
+    repro: Option<String>,
+    code_snippet: Option<String>,
+    metadata: Option<String>,
+    validate: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let project_root = if let Some(p) = project {
         p
@@ -150,16 +263,39 @@ fn add_bug(
         .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
 
+    let metadata_map: HashMap<String, Value> = if let Some(meta_str) = metadata {
+        serde_json::from_str(&meta_str).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+
     let bug = BugEntry {
         id: bug_id.clone(),
-        timestamp,
+        timestamp: timestamp.clone(),
         title: title.clone(),
         description: description.clone(),
         file: file.clone(),
         context: context.clone(),
         severity: severity.clone(),
         tags: tag_list.clone(),
+        repro: repro.clone(),
+        code_snippet: code_snippet.clone(),
+        metadata: metadata_map.clone(),
     };
+
+    // Validate the bug report if requested
+    if validate {
+        match validate_bug_report(&bug) {
+            Ok(approved) => {
+                if !approved {
+                    return Err("Bug report did not pass quality check. Please revise and try again.".into());
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: Validation failed: {}. Proceeding anyway.", e);
+            }
+        }
+    }
 
     // Create or append to BUGS.md
     let mut output = OpenOptions::new()
@@ -168,8 +304,22 @@ fn add_bug(
         .open(&bugs_file)?;
 
     // Check if file is empty (just created)
-    let metadata = fs::metadata(&bugs_file)?;
-    if metadata.len() == 0 {
+    let file_metadata = fs::metadata(&bugs_file)?;
+    if file_metadata.len() == 0 {
+        writeln!(output, "<!-- ")?;
+        writeln!(output, "═══════════════════════════════════════════════════════════════════════")?;
+        writeln!(output, "⚠️  WARNING: DO NOT EDIT THIS FILE MANUALLY!")?;
+        writeln!(output, "═══════════════════════════════════════════════════════════════════════")?;
+        writeln!(output)?;
+        writeln!(output, "This file is managed by bug-tracker CLI tool.")?;
+        writeln!(output, "Manual edits may be overwritten or cause parsing errors.")?;
+        writeln!(output)?;
+        writeln!(output, "To add, close, or list bugs, use:")?;
+        writeln!(output, "    bug-tracker --help")?;
+        writeln!(output)?;
+        writeln!(output, "═══════════════════════════════════════════════════════════════════════")?;
+        writeln!(output, "-->")?;
+        writeln!(output)?;
         writeln!(output, "# Bugs")?;
         writeln!(output)?;
         writeln!(
@@ -182,7 +332,7 @@ fn add_bug(
     writeln!(output, "## {} [{}]", title, bug_id)?;
     writeln!(output)?;
     writeln!(output, "**ID:** {}", bug_id)?;
-    writeln!(output, "**Timestamp:** {}", bug.timestamp)?;
+    writeln!(output, "**Timestamp:** {}", timestamp)?;
     writeln!(output, "**Severity:** {}", severity)?;
 
     if let Some(ref f) = file {
@@ -206,6 +356,31 @@ fn add_bug(
         writeln!(output, "### Description")?;
         writeln!(output)?;
         writeln!(output, "{}", desc)?;
+        writeln!(output)?;
+    }
+
+    if let Some(ref r) = repro {
+        writeln!(output, "### Minimal Reproducing Case")?;
+        writeln!(output)?;
+        writeln!(output, "{}", r)?;
+        writeln!(output)?;
+    }
+
+    if let Some(ref snippet) = code_snippet {
+        writeln!(output, "### Code Snippet")?;
+        writeln!(output)?;
+        writeln!(output, "```")?;
+        writeln!(output, "{}", snippet)?;
+        writeln!(output, "```")?;
+        writeln!(output)?;
+    }
+
+    if !metadata_map.is_empty() {
+        writeln!(output, "### Metadata")?;
+        writeln!(output)?;
+        for (key, value) in metadata_map.iter() {
+            writeln!(output, "- **{}:** {}", key, value)?;
+        }
         writeln!(output)?;
     }
 
@@ -340,14 +515,14 @@ fn install_to_claude_md(claude_md: Option<PathBuf>) -> Result<(), Box<dyn std::e
     let tool_definition = r#"
 ## Bug Tracker
 
-Use this tool to record bugs discovered during development. This helps track issues that need to be addressed later.
+Use this tool to record bugs discovered during development. This helps track issues that need to be addressed later. Each bug gets a unique ID (goofy animal name like "curious-elephant") for easy reference and closing.
 
 ### Tool Definition
 
 ```json
 {
   "name": "bug_tracker",
-  "description": "Records bugs discovered during development to BUGS.md in the project root. Each bug gets a unique goofy animal name ID.",
+  "description": "Records bugs discovered during development to BUGS.md in the project root. Each bug gets a unique goofy animal name ID. Includes AI-powered quality validation.",
   "input_schema": {
     "type": "object",
     "properties": {
@@ -379,6 +554,18 @@ Use this tool to record bugs discovered during development. This helps track iss
       "tags": {
         "type": "string",
         "description": "Comma-separated tags"
+      },
+      "repro": {
+        "type": "string",
+        "description": "Minimal reproducing case or steps to reproduce"
+      },
+      "code_snippet": {
+        "type": "string",
+        "description": "Code snippet demonstrating the bug"
+      },
+      "metadata": {
+        "type": "string",
+        "description": "Additional metadata as JSON string (e.g., version, platform)"
       }
     },
     "required": ["project", "title"]
@@ -390,34 +577,92 @@ Use this tool to record bugs discovered during development. This helps track iss
 
 Add a bug:
 ```bash
-bug-tracker add --project <PATH> --title <TITLE> [OPTIONS]
+bug-tracker add --title <TITLE> [OPTIONS]
 ```
 
 Close a bug:
 ```bash
-bug-tracker close --project <PATH> <BUG_ID>
+bug-tracker close <BUG_ID>
 ```
 
 List bugs:
 ```bash
-bug-tracker list --project <PATH>
+bug-tracker list
 ```
 
-### Example
+### Examples
 
+**Add a comprehensive bug report:**
 ```bash
-bug-tracker add --project /path/to/project --title "Null pointer dereference" --description "Found potential null pointer access" --file "src/main.rs" --context "authenticate()" --severity high --tags "memory,safety"
+bug-tracker add --title "Null pointer dereference" --description "Found potential null pointer access" --file "src/main.rs" --context "authenticate()" --severity high --tags "memory,safety" --repro "Call authenticate with null user_ptr" --code-snippet "if (!user_ptr) { /* missing check */ }"
 ```
+
+**Close a bug by ID:**
+```bash
+bug-tracker close curious-elephant
+```
+
+**Enable AI quality validation:**
+```bash
+bug-tracker add --title "Bug title" --description "Bug details" --validate
+```
+
+The `--validate` flag triggers AI-powered quality checking to ensure bug reports contain sufficient information before recording.
 "#;
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&claude_md_path)?;
+    // Read existing content if file exists
+    let existing_content = if claude_md_path.exists() {
+        fs::read_to_string(&claude_md_path)?
+    } else {
+        String::new()
+    };
 
-    writeln!(file, "{}", tool_definition)?;
+    // Check if Bug Tracker section exists
+    let bug_tracker_start = "## Bug Tracker";
 
-    println!("✓ Tool definition added to {}", claude_md_path.display());
+    let new_content = if existing_content.contains(bug_tracker_start) {
+        // Find the start of the Bug Tracker section
+        let start_pos = existing_content.find(bug_tracker_start).unwrap();
+
+        // Find the end - either the next "## " heading or end of file
+        let after_start = &existing_content[start_pos..];
+        let next_section_offset = after_start[bug_tracker_start.len()..]
+            .find("\n## ")
+            .map(|pos| pos + bug_tracker_start.len());
+
+        let end_pos = if let Some(offset) = next_section_offset {
+            start_pos + offset
+        } else {
+            existing_content.len()
+        };
+
+        // Build new content: before + new definition + after
+        let mut content = String::new();
+        content.push_str(&existing_content[..start_pos]);
+        content.push_str(tool_definition.trim());
+        if end_pos < existing_content.len() {
+            content.push('\n');
+            content.push_str(&existing_content[end_pos..]);
+        } else {
+            content.push('\n');
+        }
+
+        println!("✓ Updated existing Bug Tracker definition in {}", claude_md_path.display());
+        content
+    } else {
+        // Append new section
+        let mut content = existing_content;
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(tool_definition);
+        println!("✓ Added Bug Tracker definition to {}", claude_md_path.display());
+        content
+    };
+
+    // Write the updated content
+    fs::write(&claude_md_path, new_content)?;
+
     println!("\nNote: You may need to restart your Claude Code session for changes to take effect.");
     Ok(())
 }

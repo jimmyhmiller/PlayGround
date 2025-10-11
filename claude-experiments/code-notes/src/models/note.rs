@@ -25,16 +25,22 @@ pub struct Note {
     /// Where this note is anchored in the code
     pub anchor: NoteAnchor,
 
+    /// Which collection this note belongs to
+    pub collection: String,
+
     /// Open-ended metadata for extensions
     /// Examples: tags, priority, trail_id, audience, etc.
     pub metadata: HashMap<String, serde_json::Value>,
 
     /// Whether this note is orphaned (can't find its anchor anymore)
     pub is_orphaned: bool,
+
+    /// Whether this note has been soft-deleted
+    pub deleted: bool,
 }
 
 impl Note {
-    pub fn new(content: String, author: String, anchor: NoteAnchor) -> Self {
+    pub fn new(content: String, author: String, anchor: NoteAnchor, collection: String) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -47,18 +53,22 @@ impl Note {
             created_at: now,
             updated_at: now,
             anchor,
+            collection,
             metadata: HashMap::new(),
             is_orphaned: false,
+            deleted: false,
         }
     }
 
     /// Add or update metadata
+    #[allow(dead_code)]
     pub fn set_metadata(&mut self, key: String, value: serde_json::Value) {
         self.metadata.insert(key, value);
         self.update_timestamp();
     }
 
     /// Get metadata value
+    #[allow(dead_code)]
     pub fn get_metadata(&self, key: &str) -> Option<&serde_json::Value> {
         self.metadata.get(key)
     }
@@ -72,6 +82,12 @@ impl Note {
     /// Mark as orphaned
     pub fn mark_orphaned(&mut self) {
         self.is_orphaned = true;
+        self.update_timestamp();
+    }
+
+    /// Mark as deleted (soft delete)
+    pub fn mark_deleted(&mut self) {
+        self.deleted = true;
         self.update_timestamp();
     }
 
@@ -121,6 +137,7 @@ impl NoteCollection {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_note(&self, note_id: Uuid) -> Option<&Note> {
         self.notes.iter().find(|n| n.id == note_id)
     }
@@ -130,6 +147,7 @@ impl NoteCollection {
     }
 
     /// Get all notes for a specific file
+    #[allow(dead_code)]
     pub fn notes_for_file(&self, file_path: &str) -> Vec<&Note> {
         self.notes
             .iter()

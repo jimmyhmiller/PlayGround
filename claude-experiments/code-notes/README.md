@@ -78,15 +78,31 @@ code-notes add \
   --collection default
 ```
 
+**Note**: File paths use smart resolution - you can provide just a filename, a relative path, or a full path. The CLI will intelligently find the file in your repository.
+
 ### List notes
 
 ```bash
-# List all notes in the default collection
+# List all notes from all collections
+code-notes list
+
+# List notes from a specific collection
 code-notes list --collection default
 
-# List notes for a specific file
+# List notes for a specific file (across all collections)
+# You can use just the filename - it will be found automatically
+code-notes list sample_code.rs
+code-notes list src/main.rs
+
+# List notes for a file in a specific collection
 code-notes list src/main.rs --collection default
 ```
+
+**Smart File Resolution**: You don't need to provide the full path to a file. The CLI will:
+1. Try the path relative to your current directory
+2. Try the path relative to the repository root
+3. Search the entire repository for files matching that name
+4. Provide helpful suggestions if multiple files match
 
 ### View a specific note
 

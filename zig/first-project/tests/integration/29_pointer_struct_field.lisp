@@ -1,0 +1,11 @@
+(def Point (: Type)
+  (Struct [x Int] [y Int]))
+
+(def p (: Point) (Point 10 20))
+(def ptr (: (Pointer Point)) (allocate Point p))
+(def x_val (: Int) (pointer-field-read ptr x))
+(pointer-field-write! ptr y 99)
+(def y_val (: Int) (pointer-field-read ptr y))
+(deallocate ptr)
+(def result (: Int) (+ x_val y_val))
+(printf (c-str "%lld\n") result)

@@ -1,0 +1,50 @@
+{
+  "name": "Lines added above note",
+  "description": "When lines are added above a note, the note should follow the code to its new line number",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/main.rs",
+      "content": "fn main() {\n    println!(\"Hello, world!\");\n}\n\nfn calculate(x: i32) -> i32 {\n    x * 2\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "add_note",
+      "file": "src/main.rs",
+      "line": 5,
+      "column": 0,
+      "content": "This function doubles the input",
+      "author": "Alice",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/main.rs",
+      "content": "// Added some comments\n// and documentation\n\nfn main() {\n    println!(\"Hello, world!\");\n}\n\nfn calculate(x: i32) -> i32 {\n    x * 2\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added documentation"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "This function doubles the input",
+      "file": "src/main.rs",
+      "line": 8,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

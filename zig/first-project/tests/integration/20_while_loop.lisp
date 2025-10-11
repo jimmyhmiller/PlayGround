@@ -1,0 +1,6 @@
+(def counter (: Int) 0)
+(def sum (: Int) 0)
+(while (< counter 5)
+  (set! sum (+ sum counter))
+  (set! counter (+ counter 1)))
+(printf (c-str "%lld\n") sum)

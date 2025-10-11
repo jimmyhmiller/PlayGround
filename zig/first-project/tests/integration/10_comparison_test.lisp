@@ -1,0 +1,6 @@
+(def x (: Int) 10)
+(def y (: Int) 20)
+(def lt_result (: Bool) (< x y))
+(def gt_result (: Bool) (> x y))
+(def eq_result (: Bool) (= x x))
+(printf (c-str "%d %d %d\n") lt_result gt_result eq_result)

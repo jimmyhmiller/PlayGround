@@ -1,0 +1,50 @@
+{
+  "name": "Note on variable identifier",
+  "description": "Note attached to a variable should migrate when code around it changes",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/vars.rs",
+      "content": "fn main() {\n    let count = 0;\n    println!(\"{}\", count);\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "add_note",
+      "file": "src/vars.rs",
+      "line": 2,
+      "column": 8,
+      "content": "Counter variable",
+      "author": "Dev",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/vars.rs",
+      "content": "fn main() {\n    // Initialize counter\n    let count = 0;\n    println!(\"{}\", count);\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added comment above variable"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Counter variable",
+      "file": "src/vars.rs",
+      "line": 3,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

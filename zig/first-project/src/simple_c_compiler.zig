@@ -224,6 +224,10 @@ pub const SimpleCCompiler = struct {
                         if (iter.next()) |name_val| {
                             if (name_val.isSymbol()) {
                                 const def_name = name_val.symbol;
+                                // Skip 'main' function - it's a special entry point that shouldn't be in namespace
+                                if (std.mem.eql(u8, def_name, "main")) {
+                                    continue;
+                                }
                                 // Skip type definitions (struct/enum) - they're handled differently
                                 if (checker.type_defs.get(def_name) == null) {
                                     if (checker.env.get(def_name)) |var_type| {
@@ -532,6 +536,24 @@ pub const SimpleCCompiler = struct {
             .def_names = &namespace_def_names,
         };
 
+        // Check if user defined a 'main' function
+        var has_user_main = false;
+        for (expanded_expressions.items) |expr| {
+            if (expr.* == .list) {
+                var iter = expr.list.iterator();
+                if (iter.next()) |head_val| {
+                    if (head_val.isSymbol() and std.mem.eql(u8, head_val.symbol, "def")) {
+                        if (iter.next()) |name_val| {
+                            if (name_val.isSymbol() and std.mem.eql(u8, name_val.symbol, "main")) {
+                                has_user_main = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Second pass: emit full definitions and expressions (skip namespace defs)
         for (expanded_expressions.items, report.typed.items) |expr, typed_val| {
             try self.emitTopLevel(prelude_writer, body_writer, expr, typed_val, &checker, &includes, &ns_ctx);
@@ -577,17 +599,25 @@ pub const SimpleCCompiler = struct {
 
         switch (target) {
             .executable => {
-                try output.appendSlice(self.allocator.*, "int main() {\n");
-                // Initialize namespace if present
-                if (namespace_defs.items.len > 0) {
-                    const sanitized_ns = try self.sanitizeIdentifier(ns_name);
-                    defer self.allocator.*.free(sanitized_ns);
-                    try output.print(self.allocator.*, "    init_namespace_{s}(&g_{s});\n", .{ sanitized_ns, sanitized_ns });
+                // Only generate wrapper if user hasn't defined main
+                if (!has_user_main) {
+                    try output.appendSlice(self.allocator.*, "int main() {\n");
+                    // Initialize namespace if present
+                    if (namespace_defs.items.len > 0) {
+                        const sanitized_ns = try self.sanitizeIdentifier(ns_name);
+                        defer self.allocator.*.free(sanitized_ns);
+                        try output.print(self.allocator.*, "    init_namespace_{s}(&g_{s});\n", .{ sanitized_ns, sanitized_ns });
+                    }
+                    if (body.items.len > 0) {
+                        try output.appendSlice(self.allocator.*, body.items);
+                    }
+                    try output.appendSlice(self.allocator.*, "    return 0;\n}\n");
+                } else {
+                    // User defined main, just emit the body (which contains the main function)
+                    if (body.items.len > 0) {
+                        try output.appendSlice(self.allocator.*, body.items);
+                    }
                 }
-                if (body.items.len > 0) {
-                    try output.appendSlice(self.allocator.*, body.items);
-                }
-                try output.appendSlice(self.allocator.*, "    return 0;\n}\n");
             },
             .bundle => {
                 try output.appendSlice(self.allocator.*, "void lisp_main(void) {\n");
@@ -754,7 +784,13 @@ pub const SimpleCCompiler = struct {
                                 const sanitized_name = try self.sanitizeIdentifier(name);
                                 defer self.allocator.*.free(sanitized_name);
 
-                                try forward_writer.print("static {s} {s}(", .{ return_type_str, sanitized_name });
+                                // Don't emit 'static' for main function
+                                const is_main = std.mem.eql(u8, name, "main");
+                                if (is_main) {
+                                    try forward_writer.print("{s} {s}(", .{ return_type_str, sanitized_name });
+                                } else {
+                                    try forward_writer.print("static {s} {s}(", .{ return_type_str, sanitized_name });
+                                }
 
                                 const params_val = fn_iter.next() orelse return;
                                 if (!params_val.isVector()) return;
@@ -787,12 +823,12 @@ pub const SimpleCCompiler = struct {
             .list => |list| {
                 var iter = list.iterator();
                 const head_val = iter.next() orelse {
-                    try self.emitPrintStatement(body_writer, expr, typed, includes, ns_ctx);
+                    try self.emitPrintStatement(body_writer, expr, typed, includes, ns_ctx, checker);
                     return;
                 };
 
                 if (!head_val.isSymbol()) {
-                    try self.emitPrintStatement(body_writer, expr, typed, includes, ns_ctx);
+                    try self.emitPrintStatement(body_writer, expr, typed, includes, ns_ctx, checker);
                     return;
                 }
 
@@ -828,10 +864,10 @@ pub const SimpleCCompiler = struct {
                     return;
                 }
 
-                try self.emitPrintStatement(body_writer, expr, typed, includes, ns_ctx);
+                try self.emitPrintStatement(body_writer, expr, typed, includes, ns_ctx, checker);
             },
             else => {
-                try self.emitPrintStatement(body_writer, expr, typed, includes, ns_ctx);
+                try self.emitPrintStatement(body_writer, expr, typed, includes, ns_ctx, checker);
             },
         }
     }
@@ -978,7 +1014,13 @@ pub const SimpleCCompiler = struct {
 
         const sanitized_name = try self.sanitizeIdentifier(name);
         defer self.allocator.*.free(sanitized_name);
-        try def_writer.print("static {s} {s}(", .{ return_type_str, sanitized_name });
+        // Emit 'main' without 'static' keyword so it can be an entry point
+        const is_main = std.mem.eql(u8, name, "main");
+        if (is_main) {
+            try def_writer.print("{s} {s}(", .{ return_type_str, sanitized_name });
+        } else {
+            try def_writer.print("static {s} {s}(", .{ return_type_str, sanitized_name });
+        }
         var index: usize = 0;
         while (index < params_vec.len()) : (index += 1) {
             const param_val = params_vec.at(index);
@@ -1371,6 +1413,7 @@ pub const SimpleCCompiler = struct {
             if (std.mem.eql(u8, type_name, "Bool")) return Type.bool;
             if (std.mem.eql(u8, type_name, "String")) return Type.string;
             if (std.mem.eql(u8, type_name, "Nil")) return Type.nil;
+            if (std.mem.eql(u8, type_name, "Void")) return Type.void;
             if (std.mem.eql(u8, type_name, "I8")) return Type.i8;
             if (std.mem.eql(u8, type_name, "I16")) return Type.i16;
             if (std.mem.eql(u8, type_name, "I32")) return Type.i32;
@@ -1491,8 +1534,117 @@ pub const SimpleCCompiler = struct {
         }
     }
 
-    fn emitPrintStatement(self: *SimpleCCompiler, body_writer: anytype, expr: *Value, typed: *TypedValue, includes: *IncludeFlags, ns_ctx: *NamespaceContext) Error!void {
+    fn emitPrintStatement(self: *SimpleCCompiler, body_writer: anytype, expr: *Value, typed: *TypedValue, includes: *IncludeFlags, ns_ctx: *NamespaceContext, checker: *TypeChecker) Error!void {
+        _ = checker; // Not used anymore, but kept for future use if needed
         const expr_type = typed.getType();
+
+        // Check if the untyped expression is a let - if so, handle it specially
+        // because the typed AST only contains the final value, not the bindings
+        var is_let = false;
+        if (expr.isList()) {
+            var let_iter = expr.list.iterator();
+            if (let_iter.next()) |first| {
+                if (first.isSymbol() and std.mem.eql(u8, first.symbol, "let")) {
+                    is_let = true;
+                }
+            }
+        }
+
+        if (is_let) {
+            // For let expressions, we need to emit all bindings as statements
+            // Extract bindings and body from the untyped AST
+            var let_iter = expr.list.iterator();
+            _ = let_iter.next(); // skip 'let'
+            const bindings_val = let_iter.next() orelse return Error.InvalidDefinition;
+            if (!bindings_val.isVector()) return Error.InvalidDefinition;
+            const bindings_vec = bindings_val.vector;
+
+            if (bindings_vec.len() % 3 != 0) return Error.InvalidDefinition;
+            const binding_count = bindings_vec.len() / 3;
+
+            // Emit bindings as variable declarations
+            var idx: usize = 0;
+            while (idx < binding_count) : (idx += 1) {
+                const name_val = bindings_vec.at(idx * 3);
+                const annotation_val = bindings_vec.at(idx * 3 + 1);
+                const value_val = bindings_vec.at(idx * 3 + 2);
+
+                if (!name_val.isSymbol()) continue;
+
+                // Parse type annotation to get C type
+                const var_type = try self.parseTypeFromAnnotation(annotation_val);
+                const c_type = self.cTypeFor(var_type, includes) catch continue;
+
+                // Skip void/nil bindings - just emit the expression as a statement
+                if (var_type == .void or var_type == .nil or std.mem.eql(u8, c_type, "void") or std.mem.eql(u8, c_type, "Void")) {
+                    try body_writer.print("    ", .{});
+                    try self.emitUntypedValueExpression(body_writer, value_val, ns_ctx, includes);
+                    try body_writer.print(";\n", .{});
+                    continue;
+                }
+
+                const sanitized_name = try self.sanitizeIdentifier(name_val.symbol);
+                defer self.allocator.*.free(sanitized_name);
+
+                try body_writer.print("    {s} {s} = ", .{ c_type, sanitized_name });
+
+                // Emit the untyped value expression directly
+                try self.emitUntypedValueExpression(body_writer, value_val, ns_ctx, includes);
+                try body_writer.print(";\n", .{});
+            }
+
+            // Now emit the body expressions
+            while (let_iter.next()) |body_val| {
+                // For the last expression, emit as the printed value
+                if (let_iter.peek() == null) {
+                    // This is the last expression
+                    if (expr_type == .nil or expr_type == .void) {
+                        try body_writer.print("    ", .{});
+                        try self.emitUntypedValueExpression(body_writer, body_val, ns_ctx, includes);
+                        try body_writer.print(";\n", .{});
+                    } else {
+                        const format = try self.printfFormatFor(expr_type);
+                        try body_writer.print("    printf(\"{s}\\n\", ", .{format});
+                        const wrap_bool = expr_type == .bool;
+                        if (wrap_bool) {
+                            includes.need_stdbool = true;
+                            try body_writer.writeAll("((");
+                        }
+                        try self.emitUntypedValueExpression(body_writer, body_val, ns_ctx, includes);
+                        if (wrap_bool) {
+                            try body_writer.writeAll(") ? 1 : 0)");
+                        }
+                        try body_writer.print(");\n", .{});
+                    }
+                } else {
+                    // Intermediate body expression - emit using untyped value
+                    try body_writer.print("    ", .{});
+                    try self.emitUntypedValueExpression(body_writer, body_val, ns_ctx, includes);
+                    try body_writer.print(";\n", .{});
+                }
+            }
+            return;
+        }
+
+        // Check if the untyped expression is a printf call - if so, emit it directly
+        // without wrapping to avoid double-wrapping: printf("%d\n", printf(...))
+        var is_printf = false;
+        if (expr.isList()) {
+            var printf_iter = expr.list.iterator();
+            if (printf_iter.next()) |first| {
+                if (first.isSymbol() and std.mem.eql(u8, first.symbol, "printf")) {
+                    is_printf = true;
+                }
+            }
+        }
+
+        if (is_printf) {
+            // Emit printf call directly without wrapping
+            try body_writer.print("    ", .{});
+            try self.emitUntypedValueExpression(body_writer, expr, ns_ctx, includes);
+            try body_writer.print(";\n", .{});
+            return;
+        }
 
         // Don't print Nil/void statements (e.g., pointer-write!, deallocate, while loops)
         if (expr_type == .nil or expr_type == .void) {

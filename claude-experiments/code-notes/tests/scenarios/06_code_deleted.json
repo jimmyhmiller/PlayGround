@@ -1,0 +1,48 @@
+{
+  "name": "Code completely deleted",
+  "description": "When code with a note is completely deleted, the note should become orphaned",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/delete_test.rs",
+      "content": "fn old_function() {\n    println!(\"This will be deleted\");\n}\n\nfn keep_function() {\n    println!(\"This stays\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "add_note",
+      "file": "src/delete_test.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Note on function that will be deleted",
+      "author": "Test",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/delete_test.rs",
+      "content": "fn keep_function() {\n    println!(\"This stays\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Deleted old_function"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Note on function that will be deleted",
+      "is_orphaned": true
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 0,
+      "failed": 1
+    }
+  ]
+}

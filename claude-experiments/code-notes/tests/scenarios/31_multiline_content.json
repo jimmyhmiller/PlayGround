@@ -1,0 +1,31 @@
+{
+  "name": "Multiline note content",
+  "description": "Test notes with multiline content",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/complex.rs",
+      "content": "pub fn complex_algorithm(input: Vec<i32>) -> Vec<i32> {\n    input.iter().map(|x| x * 2).collect()\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add complex algorithm"
+    },
+    {
+      "action": "add_note",
+      "file": "src/complex.rs",
+      "line": 1,
+      "column": 0,
+      "content": "This is a multiline note.\nLine 2 of the note.\nLine 3 with more details.",
+      "author": "Documenter",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "This is a multiline note.",
+      "file": "src/complex.rs",
+      "is_orphaned": false,
+      "collection": "default"
+    }
+  ]
+}

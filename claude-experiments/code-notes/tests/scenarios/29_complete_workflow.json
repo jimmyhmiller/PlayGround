@@ -1,0 +1,73 @@
+{
+  "name": "Complete workflow",
+  "description": "End-to-end workflow: create, list, update, migrate, delete",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/auth.rs",
+      "content": "pub fn authenticate(user: &str, pass: &str) -> bool {\n    // TODO: Implement real authentication\n    user.len() > 0 && pass.len() > 0\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial auth module"
+    },
+    {
+      "action": "create_collection",
+      "name": "security",
+      "description": "Security-related notes"
+    },
+    {
+      "action": "add_note",
+      "file": "src/auth.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Authentication function - needs real implementation",
+      "author": "Security Team",
+      "collection": "security",
+      "store_id_as": "auth_note"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 1,
+      "collection": "security"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/auth.rs",
+      "content": "use sha2::{Sha256, Digest};\n\npub fn authenticate(user: &str, pass: &str) -> bool {\n    // TODO: Implement real authentication\n    user.len() > 0 && pass.len() > 0\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add crypto import"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "security"
+    },
+    {
+      "action": "expect_note",
+      "content": "Authentication function - needs real implementation",
+      "file": "src/auth.rs",
+      "line": 3,
+      "is_orphaned": false,
+      "collection": "security"
+    },
+    {
+      "action": "update_note",
+      "note_id_var": "auth_note",
+      "content": "Authentication function - using SHA256 for password hashing"
+    },
+    {
+      "action": "expect_note",
+      "content": "Authentication function - using SHA256 for password hashing",
+      "file": "src/auth.rs",
+      "is_orphaned": false,
+      "collection": "security"
+    },
+    {
+      "action": "export_collection",
+      "collection": "security",
+      "output": "security_notes.json"
+    }
+  ]
+}

@@ -14,8 +14,10 @@ if [ ! -f "$BINARY" ]; then
     echo "Building code-notes..."
     cd "$PROJECT_ROOT"
     cargo build --release
-    cd "$SCRIPT_DIR"
 fi
+
+# Always run from the examples directory so relative paths work
+cd "$SCRIPT_DIR"
 
 echo "=== Code Notes Demo ==="
 echo

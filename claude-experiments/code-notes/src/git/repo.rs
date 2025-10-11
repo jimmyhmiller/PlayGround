@@ -9,6 +9,7 @@ pub struct GitRepo {
 
 impl GitRepo {
     /// Open a git repository at the given path
+    #[allow(dead_code)]
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let repo = Repository::open(path)?;
         Ok(Self { repo })
@@ -101,10 +102,12 @@ impl GitRepo {
 
         let path = Path::new(file_path);
         for delta in diff.deltas() {
-            if let Some(file_path_in_delta) = delta.new_file().path() {
-                if file_path_in_delta == path {
-                    return Ok(true);
-                }
+            // Check both old and new file paths to catch modifications, deletions, and additions
+            let old_path_matches = delta.old_file().path() == Some(path);
+            let new_path_matches = delta.new_file().path() == Some(path);
+
+            if old_path_matches || new_path_matches {
+                return Ok(true);
             }
         }
 

@@ -1,0 +1,50 @@
+{
+  "name": "JavaScript file migration",
+  "description": "Test that notes on JavaScript code migrate correctly",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/utils.js",
+      "content": "function greet(name) {\n  return `Hello, ${name}!`;\n}\n\nfunction farewell(name) {\n  return `Goodbye, ${name}!`;\n}\n\nmodule.exports = { greet, farewell };\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial JavaScript code"
+    },
+    {
+      "action": "add_note",
+      "file": "src/utils.js",
+      "line": 1,
+      "column": 0,
+      "content": "Greeting function using template literals",
+      "author": "JSDev",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/utils.js",
+      "content": "// Utility functions for greetings\n\nfunction greet(name) {\n  return `Hello, ${name}!`;\n}\n\nfunction farewell(name) {\n  return `Goodbye, ${name}!`;\n}\n\nmodule.exports = { greet, farewell };\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added header comment"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Greeting function using template literals",
+      "file": "src/utils.js",
+      "line": 3,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

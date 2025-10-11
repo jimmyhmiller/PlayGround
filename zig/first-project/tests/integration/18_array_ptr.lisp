@@ -1,0 +1,7 @@
+(def arr (: (Array Int 3)) (array Int 3 0))
+(array-set! arr 0 10)
+(array-set! arr 1 20)
+(array-set! arr 2 30)
+(def ptr (: (Pointer Int)) (array-ptr arr 1))
+(def val (: Int) (dereference ptr))
+(printf (c-str "%lld\n") val)

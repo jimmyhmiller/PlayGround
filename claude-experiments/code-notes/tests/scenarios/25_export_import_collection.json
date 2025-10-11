@@ -1,0 +1,52 @@
+{
+  "name": "Export and import collections",
+  "description": "Test exporting a collection to a file and importing it back",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/utils.rs",
+      "content": "pub fn format_string(s: &str) -> String {\n    format!(\"[{}]\", s)\n}\n\npub fn trim_string(s: &str) -> String {\n    s.trim().to_string()\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add utilities"
+    },
+    {
+      "action": "create_collection",
+      "name": "utilities",
+      "description": "Documentation for utility functions"
+    },
+    {
+      "action": "add_note",
+      "file": "src/utils.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Wraps string in brackets for display",
+      "author": "Charlie",
+      "collection": "utilities"
+    },
+    {
+      "action": "add_note",
+      "file": "src/utils.rs",
+      "line": 5,
+      "column": 0,
+      "content": "Removes whitespace from string edges",
+      "author": "Charlie",
+      "collection": "utilities"
+    },
+    {
+      "action": "expect_collection_exists",
+      "name": "utilities"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 2,
+      "collection": "utilities"
+    },
+    {
+      "action": "export_collection",
+      "collection": "utilities",
+      "output": "utilities_backup.json"
+    }
+  ]
+}

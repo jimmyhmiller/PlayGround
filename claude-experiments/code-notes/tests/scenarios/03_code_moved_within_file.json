@@ -1,0 +1,50 @@
+{
+  "name": "Code moved within file",
+  "description": "When a function is moved to a different location in the same file, note should follow",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/utils.rs",
+      "content": "fn helper_a() {\n    println!(\"A\");\n}\n\nfn helper_b() {\n    println!(\"B\");\n}\n\nfn main_function() {\n    helper_a();\n    helper_b();\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "add_note",
+      "file": "src/utils.rs",
+      "line": 9,
+      "column": 0,
+      "content": "Main entry point that calls helpers",
+      "author": "Charlie",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/utils.rs",
+      "content": "fn main_function() {\n    helper_a();\n    helper_b();\n}\n\nfn helper_a() {\n    println!(\"A\");\n}\n\nfn helper_b() {\n    println!(\"B\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Moved main_function to top"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Main entry point that calls helpers",
+      "file": "src/utils.rs",
+      "line": 1,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

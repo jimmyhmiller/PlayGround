@@ -1,0 +1,66 @@
+{
+  "name": "Python file migration",
+  "description": "Test that notes on Python code migrate correctly across refactoring",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/calculator.py",
+      "content": "def add(a, b):\n    return a + b\n\ndef multiply(x, y):\n    return x * y\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial Python code"
+    },
+    {
+      "action": "add_note",
+      "file": "src/calculator.py",
+      "line": 1,
+      "column": 0,
+      "content": "Simple addition function",
+      "author": "PythonDev",
+      "collection": "default"
+    },
+    {
+      "action": "add_note",
+      "file": "src/calculator.py",
+      "line": 4,
+      "column": 0,
+      "content": "Multiplication function",
+      "author": "PythonDev",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/calculator.py",
+      "content": "\"\"\"Calculator module with basic operations.\"\"\"\n\ndef add(a, b):\n    \"\"\"Add two numbers.\"\"\"\n    return a + b\n\ndef multiply(x, y):\n    \"\"\"Multiply two numbers.\"\"\"\n    return x * y\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added docstrings"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Simple addition function",
+      "file": "src/calculator.py",
+      "line": 3,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_note",
+      "content": "Multiplication function",
+      "file": "src/calculator.py",
+      "line": 7,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 2,
+      "successful": 2,
+      "failed": 0
+    }
+  ]
+}

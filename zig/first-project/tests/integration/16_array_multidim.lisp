@@ -1,0 +1,20 @@
+(def matrix (: (Array (Array Int 2) 2)) (array (Array Int 2) 2))
+(def row0 (: (Array Int 2)) (array Int 2 0))
+(def row1 (: (Array Int 2)) (array Int 2 0))
+
+(array-set! row0 0 1)
+(array-set! row0 1 2)
+(array-set! row1 0 3)
+(array-set! row1 1 4)
+
+(array-set! matrix 0 row0)
+(array-set! matrix 1 row1)
+
+(def r0 (: (Array Int 2)) (array-ref matrix 0))
+(def r1 (: (Array Int 2)) (array-ref matrix 1))
+(def a (: Int) (array-ref r0 0))
+(def b (: Int) (array-ref r0 1))
+(def c (: Int) (array-ref r1 0))
+(def d (: Int) (array-ref r1 1))
+(def result (: Int) (+ (+ a b) (+ c d)))
+(printf (c-str "%lld\n") result)

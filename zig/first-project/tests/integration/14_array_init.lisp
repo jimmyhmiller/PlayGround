@@ -1,0 +1,5 @@
+(def arr (: (Array Int 5)) (array Int 5 42))
+(def x (: Int) (array-ref arr 0))
+(def y (: Int) (array-ref arr 4))
+(def result (: Int) (+ x y))
+(printf (c-str "%lld\n") result)

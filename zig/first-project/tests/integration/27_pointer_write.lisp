@@ -1,0 +1,6 @@
+(def x (: Int) 10)
+(def ptr (: (Pointer Int)) (allocate Int x))
+(pointer-write! ptr 42)
+(def val (: Int) (dereference ptr))
+(deallocate ptr)
+(printf (c-str "%lld\n") val)
