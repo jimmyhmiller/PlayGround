@@ -1,0 +1,50 @@
+{
+  "name": "Refactored with unchanged function text",
+  "description": "When code is refactored but the function text stays the same, note should follow",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/calc.rs",
+      "content": "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\npub fn multiply(a: i32, b: i32) -> i32 {\n    a * b\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "add_note",
+      "file": "src/calc.rs",
+      "line": 5,
+      "column": 0,
+      "content": "Simple multiplication function",
+      "author": "Dave",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/calc.rs",
+      "content": "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\npub fn subtract(a: i32, b: i32) -> i32 {\n    a - b\n}\n\npub fn multiply(a: i32, b: i32) -> i32 {\n    a * b\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added subtract function"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Simple multiplication function",
+      "file": "src/calc.rs",
+      "line": 9,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

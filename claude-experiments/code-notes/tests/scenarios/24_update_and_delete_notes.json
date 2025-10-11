@@ -1,0 +1,72 @@
+{
+  "name": "Update and delete notes",
+  "description": "Test updating note content and deleting notes from collections",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/lib.rs",
+      "content": "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\npub fn multiply(a: i32, b: i32) -> i32 {\n    a * b\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial code"
+    },
+    {
+      "action": "add_note",
+      "file": "src/lib.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Simple addition function",
+      "author": "Alice",
+      "collection": "default",
+      "store_id_as": "note1"
+    },
+    {
+      "action": "add_note",
+      "file": "src/lib.rs",
+      "line": 5,
+      "column": 0,
+      "content": "Multiplication function",
+      "author": "Bob",
+      "collection": "default",
+      "store_id_as": "note2"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 2,
+      "collection": "default"
+    },
+    {
+      "action": "update_note",
+      "note_id_var": "note1",
+      "content": "Updated: Addition function with overflow protection needed"
+    },
+    {
+      "action": "expect_note",
+      "content": "Updated: Addition function with overflow protection needed",
+      "file": "src/lib.rs",
+      "is_orphaned": false,
+      "collection": "default"
+    },
+    {
+      "action": "expect_note_not_exists",
+      "content": "Simple addition function",
+      "collection": "default"
+    },
+    {
+      "action": "delete_note",
+      "note_id_var": "note2",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 1,
+      "collection": "default"
+    },
+    {
+      "action": "expect_note_not_exists",
+      "content": "Multiplication function",
+      "collection": "default"
+    }
+  ]
+}

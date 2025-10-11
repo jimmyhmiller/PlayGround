@@ -198,13 +198,13 @@ impl NoteStorage {
         let notes_dir = self.project_path.join(NOTES_SUBDIR);
         for entry in fs::read_dir(notes_dir)? {
             let entry = entry?;
-            if entry.path().extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Ok(note) = self.load_note_from_path(&entry.path()) {
+            if entry.path().extension().and_then(|s| s.to_str()) == Some("json")
+                && let Ok(note) = self.load_note_from_path(&entry.path()) {
                     // Filter notes that belong to this collection
-                    // For now, we include all notes. In the future, we could add collection metadata to notes
-                    collection.add_note(note);
+                    if note.collection == name {
+                        collection.add_note(note);
+                    }
                 }
-            }
         }
 
         Ok(collection)
@@ -230,6 +230,7 @@ impl NoteStorage {
     }
 
     /// Delete a collection
+    #[allow(dead_code)]
     pub fn delete_collection(&self, name: &str) -> Result<()> {
         let mut collections = self.load_all_collections()?;
         collections.retain(|c| c.name != name);
@@ -265,7 +266,17 @@ impl NoteStorage {
         Ok(note)
     }
 
+    /// Delete a note file from disk
+    pub fn delete_note_file(&self, id: Uuid) -> Result<()> {
+        let note_path = self.project_path.join(NOTES_SUBDIR).join(format!("{}.json", id));
+        if note_path.exists() {
+            fs::remove_file(note_path)?;
+        }
+        Ok(())
+    }
+
     /// Load all notes
+    #[allow(dead_code)]
     pub fn load_all_notes(&self) -> Result<Vec<Note>> {
         let notes_dir = self.project_path.join(NOTES_SUBDIR);
         let mut notes = Vec::new();
@@ -276,11 +287,10 @@ impl NoteStorage {
 
         for entry in fs::read_dir(notes_dir)? {
             let entry = entry?;
-            if entry.path().extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Ok(note) = self.load_note_from_path(&entry.path()) {
+            if entry.path().extension().and_then(|s| s.to_str()) == Some("json")
+                && let Ok(note) = self.load_note_from_path(&entry.path()) {
                     notes.push(note);
                 }
-            }
         }
 
         Ok(notes)

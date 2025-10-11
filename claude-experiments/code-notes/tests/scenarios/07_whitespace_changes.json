@@ -1,0 +1,50 @@
+{
+  "name": "Whitespace-only changes",
+  "description": "When only whitespace changes, notes should migrate successfully",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/whitespace.rs",
+      "content": "fn calculate(x: i32) -> i32 {\nx * 2\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "add_note",
+      "file": "src/whitespace.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Doubles the input value",
+      "author": "Formatter",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/whitespace.rs",
+      "content": "fn calculate(x: i32) -> i32 {\n    x * 2\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Fixed indentation"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Doubles the input value",
+      "file": "src/whitespace.rs",
+      "line": 1,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::git::GitRepo;
 use crate::models::{MigrationRecord, Note, NoteAnchor};
-use crate::parsers::{AnchorBuilder, AnchorMatcher, CodeParser, SupportedLanguage};
+use crate::parsers::{AnchorBuilder, AnchorMatcher, CodeParser, LanguageRegistry, LanguageInstaller, GrammarSource};
 
 /// Threshold for considering a match valid (0.0 to 1.0)
 const MATCH_CONFIDENCE_THRESHOLD: f64 = 0.7;
@@ -154,11 +154,19 @@ impl NoteMigrator {
             .and_then(|s| s.to_str())
             .ok_or_else(|| anyhow!("Could not determine file extension"))?;
 
-        let language = SupportedLanguage::from_extension(extension)
-            .ok_or_else(|| anyhow!("Unsupported language: {}", extension))?;
+        // Create language registry
+        let mut registry = LanguageRegistry::new()?;
+        registry.initialize()?;
 
-        // Parse the file
-        let mut parser = CodeParser::new(language)?;
+        // Auto-install language if needed
+        Self::auto_install_language_if_needed(extension, &registry)?;
+
+        // Re-initialize registry to pick up newly installed language
+        registry = LanguageRegistry::new()?;
+        registry.initialize()?;
+
+        // Create parser
+        let mut parser = CodeParser::from_extension(extension, &mut registry)?;
         let tree = parser.parse(&file_content)?;
 
         // Try to find matching node
@@ -195,6 +203,36 @@ impl NoteMigrator {
         }
 
         Ok(report)
+    }
+
+    /// Auto-install a language if it's not already installed (for migration)
+    fn auto_install_language_if_needed(extension: &str, registry: &LanguageRegistry) -> Result<()> {
+        // Try to get language name from extension via registry first
+        if let Ok(lang_name) = registry.language_from_extension(extension) {
+            // Check if already installed
+            if registry.is_installed(&lang_name).unwrap_or(false) {
+                return Ok(()); // Already installed
+            }
+
+            // Check if this language is available for installation
+            if GrammarSource::find_by_name(&lang_name).is_some() {
+                eprintln!("Language '{}' not installed. Installing automatically for migration...", lang_name);
+
+                if let Ok(mut installer) = LanguageInstaller::new() {
+                    match installer.install(&lang_name) {
+                        Ok(_) => {
+                            eprintln!("✓ Successfully installed {}", lang_name);
+                        }
+                        Err(e) => {
+                            eprintln!("⚠ Failed to auto-install {}: {}", lang_name, e);
+                            eprintln!("  You can install it manually with: code-notes lang install {}", lang_name);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

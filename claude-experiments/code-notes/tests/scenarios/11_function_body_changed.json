@@ -1,0 +1,50 @@
+{
+  "name": "Function body changed",
+  "description": "When function body changes but signature stays same, note on signature should migrate",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/body.rs",
+      "content": "fn calculate(x: i32, y: i32) -> i32 {\n    x + y\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial implementation"
+    },
+    {
+      "action": "add_note",
+      "file": "src/body.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Main calculation function",
+      "author": "Engineer",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/body.rs",
+      "content": "fn calculate(x: i32, y: i32) -> i32 {\n    // New implementation\n    let result = x + y;\n    println!(\"Result: {}\", result);\n    result\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Enhanced implementation with logging"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Main calculation function",
+      "file": "src/body.rs",
+      "line": 1,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

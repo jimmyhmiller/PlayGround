@@ -1,0 +1,82 @@
+{
+  "name": "Multiple notes on same file",
+  "description": "Multiple notes on different parts of a file should migrate independently",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/multi.rs",
+      "content": "fn function_a() {\n    println!(\"A\");\n}\n\nfn function_b() {\n    println!(\"B\");\n}\n\nfn function_c() {\n    println!(\"C\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "add_note",
+      "file": "src/multi.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Note on function A",
+      "author": "Alice",
+      "collection": "default"
+    },
+    {
+      "action": "add_note",
+      "file": "src/multi.rs",
+      "line": 5,
+      "column": 0,
+      "content": "Note on function B",
+      "author": "Bob",
+      "collection": "default"
+    },
+    {
+      "action": "add_note",
+      "file": "src/multi.rs",
+      "line": 9,
+      "column": 0,
+      "content": "Note on function C",
+      "author": "Charlie",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/multi.rs",
+      "content": "// File header\n// Documentation\n\nfn function_a() {\n    println!(\"A\");\n}\n\nfn function_b() {\n    println!(\"B\");\n}\n\nfn function_c() {\n    println!(\"C\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added file header"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Note on function A",
+      "file": "src/multi.rs",
+      "line": 4,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_note",
+      "content": "Note on function B",
+      "file": "src/multi.rs",
+      "line": 8,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_note",
+      "content": "Note on function C",
+      "file": "src/multi.rs",
+      "line": 12,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 3,
+      "successful": 3,
+      "failed": 0
+    }
+  ]
+}

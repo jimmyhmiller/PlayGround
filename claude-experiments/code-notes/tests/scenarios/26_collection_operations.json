@@ -1,0 +1,77 @@
+{
+  "name": "Collection operations",
+  "description": "Test creating collections and listing them",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/main.rs",
+      "content": "fn main() {\n    println!(\"Hello, world!\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "list_collections"
+    },
+    {
+      "action": "create_collection",
+      "name": "docs",
+      "description": "Documentation notes"
+    },
+    {
+      "action": "create_collection",
+      "name": "bugs"
+    },
+    {
+      "action": "create_collection",
+      "name": "onboarding",
+      "description": "Notes for new developers"
+    },
+    {
+      "action": "expect_collection_exists",
+      "name": "docs"
+    },
+    {
+      "action": "expect_collection_exists",
+      "name": "bugs"
+    },
+    {
+      "action": "expect_collection_exists",
+      "name": "onboarding"
+    },
+    {
+      "action": "add_note",
+      "file": "src/main.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Entry point",
+      "author": "Dev",
+      "collection": "docs"
+    },
+    {
+      "action": "add_note",
+      "file": "src/main.rs",
+      "line": 2,
+      "column": 4,
+      "content": "TODO: Add error handling",
+      "author": "Dev",
+      "collection": "bugs"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 1,
+      "collection": "docs"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 1,
+      "collection": "bugs"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 0,
+      "collection": "onboarding"
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "name": "Lines added below note",
+  "description": "When lines are added below a note, the note should stay at the same line",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/below.rs",
+      "content": "fn important() {\n    println!(\"Important\");\n}\n\nfn other() {\n    println!(\"Other\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "add_note",
+      "file": "src/below.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Critical function",
+      "author": "Alice",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/below.rs",
+      "content": "fn important() {\n    println!(\"Important\");\n}\n\nfn other() {\n    println!(\"Other\");\n}\n\nfn new_function() {\n    println!(\"New\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added new function below"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Critical function",
+      "file": "src/below.rs",
+      "line": 1,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

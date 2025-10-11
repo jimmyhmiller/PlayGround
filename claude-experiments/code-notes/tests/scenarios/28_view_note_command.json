@@ -1,0 +1,50 @@
+{
+  "name": "View note command",
+  "description": "Test viewing specific notes by ID",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/database.rs",
+      "content": "pub struct Database {\n    connection: String,\n}\n\nimpl Database {\n    pub fn new(url: &str) -> Self {\n        Database {\n            connection: url.to_string(),\n        }\n    }\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add database module"
+    },
+    {
+      "action": "add_note",
+      "file": "src/database.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Main database connection struct",
+      "author": "DBA",
+      "collection": "default",
+      "store_id_as": "db_note"
+    },
+    {
+      "action": "add_note",
+      "file": "src/database.rs",
+      "line": 6,
+      "column": 4,
+      "content": "Constructor that takes a database URL",
+      "author": "DBA",
+      "collection": "default",
+      "store_id_as": "constructor_note"
+    },
+    {
+      "action": "view_note",
+      "note_id_var": "db_note"
+    },
+    {
+      "action": "view_note",
+      "note_id_var": "constructor_note"
+    },
+    {
+      "action": "expect_note",
+      "content": "Main database connection struct",
+      "file": "src/database.rs",
+      "is_orphaned": false,
+      "collection": "default"
+    }
+  ]
+}

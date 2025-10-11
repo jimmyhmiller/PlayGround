@@ -1,0 +1,8 @@
+(def x (: Int) 100)
+(def ptr1 (: (Pointer Int)) (allocate Int x))
+(def ptr2 (: (Pointer (Pointer Int))) (allocate (Pointer Int) ptr1))
+(def ptr1_deref (: (Pointer Int)) (dereference ptr2))
+(def val (: Int) (dereference ptr1_deref))
+(deallocate ptr2)
+(deallocate ptr1)
+(printf (c-str "%lld\n") val)

@@ -1,0 +1,66 @@
+{
+  "name": "Notes on nested Rust structures",
+  "description": "Test notes on methods inside impl blocks",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/person.rs",
+      "content": "struct Person {\n    name: String,\n}\n\nimpl Person {\n    fn new(name: String) -> Self {\n        Person { name }\n    }\n    \n    fn greet(&self) {\n        println!(\"Hello, {}!\", self.name);\n    }\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial Person struct"
+    },
+    {
+      "action": "add_note",
+      "file": "src/person.rs",
+      "line": 6,
+      "column": 4,
+      "content": "Constructor for Person",
+      "author": "StructDev",
+      "collection": "default"
+    },
+    {
+      "action": "add_note",
+      "file": "src/person.rs",
+      "line": 10,
+      "column": 4,
+      "content": "Instance method for greeting",
+      "author": "StructDev",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/person.rs",
+      "content": "// Person entity\n\nstruct Person {\n    name: String,\n}\n\nimpl Person {\n    fn new(name: String) -> Self {\n        Person { name }\n    }\n    \n    fn greet(&self) {\n        println!(\"Hello, {}!\", self.name);\n    }\n    \n    fn goodbye(&self) {\n        println!(\"Goodbye, {}!\", self.name);\n    }\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added goodbye method"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Constructor for Person",
+      "file": "src/person.rs",
+      "line": 8,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_note",
+      "content": "Instance method for greeting",
+      "file": "src/person.rs",
+      "line": 12,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 2,
+      "successful": 2,
+      "failed": 0
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+{
+  "name": "Multiple collections",
+  "description": "Test that notes in different collections are managed independently",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/app.rs",
+      "content": "fn main() {\n    println!(\"App\");\n}\n\nfn helper() {\n    println!(\"Helper\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial code"
+    },
+    {
+      "action": "add_note",
+      "file": "src/app.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Main entry point",
+      "author": "Dev1",
+      "collection": "documentation"
+    },
+    {
+      "action": "add_note",
+      "file": "src/app.rs",
+      "line": 5,
+      "column": 0,
+      "content": "TODO: Optimize this function",
+      "author": "Dev2",
+      "collection": "todos"
+    },
+    {
+      "action": "add_note",
+      "file": "src/app.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Entry point for onboarding",
+      "author": "Dev3",
+      "collection": "onboarding"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/app.rs",
+      "content": "// Application\n\nfn main() {\n    println!(\"App\");\n}\n\nfn helper() {\n    println!(\"Helper\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added comment"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "documentation"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "todos"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "onboarding"
+    },
+    {
+      "action": "expect_note",
+      "content": "Main entry point",
+      "file": "src/app.rs",
+      "line": 3,
+      "is_orphaned": false,
+      "collection": "documentation"
+    },
+    {
+      "action": "expect_note",
+      "content": "TODO: Optimize this function",
+      "file": "src/app.rs",
+      "line": 7,
+      "is_orphaned": false,
+      "collection": "todos"
+    },
+    {
+      "action": "expect_note",
+      "content": "Entry point for onboarding",
+      "file": "src/app.rs",
+      "line": 3,
+      "is_orphaned": false,
+      "collection": "onboarding"
+    }
+  ]
+}

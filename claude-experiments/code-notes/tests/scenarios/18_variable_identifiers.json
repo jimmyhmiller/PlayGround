@@ -1,0 +1,50 @@
+{
+  "name": "Notes on variable identifiers",
+  "description": "Test that notes on variables (not just functions) migrate correctly",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/config.rs",
+      "content": "const MAX_CONNECTIONS: usize = 100;\n\nfn get_config() -> usize {\n    MAX_CONNECTIONS\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial config"
+    },
+    {
+      "action": "add_note",
+      "file": "src/config.rs",
+      "line": 1,
+      "column": 6,
+      "content": "This constant controls connection pool size",
+      "author": "ConfigDev",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/config.rs",
+      "content": "// Configuration constants\n\nconst MAX_CONNECTIONS: usize = 100;\nconst TIMEOUT_MS: usize = 5000;\n\nfn get_config() -> usize {\n    MAX_CONNECTIONS\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added timeout constant"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "This constant controls connection pool size",
+      "file": "src/config.rs",
+      "line": 3,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

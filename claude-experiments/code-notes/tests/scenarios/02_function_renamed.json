@@ -1,0 +1,48 @@
+{
+  "name": "Function renamed",
+  "description": "When a function is renamed, the note should become orphaned (rename tracking is punted for now)",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/lib.rs",
+      "content": "pub fn authenticate(username: &str) -> bool {\n    username == \"admin\"\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "add_note",
+      "file": "src/lib.rs",
+      "line": 1,
+      "column": 7,
+      "content": "Main authentication entry point",
+      "author": "Bob",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/lib.rs",
+      "content": "pub fn verify_user(username: &str) -> bool {\n    username == \"admin\"\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Renamed authenticate to verify_user"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Main authentication entry point",
+      "is_orphaned": true
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 0,
+      "failed": 1
+    }
+  ]
+}

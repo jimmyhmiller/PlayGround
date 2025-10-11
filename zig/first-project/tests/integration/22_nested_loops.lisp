@@ -1,0 +1,5 @@
+(def result (: Int) 0)
+(c-for [i (: Int) 0] (< i 3) (set! i (+ i 1))
+  (c-for [j (: Int) 0] (< j 3) (set! j (+ j 1))
+    (set! result (+ result 1))))
+(printf (c-str "%lld\n") result)

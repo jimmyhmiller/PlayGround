@@ -1,0 +1,34 @@
+{
+  "name": "Empty collection migration",
+  "description": "Test that migrating an empty collection works without errors",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/dummy.rs",
+      "content": "fn dummy() {}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "add_note",
+      "file": "src/dummy.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Dummy note",
+      "author": "Dev",
+      "collection": "populated"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "populated"
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

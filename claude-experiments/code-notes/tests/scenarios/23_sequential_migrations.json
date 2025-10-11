@@ -1,0 +1,68 @@
+{
+  "name": "Sequential migrations across many commits",
+  "description": "Test that notes can be migrated successfully across multiple sequential commits",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/evolve.rs",
+      "content": "fn process() {\n    println!(\"v1\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Version 1"
+    },
+    {
+      "action": "add_note",
+      "file": "src/evolve.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Processing function",
+      "author": "Dev",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/evolve.rs",
+      "content": "// Version 2\nfn process() {\n    println!(\"v2\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Version 2"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/evolve.rs",
+      "content": "// Version 3\n// Enhanced\nfn process() {\n    println!(\"v3\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Version 3"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/evolve.rs",
+      "content": "// Version 4\n// Enhanced and optimized\nfn process() {\n    println!(\"v4\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Version 4"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Processing function",
+      "file": "src/evolve.rs",
+      "line": 3,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

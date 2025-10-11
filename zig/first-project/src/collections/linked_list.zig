@@ -71,6 +71,16 @@ pub fn PersistentLinkedList(comptime T: type) type {
                 }
                 return null;
             }
+
+            pub fn peek(self: *const Iterator) ?T {
+                if (self.current) |node| {
+                    if (node.tag == .empty) {
+                        return null;
+                    }
+                    return node.value;
+                }
+                return null;
+            }
         };
 
         pub fn iterator(self: *const Self) Iterator {

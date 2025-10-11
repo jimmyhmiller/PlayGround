@@ -1,0 +1,48 @@
+{
+  "name": "Complete function rewrite",
+  "description": "Test note orphaning when function is completely rewritten",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/algo.rs",
+      "content": "fn bubble_sort(arr: &mut [i32]) {\n    let n = arr.len();\n    for i in 0..n {\n        for j in 0..n-i-1 {\n            if arr[j] > arr[j+1] {\n                arr.swap(j, j+1);\n            }\n        }\n    }\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial bubble sort"
+    },
+    {
+      "action": "add_note",
+      "file": "src/algo.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Bubble sort algorithm - O(n^2)",
+      "author": "AlgoDev",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/algo.rs",
+      "content": "fn quick_sort(arr: &mut [i32]) {\n    if arr.len() <= 1 {\n        return;\n    }\n    let pivot = arr.len() / 2;\n    arr.swap(pivot, arr.len() - 1);\n    // Quick sort implementation\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Replaced with quick sort"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Bubble sort algorithm - O(n^2)",
+      "is_orphaned": true
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 0,
+      "failed": 1
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "name": "Orphaned notes listing",
+  "description": "Test listing orphaned notes after code changes that break anchors",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/processor.rs",
+      "content": "pub fn process_data(data: &str) -> String {\n    data.to_uppercase()\n}\n\npub fn validate_input(input: &str) -> bool {\n    !input.is_empty()\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add processor module"
+    },
+    {
+      "action": "add_note",
+      "file": "src/processor.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Processes incoming data",
+      "author": "Dev",
+      "collection": "default"
+    },
+    {
+      "action": "add_note",
+      "file": "src/processor.rs",
+      "line": 5,
+      "column": 0,
+      "content": "Validates user input",
+      "author": "Dev",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 2,
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/processor.rs",
+      "content": "pub fn handle_request(req: &str) -> String {\n    req.to_lowercase()\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Complete rewrite"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "list_orphaned",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Processes incoming data",
+      "is_orphaned": true,
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Validates user input",
+      "is_orphaned": true,
+      "collection": "default"
+    }
+  ]
+}

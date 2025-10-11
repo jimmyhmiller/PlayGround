@@ -25,27 +25,62 @@ pub struct CodeAnchor {
 
     /// Context around the node (parent nodes' kinds)
     pub context: Vec<String>,
+
+    /// Semantic identifier (function name, class name, variable name, etc.)
+    /// Extracted from the node for robust matching across refactorings
+    pub semantic_id: Option<String>,
+
+    /// Normalized version of node_text (whitespace removed, trimmed)
+    /// Used for matching that ignores formatting changes
+    pub normalized_text: String,
 }
 
 impl CodeAnchor {
+    /// Normalize text by removing formatting differences
+    /// This makes matching robust to whitespace-only changes
+    pub fn normalize_text(text: &str) -> String {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string()
+    }
+
     /// Calculate a confidence score for matching this anchor at a new location
     /// Returns 0.0 (no match) to 1.0 (perfect match)
     pub fn match_confidence(&self, candidate: &CodeAnchor) -> f64 {
+        // Node kind must match as prerequisite
+        if self.node_kind != candidate.node_kind {
+            return 0.0;
+        }
+
+        // Strategy 1: Semantic identifier match (highest priority)
+        // If both have semantic IDs and they match, this is a strong signal
+        if let (Some(self_id), Some(cand_id)) = (&self.semantic_id, &candidate.semantic_id)
+            && self_id == cand_id {
+                // Same semantic identity - check if content is similar too
+                if self.normalized_text == candidate.normalized_text {
+                    return 1.0; // Perfect match - same name and same content
+                } else {
+                    return 0.85; // Same name but content changed (e.g., function body changed)
+                }
+            }
+
+        // Strategy 2: Weighted scoring for structural similarity
         let mut score = 0.0;
         let mut weight_sum = 0.0;
 
-        // Exact text match is strongest signal
-        if self.node_text == candidate.node_text {
+        // Normalized text match (ignores whitespace)
+        if self.normalized_text == candidate.normalized_text {
             score += 10.0;
+        } else if self.node_text == candidate.node_text {
+            // Exact text match as fallback
+            score += 8.0;
         }
         weight_sum += 10.0;
 
-        // Node kind must match
-        if self.node_kind == candidate.node_kind {
-            score += 5.0;
-        } else {
-            return 0.0; // Must match node kind at minimum
-        }
+        // Node kind already checked above
+        score += 5.0;
         weight_sum += 5.0;
 
         // AST path similarity
@@ -74,8 +109,8 @@ impl CodeAnchor {
         }
 
         let mut matches = 0;
-        for i in 0..min_len {
-            if self.ast_path[i] == other[i] {
+        for (i, item) in other.iter().enumerate().take(min_len) {
+            if self.ast_path[i] == *item {
                 matches += 1;
             }
         }
@@ -96,8 +131,8 @@ impl CodeAnchor {
         }
 
         let mut matches = 0;
-        for i in 0..min_len {
-            if self.context[i] == other[i] {
+        for (i, item) in other.iter().enumerate().take(min_len) {
+            if self.context[i] == *item {
                 matches += 1;
             }
         }

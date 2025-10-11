@@ -1,0 +1,68 @@
+{
+  "name": "Multiple sequential commits",
+  "description": "Note should migrate successfully across multiple commits",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/evolve.rs",
+      "content": "fn process() {\n    println!(\"v1\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Version 1"
+    },
+    {
+      "action": "add_note",
+      "file": "src/evolve.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Main processing function",
+      "author": "Developer",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/evolve.rs",
+      "content": "// Added comment\n\nfn process() {\n    println!(\"v1\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added comment"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/evolve.rs",
+      "content": "// Added comment\n// More documentation\n\nfn process() {\n    println!(\"v1\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "More docs"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/evolve.rs",
+      "content": "// Added comment\n// More documentation\n\nfn helper() {\n    println!(\"helper\");\n}\n\nfn process() {\n    println!(\"v1\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added helper function"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Main processing function",
+      "file": "src/evolve.rs",
+      "line": 8,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    }
+  ]
+}

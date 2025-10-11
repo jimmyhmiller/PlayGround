@@ -76,6 +76,11 @@ impl std::fmt::Display for AuthError {
     }
 }
 
+fn main() {
+    println!("This is sample code for demonstrating code-notes.");
+    println!("Use 'code-notes add' to attach notes to functions in this file.");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

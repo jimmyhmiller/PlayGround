@@ -1,0 +1,76 @@
+{
+  "name": "Notes across multiple files",
+  "description": "Test managing notes on multiple different files",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "src/file_a.rs",
+      "content": "fn function_a() {\n    println!(\"A\");\n}\n"
+    },
+    {
+      "action": "create_file",
+      "file": "src/file_b.rs",
+      "content": "fn function_b() {\n    println!(\"B\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial files"
+    },
+    {
+      "action": "add_note",
+      "file": "src/file_a.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Note on file A",
+      "author": "Dev",
+      "collection": "default"
+    },
+    {
+      "action": "add_note",
+      "file": "src/file_b.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Note on file B",
+      "author": "Dev",
+      "collection": "default"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/file_a.rs",
+      "content": "// File A\n\nfn function_a() {\n    println!(\"A\");\n}\n"
+    },
+    {
+      "action": "modify_file",
+      "file": "src/file_b.rs",
+      "content": "// File B\n\nfn function_b() {\n    println!(\"B\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Added headers to both files"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "default"
+    },
+    {
+      "action": "expect_note",
+      "content": "Note on file A",
+      "file": "src/file_a.rs",
+      "line": 3,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_note",
+      "content": "Note on file B",
+      "file": "src/file_b.rs",
+      "line": 3,
+      "is_orphaned": false
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 2,
+      "successful": 2,
+      "failed": 0
+    }
+  ]
+}
