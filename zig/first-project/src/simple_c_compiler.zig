@@ -36,12 +36,14 @@ pub const SimpleCCompiler = struct {
         expr: *Value,
         typed: *TypedValue,
         var_type: Type,
+        idx: usize,
     };
 
     const NamespaceContext = struct {
         name: ?[]const u8,
         def_names: *std.StringHashMap(void),
         in_init_function: bool = false,
+        init_only_def_names: ?*std.StringHashMap(void) = null, // Defs initialized in init (not main)
     };
 
     pub const Error = error{
@@ -194,7 +196,7 @@ pub const SimpleCCompiler = struct {
 
         // Note: expanded_expressions and report.typed have the same length
         // because we filtered out macros before type checking
-        for (expanded_expressions.items, report.typed.items) |expr, typed_val| {
+        for (expanded_expressions.items, report.typed.items, 0..) |expr, typed_val, expr_idx| {
 
             // Check for namespace declaration
             if (expr.* == .namespace) {
@@ -237,6 +239,7 @@ pub const SimpleCCompiler = struct {
                                             .expr = expr,
                                             .typed = typed_val,
                                             .var_type = var_type,
+                                            .idx = expr_idx,
                                         });
                                         continue;
                                     }
@@ -248,7 +251,7 @@ pub const SimpleCCompiler = struct {
             }
 
             // Not a namespace or def - it's a regular expression
-            try non_def_exprs.append(self.allocator.*, .{ .expr = expr, .typed = typed_val, .idx = 0 }); // idx not needed for non-defs
+            try non_def_exprs.append(self.allocator.*, .{ .expr = expr, .typed = typed_val, .idx = expr_idx });
         }
 
         var forward_decls = std.ArrayList(u8){};
@@ -387,8 +390,26 @@ pub const SimpleCCompiler = struct {
             // Generate init function signature
             try init_writer.print("void init_namespace_{s}(Namespace_{s}* ns) {{\n", .{ sanitized_ns, sanitized_ns });
 
-            // Emit initialization for each def
+            // Find the index of the first non-def expression
+            // Defs before this index can be initialized in init()
+            // Defs after this index must be initialized in main() to preserve source order
+            var first_non_def_idx: ?usize = null;
+            if (non_def_exprs.items.len > 0) {
+                first_non_def_idx = non_def_exprs.items[0].idx;
+                for (non_def_exprs.items) |non_def| {
+                    if (first_non_def_idx == null or non_def.idx < first_non_def_idx.?) {
+                        first_non_def_idx = non_def.idx;
+                    }
+                }
+            }
+
+            // Emit initialization for defs that appear before any non-def expressions
             for (namespace_defs.items) |def| {
+                // Skip defs that appear after non-def expressions - they'll be initialized in main
+                if (first_non_def_idx != null and def.idx >= first_non_def_idx.?) {
+                    continue;
+                }
+
                 const sanitized_field = try self.sanitizeIdentifier(def.name);
                 defer self.allocator.*.free(sanitized_field);
 
@@ -529,11 +550,38 @@ pub const SimpleCCompiler = struct {
             try namespace_def_names.put(def.name, {});
         }
 
+        // Build sets for tracking which defs were initialized where
+        var init_processed_indices = std.AutoHashMap(usize, void).init(self.allocator.*);
+        defer init_processed_indices.deinit();
+
+        var init_only_def_names = std.StringHashMap(void).init(self.allocator.*);
+        defer init_only_def_names.deinit();
+
+        // Find first non-def index again
+        var first_non_def_idx_main: ?usize = null;
+        if (non_def_exprs.items.len > 0) {
+            first_non_def_idx_main = non_def_exprs.items[0].idx;
+            for (non_def_exprs.items) |non_def| {
+                if (first_non_def_idx_main == null or non_def.idx < first_non_def_idx_main.?) {
+                    first_non_def_idx_main = non_def.idx;
+                }
+            }
+        }
+
+        for (namespace_defs.items) |def| {
+            // Only mark as processed if it was actually initialized in init (before first non-def)
+            if (first_non_def_idx_main == null or def.idx < first_non_def_idx_main.?) {
+                try init_processed_indices.put(def.idx, {});
+                try init_only_def_names.put(def.name, {});
+            }
+        }
+
         // Create namespace context (use "user" as default if no namespace declared)
         const ns_name = namespace_name orelse "user";
         var ns_ctx = NamespaceContext{
             .name = ns_name,
             .def_names = &namespace_def_names,
+            .init_only_def_names = &init_only_def_names,
         };
 
         // Check if user defined a 'main' function
@@ -554,8 +602,12 @@ pub const SimpleCCompiler = struct {
             }
         }
 
-        // Second pass: emit full definitions and expressions (skip namespace defs)
-        for (expanded_expressions.items, report.typed.items) |expr, typed_val| {
+        // Second pass: emit full definitions and expressions (skip namespace defs and init-processed exprs)
+        for (expanded_expressions.items, report.typed.items, 0..) |expr, typed_val, expr_idx| {
+            // Skip expressions that were already processed in the init function
+            if (namespace_defs.items.len > 0 and init_processed_indices.contains(expr_idx)) {
+                continue;
+            }
             try self.emitTopLevel(prelude_writer, body_writer, expr, typed_val, &checker, &includes, &ns_ctx);
         }
 
@@ -848,16 +900,45 @@ pub const SimpleCCompiler = struct {
                 }
 
                 if (std.mem.eql(u8, head, "def")) {
-                    // Check if this def is in the namespace (skip if it is)
+                    // Check if this def was initialized in namespace init
                     if (iter.next()) |name_val| {
                         if (name_val.isSymbol()) {
-                            if (ns_ctx.def_names.contains(name_val.symbol)) {
-                                // Skip - it's handled in namespace init
+                            const def_name = name_val.symbol;
+                            const is_namespace_def = ns_ctx.def_names.contains(def_name);
+                            const was_init_in_init = if (ns_ctx.init_only_def_names) |init_only|
+                                init_only.contains(def_name)
+                            else
+                                is_namespace_def;
+
+                            if (was_init_in_init) {
+                                // Skip - it was fully handled in namespace init
+                                return;
+                            }
+
+                            if (is_namespace_def) {
+                                // This is a namespace def that wasn't initialized in init
+                                // Emit it as a namespace field assignment in main
+                                const sanitized_name = try self.sanitizeIdentifier(def_name);
+                                defer self.allocator.*.free(sanitized_name);
+                                const sanitized_ns = try self.sanitizeIdentifier(ns_ctx.name.?);
+                                defer self.allocator.*.free(sanitized_ns);
+
+                                try body_writer.print("    g_{s}.{s} = ", .{ sanitized_ns, sanitized_name });
+                                self.writeExpressionTyped(body_writer, typed, ns_ctx, includes) catch |err| {
+                                    switch (err) {
+                                        Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
+                                            try body_writer.print("0; // unsupported\n", .{});
+                                            return;
+                                        },
+                                        else => return err,
+                                    }
+                                };
+                                try body_writer.print(";\n", .{});
                                 return;
                             }
                         }
                     }
-                    // Reset iterator and emit as normal
+                    // Not a namespace def - reset iterator and emit as normal standalone def
                     iter = list.iterator();
                     _ = iter.next(); // skip 'def' again
                     try self.emitDefinition(def_writer, expr, typed, checker, includes);
@@ -1210,11 +1291,11 @@ pub const SimpleCCompiler = struct {
                 return;
             }
             if (std.mem.eql(u8, expr.symbol, "true")) {
-                try writer.print("true", .{});
+                try writer.print("1", .{});
                 return;
             }
             if (std.mem.eql(u8, expr.symbol, "false")) {
-                try writer.print("false", .{});
+                try writer.print("0", .{});
                 return;
             }
 
@@ -1996,18 +2077,34 @@ pub const SimpleCCompiler = struct {
                 }
 
                 // Check for if expression (represented as 3-element list without 'if' symbol)
-                // Pattern: [cond, then, else] where cond is typically a list (comparison/function call)
-                if (l.elements.len == 3 and l.elements[0].* == .list) {
-                    // This is likely an if expression (cond then else)
-                    // Emit as C ternary: (cond ? then : else)
-                    try writer.print("(", .{});
-                    try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
-                    try writer.print(" ? ", .{});
-                    try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                    try writer.print(" : ", .{});
-                    try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                    try writer.print(")", .{});
-                    return;
+                // Pattern: [cond, then, else] where cond has boolean type
+                // IMPORTANT: Make sure first element is NOT an operator symbol (like <, >, =, etc.)
+                // Those are handled by the operator check below
+                if (l.elements.len == 3) {
+                    const cond_type = l.elements[0].getType();
+                    const is_operator_form = l.elements[0].* == .symbol and blk: {
+                        const op_name = l.elements[0].symbol.name;
+                        break :blk std.mem.eql(u8, op_name, "<") or
+                            std.mem.eql(u8, op_name, ">") or
+                            std.mem.eql(u8, op_name, "<=") or
+                            std.mem.eql(u8, op_name, ">=") or
+                            std.mem.eql(u8, op_name, "=") or
+                            std.mem.eql(u8, op_name, "!=") or
+                            std.mem.eql(u8, op_name, "and") or
+                            std.mem.eql(u8, op_name, "or");
+                    };
+                    if (cond_type == .bool and !is_operator_form) {
+                        // This is an if expression (cond then else)
+                        // Emit as C ternary: (cond ? then : else)
+                        try writer.print("(", .{});
+                        try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                        try writer.print(" ? ", .{});
+                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                        try writer.print(" : ", .{});
+                        try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                        try writer.print(")", .{});
+                        return;
+                    }
                 }
 
                 // Check for arithmetic/comparison/logical operators
@@ -2118,8 +2215,19 @@ pub const SimpleCCompiler = struct {
                     return;
                 }
 
-                // Check if this is an enum variant (has type enum_type)
-                if (sym.type == .enum_type) {
+                // Check if this is a boolean literal
+                if (std.mem.eql(u8, sym.name, "true")) {
+                    try writer.print("1", .{});
+                    return;
+                }
+                if (std.mem.eql(u8, sym.name, "false")) {
+                    try writer.print("0", .{});
+                    return;
+                }
+
+                // Check if this is an enum variant (has type enum_type AND qualified name with /)
+                // We need to distinguish enum variants (Color/Red) from variables of enum type (pc: Color)
+                if (sym.type == .enum_type and std.mem.indexOf(u8, sym.name, "/") != null) {
                     // Enum variants like Color/Red become ENUM_VARIANT in C
                     const sanitized = try self.sanitizeIdentifier(sym.name);
                     defer self.allocator.*.free(sanitized);
@@ -2128,7 +2236,7 @@ pub const SimpleCCompiler = struct {
                 }
 
                 // Check if this symbol is in the namespace
-                if (ns_ctx.def_names.contains(sym.name)) {
+                if (ns_ctx.def_names.*.contains(sym.name)) {
                     if (ns_ctx.name) |_| {
                         const sanitized_field = try self.sanitizeIdentifier(sym.name);
                         defer self.allocator.*.free(sanitized_field);

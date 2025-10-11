@@ -144,6 +144,30 @@ pub enum Commands {
     /// Language management commands
     #[command(subcommand)]
     Lang(LangCommands),
+
+    /// Inject notes as inline comments into source files
+    Inject {
+        /// File path (injects all notes for this file)
+        file: PathBuf,
+
+        /// Collection name (default: "default")
+        #[arg(long, default_value = "default")]
+        collection: String,
+
+        /// Output file (default: overwrites input file)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Remove all inline note comments from a source file
+    RemoveInline {
+        /// File path
+        file: PathBuf,
+
+        /// Output file (default: overwrites input file)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
