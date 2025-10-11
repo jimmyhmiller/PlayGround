@@ -3,6 +3,7 @@ mod parsers;
 mod storage;
 mod git;
 mod cli;
+mod inline;
 
 use clap::Parser;
 use cli::{Cli, execute_command};
