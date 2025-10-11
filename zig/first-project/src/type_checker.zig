@@ -1641,6 +1641,8 @@ pub const BidirectionalTypeChecker = struct {
         const snapshot_slice = snapshots_storage[0..binding_count];
         errdefer self.restoreBindingSnapshots(snapshot_slice[0..inserted]);
 
+        // Create typed bindings vector
+        var typed_bindings_elements = try self.allocator.alloc(*TypedValue, binding_count * 3);
         var idx: usize = 0;
         while (idx < binding_count) : (idx += 1) {
             const name_val = bindings_vec.at(idx * 3);
@@ -1650,8 +1652,18 @@ pub const BidirectionalTypeChecker = struct {
             if (!name_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
 
             const annotated_type = try self.parseTypeAnnotation(annotation_val);
+            const typed_value = try self.checkTyped(value_val, annotated_type);
 
-            _ = try self.checkTyped(value_val, annotated_type);
+            // Create typed binding: [name-symbol, type-annotation, typed-value]
+            const name_typed = try self.allocator.create(TypedValue);
+            name_typed.* = TypedValue{ .symbol = .{ .name = name_val.symbol, .type = annotated_type } };
+
+            const type_typed = try self.allocator.create(TypedValue);
+            type_typed.* = TypedValue{ .type_value = .{ .value_type = annotated_type, .type = Type.type_type } };
+
+            typed_bindings_elements[idx * 3] = name_typed;
+            typed_bindings_elements[idx * 3 + 1] = type_typed;
+            typed_bindings_elements[idx * 3 + 2] = typed_value;
 
             const entry = try self.env.getOrPut(name_val.symbol);
             const had_previous = entry.found_existing;
@@ -1667,8 +1679,29 @@ pub const BidirectionalTypeChecker = struct {
             inserted += 1;
         }
 
+        // Create typed bindings vector
+        const typed_bindings_vec = try self.allocator.create(TypedValue);
+        const vec_type_ptr = try self.allocator.create(Type);
+        vec_type_ptr.* = Type.nil; // Vector element type is mixed/generic
+        typed_bindings_vec.* = TypedValue{ .vector = .{
+            .elements = typed_bindings_elements,
+            .type = Type{ .vector = vec_type_ptr },
+        } };
+
+        // Type check body expressions
         current = bindings_node.next;
         if (current == null) return TypeCheckError.InvalidTypeAnnotation;
+
+        // Count body expressions first
+        var body_count: usize = 0;
+        var count_current = current;
+        while (count_current) |node| {
+            if (node.value != null) body_count += 1;
+            count_current = node.next;
+        }
+
+        var body_typed_elements = try self.allocator.alloc(*TypedValue, body_count);
+        var body_idx: usize = 0;
 
         var last_typed: ?*TypedValue = null;
         var let_body_count: usize = 0;
@@ -1676,20 +1709,43 @@ pub const BidirectionalTypeChecker = struct {
             const node = current.?;
             if (node.value) |body_expr| {
                 let_body_count += 1;
-                last_typed = self.synthesizeTyped(body_expr) catch |err| {
+                const typed = self.synthesizeTyped(body_expr) catch |err| {
                     std.debug.print("ERROR: Let body expr #{} failed: {}\n", .{ let_body_count, err });
                     return err;
                 };
+                body_typed_elements[body_idx] = typed;
+                body_idx += 1;
+                last_typed = typed;
             }
             current = node.next;
         }
 
         const body_typed = last_typed orelse return TypeCheckError.InvalidTypeAnnotation;
+        const result_type = body_typed.getType();
 
         self.restoreBindingSnapshots(snapshot_slice[0..inserted]);
 
+        // Create typed let structure: [let, bindings-vector, body-expr1, ...]
+        const total_elements = 2 + body_count;
+        var let_elements = try self.allocator.alloc(*TypedValue, total_elements);
+
+        const let_symbol = try self.allocator.create(TypedValue);
+        let_symbol.* = TypedValue{ .symbol = .{ .name = "let", .type = result_type } };
+
+        let_elements[0] = let_symbol;
+        let_elements[1] = typed_bindings_vec;
+        for (body_typed_elements, 0..) |body_expr, i| {
+            let_elements[2 + i] = body_expr;
+        }
+
+        const result = try self.allocator.create(TypedValue);
+        result.* = TypedValue{ .list = .{
+            .elements = let_elements,
+            .type = result_type,
+        } };
+
         _ = expr;
-        return body_typed;
+        return result;
     }
 
     fn synthesizeTypedComparison(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
@@ -1799,12 +1855,16 @@ pub const BidirectionalTypeChecker = struct {
             return TypeCheckError.TypeMismatch;
         }
 
-        storage[0] = arg_typed;
+        // Include 'c-str' symbol as first element
+        const cstr_symbol = try self.allocator.create(TypedValue);
+        cstr_symbol.* = TypedValue{ .symbol = .{ .name = "c-str", .type = Type.c_string } };
+        storage[0] = cstr_symbol;
+        storage[1] = arg_typed;
 
         // Return type is CString
         const result = try self.allocator.create(TypedValue);
         result.* = TypedValue{ .list = .{
-            .elements = storage[0..1],
+            .elements = storage[0..2],
             .type = Type.c_string,
         } };
         return result;
@@ -1822,7 +1882,7 @@ pub const BidirectionalTypeChecker = struct {
 
         var arg_count: usize = 0;
 
-        // Type check all arguments
+        // Type check all arguments (start at index 1 to leave space for printf symbol at [0])
         while (arg_node_opt) |node| {
             // Skip empty nodes (sentinels at end of list)
             if (node.tag == .empty) break;
@@ -1836,15 +1896,15 @@ pub const BidirectionalTypeChecker = struct {
                 if (fmt_type != .c_string and fmt_type != .string) {
                     return TypeCheckError.TypeMismatch;
                 }
-                storage[arg_count] = fmt_typed;
+                storage[arg_count + 1] = fmt_typed;
             } else {
                 // Rest of the arguments can be any type (printf is variadic)
                 const arg_typed = try self.synthesizeTyped(arg_expr);
-                storage[arg_count] = arg_typed;
+                storage[arg_count + 1] = arg_typed;
             }
 
             arg_count += 1;
-            if (arg_count >= storage.len) break;
+            if (arg_count >= storage.len - 1) break; // -1 for the symbol
             arg_node_opt = node.next;
         }
 
@@ -1852,10 +1912,15 @@ pub const BidirectionalTypeChecker = struct {
             return TypeCheckError.InvalidTypeAnnotation;
         }
 
+        // Include 'printf' symbol as first element
+        const printf_symbol = try self.allocator.create(TypedValue);
+        printf_symbol.* = TypedValue{ .symbol = .{ .name = "printf", .type = Type.i32 } };
+        storage[0] = printf_symbol;
+
         // Return type is I32 (number of characters printed)
         const result = try self.allocator.create(TypedValue);
         result.* = TypedValue{ .list = .{
-            .elements = storage[0..arg_count],
+            .elements = storage[0..arg_count+1],
             .type = Type.i32,
         } };
         return result;
@@ -1867,7 +1932,7 @@ pub const BidirectionalTypeChecker = struct {
 
         if (std.mem.eql(u8, op, "bit-not")) {
             // Unary operator
-            if (storage.len < 1) return TypeCheckError.InvalidTypeAnnotation;
+            if (storage.len < 2) return TypeCheckError.InvalidTypeAnnotation;
 
             const operand = try getUnaryOperand(list);
             const operand_typed = try self.synthesizeTyped(operand);
@@ -1877,18 +1942,22 @@ pub const BidirectionalTypeChecker = struct {
                 return TypeCheckError.TypeMismatch;
             }
 
-            storage[0] = operand_typed;
+            // Include operator symbol as first element
+            const op_symbol = try self.allocator.create(TypedValue);
+            op_symbol.* = TypedValue{ .symbol = .{ .name = op, .type = operand_type } };
+            storage[0] = op_symbol;
+            storage[1] = operand_typed;
 
             const result = try self.allocator.create(TypedValue);
             result.* = TypedValue{ .list = .{
-                .elements = storage[0..1],
+                .elements = storage[0..2],
                 .type = operand_type,
             } };
             return result;
         }
 
         // Binary operators
-        if (storage.len < 2) return TypeCheckError.InvalidTypeAnnotation;
+        if (storage.len < 3) return TypeCheckError.InvalidTypeAnnotation;
 
         const operands = try getBinaryOperands(list);
         const left_typed = try self.synthesizeTyped(operands.left);
@@ -1900,25 +1969,29 @@ pub const BidirectionalTypeChecker = struct {
             return TypeCheckError.TypeMismatch;
         }
 
-        storage[0] = left_typed;
-        storage[1] = right_typed;
-
         // For shifts, result type is left operand type
         const result_type = if (std.mem.eql(u8, op, "bit-shl") or std.mem.eql(u8, op, "bit-shr"))
             left_type
         else
             try self.mergeNumericTypes(left_type, right_type);
 
+        // Include operator symbol as first element
+        const op_symbol = try self.allocator.create(TypedValue);
+        op_symbol.* = TypedValue{ .symbol = .{ .name = op, .type = result_type } };
+        storage[0] = op_symbol;
+        storage[1] = left_typed;
+        storage[2] = right_typed;
+
         const result = try self.allocator.create(TypedValue);
         result.* = TypedValue{ .list = .{
-            .elements = storage[0..2],
+            .elements = storage[0..3],
             .type = result_type,
         } };
         return result;
     }
 
     fn synthesizeTypedIf(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
-        if (storage.len < 3) return TypeCheckError.InvalidTypeAnnotation;
+        if (storage.len < 4) return TypeCheckError.InvalidTypeAnnotation;
 
         _ = expr;
         const cond_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
@@ -1947,13 +2020,17 @@ pub const BidirectionalTypeChecker = struct {
             return err;
         };
 
-        storage[0] = cond_typed;
-        storage[1] = then_typed;
-        storage[2] = else_typed;
+        // Include 'if' symbol as first element
+        const if_symbol = try self.allocator.create(TypedValue);
+        if_symbol.* = TypedValue{ .symbol = .{ .name = "if", .type = result_type } };
+        storage[0] = if_symbol;
+        storage[1] = cond_typed;
+        storage[2] = then_typed;
+        storage[3] = else_typed;
 
         const result = try self.allocator.create(TypedValue);
         result.* = TypedValue{ .list = .{
-            .elements = storage[0..3],
+            .elements = storage[0..4],
             .type = result_type,
         } };
         return result;
@@ -1973,7 +2050,7 @@ pub const BidirectionalTypeChecker = struct {
 
         // Type check all body expressions
         var current = cond_node.next;
-        var elem_count: usize = 1; // Start at 1 for condition
+        var elem_count: usize = 2; // Start at 2: symbol at [0], condition at [1]
         while (current) |node| {
             if (node.value) |body_expr| {
                 if (elem_count >= storage.len) return TypeCheckError.InvalidTypeAnnotation;
@@ -1983,7 +2060,11 @@ pub const BidirectionalTypeChecker = struct {
             current = node.next;
         }
 
-        storage[0] = cond_typed;
+        // Include 'while' symbol as first element
+        const while_symbol = try self.allocator.create(TypedValue);
+        while_symbol.* = TypedValue{ .symbol = .{ .name = "while", .type = Type.void } };
+        storage[0] = while_symbol;
+        storage[1] = cond_typed;
 
         const result = try self.allocator.create(TypedValue);
         result.* = TypedValue{ .list = .{
@@ -2058,7 +2139,7 @@ pub const BidirectionalTypeChecker = struct {
 
         // Type check all body expressions
         var current = step_node.next;
-        var elem_count: usize = 3; // Start at 3 for init, cond, step
+        var elem_count: usize = 4; // Start at 4: symbol, init, cond, step
         while (current) |node| {
             if (node.value) |body_expr| {
                 if (elem_count >= storage.len) return TypeCheckError.InvalidTypeAnnotation;
@@ -2071,9 +2152,34 @@ pub const BidirectionalTypeChecker = struct {
         // Restore binding
         self.restoreBindingSnapshots(&[_]BindingSnapshot{snapshot});
 
-        storage[0] = init_typed;
-        storage[1] = cond_typed;
-        storage[2] = step_typed;
+        // Create typed init binding vector: [var-symbol, type-annotation, typed-init-value]
+        var init_vec_elements = try self.allocator.alloc(*TypedValue, 3);
+
+        const var_typed = try self.allocator.create(TypedValue);
+        var_typed.* = TypedValue{ .symbol = .{ .name = var_name, .type = var_type } };
+
+        const type_annotation = try self.allocator.create(TypedValue);
+        type_annotation.* = TypedValue{ .type_value = .{ .value_type = var_type, .type = Type.type_type } };
+
+        init_vec_elements[0] = var_typed;
+        init_vec_elements[1] = type_annotation;
+        init_vec_elements[2] = init_typed;
+
+        const init_binding_vec = try self.allocator.create(TypedValue);
+        const vec_type_ptr = try self.allocator.create(Type);
+        vec_type_ptr.* = Type.nil;
+        init_binding_vec.* = TypedValue{ .vector = .{
+            .elements = init_vec_elements,
+            .type = Type{ .vector = vec_type_ptr },
+        } };
+
+        // Include 'c-for' symbol as first element
+        const cfor_symbol = try self.allocator.create(TypedValue);
+        cfor_symbol.* = TypedValue{ .symbol = .{ .name = "c-for", .type = Type.void } };
+        storage[0] = cfor_symbol;
+        storage[1] = init_binding_vec;
+        storage[2] = cond_typed;
+        storage[3] = step_typed;
 
         const result = try self.allocator.create(TypedValue);
         result.* = TypedValue{ .list = .{
@@ -2100,11 +2206,19 @@ pub const BidirectionalTypeChecker = struct {
 
         // Type check the value and ensure it matches the variable's type
         const value_typed = try self.checkTyped(operands.right, var_type);
-        storage[0] = value_typed;
+
+        // Include 'set!' symbol and variable name as first two elements
+        const set_symbol = try self.allocator.create(TypedValue);
+        set_symbol.* = TypedValue{ .symbol = .{ .name = "set!", .type = Type.void } };
+        const var_symbol = try self.allocator.create(TypedValue);
+        var_symbol.* = TypedValue{ .symbol = .{ .name = var_name, .type = var_type } };
+        storage[0] = set_symbol;
+        storage[1] = var_symbol;
+        storage[2] = value_typed;
 
         const result = try self.allocator.create(TypedValue);
         result.* = TypedValue{ .list = .{
-            .elements = storage[0..1],
+            .elements = storage[0..3],
             .type = Type.void,
         } };
         return result;
@@ -3133,11 +3247,19 @@ pub const BidirectionalTypeChecker = struct {
                             const ptr_type = try self.allocator.create(Type);
                             ptr_type.* = pointee_type;
 
+                            // Create allocate symbol and type marker
+                            const alloc_symbol = try self.allocator.create(TypedValue);
+                            alloc_symbol.* = TypedValue{ .symbol = .{ .name = "allocate", .type = Type{ .pointer = ptr_type } } };
+                            const type_marker = try self.allocator.create(TypedValue);
+                            type_marker.* = TypedValue{ .type_value = .{ .value_type = pointee_type, .type = Type.type_type } };
+
                             // For extern types, allow allocation without initialization
                             if (pointee_type == .extern_type) {
                                 // No initialization value needed for extern types
+                                typed_elements[0] = alloc_symbol;
+                                typed_elements[1] = type_marker;
                                 result.* = TypedValue{ .list = .{
-                                    .elements = typed_elements[0..0],
+                                    .elements = typed_elements[0..2],
                                     .type = Type{ .pointer = ptr_type },
                                 } };
                                 return result;
@@ -3150,9 +3272,11 @@ pub const BidirectionalTypeChecker = struct {
                             // Type check the value against the pointee type
                             const typed_value = try self.checkTyped(value_node.value.?, pointee_type);
 
-                            typed_elements[0] = typed_value;
+                            typed_elements[0] = alloc_symbol;
+                            typed_elements[1] = type_marker;
+                            typed_elements[2] = typed_value;
                             result.* = TypedValue{ .list = .{
-                                .elements = typed_elements[0..1],
+                                .elements = typed_elements[0..3],
                                 .type = Type{ .pointer = ptr_type },
                             } };
                             return result;
@@ -3167,9 +3291,17 @@ pub const BidirectionalTypeChecker = struct {
                             // Parse the type argument
                             const value_type = try self.parseType(type_arg_node.value.?);
 
+                            // Include 'uninitialized' symbol and type marker
+                            const uninit_symbol = try self.allocator.create(TypedValue);
+                            uninit_symbol.* = TypedValue{ .symbol = .{ .name = "uninitialized", .type = value_type } };
+                            const type_marker = try self.allocator.create(TypedValue);
+                            type_marker.* = TypedValue{ .type_value = .{ .value_type = value_type, .type = Type.type_type } };
+                            typed_elements[0] = uninit_symbol;
+                            typed_elements[1] = type_marker;
+
                             // Return a value of the given type (uninitialized)
                             result.* = TypedValue{ .list = .{
-                                .elements = typed_elements[0..0],
+                                .elements = typed_elements[0..2],
                                 .type = value_type,
                             } };
                             return result;
@@ -3222,9 +3354,13 @@ pub const BidirectionalTypeChecker = struct {
 
                             const pointee_type = typed_ptr.getType().pointer.*;
 
-                            typed_elements[0] = typed_ptr;
+                            // Include 'dereference' symbol as first element
+                            const deref_symbol = try self.allocator.create(TypedValue);
+                            deref_symbol.* = TypedValue{ .symbol = .{ .name = "dereference", .type = pointee_type } };
+                            typed_elements[0] = deref_symbol;
+                            typed_elements[1] = typed_ptr;
                             result.* = TypedValue{ .list = .{
-                                .elements = typed_elements[0..1],
+                                .elements = typed_elements[0..2],
                                 .type = pointee_type,
                             } };
                             return result;
@@ -3252,10 +3388,14 @@ pub const BidirectionalTypeChecker = struct {
                             // Check value against pointee type
                             const typed_value = try self.checkTyped(value_node.value.?, pointee_type);
 
-                            typed_elements[0] = typed_ptr;
-                            typed_elements[1] = typed_value;
+                            // Include 'pointer-write!' symbol as first element
+                            const write_symbol = try self.allocator.create(TypedValue);
+                            write_symbol.* = TypedValue{ .symbol = .{ .name = "pointer-write!", .type = Type.nil } };
+                            typed_elements[0] = write_symbol;
+                            typed_elements[1] = typed_ptr;
+                            typed_elements[2] = typed_value;
                             result.* = TypedValue{ .list = .{
-                                .elements = typed_elements[0..2],
+                                .elements = typed_elements[0..3],
                                 .type = Type.nil,
                             } };
                             return result;
@@ -3278,13 +3418,15 @@ pub const BidirectionalTypeChecker = struct {
                             const ptr_type = try self.allocator.create(Type);
                             ptr_type.* = var_type;
 
-                            typed_elements[0] = try self.allocator.create(TypedValue);
-                            typed_elements[0].* = TypedValue{ .symbol = .{
-                                .name = var_name,
-                                .type = Type{ .pointer = ptr_type },
-                            } };
+                            // Include 'address-of' symbol as first element
+                            const addr_symbol = try self.allocator.create(TypedValue);
+                            addr_symbol.* = TypedValue{ .symbol = .{ .name = "address-of", .type = Type{ .pointer = ptr_type } } };
+                            const var_symbol = try self.allocator.create(TypedValue);
+                            var_symbol.* = TypedValue{ .symbol = .{ .name = var_name, .type = var_type } };
+                            typed_elements[0] = addr_symbol;
+                            typed_elements[1] = var_symbol;
                             result.* = TypedValue{ .list = .{
-                                .elements = typed_elements[0..1],
+                                .elements = typed_elements[0..2],
                                 .type = Type{ .pointer = ptr_type },
                             } };
                             return result;
@@ -3330,11 +3472,16 @@ pub const BidirectionalTypeChecker = struct {
                                 return TypeCheckError.InvalidTypeAnnotation; // Field not found
                             }
 
-                            typed_elements[0] = typed_ptr;
-                            typed_elements[1] = try self.allocator.create(TypedValue);
-                            typed_elements[1].* = TypedValue{ .symbol = .{ .name = field_name, .type = Type.nil } };
+                            // Create symbol for pointer-field-read
+                            const ptr_field_read_symbol = try self.allocator.create(TypedValue);
+                            ptr_field_read_symbol.* = TypedValue{ .symbol = .{ .name = "pointer-field-read", .type = field_type.? } };
+
+                            typed_elements[0] = ptr_field_read_symbol;
+                            typed_elements[1] = typed_ptr;
+                            typed_elements[2] = try self.allocator.create(TypedValue);
+                            typed_elements[2].* = TypedValue{ .symbol = .{ .name = field_name, .type = Type.nil } };
                             result.* = TypedValue{ .list = .{
-                                .elements = typed_elements[0..2],
+                                .elements = typed_elements[0..3],
                                 .type = field_type.?,
                             } };
                             return result;
@@ -3389,12 +3536,17 @@ pub const BidirectionalTypeChecker = struct {
                             // Check value against field type
                             const typed_value = try self.checkTyped(value_node.value.?, field_type.?);
 
-                            typed_elements[0] = typed_ptr;
-                            typed_elements[1] = try self.allocator.create(TypedValue);
-                            typed_elements[1].* = TypedValue{ .symbol = .{ .name = field_name, .type = Type.nil } };
-                            typed_elements[2] = typed_value;
+                            // Create symbol for pointer-field-write!
+                            const ptr_field_write_symbol = try self.allocator.create(TypedValue);
+                            ptr_field_write_symbol.* = TypedValue{ .symbol = .{ .name = "pointer-field-write!", .type = Type.nil } };
+
+                            typed_elements[0] = ptr_field_write_symbol;
+                            typed_elements[1] = typed_ptr;
+                            typed_elements[2] = try self.allocator.create(TypedValue);
+                            typed_elements[2].* = TypedValue{ .symbol = .{ .name = field_name, .type = Type.nil } };
+                            typed_elements[3] = typed_value;
                             result.* = TypedValue{ .list = .{
-                                .elements = typed_elements[0..3],
+                                .elements = typed_elements[0..4],
                                 .type = Type.nil,
                             } };
                             return result;
@@ -3419,10 +3571,15 @@ pub const BidirectionalTypeChecker = struct {
 
                             const typed_ptr2 = try self.checkTyped(ptr2_node.value.?, typed_ptr1.getType());
 
-                            typed_elements[0] = typed_ptr1;
-                            typed_elements[1] = typed_ptr2;
+                            // Create symbol for pointer-equal?
+                            const ptr_equal_symbol = try self.allocator.create(TypedValue);
+                            ptr_equal_symbol.* = TypedValue{ .symbol = .{ .name = "pointer-equal?", .type = Type.bool } };
+
+                            typed_elements[0] = ptr_equal_symbol;
+                            typed_elements[1] = typed_ptr1;
+                            typed_elements[2] = typed_ptr2;
                             result.* = TypedValue{ .list = .{
-                                .elements = typed_elements[0..2],
+                                .elements = typed_elements[0..3],
                                 .type = Type.bool,
                             } };
                             return result;
