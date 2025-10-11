@@ -76,6 +76,11 @@ List bugs:
 bug-tracker list
 ```
 
+View a bug:
+```bash
+bug-tracker view <BUG_ID>
+```
+
 ### Examples
 
 **Add a comprehensive bug report:**
@@ -86,6 +91,11 @@ bug-tracker add --title "Null pointer dereference" --description "Found potentia
 **Close a bug by ID:**
 ```bash
 bug-tracker close curious-elephant
+```
+
+**View a bug by ID:**
+```bash
+bug-tracker view curious-elephant
 ```
 
 **Enable AI quality validation:**
