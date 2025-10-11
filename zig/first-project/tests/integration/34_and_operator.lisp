@@ -1,0 +1,5 @@
+(def result1 (: Int) (if (and true true) 1 0))
+(def result2 (: Int) (if (and true false) 1 0))
+(def result3 (: Int) (if (and false true) 1 0))
+(def result4 (: Int) (if (and false false) 1 0))
+(printf (c-str "%d %d %d %d\n") result1 result2 result3 result4)

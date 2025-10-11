@@ -85,6 +85,16 @@ enum Commands {
         project: Option<PathBuf>,
     },
 
+    /// View a specific bug by its ID
+    View {
+        /// Project root directory (where BUGS.md is located). Defaults to searching current directory and parents.
+        #[arg(short, long)]
+        project: Option<PathBuf>,
+
+        /// Bug ID to view (e.g., "curious-elephant")
+        bug_id: String,
+    },
+
     /// Install the tool definition in claude.md
     Install {
         /// Path to the claude.md file (defaults to .claude/claude.md in current directory)
@@ -151,6 +161,12 @@ fn main() {
         Commands::List { project } => {
             if let Err(e) = list_bugs(project) {
                 eprintln!("Error listing bugs: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::View { project, bug_id } => {
+            if let Err(e) = view_bug(project, bug_id) {
+                eprintln!("Error viewing bug: {}", e);
                 std::process::exit(1);
             }
         }
@@ -494,6 +510,37 @@ fn list_bugs(project: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+fn view_bug(project: Option<PathBuf>, bug_id: String) -> Result<(), Box<dyn std::error::Error>> {
+    let project_root = if let Some(p) = project {
+        p
+    } else {
+        find_bugs_file(None)?
+    };
+
+    let bugs_file = project_root.join("BUGS.md");
+
+    if !bugs_file.exists() {
+        return Err("BUGS.md not found in project directory".into());
+    }
+
+    let content = fs::read_to_string(&bugs_file)?;
+
+    // Pattern to match a bug section with the given ID
+    let bug_pattern = format!(r"(?s)(## .*?\[{}\].*?)(---\s*\n)", regex::escape(&bug_id));
+    let re = Regex::new(&bug_pattern)?;
+
+    if let Some(caps) = re.captures(&content) {
+        let bug_content = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+
+        println!("\n{}", bug_content.trim());
+        println!("---\n");
+
+        Ok(())
+    } else {
+        Err(format!("Bug with ID '{}' not found", bug_id).into())
+    }
+}
+
 fn install_to_claude_md(claude_md: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     // Determine the claude.md path
     let claude_md_path = if let Some(path) = claude_md {
@@ -590,6 +637,11 @@ List bugs:
 bug-tracker list
 ```
 
+View a bug:
+```bash
+bug-tracker view <BUG_ID>
+```
+
 ### Examples
 
 **Add a comprehensive bug report:**
@@ -600,6 +652,11 @@ bug-tracker add --title "Null pointer dereference" --description "Found potentia
 **Close a bug by ID:**
 ```bash
 bug-tracker close curious-elephant
+```
+
+**View a bug by ID:**
+```bash
+bug-tracker view curious-elephant
 ```
 
 **Enable AI quality validation:**

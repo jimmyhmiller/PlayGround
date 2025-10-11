@@ -1,0 +1,13 @@
+(def Node (: Type)
+  (Struct [value Int] [next (Pointer Node)]))
+
+(def n1 (: Node) (Node 10 pointer-null))
+(def n2 (: Node) (Node 20 pointer-null))
+(def ptr1 (: (Pointer Node)) (allocate Node n1))
+(def ptr2 (: (Pointer Node)) (allocate Node n2))
+(pointer-field-write! ptr2 next ptr1)
+(def next_ptr (: (Pointer Node)) (pointer-field-read ptr2 next))
+(def val (: Int) (pointer-field-read next_ptr value))
+(deallocate ptr1)
+(deallocate ptr2)
+(printf (c-str "%lld\n") val)

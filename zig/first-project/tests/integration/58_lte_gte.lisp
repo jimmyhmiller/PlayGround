@@ -1,0 +1,5 @@
+(def x (: Int) 10)
+(def y (: Int) 10)
+(def lte_result (: Bool) (<= x y))
+(def gte_result (: Bool) (>= x y))
+(printf (c-str "%d %d\n") lte_result gte_result)
