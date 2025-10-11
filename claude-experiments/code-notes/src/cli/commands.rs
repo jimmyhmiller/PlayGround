@@ -147,26 +147,50 @@ pub enum Commands {
 
     /// Inject notes as inline comments into source files
     Inject {
-        /// File path (injects all notes for this file)
-        file: PathBuf,
+        /// File path (optional, injects all files if not provided)
+        file: Option<PathBuf>,
 
-        /// Collection name (default: "default")
-        #[arg(long, default_value = "default")]
-        collection: String,
+        /// Collection name (optional, injects all collections if not provided)
+        #[arg(long)]
+        collection: Option<String>,
 
         /// Output file (default: overwrites input file)
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
 
-    /// Remove all inline note comments from a source file
+    /// Remove all inline note comments from source files
     RemoveInline {
-        /// File path
-        file: PathBuf,
+        /// File path (optional, removes from all files if not provided)
+        file: Option<PathBuf>,
 
         /// Output file (default: overwrites input file)
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+
+    /// Extract notes from inline comments in source files
+    Extract {
+        /// File path (optional, extracts from all files if not provided)
+        file: Option<PathBuf>,
+
+        /// Collection name (optional, searches all collections if not provided)
+        #[arg(long)]
+        collection: Option<String>,
+    },
+
+    /// Capture @note: markers in code and convert them to proper notes
+    Capture {
+        /// File path
+        file: PathBuf,
+
+        /// Author name
+        #[arg(short, long)]
+        author: String,
+
+        /// Collection name (default: "default")
+        #[arg(long, default_value = "default")]
+        collection: String,
     },
 }
 
@@ -220,6 +244,10 @@ pub fn execute_command(cli: Cli) -> Result<()> {
         Commands::Import { bundle } => cmd_import(bundle),
         Commands::Orphaned { collection } => cmd_orphaned(collection),
         Commands::Lang(lang_cmd) => execute_lang_command(lang_cmd),
+        Commands::Inject { file, collection, output } => cmd_inject(file, collection, output),
+        Commands::RemoveInline { file, output } => cmd_remove_inline(file, output),
+        Commands::Extract { file, collection } => cmd_extract(file, collection),
+        Commands::Capture { file, author, collection } => cmd_capture(file, author, collection),
     }
 }
 
@@ -647,6 +675,376 @@ fn cmd_orphaned(collection_name: String) -> Result<()> {
         println!("File: {}:{}", note.anchor.primary.file_path, note.anchor.primary.line_number + 1);
         println!("Content: {}", note.content);
     }
+
+    Ok(())
+}
+
+fn cmd_inject(file: Option<PathBuf>, collection_name: Option<String>, output: Option<PathBuf>) -> Result<()> {
+    use crate::inline;
+    use std::collections::HashMap;
+
+    let repo = GitRepo::discover(".")?;
+    let root = repo.root_path()?;
+    let storage = NoteStorage::new(&root)?;
+
+    // Determine which collections to process
+    let collection_names = if let Some(name) = collection_name {
+        vec![name]
+    } else {
+        storage.list_collections()?
+    };
+
+    // Collect all notes from selected collections
+    let mut notes_by_file: HashMap<String, Vec<crate::models::Note>> = HashMap::new();
+
+    for coll_name in &collection_names {
+        if let Ok(collection) = storage.load_collection(coll_name) {
+            for note in collection.notes {
+                if !note.deleted {
+                    let file_path = note.anchor.primary.file_path.clone();
+                    notes_by_file.entry(file_path).or_insert_with(Vec::new).push(note);
+                }
+            }
+        }
+    }
+
+    if notes_by_file.is_empty() {
+        println!("No notes found to inject");
+        return Ok(());
+    }
+
+    // If specific file requested, filter to just that file
+    let files_to_process: Vec<String> = if let Some(file_path) = file {
+        let resolved_file = resolve_file_path(&repo, &file_path)?;
+        let rel_path = repo.relative_path(&resolved_file)?;
+
+        // Find notes matching this file
+        let matching_keys: Vec<_> = notes_by_file.keys()
+            .filter(|k| *k == &rel_path || k.ends_with(&rel_path))
+            .cloned()
+            .collect();
+
+        if matching_keys.is_empty() {
+            println!("No notes found for file {}", file_path.display());
+            return Ok(());
+        }
+        matching_keys
+    } else {
+        notes_by_file.keys().cloned().collect()
+    };
+
+    // Process each file
+    let mut files_processed = 0;
+    let mut notes_injected = 0;
+
+    for file_key in &files_to_process {
+        if let Some(file_notes) = notes_by_file.get(file_key) {
+            // Resolve the file path (it's stored as relative path)
+            let file_full_path = root.join(file_key);
+
+            if !file_full_path.exists() {
+                eprintln!("Warning: File {} not found, skipping", file_key);
+                continue;
+            }
+
+            match inline::inject_notes(&file_full_path, file_notes) {
+                Ok(injected_content) => {
+                    let output_path = if let Some(ref out) = output {
+                        out.clone()
+                    } else {
+                        file_full_path.clone()
+                    };
+
+                    std::fs::write(&output_path, injected_content)?;
+                    println!("✓ Injected {} notes into {}", file_notes.len(), file_key);
+                    files_processed += 1;
+                    notes_injected += file_notes.len();
+                }
+                Err(e) => {
+                    eprintln!("✗ Failed to inject notes into {}: {}", file_key, e);
+                }
+            }
+        }
+    }
+
+    println!("\nSummary: Injected {} notes across {} files", notes_injected, files_processed);
+    Ok(())
+}
+
+fn cmd_remove_inline(file: Option<PathBuf>, output: Option<PathBuf>) -> Result<()> {
+    use crate::inline;
+    use std::collections::HashSet;
+
+    let repo = GitRepo::discover(".")?;
+    let root = repo.root_path()?;
+    let storage = NoteStorage::new(&root)?;
+
+    // Determine which files to process
+    let files_to_process: Vec<PathBuf> = if let Some(file_path) = file {
+        vec![resolve_file_path(&repo, &file_path)?]
+    } else {
+        // Get unique files from all notes across all collections
+        let mut file_set = HashSet::new();
+        let collection_names = storage.list_collections()?;
+
+        for coll_name in &collection_names {
+            if let Ok(collection) = storage.load_collection(coll_name) {
+                for note in collection.notes {
+                    file_set.insert(note.anchor.primary.file_path.clone());
+                }
+            }
+        }
+
+        // Convert to full paths
+        file_set.iter()
+            .map(|rel_path| root.join(rel_path))
+            .filter(|p| p.exists())
+            .collect()
+    };
+
+    if files_to_process.is_empty() {
+        println!("No files with notes found");
+        return Ok(());
+    }
+
+    let mut files_processed = 0;
+
+    for file_path in &files_to_process {
+        match inline::remove_notes(file_path) {
+            Ok(cleaned_content) => {
+                let output_path = if let Some(ref out) = output {
+                    out.clone()
+                } else {
+                    file_path.clone()
+                };
+
+                // Only write and report if notes were actually removed
+                let original = std::fs::read_to_string(file_path)?;
+                if original != cleaned_content {
+                    std::fs::write(&output_path, cleaned_content)?;
+                    let rel_path = file_path.strip_prefix(&root).unwrap_or(file_path);
+                    println!("✓ Removed inline notes from {}", rel_path.display());
+                    files_processed += 1;
+                }
+            }
+            Err(e) => {
+                let rel_path = file_path.strip_prefix(&root).unwrap_or(file_path);
+                eprintln!("✗ Failed to process {}: {}", rel_path.display(), e);
+            }
+        }
+    }
+
+    if files_processed > 0 {
+        println!("\nSummary: Removed inline notes from {} files", files_processed);
+    } else {
+        println!("No inline notes found to remove");
+    }
+    Ok(())
+}
+
+fn cmd_extract(file: Option<PathBuf>, collection_name: Option<String>) -> Result<()> {
+    use crate::inline;
+    use std::collections::HashSet;
+
+    let repo = GitRepo::discover(".")?;
+    let root = repo.root_path()?;
+    let storage = NoteStorage::new(&root)?;
+
+    // Determine which files to process
+    let files_to_process: Vec<PathBuf> = if let Some(file_path) = file {
+        vec![resolve_file_path(&repo, &file_path)?]
+    } else {
+        // Get unique files from notes in specified collections (or all collections)
+        let mut file_set = HashSet::new();
+        let collection_names = if let Some(name) = &collection_name {
+            vec![name.clone()]
+        } else {
+            storage.list_collections()?
+        };
+
+        for coll_name in &collection_names {
+            if let Ok(collection) = storage.load_collection(coll_name) {
+                for note in collection.notes {
+                    file_set.insert(note.anchor.primary.file_path.clone());
+                }
+            }
+        }
+
+        // Convert to full paths
+        file_set.iter()
+            .map(|rel_path| root.join(rel_path))
+            .filter(|p| p.exists())
+            .collect()
+    };
+
+    if files_to_process.is_empty() {
+        println!("No files with notes found");
+        return Ok(());
+    }
+
+    // Determine which collections to search for extraction
+    let search_collections = if let Some(name) = collection_name {
+        Some(vec![name])
+    } else {
+        None
+    };
+
+    let mut total_notes = 0;
+    let mut files_with_notes = 0;
+
+    for file_path in &files_to_process {
+        match inline::extract_notes(file_path, &storage, search_collections.clone()) {
+            Ok(notes) => {
+                if !notes.is_empty() {
+                    let rel_path = file_path.strip_prefix(&root).unwrap_or(file_path);
+                    println!("\n=== {} ===", rel_path.display());
+                    println!("Found {} note(s):", notes.len());
+
+                    for note in &notes {
+                        println!("\nID: {}", note.id);
+                        println!("Collection: {}", note.collection);
+                        println!("Line: {}", note.anchor.primary.line_number + 1);
+                        println!("Author: {}", note.author);
+                        println!("Content: {}", note.content);
+                        if note.deleted {
+                            println!("🗑️  DELETED");
+                        }
+                        if note.is_orphaned {
+                            println!("⚠️  ORPHANED");
+                        }
+                    }
+
+                    total_notes += notes.len();
+                    files_with_notes += 1;
+                }
+            }
+            Err(e) => {
+                let rel_path = file_path.strip_prefix(&root).unwrap_or(file_path);
+                eprintln!("✗ Failed to extract from {}: {}", rel_path.display(), e);
+            }
+        }
+    }
+
+    if total_notes > 0 {
+        println!("\nSummary: Extracted {} notes from {} files", total_notes, files_with_notes);
+    } else {
+        println!("No inline notes found to extract");
+    }
+    Ok(())
+}
+
+fn cmd_capture(file: PathBuf, author: String, collection_name: String) -> Result<()> {
+    use crate::inline;
+
+    let repo = GitRepo::discover(".")?;
+    let root = repo.root_path()?;
+    let storage = NoteStorage::new(&root)?;
+
+    if !storage.is_initialized() {
+        return Err(anyhow!("Code-notes not initialized. Run 'code-notes init' first"));
+    }
+
+    // Resolve the file path
+    let resolved_file = resolve_file_path(&repo, &file)?;
+
+    // Scan for @note: markers
+    let captured_notes = inline::scan_for_note_markers(&resolved_file)?;
+
+    if captured_notes.is_empty() {
+        println!("No @note: markers found in {}", file.display());
+        return Ok(());
+    }
+
+    println!("Found {} @note: marker(s) in {}", captured_notes.len(), file.display());
+
+    // Read file content for tree-sitter parsing
+    let file_content = std::fs::read_to_string(&resolved_file)?;
+
+    // Detect language
+    let extension = resolved_file
+        .extension()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow!("Could not determine file extension"))?;
+
+    // Create language registry
+    let mut registry = LanguageRegistry::new()?;
+    registry.initialize()?;
+
+    // Auto-install language if needed
+    if auto_install_language(extension, &registry) {
+        registry = LanguageRegistry::new()?;
+        registry.initialize()?;
+    }
+
+    // Create parser
+    let mut parser = CodeParser::from_extension(extension, &mut registry)?;
+    let tree = parser.parse(&file_content)?;
+
+    // Get relative path
+    let rel_path = repo.relative_path(&resolved_file)?;
+    let commit_hash = repo.current_commit_hash()?;
+
+    // Load or create collection
+    let mut collection = storage
+        .load_collection(&collection_name)
+        .unwrap_or_else(|_| NoteCollection::new(collection_name.clone()));
+
+    // Create notes for each captured marker
+    let mut notes_with_ids = Vec::new();
+
+    for captured in &captured_notes {
+        // Find the actual code line (line after the @note: comment)
+        let code_line = captured.line_number;
+
+        // Find the first non-comment line after the note
+        let lines: Vec<&str> = file_content.lines().collect();
+        let mut target_line = code_line;
+
+        // Skip past all comment lines to find the actual code
+        let comment_prefix = inline::comment_prefix_for_extension(extension)?;
+        while target_line < lines.len() {
+            let line = lines[target_line].trim();
+            if !line.starts_with(comment_prefix) && !line.is_empty() {
+                break;
+            }
+            target_line += 1;
+        }
+
+        if target_line >= lines.len() {
+            eprintln!("Warning: Could not find code for note at line {}", captured.line_number + 1);
+            continue;
+        }
+
+        // Find node at the code line (0-indexed for tree-sitter)
+        let node = find_node_at_position(&tree, &file_content, target_line, 0)
+            .ok_or_else(|| anyhow!("No code found at line {}", target_line + 1))?;
+
+        // Build anchor
+        let builder = AnchorBuilder::new(&file_content, rel_path.clone());
+        let anchor = builder.build_note_anchor(node, commit_hash.clone())?;
+
+        // Create note with new UUID
+        let note = Note::new(captured.content.clone(), author.clone(), anchor, collection_name.clone());
+        let note_id = note.id;
+
+        // Add to collection
+        collection.add_note(note);
+
+        // Store for file replacement
+        notes_with_ids.push((captured.clone(), note_id));
+
+        println!("✓ Created note {} at line {}", note_id, captured.line_number + 1);
+    }
+
+    // Save collection
+    storage.save_collection(&collection)?;
+
+    // Replace @note: markers with full format
+    let updated_content = inline::replace_note_markers_with_full_notes(&resolved_file, &notes_with_ids)?;
+    std::fs::write(&resolved_file, updated_content)?;
+
+    println!("\n✓ Captured {} notes and saved to collection '{}'", notes_with_ids.len(), collection_name);
+    println!("✓ Updated {} with full note markers", file.display());
 
     Ok(())
 }

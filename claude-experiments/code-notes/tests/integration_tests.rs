@@ -115,6 +115,46 @@ enum Step {
         successful: usize,
         failed: usize,
     },
+
+    #[serde(rename = "inject_notes")]
+    InjectNotes {
+        file: String,
+        collection: String,
+    },
+
+    #[serde(rename = "remove_inline_notes")]
+    RemoveInlineNotes {
+        file: String,
+    },
+
+    #[serde(rename = "extract_notes")]
+    ExtractNotes {
+        file: String,
+        collection: Option<String>,
+    },
+
+    #[serde(rename = "expect_file_contains")]
+    ExpectFileContains {
+        file: String,
+        content: String,
+    },
+
+    #[serde(rename = "expect_file_not_contains")]
+    ExpectFileNotContains {
+        file: String,
+        content: String,
+    },
+
+    #[serde(rename = "expect_extracted_note_count")]
+    ExpectExtractedNoteCount {
+        count: usize,
+    },
+
+    #[serde(rename = "read_file")]
+    ReadFile {
+        file: String,
+        store_as: String,
+    },
 }
 
 struct TestContext {
@@ -123,6 +163,8 @@ struct TestContext {
     repo_path: PathBuf,
     binary_path: PathBuf,
     note_ids: HashMap<String, String>,
+    last_extracted_output: String,
+    stored_files: HashMap<String, String>,
 }
 
 impl TestContext {
@@ -166,6 +208,8 @@ impl TestContext {
             repo_path,
             binary_path,
             note_ids: HashMap::new(),
+            last_extracted_output: String::new(),
+            stored_files: HashMap::new(),
         })
     }
 
@@ -538,6 +582,105 @@ impl TestContext {
 
         Ok(())
     }
+
+    fn inject_notes(&self, file: &str, collection: &str) -> Result<()> {
+        let output = Command::new(&self.binary_path)
+            .args(&["inject", file, "--collection", collection])
+            .current_dir(&self.repo_path)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(anyhow!("Inject notes failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+
+        Ok(())
+    }
+
+    fn remove_inline_notes(&self, file: &str) -> Result<()> {
+        let output = Command::new(&self.binary_path)
+            .args(&["remove-inline", file])
+            .current_dir(&self.repo_path)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(anyhow!("Remove inline notes failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+
+        Ok(())
+    }
+
+    fn extract_notes(&mut self, file: &str, collection: Option<&str>) -> Result<()> {
+        let mut args = vec!["extract", file];
+        if let Some(coll) = collection {
+            args.push("--collection");
+            args.push(coll);
+        }
+
+        let output = Command::new(&self.binary_path)
+            .args(&args)
+            .current_dir(&self.repo_path)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(anyhow!("Extract notes failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+
+        self.last_extracted_output = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(())
+    }
+
+    fn expect_file_contains(&self, file: &str, content: &str) -> Result<()> {
+        let file_path = self.repo_path.join(file);
+        let file_content = std::fs::read_to_string(&file_path)
+            .map_err(|e| anyhow!("Could not read file {}: {}", file, e))?;
+
+        if !file_content.contains(content) {
+            return Err(anyhow!(
+                "File '{}' does not contain expected content '{}'\nFile contents:\n{}",
+                file, content, file_content
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn expect_file_not_contains(&self, file: &str, content: &str) -> Result<()> {
+        let file_path = self.repo_path.join(file);
+        let file_content = std::fs::read_to_string(&file_path)
+            .map_err(|e| anyhow!("Could not read file {}: {}", file, e))?;
+
+        if file_content.contains(content) {
+            return Err(anyhow!(
+                "File '{}' should not contain '{}' but it does\nFile contents:\n{}",
+                file, content, file_content
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn expect_extracted_note_count(&self, expected_count: usize) -> Result<()> {
+        // Count occurrences of "ID: " in extracted output
+        let actual_count = self.last_extracted_output.matches("ID: ").count();
+
+        if actual_count != expected_count {
+            return Err(anyhow!(
+                "Expected {} extracted notes, found {}\nExtracted output:\n{}",
+                expected_count, actual_count, self.last_extracted_output
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn read_file(&mut self, file: &str, store_as: &str) -> Result<()> {
+        let file_path = self.repo_path.join(file);
+        let content = std::fs::read_to_string(&file_path)
+            .map_err(|e| anyhow!("Could not read file {}: {}", file, e))?;
+
+        self.stored_files.insert(store_as.to_string(), content);
+        Ok(())
+    }
 }
 
 fn run_scenario(scenario_path: &Path) -> Result<()> {
@@ -610,6 +753,27 @@ fn run_scenario(scenario_path: &Path) -> Result<()> {
             }
             Step::ExpectMigrationSuccess { total, successful, failed } => {
                 ctx.expect_migration_success(&last_migration_output, *total, *successful, *failed)?;
+            }
+            Step::InjectNotes { file, collection } => {
+                ctx.inject_notes(file, collection)?;
+            }
+            Step::RemoveInlineNotes { file } => {
+                ctx.remove_inline_notes(file)?;
+            }
+            Step::ExtractNotes { file, collection } => {
+                ctx.extract_notes(file, collection.as_deref())?;
+            }
+            Step::ExpectFileContains { file, content } => {
+                ctx.expect_file_contains(file, content)?;
+            }
+            Step::ExpectFileNotContains { file, content } => {
+                ctx.expect_file_not_contains(file, content)?;
+            }
+            Step::ExpectExtractedNoteCount { count } => {
+                ctx.expect_extracted_note_count(*count)?;
+            }
+            Step::ReadFile { file, store_as } => {
+                ctx.read_file(file, store_as)?;
             }
         }
     }

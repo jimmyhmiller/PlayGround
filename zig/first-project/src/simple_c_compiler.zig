@@ -46,6 +46,125 @@ pub const SimpleCCompiler = struct {
         init_only_def_names: ?*std.StringHashMap(void) = null, // Defs initialized in init (not main)
     };
 
+    const SpecialForm = enum {
+        // Control flow
+        if_form,
+        while_form,
+        c_for,
+        let_form,
+
+        // Assignment
+        set,
+
+        // Arithmetic operators
+        add,
+        subtract,
+        multiply,
+        divide,
+        modulo,
+
+        // Comparison operators
+        less_than,
+        greater_than,
+        less_equal,
+        greater_equal,
+        equal,
+        not_equal,
+
+        // Logical operators
+        and_op,
+        or_op,
+        not_op,
+
+        // Memory operations
+        allocate,
+        deallocate,
+        dereference,
+        pointer_write,
+        pointer_equal,
+
+        // Pointer field operations
+        pointer_field_read,
+        pointer_field_write,
+
+        // Array operations
+        array_ref,
+        array_set,
+        array_length,
+        array_create,
+        array_ptr,
+        allocate_array,
+        deallocate_array,
+        pointer_index_read,
+        pointer_index_write,
+
+        // Other operations
+        cast,
+        field_access,
+        printf_fn,
+
+        // Unknown/not a special form
+        unknown,
+    };
+
+    fn identifySpecialForm(op: []const u8) SpecialForm {
+        // Use a hash map or simple if-else chain for string matching
+        if (std.mem.eql(u8, op, "if")) return .if_form;
+        if (std.mem.eql(u8, op, "while")) return .while_form;
+        if (std.mem.eql(u8, op, "c-for")) return .c_for;
+        if (std.mem.eql(u8, op, "let")) return .let_form;
+        if (std.mem.eql(u8, op, "set!")) return .set;
+
+        // Arithmetic
+        if (std.mem.eql(u8, op, "+")) return .add;
+        if (std.mem.eql(u8, op, "-")) return .subtract;
+        if (std.mem.eql(u8, op, "*")) return .multiply;
+        if (std.mem.eql(u8, op, "/")) return .divide;
+        if (std.mem.eql(u8, op, "%")) return .modulo;
+
+        // Comparison
+        if (std.mem.eql(u8, op, "<")) return .less_than;
+        if (std.mem.eql(u8, op, ">")) return .greater_than;
+        if (std.mem.eql(u8, op, "<=")) return .less_equal;
+        if (std.mem.eql(u8, op, ">=")) return .greater_equal;
+        if (std.mem.eql(u8, op, "=")) return .equal;
+        if (std.mem.eql(u8, op, "!=")) return .not_equal;
+
+        // Logical
+        if (std.mem.eql(u8, op, "and")) return .and_op;
+        if (std.mem.eql(u8, op, "or")) return .or_op;
+        if (std.mem.eql(u8, op, "not")) return .not_op;
+
+        // Memory
+        if (std.mem.eql(u8, op, "allocate")) return .allocate;
+        if (std.mem.eql(u8, op, "deallocate")) return .deallocate;
+        if (std.mem.eql(u8, op, "dereference")) return .dereference;
+        if (std.mem.eql(u8, op, "pointer-write!")) return .pointer_write;
+        if (std.mem.eql(u8, op, "pointer-equal?")) return .pointer_equal;
+
+        // Pointer fields
+        if (std.mem.eql(u8, op, "pointer-field-read")) return .pointer_field_read;
+        if (std.mem.eql(u8, op, "pointer-field-write!")) return .pointer_field_write;
+
+        // Arrays
+        if (std.mem.eql(u8, op, "array-ref")) return .array_ref;
+        if (std.mem.eql(u8, op, "array-set!")) return .array_set;
+        if (std.mem.eql(u8, op, "array-length")) return .array_length;
+        if (std.mem.eql(u8, op, "array")) return .array_create;
+        if (std.mem.eql(u8, op, "array-ptr")) return .array_ptr;
+        if (std.mem.eql(u8, op, "allocate-array")) return .allocate_array;
+        if (std.mem.eql(u8, op, "deallocate-array")) return .deallocate_array;
+        if (std.mem.eql(u8, op, "pointer-index-read")) return .pointer_index_read;
+        if (std.mem.eql(u8, op, "pointer-index-write!")) return .pointer_index_write;
+
+        // Other
+        if (std.mem.eql(u8, op, "cast")) return .cast;
+        if (std.mem.eql(u8, op, ".")) return .field_access;
+        if (std.mem.eql(u8, op, "printf")) return .printf_fn;
+
+        return .unknown;
+    }
+
     pub const Error = error{
         UnsupportedExpression,
         MissingOperand,
@@ -1781,6 +1900,295 @@ pub const SimpleCCompiler = struct {
         try body_writer.print(");\n", .{});
     }
 
+    // Helper method to dispatch special forms using a switch statement
+    fn dispatchSpecialForm(self: *SimpleCCompiler, writer: anytype, form: SpecialForm, l: anytype, ns_ctx: *NamespaceContext, includes: *IncludeFlags) Error!bool {
+        switch (form) {
+            .if_form => {
+                if (l.elements.len != 4) return Error.UnsupportedExpression;
+                try writer.print("(", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print(" ? ", .{});
+                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                try writer.print(" : ", .{});
+                try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                try writer.print(")", .{});
+                return true;
+            },
+            .while_form => {
+                if (l.elements.len < 3) return Error.UnsupportedExpression;
+                try writer.print("({{ while (", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print(") {{ ", .{});
+                for (l.elements[2..]) |body_stmt| {
+                    try self.writeExpressionTyped(writer, body_stmt, ns_ctx, includes);
+                    try writer.print("; ", .{});
+                }
+                try writer.print("}} }})", .{});
+                return true;
+            },
+            .c_for => {
+                if (l.elements.len < 5) return Error.UnsupportedExpression;
+                if (l.elements[1].* != .vector) return Error.UnsupportedExpression;
+                const init_vec = l.elements[1].vector;
+                if (init_vec.elements.len != 3) return Error.UnsupportedExpression;
+
+                const var_sym = init_vec.elements[0];
+                const type_val = init_vec.elements[1];
+                const init_val = init_vec.elements[2];
+
+                if (var_sym.* != .symbol) return Error.UnsupportedExpression;
+                if (type_val.* != .type_value) return Error.UnsupportedExpression;
+
+                const var_name = var_sym.symbol.name;
+                const var_type = type_val.type_value.value_type;
+
+                const c_type = try self.cTypeFor(var_type, includes);
+                const sanitized = try self.sanitizeIdentifier(var_name);
+                defer self.allocator.*.free(sanitized);
+
+                try writer.print("({{ for ({s} {s} = ", .{ c_type, sanitized });
+                try self.writeExpressionTyped(writer, init_val, ns_ctx, includes);
+                try writer.print("; ", .{});
+                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                try writer.print("; ", .{});
+                try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                try writer.print(") {{ ", .{});
+
+                for (l.elements[4..]) |body_stmt| {
+                    try self.writeExpressionTyped(writer, body_stmt, ns_ctx, includes);
+                    try writer.print("; ", .{});
+                }
+
+                try writer.print("}} }})", .{});
+                return true;
+            },
+            .let_form => {
+                if (l.elements.len < 3) return Error.UnsupportedExpression;
+                if (l.elements[1].* != .vector) return Error.UnsupportedExpression;
+
+                const bindings_vec = l.elements[1].vector;
+                if (bindings_vec.elements.len % 3 != 0) return Error.UnsupportedExpression;
+                const binding_count = bindings_vec.elements.len / 3;
+
+                try writer.print("({{ ", .{});
+
+                var i: usize = 0;
+                while (i < binding_count) : (i += 1) {
+                    const name_typed = bindings_vec.elements[i * 3];
+                    const type_typed = bindings_vec.elements[i * 3 + 1];
+                    const value_typed = bindings_vec.elements[i * 3 + 2];
+
+                    if (name_typed.* != .symbol) return Error.UnsupportedExpression;
+                    if (type_typed.* != .type_value) return Error.UnsupportedExpression;
+
+                    const var_name = name_typed.symbol.name;
+                    const var_type = type_typed.type_value.value_type;
+
+                    if (var_type == .nil) {
+                        try self.writeExpressionTyped(writer, value_typed, ns_ctx, includes);
+                        try writer.print("; ", .{});
+                        continue;
+                    }
+
+                    const c_type = try self.cTypeFor(var_type, includes);
+                    const sanitized = try self.sanitizeIdentifier(var_name);
+                    defer self.allocator.*.free(sanitized);
+
+                    try writer.print("{s} {s} = ", .{ c_type, sanitized });
+                    try self.writeExpressionTyped(writer, value_typed, ns_ctx, includes);
+                    try writer.print("; ", .{});
+                }
+
+                for (l.elements[2 .. l.elements.len - 1]) |body_stmt| {
+                    try self.writeExpressionTyped(writer, body_stmt, ns_ctx, includes);
+                    try writer.print("; ", .{});
+                }
+
+                try self.writeExpressionTyped(writer, l.elements[l.elements.len - 1], ns_ctx, includes);
+                try writer.print("; }})", .{});
+                return true;
+            },
+            .set => {
+                if (l.elements.len != 3) return Error.UnsupportedExpression;
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print(" = ", .{});
+                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                return true;
+            },
+            .add, .subtract, .multiply, .divide, .modulo => {
+                if (l.elements.len < 2) return Error.UnsupportedExpression;
+                const op_str = l.elements[0].symbol.name;
+
+                if (form == .subtract and l.elements.len == 2) {
+                    try writer.print("(-(", .{});
+                    try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                    try writer.print("))", .{});
+                    return true;
+                }
+
+                try writer.print("(", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                var i: usize = 2;
+                while (i < l.elements.len) : (i += 1) {
+                    try writer.print(" {s} ", .{op_str});
+                    try self.writeExpressionTyped(writer, l.elements[i], ns_ctx, includes);
+                }
+                try writer.print(")", .{});
+                return true;
+            },
+            .less_than, .greater_than, .less_equal, .greater_equal, .equal, .not_equal => {
+                if (l.elements.len != 3) return Error.UnsupportedExpression;
+                const op = l.elements[0].symbol.name;
+                const c_op = if (std.mem.eql(u8, op, "=")) "==" else op;
+                try writer.print("(", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print(" {s} ", .{c_op});
+                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                try writer.print(")", .{});
+                return true;
+            },
+            .and_op, .or_op => {
+                if (l.elements.len != 3) return Error.UnsupportedExpression;
+                const c_op = if (form == .and_op) "&&" else "||";
+                try writer.print("(", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print(" {s} ", .{c_op});
+                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                try writer.print(")", .{});
+                return true;
+            },
+            .not_op => {
+                if (l.elements.len != 2) return Error.UnsupportedExpression;
+                try writer.print("(!(", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print("))", .{});
+                return true;
+            },
+            .array_ref => {
+                if (l.elements.len != 3) return false;
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print("[", .{});
+                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                try writer.print("]", .{});
+                return true;
+            },
+            .array_set => {
+                if (l.elements.len != 4 or l.type != .nil) return false;
+                try writer.print("(", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print("[", .{});
+                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                try writer.print("] = ", .{});
+                try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                try writer.print(")", .{});
+                return true;
+            },
+            .array_length => {
+                if (l.elements.len != 2) return false;
+                const array_type = l.elements[1].getType();
+                if (array_type == .array) {
+                    try writer.print("{d}", .{array_type.array.size});
+                    return true;
+                }
+                return false;
+            },
+            .array_create => {
+                if (l.type != .array) return false;
+                const array_type = l.type.array;
+                const elem_c_type = try self.cTypeFor(array_type.element_type, includes);
+
+                if (l.elements.len == 3) {
+                    try writer.print("({{ {s} __tmp_arr[{d}]; for (size_t __i = 0; __i < {d}; __i++) __tmp_arr[__i] = ", .{ elem_c_type, array_type.size, array_type.size });
+                    try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                    try writer.print("; __tmp_arr; }})", .{});
+                } else {
+                    try writer.print("({{ {s} __tmp_arr[{d}]; __tmp_arr; }})", .{ elem_c_type, array_type.size });
+                }
+                return true;
+            },
+            .array_ptr => {
+                if (l.elements.len != 3) return false;
+                try writer.print("(&", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print("[", .{});
+                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                try writer.print("])", .{});
+                return true;
+            },
+            .allocate_array => {
+                if (l.type != .pointer) return false;
+                const elem_type = l.type.pointer.*;
+                const elem_c_type = try self.cTypeFor(elem_type, includes);
+                includes.need_stdlib = true;
+
+                const size_typed = l.elements[2];
+
+                if (l.elements.len == 4) {
+                    try writer.print("({{ {s}* __arr = ({s}*)malloc(", .{ elem_c_type, elem_c_type });
+                    try self.writeExpressionTyped(writer, size_typed, ns_ctx, includes);
+                    try writer.print(" * sizeof({s})); for (size_t __i = 0; __i < ", .{elem_c_type});
+                    try self.writeExpressionTyped(writer, size_typed, ns_ctx, includes);
+                    try writer.print("; __i++) __arr[__i] = ", .{});
+                    try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                    try writer.print("; __arr; }})", .{});
+                } else {
+                    try writer.print("({s}*)malloc(", .{elem_c_type});
+                    try self.writeExpressionTyped(writer, size_typed, ns_ctx, includes);
+                    try writer.print(" * sizeof({s}))", .{elem_c_type});
+                }
+                return true;
+            },
+            .deallocate_array => {
+                if (l.elements.len != 2) return false;
+                includes.need_stdlib = true;
+                try writer.print("free(", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print(")", .{});
+                return true;
+            },
+            .pointer_index_read => {
+                if (l.elements.len != 3) return false;
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print("[", .{});
+                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                try writer.print("]", .{});
+                return true;
+            },
+            .pointer_index_write => {
+                if (l.elements.len != 4 or l.type != .nil) return false;
+                try writer.print("(", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print("[", .{});
+                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                try writer.print("] = ", .{});
+                try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                try writer.print(")", .{});
+                return true;
+            },
+            .printf_fn => {
+                if (l.type != .i32) return false;
+                try writer.print("printf(", .{});
+                for (l.elements[1..], 0..) |arg, i| {
+                    if (i > 0) try writer.print(", ", .{});
+                    try self.writeExpressionTyped(writer, arg, ns_ctx, includes);
+                }
+                try writer.print(")", .{});
+                return true;
+            },
+            .pointer_write, .pointer_equal, .pointer_field_read, .pointer_field_write => {
+                // These are handled earlier in writeExpressionTyped for better organization
+                return false;
+            },
+            .allocate, .deallocate, .dereference, .cast, .field_access => {
+                // These are handled earlier in writeExpressionTyped for better organization
+                return false;
+            },
+            .unknown => {
+                return false;
+            },
+        }
+    }
+
     fn writeExpressionTyped(self: *SimpleCCompiler, writer: anytype, typed: *TypedValue, ns_ctx: *NamespaceContext, includes: *IncludeFlags) Error!void {
         switch (typed.*) {
             .struct_instance => |si| {
@@ -1809,36 +2217,26 @@ pub const SimpleCCompiler = struct {
                     return;
                 }
 
-                // Check for allocate operation (by type signature)
-                // allocate creates a list with 0-1 elements and pointer type
-                // BUT: distinguish from function calls that return pointers
-                // Function calls have the function as the first element
-                if ((l.elements.len == 0 or l.elements.len == 1) and l.type == .pointer) {
-                    // If we have 1 element and it's a symbol with function/pointer type, it's a function call, not allocate
-                    const is_function_call = if (l.elements.len == 1)
-                        (l.elements[0].getType() == .function or
-                         (l.elements[0].getType() == .pointer and l.elements[0].getType().pointer.* == .function))
-                    else
-                        false;
+                // Check for allocate operation (by symbol)
+                // allocate: [allocate, type-marker, value?]
+                if (l.elements.len > 0 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "allocate")) {
+                    if (l.elements.len < 2 or l.elements.len > 3) return Error.UnsupportedExpression;
+                    const ptr_type = l.type;
+                    const pointee = ptr_type.pointer.*;
+                    includes.need_stdlib = true;
+                    try writer.print("({{ ", .{});
+                    const c_type = try self.cTypeFor(pointee, includes);
+                    try writer.print("{s}* __tmp_ptr = malloc(sizeof({s})); ", .{ c_type, c_type });
 
-                    if (!is_function_call) {
-                        const ptr_type = l.type;
-                        const pointee = ptr_type.pointer.*;
-                        includes.need_stdlib = true;
-                        try writer.print("({{ ", .{});
-                        const c_type = try self.cTypeFor(pointee, includes);
-                        try writer.print("{s}* __tmp_ptr = malloc(sizeof({s})); ", .{ c_type, c_type });
-
-                        // Initialize if value provided
-                        if (l.elements.len == 1) {
-                            try writer.print("*__tmp_ptr = ", .{});
-                            try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
-                            try writer.print("; ", .{});
-                        }
-
-                        try writer.print("__tmp_ptr; }})", .{});
-                        return;
+                    // Initialize if value provided (element at index 2)
+                    if (l.elements.len == 3) {
+                        try writer.print("*__tmp_ptr = ", .{});
+                        try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                        try writer.print("; ", .{});
                     }
+
+                    try writer.print("__tmp_ptr; }})", .{});
+                    return;
                 }
 
                 // Check for deallocate first: 1 element (pointer), result type is nil
@@ -1860,10 +2258,11 @@ pub const SimpleCCompiler = struct {
                     return;
                 }
 
-                // Check for dereference: 1 element (pointer), result type is NOT pointer and NOT nil
-                if (l.elements.len == 1 and l.elements[0].getType() == .pointer and l.type != .pointer and l.type != .nil) {
+                // Check for dereference (by symbol)
+                // dereference: [dereference, ptr]
+                if (l.elements.len == 2 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "dereference")) {
                     try writer.print("(*", .{});
-                    try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                    try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
                     try writer.print(")", .{});
                     return;
                 }
@@ -1880,294 +2279,70 @@ pub const SimpleCCompiler = struct {
                             }
                         }
                     }
-                    // Check for pointer-write!: 2 elements (pointer, value), result type is nil
-                    if (l.elements.len == 2 and l.elements[0].getType() == .pointer and l.type == .nil) {
+                    // Check for pointer-write! (by symbol)
+                    // pointer-write!: [pointer-write!, ptr, value]
+                    if (l.elements.len == 3 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "pointer-write!")) {
                         try writer.print("(*", .{});
-                        try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
                         try writer.print(" = ", .{});
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                        try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
                         try writer.print(")", .{});
                         return;
                     }
-                    // Check for pointer-equal?: 2 elements (both pointers), result type is bool
-                    // This must come BEFORE pointer-field-read to avoid conflicts
-                    if (l.elements.len == 2 and l.elements[0].getType() == .pointer and l.elements[1].getType() == .pointer and l.type == .bool) {
+                    // Check for pointer-equal? (by symbol)
+                    // pointer-equal?: [pointer-equal?, ptr1, ptr2]
+                    if (l.elements.len == 3 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "pointer-equal?")) {
                         try writer.print("(", .{});
-                        try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
+                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
                         try writer.print(" == ", .{});
+                        try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                        try writer.print(")", .{});
+                        return;
+                    }
+                    // Check for pointer-field-read (by symbol)
+                    // pointer-field-read: [pointer-field-read, ptr, field]
+                    if (l.elements.len == 3 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "pointer-field-read")) {
+                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                        try writer.print("->", .{});
+                        const sanitized = try self.sanitizeIdentifier(l.elements[2].symbol.name);
+                        defer self.allocator.*.free(sanitized);
+                        try writer.print("{s}", .{sanitized});
+                        return;
+                    }
+                    // Check for pointer-field-write! (by symbol)
+                    // pointer-field-write!: [pointer-field-write!, ptr, field, value]
+                    if (l.elements.len == 4 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "pointer-field-write!")) {
+                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                        try writer.print("->", .{});
+                        const sanitized = try self.sanitizeIdentifier(l.elements[2].symbol.name);
+                        defer self.allocator.*.free(sanitized);
+                        try writer.print("{s} = ", .{sanitized});
+                        try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                        return;
+                    }
+                    // Check for address-of (by symbol)
+                    // address-of: [address-of, var]
+                    if (l.elements.len == 2 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "address-of")) {
+                        try writer.print("(&", .{});
                         try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
                         try writer.print(")", .{});
                         return;
                     }
-                    // Check for pointer-field-read: 2 elements (pointer to struct, field symbol)
-                    if (l.elements.len == 2 and l.elements[0].getType() == .pointer and l.elements[1].* == .symbol) {
-                        const ptr_type = l.elements[0].getType().pointer.*;
-                        if (ptr_type == .struct_type) {
-                            try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
-                            try writer.print("->", .{});
-                            const sanitized = try self.sanitizeIdentifier(l.elements[1].symbol.name);
-                            defer self.allocator.*.free(sanitized);
-                            try writer.print("{s}", .{sanitized});
-                            return;
-                        }
-                    }
-                    // Check for pointer-field-write!: 3 elements (pointer to struct, field symbol, value), result type is nil
-                    if (l.elements.len == 3 and l.elements[0].getType() == .pointer and l.elements[1].* == .symbol and l.type == .nil) {
-                        const ptr_type = l.elements[0].getType().pointer.*;
-                        if (ptr_type == .struct_type) {
-                            try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
-                            try writer.print("->", .{});
-                            const sanitized = try self.sanitizeIdentifier(l.elements[1].symbol.name);
-                            defer self.allocator.*.free(sanitized);
-                            try writer.print("{s} = ", .{sanitized});
-                            try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                            return;
-                        }
-                    }
-                    // Check for address-of: 1 element (variable symbol), result type is pointer
-                    // BUT: exclude function calls (symbol with function type)
-                    if (l.elements.len == 1 and l.elements[0].* == .symbol and l.type == .pointer) {
-                        const sym_type = l.elements[0].symbol.type;
-                        const is_function_sym = sym_type == .function or
-                            (sym_type == .pointer and sym_type.pointer.* == .function);
-
-                        if (!is_function_sym) {
-                            try writer.print("(&", .{});
-                            try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
-                            try writer.print(")", .{});
-                            return;
-                        }
-                    }
-                    // Check for array operations by first element symbol
+                    // Try special form dispatch using switch
                     if (l.elements.len > 0 and l.elements[0].* == .symbol) {
                         const op = l.elements[0].symbol.name;
-
-                        // array-ref: (array-ref array index) -> array[index]
-                        if (std.mem.eql(u8, op, "array-ref") and l.elements.len == 3) {
-                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                            try writer.print("[", .{});
-                            try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                            try writer.print("]", .{});
-                            return;
-                        }
-
-                        // array-set!: (array-set! array index value) -> array[index] = value
-                        if (std.mem.eql(u8, op, "array-set!") and l.elements.len == 4 and l.type == .nil) {
-                            try writer.print("(", .{});
-                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                            try writer.print("[", .{});
-                            try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                            try writer.print("] = ", .{});
-                            try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
-                            try writer.print(")", .{});
-                            return;
-                        }
-
-                        // array-length: (array-length array) -> compile-time size constant
-                        if (std.mem.eql(u8, op, "array-length") and l.elements.len == 2) {
-                            // The type checker already validated this is an array
-                            // We return the compile-time constant from the array type
-                            const array_type = l.elements[1].getType();
-                            if (array_type == .array) {
-                                try writer.print("{d}", .{array_type.array.size});
-                                return;
-                            }
-                        }
-
-                        // array: (array Type Size [InitValue])
-                        // For typed arrays, we need to check if result type is array
-                        if (std.mem.eql(u8, op, "array") and l.type == .array) {
-                            const array_type = l.type.array;
-                            const elem_c_type = try self.cTypeFor(array_type.element_type, includes);
-
-                            // Check if there's an init value (element count is 3)
-                            if (l.elements.len == 3) {
-                                // Initialized array: {init_val, init_val, ...}
-                                try writer.print("({{ {s} __tmp_arr[{d}]; for (size_t __i = 0; __i < {d}; __i++) __tmp_arr[__i] = ", .{ elem_c_type, array_type.size, array_type.size });
-                                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                                try writer.print("; __tmp_arr; }})", .{});
-                            } else {
-                                // Uninitialized array - just declare it
-                                try writer.print("({{ {s} __tmp_arr[{d}]; __tmp_arr; }})", .{ elem_c_type, array_type.size });
-                            }
-                            return;
-                        }
-
-                        // array-ptr: (array-ptr array index) -> &array[index]
-                        if (std.mem.eql(u8, op, "array-ptr") and l.elements.len == 3) {
-                            try writer.print("(&", .{});
-                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                            try writer.print("[", .{});
-                            try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                            try writer.print("])", .{});
-                            return;
-                        }
-
-                        // allocate-array: (allocate-array Type Size [InitValue])
-                        if (std.mem.eql(u8, op, "allocate-array") and l.type == .pointer) {
-                            const elem_type = l.type.pointer.*;
-                            const elem_c_type = try self.cTypeFor(elem_type, includes);
-                            includes.need_stdlib = true;
-
-                            // Size is in l.elements[2] (after symbol and type)
-                            const size_typed = l.elements[2];
-
-                            if (l.elements.len == 4) {
-                                // With initialization
-                                try writer.print("({{ {s}* __arr = ({s}*)malloc(", .{ elem_c_type, elem_c_type });
-                                try self.writeExpressionTyped(writer, size_typed, ns_ctx, includes);
-                                try writer.print(" * sizeof({s})); for (size_t __i = 0; __i < ", .{elem_c_type});
-                                try self.writeExpressionTyped(writer, size_typed, ns_ctx, includes);
-                                try writer.print("; __i++) __arr[__i] = ", .{});
-                                try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
-                                try writer.print("; __arr; }})", .{});
-                            } else {
-                                // Without initialization
-                                try writer.print("({s}*)malloc(", .{elem_c_type});
-                                try self.writeExpressionTyped(writer, size_typed, ns_ctx, includes);
-                                try writer.print(" * sizeof({s}))", .{elem_c_type});
-                            }
-                            return;
-                        }
-
-                        // deallocate-array: free(ptr)
-                        if (std.mem.eql(u8, op, "deallocate-array") and l.elements.len == 2) {
-                            includes.need_stdlib = true;
-                            try writer.print("free(", .{});
-                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                            try writer.print(")", .{});
-                            return;
-                        }
-
-                        // pointer-index-read: ptr[index]
-                        if (std.mem.eql(u8, op, "pointer-index-read") and l.elements.len == 3) {
-                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                            try writer.print("[", .{});
-                            try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                            try writer.print("]", .{});
-                            return;
-                        }
-
-                        // pointer-index-write!: ptr[index] = value
-                        if (std.mem.eql(u8, op, "pointer-index-write!") and l.elements.len == 4 and l.type == .nil) {
-                            try writer.print("(", .{});
-                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                            try writer.print("[", .{});
-                            try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                            try writer.print("] = ", .{});
-                            try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
-                            try writer.print(")", .{});
-                            return;
-                        }
-
-                        // printf: (printf format-string ...args) -> printf(format, args...)
-                        if (std.mem.eql(u8, op, "printf") and l.type == .i32) {
-                            try writer.print("printf(", .{});
-
-                            // Emit all arguments (format string + variadic args)
-                            for (l.elements[1..], 0..) |arg, i| {
-                                if (i > 0) try writer.print(", ", .{});
-                                try self.writeExpressionTyped(writer, arg, ns_ctx, includes);
-                            }
-
-                            try writer.print(")", .{});
-                            return;
-                        }
+                        const form = identifySpecialForm(op);
+                        const handled = try self.dispatchSpecialForm(writer, form, l, ns_ctx, includes);
+                        if (handled) return;
                     }
                 }
 
-                // Check for if expression (represented as 3-element list without 'if' symbol)
-                // Pattern: [cond, then, else] where cond has boolean type
-                // IMPORTANT: Make sure first element is NOT an operator symbol (like <, >, =, etc.)
-                // Those are handled by the operator check below
-                if (l.elements.len == 3) {
-                    const cond_type = l.elements[0].getType();
-                    const is_operator_form = l.elements[0].* == .symbol and blk: {
-                        const op_name = l.elements[0].symbol.name;
-                        break :blk std.mem.eql(u8, op_name, "<") or
-                            std.mem.eql(u8, op_name, ">") or
-                            std.mem.eql(u8, op_name, "<=") or
-                            std.mem.eql(u8, op_name, ">=") or
-                            std.mem.eql(u8, op_name, "=") or
-                            std.mem.eql(u8, op_name, "!=") or
-                            std.mem.eql(u8, op_name, "and") or
-                            std.mem.eql(u8, op_name, "or");
-                    };
-                    if (cond_type == .bool and !is_operator_form) {
-                        // This is an if expression (cond then else)
-                        // Emit as C ternary: (cond ? then : else)
-                        try writer.print("(", .{});
-                        try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
-                        try writer.print(" ? ", .{});
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        try writer.print(" : ", .{});
-                        try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                        try writer.print(")", .{});
-                        return;
-                    }
-                }
-
-                // Check for arithmetic/comparison/logical operators
+                // Dispatch special forms using switch-based dispatch
                 if (l.elements.len > 0 and l.elements[0].* == .symbol) {
                     const op = l.elements[0].symbol.name;
-
-                    // Arithmetic operators: +, -, *, /, %
-                    if (std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or
-                        std.mem.eql(u8, op, "*") or std.mem.eql(u8, op, "/") or std.mem.eql(u8, op, "%")) {
-                        if (l.elements.len < 2) return Error.UnsupportedExpression;
-
-                        // Handle unary minus
-                        if (std.mem.eql(u8, op, "-") and l.elements.len == 2) {
-                            try writer.print("(-(", .{});
-                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                            try writer.print("))", .{});
-                            return;
-                        }
-
-                        try writer.print("(", .{});
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        var i: usize = 2;
-                        while (i < l.elements.len) : (i += 1) {
-                            try writer.print(" {s} ", .{op});
-                            try self.writeExpressionTyped(writer, l.elements[i], ns_ctx, includes);
-                        }
-                        try writer.print(")", .{});
-                        return;
-                    }
-
-                    // Comparison operators
-                    if (std.mem.eql(u8, op, "<") or std.mem.eql(u8, op, ">") or
-                        std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, ">=") or
-                        std.mem.eql(u8, op, "=") or std.mem.eql(u8, op, "!=")) {
-                        if (l.elements.len != 3) return Error.UnsupportedExpression;
-                        const c_op = if (std.mem.eql(u8, op, "=")) "==" else op;
-                        try writer.print("(", .{});
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        try writer.print(" {s} ", .{c_op});
-                        try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                        try writer.print(")", .{});
-                        return;
-                    }
-
-                    // Logical operators
-                    if (std.mem.eql(u8, op, "and") or std.mem.eql(u8, op, "or")) {
-                        if (l.elements.len != 3) return Error.UnsupportedExpression;
-                        const c_op = if (std.mem.eql(u8, op, "and")) "&&" else "||";
-                        try writer.print("(", .{});
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        try writer.print(" {s} ", .{c_op});
-                        try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                        try writer.print(")", .{});
-                        return;
-                    }
-
-                    if (std.mem.eql(u8, op, "not")) {
-                        if (l.elements.len != 2) return Error.UnsupportedExpression;
-                        try writer.print("(!(", .{});
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        try writer.print("))", .{});
-                        return;
-                    }
+                    const form = identifySpecialForm(op);
+                    const handled = try self.dispatchSpecialForm(writer, form, l, ns_ctx, includes);
+                    if (handled) return;
                 }
 
                 // Check if this is a function or function pointer application
