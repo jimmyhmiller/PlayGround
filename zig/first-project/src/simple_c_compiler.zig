@@ -1325,26 +1325,36 @@ pub const SimpleCCompiler = struct {
         const last_typed_expr = typed_list.elements[typed_list.elements.len - 1];
         const is_void_function = std.mem.eql(u8, return_type_str, "void");
 
-        if (!is_void_function) {
-            try def_writer.print("    return ", .{});
-        } else {
-            try def_writer.print("    ", .{});
-        }
+        // Check if the last expression is a bare nil literal (not a complex expression with nil type)
+        // We want to skip bare nil, but still emit complex expressions like (if ...) that have nil type
+        const is_bare_nil = last_typed_expr.* == .nil;
 
-        self.writeExpressionTyped(def_writer, last_typed_expr, ns_ctx, includes) catch |err| {
-            switch (err) {
-                Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
-                    const repr = try self.formatValue(fn_expr);
-                    defer self.allocator.*.free(repr);
-                    try def_writer.writeAll("0;\n}\n");
-                    try def_writer.print("// unsupported function body: {s}\n", .{repr});
-                    std.debug.print("ERROR writing return expression: {s}\n", .{@errorName(err)});
-                    return;
-                },
-                else => return err,
+        if (is_void_function and is_bare_nil) {
+            // For void functions that end with a bare nil literal, just close the function
+            // This avoids the "unused expression result" warning for bare `0;`
+            try def_writer.writeAll("}\n");
+        } else {
+            if (!is_void_function) {
+                try def_writer.print("    return ", .{});
+            } else {
+                try def_writer.print("    ", .{});
             }
-        };
-        try def_writer.writeAll(";\n}\n");
+
+            self.writeExpressionTyped(def_writer, last_typed_expr, ns_ctx, includes) catch |err| {
+                switch (err) {
+                    Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
+                        const repr = try self.formatValue(fn_expr);
+                        defer self.allocator.*.free(repr);
+                        try def_writer.writeAll("0;\n}\n");
+                        try def_writer.print("// unsupported function body: {s}\n", .{repr});
+                        std.debug.print("ERROR writing return expression: {s}\n", .{@errorName(err)});
+                        return;
+                    },
+                    else => return err,
+                }
+            };
+            try def_writer.writeAll(";\n}\n");
+        }
     }
 
     fn hasLet(self: *SimpleCCompiler, expr: *Value) bool {
@@ -1923,6 +1933,10 @@ pub const SimpleCCompiler = struct {
                 defer self.allocator.*.free(sanitized_name);
 
                 try body_writer.print("    {s} {s} = ", .{ c_type, sanitized_name });
+                // Add explicit cast for pointers to avoid const-qualifier warnings
+                if (var_type == .pointer) {
+                    try body_writer.print("({s})", .{c_type});
+                }
                 try self.emitUntypedValueExpression(body_writer, value_val, ns_ctx, includes);
                 try body_writer.print(";\n", .{});
             }
@@ -2138,13 +2152,41 @@ pub const SimpleCCompiler = struct {
         switch (form) {
             .if_form => {
                 if (l.elements.len != 4) return Error.UnsupportedExpression;
-                try writer.print("(", .{});
-                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                try writer.print(" ? ", .{});
-                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                try writer.print(" : ", .{});
-                try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
-                try writer.print(")", .{});
+
+                // Check if this if expression has nil/void type
+                // If so, emit as a statement to avoid "unused expression result" warnings
+                const if_type = l.type;
+                const is_void_if = if_type == .nil or if_type == .void;
+
+                if (is_void_if) {
+                    // Emit as if-else statement wrapped in compound expression
+                    // Check if branches are bare nil to avoid emitting unused `0;`
+                    const then_is_nil = l.elements[2].* == .nil;
+                    const else_is_nil = l.elements[3].* == .nil;
+
+                    try writer.print("({{ if (", .{});
+                    try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                    try writer.print(") {{ ", .{});
+                    if (!then_is_nil) {
+                        try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                        try writer.print("; ", .{});
+                    }
+                    try writer.print("}} else {{ ", .{});
+                    if (!else_is_nil) {
+                        try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                        try writer.print("; ", .{});
+                    }
+                    try writer.print("}} }})", .{});
+                } else {
+                    // Emit as ternary expression for non-void types
+                    try writer.print("(", .{});
+                    try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                    try writer.print(" ? ", .{});
+                    try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                    try writer.print(" : ", .{});
+                    try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                    try writer.print(")", .{});
+                }
                 return true;
             },
             .while_form => {
@@ -2228,6 +2270,10 @@ pub const SimpleCCompiler = struct {
                     defer self.allocator.*.free(sanitized);
 
                     try writer.print("{s} {s} = ", .{ c_type, sanitized });
+                    // Add explicit cast for pointers to avoid const-qualifier warnings
+                    if (var_type == .pointer) {
+                        try writer.print("({s})", .{c_type});
+                    }
                     try self.writeExpressionTyped(writer, value_typed, ns_ctx, includes);
                     try writer.print("; ", .{});
                 }
