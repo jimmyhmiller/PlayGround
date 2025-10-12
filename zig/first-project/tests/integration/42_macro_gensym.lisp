@@ -1,5 +1,5 @@
 (defmacro swap-add [a b]
-  (let [temp (: Symbol) (gensym "temp")]
+  (let [temp (gensym "temp")]
     `(let [~temp (: Int) ~a]
        (+ ~temp ~b))))
 

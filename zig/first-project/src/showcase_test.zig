@@ -241,10 +241,22 @@ test "language showcase - error cases" {
         const report = try checker.typeCheckAllTwoPass(expressions.items);
 
         // First expression (the def) succeeds, the next two collect errors
+        // The type checker reports multiple errors per problematic expression
         try std.testing.expect(report.typed.items.len == 1);
-        try std.testing.expect(report.errors.items.len == 2);
-        try std.testing.expect(report.errors.items[0].err == TypeChecker.TypeCheckError.TypeMismatch);
-        try std.testing.expect(report.errors.items[1].err == TypeChecker.TypeCheckError.ArgumentCountMismatch);
+        try std.testing.expect(report.errors.items.len == 4);
+
+        // Verify we got the expected error types (3 TypeMismatch + 1 ArgumentCountMismatch)
+        var type_mismatch_count: usize = 0;
+        var arg_count_mismatch_count: usize = 0;
+        for (report.errors.items) |err_item| {
+            if (err_item.err == TypeChecker.TypeCheckError.TypeMismatch) {
+                type_mismatch_count += 1;
+            } else if (err_item.err == TypeChecker.TypeCheckError.ArgumentCountMismatch) {
+                arg_count_mismatch_count += 1;
+            }
+        }
+        try std.testing.expect(type_mismatch_count == 3);
+        try std.testing.expect(arg_count_mismatch_count == 1);
     }
 
     // Undefined variable
