@@ -1,0 +1,54 @@
+{
+  "name": "Multiline Notes Injection",
+  "description": "Test injecting and extracting notes with multiline content",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "complex.rs",
+      "content": "fn process_data(data: &[u8]) -> Result<String, Error> {\n    Ok(String::from_utf8_lossy(data).to_string())\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add complex function"
+    },
+    {
+      "action": "add_note",
+      "file": "complex.rs",
+      "line": 1,
+      "column": 0,
+      "content": "This function processes raw byte data.\nIt converts bytes to a UTF-8 string.\nHandles invalid UTF-8 gracefully.",
+      "author": "Alice",
+      "collection": "default",
+      "store_id_as": "note1"
+    },
+    {
+      "action": "inject_notes",
+      "file": "complex.rs",
+      "collection": "default"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "complex.rs",
+      "content": "This function processes raw byte data."
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "complex.rs",
+      "content": "It converts bytes to a UTF-8 string."
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "complex.rs",
+      "content": "Handles invalid UTF-8 gracefully."
+    },
+    {
+      "action": "extract_notes",
+      "file": "complex.rs",
+      "collection": null
+    },
+    {
+      "action": "expect_extracted_note_count",
+      "count": 1
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+{
+  "name": "Collection-Specific Extraction",
+  "description": "Test extracting notes from specific collections only",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "multi.rs",
+      "content": "fn func1() {}\nfn func2() {}\nfn func3() {}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add functions"
+    },
+    {
+      "action": "create_collection",
+      "name": "team-a",
+      "description": "Team A's notes"
+    },
+    {
+      "action": "create_collection",
+      "name": "team-b",
+      "description": "Team B's notes"
+    },
+    {
+      "action": "add_note",
+      "file": "multi.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Team A note 1",
+      "author": "Alice",
+      "collection": "team-a",
+      "store_id_as": null
+    },
+    {
+      "action": "add_note",
+      "file": "multi.rs",
+      "line": 2,
+      "column": 0,
+      "content": "Team A note 2",
+      "author": "Alice",
+      "collection": "team-a",
+      "store_id_as": null
+    },
+    {
+      "action": "add_note",
+      "file": "multi.rs",
+      "line": 3,
+      "column": 0,
+      "content": "Team B note",
+      "author": "Bob",
+      "collection": "team-b",
+      "store_id_as": null
+    },
+    {
+      "action": "inject_notes",
+      "file": "multi.rs",
+      "collection": "team-a"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "multi.rs",
+      "content": "Team A note 1"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "multi.rs",
+      "content": "Team A note 2"
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "multi.rs",
+      "content": "Team B note"
+    },
+    {
+      "action": "extract_notes",
+      "file": "multi.rs",
+      "collection": "team-a"
+    },
+    {
+      "action": "expect_extracted_note_count",
+      "count": 2
+    }
+  ]
+}

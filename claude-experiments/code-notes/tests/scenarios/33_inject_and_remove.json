@@ -1,0 +1,79 @@
+{
+  "name": "Inject and Remove Inline Notes",
+  "description": "Test inject/remove workflow: add notes, inject them, then remove them cleanly",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "calculator.rs",
+      "content": "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\nfn multiply(a: i32, b: i32) -> i32 {\n    a * b\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add calculator functions"
+    },
+    {
+      "action": "add_note",
+      "file": "calculator.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Simple addition function",
+      "author": "Alice",
+      "collection": "default",
+      "store_id_as": null
+    },
+    {
+      "action": "add_note",
+      "file": "calculator.rs",
+      "line": 5,
+      "column": 0,
+      "content": "Simple multiplication function",
+      "author": "Alice",
+      "collection": "default",
+      "store_id_as": null
+    },
+    {
+      "action": "inject_notes",
+      "file": "calculator.rs",
+      "collection": "default"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "calculator.rs",
+      "content": "Simple addition function"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "calculator.rs",
+      "content": "Simple multiplication function"
+    },
+    {
+      "action": "remove_inline_notes",
+      "file": "calculator.rs"
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "calculator.rs",
+      "content": "@code-note"
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "calculator.rs",
+      "content": "@end-code-note"
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "calculator.rs",
+      "content": "Simple addition function"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "calculator.rs",
+      "content": "fn add(a: i32, b: i32) -> i32"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "calculator.rs",
+      "content": "fn multiply(a: i32, b: i32) -> i32"
+    }
+  ]
+}

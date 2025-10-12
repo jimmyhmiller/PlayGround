@@ -1,0 +1,66 @@
+{
+  "name": "Capture Full Workflow",
+  "description": "Test complete workflow: capture -> list -> inject -> extract -> remove roundtrip",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "workflow.rs",
+      "content": "// @note: Entry point of the application\nfn main() {\n    let result = compute();\n    println!(\"Result: {}\", result);\n}\n\n// @note: Performs the main computation\nfn compute() -> i32 {\n    42\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add workflow test file"
+    },
+    {
+      "action": "capture_notes",
+      "file": "workflow.rs",
+      "author": "Henry",
+      "collection": "workflow-test"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 2,
+      "collection": "workflow-test"
+    },
+    {
+      "action": "list_collections"
+    },
+    {
+      "action": "expect_collection_exists",
+      "name": "workflow-test"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "workflow.rs",
+      "content": "// @code-note["
+    },
+    {
+      "action": "remove_inline_notes",
+      "file": "workflow.rs"
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "workflow.rs",
+      "content": "@code-note"
+    },
+    {
+      "action": "inject_notes",
+      "file": "workflow.rs",
+      "collection": "workflow-test"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "workflow.rs",
+      "content": "// @code-note["
+    },
+    {
+      "action": "extract_notes",
+      "file": "workflow.rs",
+      "collection": "workflow-test"
+    },
+    {
+      "action": "expect_extracted_note_count",
+      "count": 2
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "name": "Capture Python Notes",
+  "description": "Test capturing @note: markers in Python files with # comments",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "calculator.py",
+      "content": "# @note: Main calculator class for basic operations\nclass Calculator:\n    # @note: Add two numbers together\n    def add(self, a, b):\n        return a + b\n    \n    # @note: Multiply two numbers\n    def multiply(self, a, b):\n        return a * b\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add Python calculator with note markers"
+    },
+    {
+      "action": "capture_notes",
+      "file": "calculator.py",
+      "author": "Diana",
+      "collection": "python-docs"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 3,
+      "collection": "python-docs"
+    },
+    {
+      "action": "expect_note",
+      "content": "Main calculator class for basic operations",
+      "file": "calculator.py",
+      "line": null,
+      "is_orphaned": false,
+      "collection": "python-docs"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "calculator.py",
+      "content": "# @code-note["
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "calculator.py",
+      "content": "# @end-code-note"
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "calculator.py",
+      "content": "# @note:"
+    }
+  ]
+}

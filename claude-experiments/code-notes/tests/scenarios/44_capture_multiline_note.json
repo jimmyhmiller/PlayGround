@@ -1,0 +1,49 @@
+{
+  "name": "Capture Multiline Note",
+  "description": "Test capturing multiline @note: markers",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "auth.rs",
+      "content": "// @note: This function validates JWT tokens\n// It checks the signature using RS256 algorithm\n// Returns true if valid, false otherwise\nfn validate_jwt(token: &str) -> bool {\n    true\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add auth function with multiline note"
+    },
+    {
+      "action": "capture_notes",
+      "file": "auth.rs",
+      "author": "Charlie",
+      "collection": "security"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 1,
+      "collection": "security"
+    },
+    {
+      "action": "expect_note",
+      "content": "This function validates JWT tokens",
+      "file": null,
+      "line": null,
+      "is_orphaned": false,
+      "collection": "security"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "auth.rs",
+      "content": "// This function validates JWT tokens"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "auth.rs",
+      "content": "// It checks the signature using RS256 algorithm"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "auth.rs",
+      "content": "// Returns true if valid, false otherwise"
+    }
+  ]
+}

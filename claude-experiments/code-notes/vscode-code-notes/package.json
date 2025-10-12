@@ -1,0 +1,70 @@
+{
+  "name": "code-notes",
+  "displayName": "Code Notes",
+  "description": "Display layered annotations for code that persist across commits",
+  "version": "0.1.0",
+  "publisher": "code-notes",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "code-notes.refreshNotes",
+        "title": "Code Notes: Refresh Notes"
+      },
+      {
+        "command": "code-notes.showNotes",
+        "title": "Code Notes: Show All Notes in File"
+      },
+      {
+        "command": "code-notes.showNoteAtCursor",
+        "title": "Code Notes: Show Note at Cursor"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "code-notes.showNoteAtCursor",
+        "key": "ctrl+alt+n",
+        "mac": "cmd+alt+n",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Code Notes",
+      "properties": {
+        "codeNotes.storageDir": {
+          "type": "string",
+          "default": "~/.code-notes",
+          "description": "Directory where code notes are stored"
+        },
+        "codeNotes.gutterIconColor": {
+          "type": "string",
+          "default": "#4A9EFF",
+          "description": "Color for the gutter icon indicating notes"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.0.0"
+  }
+}

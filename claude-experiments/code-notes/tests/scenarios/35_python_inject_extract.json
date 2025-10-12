@@ -1,0 +1,73 @@
+{
+  "name": "Python Inject/Extract",
+  "description": "Test inject/extract with Python files using # comments",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "utils.py",
+      "content": "def greet(name):\n    return f\"Hello, {name}!\"\n\ndef farewell(name):\n    return f\"Goodbye, {name}!\"\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add Python utils"
+    },
+    {
+      "action": "add_note",
+      "file": "utils.py",
+      "line": 1,
+      "column": 0,
+      "content": "Returns a greeting message",
+      "author": "Alice",
+      "collection": "default",
+      "store_id_as": null
+    },
+    {
+      "action": "add_note",
+      "file": "utils.py",
+      "line": 4,
+      "column": 0,
+      "content": "Returns a farewell message",
+      "author": "Alice",
+      "collection": "default",
+      "store_id_as": null
+    },
+    {
+      "action": "inject_notes",
+      "file": "utils.py",
+      "collection": "default"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "utils.py",
+      "content": "# @code-note["
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "utils.py",
+      "content": "# Returns a greeting message"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "utils.py",
+      "content": "# @end-code-note"
+    },
+    {
+      "action": "extract_notes",
+      "file": "utils.py",
+      "collection": null
+    },
+    {
+      "action": "expect_extracted_note_count",
+      "count": 2
+    },
+    {
+      "action": "remove_inline_notes",
+      "file": "utils.py"
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "utils.py",
+      "content": "@code-note"
+    }
+  ]
+}

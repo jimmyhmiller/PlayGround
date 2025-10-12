@@ -1,0 +1,42 @@
+{
+  "name": "Capture JavaScript Notes",
+  "description": "Test capturing @note: markers in JavaScript files",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "utils.js",
+      "content": "// @note: Formats a date to ISO string\nfunction formatDate(date) {\n    return date.toISOString();\n}\n\n// @note: Parses a JSON string safely\n// Returns null if parsing fails\nfunction safeParse(json) {\n    try {\n        return JSON.parse(json);\n    } catch (e) {\n        return null;\n    }\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add JavaScript utils with note markers"
+    },
+    {
+      "action": "capture_notes",
+      "file": "utils.js",
+      "author": "Eve",
+      "collection": "js-docs"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 2,
+      "collection": "js-docs"
+    },
+    {
+      "action": "expect_note",
+      "content": "Formats a date to ISO string",
+      "file": "utils.js",
+      "line": null,
+      "is_orphaned": false,
+      "collection": "js-docs"
+    },
+    {
+      "action": "expect_note",
+      "content": "Parses a JSON string safely",
+      "file": null,
+      "line": null,
+      "is_orphaned": false,
+      "collection": "js-docs"
+    }
+  ]
+}

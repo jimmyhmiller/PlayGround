@@ -1,0 +1,30 @@
+{
+  "name": "Empty Collection Injection",
+  "description": "Test injecting from a collection with no notes for the file",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "empty.rs",
+      "content": "fn empty() {}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add empty file"
+    },
+    {
+      "action": "create_collection",
+      "name": "empty-test",
+      "description": "Empty collection"
+    },
+    {
+      "action": "inject_notes",
+      "file": "empty.rs",
+      "collection": "empty-test"
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "empty.rs",
+      "content": "@code-note"
+    }
+  ]
+}

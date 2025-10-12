@@ -1,0 +1,55 @@
+{
+  "name": "Capture Multiple Notes",
+  "description": "Test capturing multiple @note: markers in the same file",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "math.rs",
+      "content": "// @note: Helper function to add two numbers\nfn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n// @note: Helper function to subtract two numbers\nfn subtract(a: i32, b: i32) -> i32 {\n    a - b\n}\n\n// @note: Helper function to multiply two numbers\nfn multiply(a: i32, b: i32) -> i32 {\n    a * b\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add math functions with note markers"
+    },
+    {
+      "action": "capture_notes",
+      "file": "math.rs",
+      "author": "Bob",
+      "collection": "math-docs"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 3,
+      "collection": "math-docs"
+    },
+    {
+      "action": "expect_note",
+      "content": "Helper function to add two numbers",
+      "file": "math.rs",
+      "line": null,
+      "is_orphaned": false,
+      "collection": "math-docs"
+    },
+    {
+      "action": "expect_note",
+      "content": "Helper function to subtract two numbers",
+      "file": "math.rs",
+      "line": null,
+      "is_orphaned": false,
+      "collection": "math-docs"
+    },
+    {
+      "action": "expect_note",
+      "content": "Helper function to multiply two numbers",
+      "file": "math.rs",
+      "line": null,
+      "is_orphaned": false,
+      "collection": "math-docs"
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "math.rs",
+      "content": "// @note:"
+    }
+  ]
+}

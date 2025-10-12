@@ -1,0 +1,54 @@
+{
+  "name": "Capture Single Note",
+  "description": "Test capturing a single @note: marker in Rust code",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "sample.rs",
+      "content": "// @note: This is the main entry point\nfn main() {\n    println!(\"Hello, world!\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add sample code with note marker"
+    },
+    {
+      "action": "capture_notes",
+      "file": "sample.rs",
+      "author": "Alice",
+      "collection": "demo"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 1,
+      "collection": "demo"
+    },
+    {
+      "action": "expect_note",
+      "content": "This is the main entry point",
+      "file": "sample.rs",
+      "line": null,
+      "is_orphaned": false,
+      "collection": "demo"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "sample.rs",
+      "content": "// @code-note["
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "sample.rs",
+      "content": "// This is the main entry point"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "sample.rs",
+      "content": "// @end-code-note"
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "sample.rs",
+      "content": "// @note:"
+    }
+  ]
+}
