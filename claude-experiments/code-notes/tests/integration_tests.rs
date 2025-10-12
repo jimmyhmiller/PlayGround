@@ -155,6 +155,13 @@ enum Step {
         file: String,
         store_as: String,
     },
+
+    #[serde(rename = "capture_notes")]
+    CaptureNotes {
+        file: String,
+        author: String,
+        collection: String,
+    },
 }
 
 struct TestContext {
@@ -681,6 +688,19 @@ impl TestContext {
         self.stored_files.insert(store_as.to_string(), content);
         Ok(())
     }
+
+    fn capture_notes(&self, file: &str, author: &str, collection: &str) -> Result<()> {
+        let output = Command::new(&self.binary_path)
+            .args(&["capture", file, "--author", author, "--collection", collection])
+            .current_dir(&self.repo_path)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(anyhow!("Capture notes failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+
+        Ok(())
+    }
 }
 
 fn run_scenario(scenario_path: &Path) -> Result<()> {
@@ -774,6 +794,9 @@ fn run_scenario(scenario_path: &Path) -> Result<()> {
             }
             Step::ReadFile { file, store_as } => {
                 ctx.read_file(file, store_as)?;
+            }
+            Step::CaptureNotes { file, author, collection } => {
+                ctx.capture_notes(file, author, collection)?;
             }
         }
     }
