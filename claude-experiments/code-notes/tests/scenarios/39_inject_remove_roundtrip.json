@@ -1,0 +1,63 @@
+{
+  "name": "Inject-Remove-Inject Round Trip",
+  "description": "Test that removing and re-injecting notes works correctly",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "cycle.rs",
+      "content": "fn test() {\n    println!(\"test\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial"
+    },
+    {
+      "action": "add_note",
+      "file": "cycle.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Test function",
+      "author": "Alice",
+      "collection": "default",
+      "store_id_as": null
+    },
+    {
+      "action": "inject_notes",
+      "file": "cycle.rs",
+      "collection": "default"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "cycle.rs",
+      "content": "Test function"
+    },
+    {
+      "action": "remove_inline_notes",
+      "file": "cycle.rs"
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "cycle.rs",
+      "content": "@code-note"
+    },
+    {
+      "action": "inject_notes",
+      "file": "cycle.rs",
+      "collection": "default"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "cycle.rs",
+      "content": "Test function"
+    },
+    {
+      "action": "extract_notes",
+      "file": "cycle.rs",
+      "collection": null
+    },
+    {
+      "action": "expect_extracted_note_count",
+      "count": 1
+    }
+  ]
+}

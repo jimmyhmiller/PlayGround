@@ -1,0 +1,41 @@
+{
+  "name": "Capture With Indentation Preservation",
+  "description": "Test that captured notes preserve indentation of the target code",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "nested.rs",
+      "content": "fn outer() {\n    // @note: This is an inner function\n    fn inner() {\n        println!(\"nested\");\n    }\n    \n    // @note: Loop through items\n    for i in 0..10 {\n        println!(\"{}\", i);\n    }\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add nested code with note markers"
+    },
+    {
+      "action": "capture_notes",
+      "file": "nested.rs",
+      "author": "Grace",
+      "collection": "indentation-test"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 2,
+      "collection": "indentation-test"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "nested.rs",
+      "content": "    // @code-note["
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "nested.rs",
+      "content": "    // This is an inner function"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "nested.rs",
+      "content": "    // @end-code-note"
+    }
+  ]
+}

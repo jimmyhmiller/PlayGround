@@ -1,0 +1,36 @@
+{
+  "name": "Capture TypeScript Notes",
+  "description": "Test capturing @note: markers in TypeScript files",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "types.ts",
+      "content": "// @note: User interface representing a system user\ninterface User {\n    id: number;\n    name: string;\n    email: string;\n}\n\n// @note: Validates user email format\nfunction validateEmail(email: string): boolean {\n    return email.includes('@');\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add TypeScript types with note markers"
+    },
+    {
+      "action": "capture_notes",
+      "file": "types.ts",
+      "author": "Frank",
+      "collection": "ts-docs"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 2,
+      "collection": "ts-docs"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "types.ts",
+      "content": "// @code-note["
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "types.ts",
+      "content": "// @note:"
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "name": "Inject and Extract Round Trip",
+  "description": "Test basic inject/extract workflow: add notes, inject them into code, extract them back",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "test.rs",
+      "content": "fn main() {\n    println!(\"Hello, world!\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Initial commit"
+    },
+    {
+      "action": "add_note",
+      "file": "test.rs",
+      "line": 1,
+      "column": 0,
+      "content": "Entry point of the application",
+      "author": "Alice",
+      "collection": "docs",
+      "store_id_as": "note1"
+    },
+    {
+      "action": "add_note",
+      "file": "test.rs",
+      "line": 2,
+      "column": 4,
+      "content": "Print a greeting message to stdout",
+      "author": "Bob",
+      "collection": "docs",
+      "store_id_as": "note2"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 2,
+      "collection": "docs"
+    },
+    {
+      "action": "inject_notes",
+      "file": "test.rs",
+      "collection": "docs"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "test.rs",
+      "content": "@code-note["
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "test.rs",
+      "content": "Entry point of the application"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "test.rs",
+      "content": "@end-code-note"
+    },
+    {
+      "action": "extract_notes",
+      "file": "test.rs",
+      "collection": "docs"
+    },
+    {
+      "action": "expect_extracted_note_count",
+      "count": 2
+    }
+  ]
+}

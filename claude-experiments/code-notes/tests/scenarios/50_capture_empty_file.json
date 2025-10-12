@@ -1,0 +1,31 @@
+{
+  "name": "Capture Empty File (No Markers)",
+  "description": "Test capture command on a file with no @note: markers",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "empty.rs",
+      "content": "fn main() {\n    println!(\"No notes here\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add file without note markers"
+    },
+    {
+      "action": "capture_notes",
+      "file": "empty.rs",
+      "author": "Ivy",
+      "collection": "empty-test"
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "empty.rs",
+      "content": "@code-note"
+    },
+    {
+      "action": "expect_file_not_contains",
+      "file": "empty.rs",
+      "content": "@note:"
+    }
+  ]
+}

@@ -1,0 +1,79 @@
+{
+  "name": "Multiple Notes Injection",
+  "description": "Test injecting and extracting multiple notes on the same file",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "auth.rs",
+      "content": "struct User {\n    id: u64,\n    name: String,\n}\n\nfn authenticate(user: &User) -> bool {\n    true\n}\n\nfn authorize(user: &User, action: &str) -> bool {\n    false\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add auth module"
+    },
+    {
+      "action": "add_note",
+      "file": "auth.rs",
+      "line": 1,
+      "column": 0,
+      "content": "User model for authentication",
+      "author": "Alice",
+      "collection": "onboarding",
+      "store_id_as": "note1"
+    },
+    {
+      "action": "add_note",
+      "file": "auth.rs",
+      "line": 6,
+      "column": 0,
+      "content": "Validates user credentials",
+      "author": "Bob",
+      "collection": "onboarding",
+      "store_id_as": "note2"
+    },
+    {
+      "action": "add_note",
+      "file": "auth.rs",
+      "line": 10,
+      "column": 0,
+      "content": "Checks if user can perform action",
+      "author": "Charlie",
+      "collection": "onboarding",
+      "store_id_as": "note3"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 3,
+      "collection": "onboarding"
+    },
+    {
+      "action": "inject_notes",
+      "file": "auth.rs",
+      "collection": "onboarding"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "auth.rs",
+      "content": "User model for authentication"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "auth.rs",
+      "content": "Validates user credentials"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "auth.rs",
+      "content": "Checks if user can perform action"
+    },
+    {
+      "action": "extract_notes",
+      "file": "auth.rs",
+      "collection": "onboarding"
+    },
+    {
+      "action": "expect_extracted_note_count",
+      "count": 3
+    }
+  ]
+}

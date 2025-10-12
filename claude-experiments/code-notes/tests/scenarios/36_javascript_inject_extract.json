@@ -1,0 +1,59 @@
+{
+  "name": "JavaScript Inject/Extract",
+  "description": "Test inject/extract with JavaScript files using // comments",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "app.js",
+      "content": "function init() {\n    console.log('Initializing...');\n}\n\nfunction cleanup() {\n    console.log('Cleaning up...');\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add JavaScript app"
+    },
+    {
+      "action": "add_note",
+      "file": "app.js",
+      "line": 1,
+      "column": 0,
+      "content": "Application initialization function",
+      "author": "Developer",
+      "collection": "docs",
+      "store_id_as": null
+    },
+    {
+      "action": "add_note",
+      "file": "app.js",
+      "line": 5,
+      "column": 0,
+      "content": "Cleanup resources before exit",
+      "author": "Developer",
+      "collection": "docs",
+      "store_id_as": null
+    },
+    {
+      "action": "inject_notes",
+      "file": "app.js",
+      "collection": "docs"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "app.js",
+      "content": "// @code-note["
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "app.js",
+      "content": "// Application initialization function"
+    },
+    {
+      "action": "extract_notes",
+      "file": "app.js",
+      "collection": "docs"
+    },
+    {
+      "action": "expect_extracted_note_count",
+      "count": 2
+    }
+  ]
+}

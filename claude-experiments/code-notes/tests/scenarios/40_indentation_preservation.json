@@ -1,0 +1,45 @@
+{
+  "name": "Indentation Preservation",
+  "description": "Test that injected notes preserve the indentation of target lines",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "indent.rs",
+      "content": "fn main() {\n    if true {\n        let x = 42;\n        println!(\"{}\", x);\n    }\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add indented code"
+    },
+    {
+      "action": "add_note",
+      "file": "indent.rs",
+      "line": 3,
+      "column": 8,
+      "content": "Variable declaration",
+      "author": "Alice",
+      "collection": "default",
+      "store_id_as": null
+    },
+    {
+      "action": "inject_notes",
+      "file": "indent.rs",
+      "collection": "default"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "indent.rs",
+      "content": "        // @code-note["
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "indent.rs",
+      "content": "        // Variable declaration"
+    },
+    {
+      "action": "expect_file_contains",
+      "file": "indent.rs",
+      "content": "        // @end-code-note"
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "name": "Capture and Migrate Notes",
+  "description": "Test that captured notes can be successfully migrated after code changes",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "migrate_test.rs",
+      "content": "// @note: Simple greeting function\nfn greet(name: &str) -> String {\n    format!(\"Hello, {}!\", name)\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add greet function with note marker"
+    },
+    {
+      "action": "capture_notes",
+      "file": "migrate_test.rs",
+      "author": "Jack",
+      "collection": "migrate-collection"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 1,
+      "collection": "migrate-collection"
+    },
+    {
+      "action": "modify_file",
+      "file": "migrate_test.rs",
+      "content": "// @code-note[<UUID will be preserved>]\n// Simple greeting function\n// @end-code-note\nfn greet(name: &str) -> String {\n    // Added a comment\n    format!(\"Hello, {}!\", name)\n}\n\nfn farewell(name: &str) -> String {\n    format!(\"Goodbye, {}!\", name)\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add farewell function and modify greet"
+    },
+    {
+      "action": "migrate_notes",
+      "collection": "migrate-collection"
+    },
+    {
+      "action": "expect_migration_success",
+      "total": 1,
+      "successful": 1,
+      "failed": 0
+    },
+    {
+      "action": "expect_note",
+      "content": "Simple greeting function",
+      "file": "migrate_test.rs",
+      "line": null,
+      "is_orphaned": false,
+      "collection": "migrate-collection"
+    }
+  ]
+}
