@@ -12,6 +12,8 @@ const array_tests = @import("array_tests.zig");
 const macro_comprehensive_tests = @import("macro_comprehensive_tests.zig");
 const c_api_tests = @import("c_api_tests.zig");
 const integration_tests = @import("integration_tests.zig");
+const self_referential_struct_tests = @import("self_referential_struct_tests.zig");
+const macro_let_tests = @import("macro_let_tests.zig");
 
 // Import all modules to include their inline tests
 const value = @import("value.zig");
@@ -39,6 +41,8 @@ comptime {
     std.testing.refAllDecls(macro_comprehensive_tests);
     std.testing.refAllDecls(c_api_tests);
     std.testing.refAllDecls(integration_tests);
+    std.testing.refAllDecls(self_referential_struct_tests);
+    std.testing.refAllDecls(macro_let_tests);
     std.testing.refAllDecls(value);
     std.testing.refAllDecls(lexer);
     std.testing.refAllDecls(parser);

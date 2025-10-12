@@ -270,6 +270,7 @@ pub const TypeCheckError = error{
 
 pub const ErrorInfo = union(enum) {
     unbound: struct { name: []const u8 },
+    type_mismatch: struct { expected: Type, actual: Type },
 };
 
 pub const TypeCheckErrorDetail = struct { index: usize, expr: *Value, err: TypeCheckError, info: ?ErrorInfo };
@@ -313,6 +314,16 @@ pub const BidirectionalTypeChecker = struct {
         return checker;
     }
 
+    fn recordTypeMismatch(self: *BidirectionalTypeChecker, expr: *Value, expected: Type, actual: Type) TypeCheckError {
+        self.errors.append(self.allocator, .{
+            .index = self.index,
+            .expr = expr,
+            .err = TypeCheckError.TypeMismatch,
+            .info = ErrorInfo{ .type_mismatch = .{ .expected = expected, .actual = actual } },
+        }) catch {};
+        return TypeCheckError.TypeMismatch;
+    }
+
     fn initBuiltins(self: *BidirectionalTypeChecker) !void {
         // Special forms that don't need type checking like regular variables
         try self.builtins.put("def", {});
@@ -325,6 +336,7 @@ pub const BidirectionalTypeChecker = struct {
         try self.builtins.put("link-library", {});
         try self.builtins.put("compiler-flag", {});
         try self.builtins.put("let", {});
+        try self.builtins.put("do", {});
         try self.builtins.put("fn", {});
         try self.builtins.put("if", {});
         try self.builtins.put("while", {});
@@ -569,6 +581,8 @@ pub const BidirectionalTypeChecker = struct {
                             return try TypedExpression.init(self.allocator, expr, Type.nil);
                         } else if (std.mem.eql(u8, first.symbol, "let")) {
                             return try self.synthesizeLet(expr, list);
+                        } else if (std.mem.eql(u8, first.symbol, "do")) {
+                            return try self.synthesizeDo(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "fn")) {
                             return TypeCheckError.CannotSynthesize; // Functions need type annotations
                         } else if (std.mem.eql(u8, first.symbol, "if")) {
@@ -1471,6 +1485,63 @@ pub const BidirectionalTypeChecker = struct {
 
         // While loops always return nil
         return try TypedExpression.init(self.allocator, expr, Type.void);
+    }
+
+    fn synthesizeDo(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
+        // (do expr1 expr2 ... exprN)
+        var current = list.next;
+        var last_typed: ?*TypedExpression = null;
+
+        // Type check all expressions
+        while (current) |node| {
+            if (node.value) |body_expr| {
+                last_typed = try self.synthesize(body_expr);
+            }
+            current = node.next;
+        }
+
+        // Return the type of the last expression (or nil if empty)
+        const result_type = if (last_typed) |typed| typed.type else Type.nil;
+        return try TypedExpression.init(self.allocator, expr, result_type);
+    }
+
+    fn synthesizeTypedDo(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedValue {
+        _ = expr;
+
+        // (do expr1 expr2 ... exprN)
+        var current = list.next;
+        var elem_count: usize = 1; // Start at 1 for the symbol
+        var result_type: Type = Type.nil;
+
+        // Allocate storage for typed elements
+        const max_elements = 100; // Reasonable max for do block
+        const storage = try self.allocator.alloc(*TypedValue, max_elements);
+
+        // Include 'do' symbol as first element
+        const do_symbol = try self.allocator.create(TypedValue);
+        storage[0] = do_symbol;
+
+        // Type check all expressions
+        while (current) |node| {
+            if (node.value) |body_expr| {
+                if (elem_count >= storage.len) return TypeCheckError.InvalidTypeAnnotation;
+                const typed = try self.synthesizeTyped(body_expr);
+                storage[elem_count] = typed;
+                result_type = typed.getType();
+                elem_count += 1;
+            }
+            current = node.next;
+        }
+
+        // Set the symbol type to the type of the last expression
+        do_symbol.* = .{ .symbol = .{ .name = "do", .type = result_type } };
+
+        const result = try self.allocator.create(TypedValue);
+        result.* = TypedValue{ .list = .{
+            .elements = storage[0..elem_count],
+            .type = result_type,
+        } };
+        return result;
     }
 
     fn synthesizeCFor(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
@@ -2711,6 +2782,12 @@ pub const BidirectionalTypeChecker = struct {
             },
             .struct_type => |a_struct| {
                 const b_struct = b.struct_type;
+                // If both structs have non-empty names and they match, consider them equal
+                // This supports self-referential and mutually recursive types
+                if (a_struct.name.len > 0 and b_struct.name.len > 0) {
+                    return std.mem.eql(u8, a_struct.name, b_struct.name);
+                }
+                // Otherwise, do structural comparison (for anonymous structs)
                 if (!std.mem.eql(u8, a_struct.name, b_struct.name)) return false;
                 if (a_struct.fields.len != b_struct.fields.len) return false;
 
@@ -3205,6 +3282,8 @@ pub const BidirectionalTypeChecker = struct {
                             return result;
                         } else if (std.mem.eql(u8, first.symbol, "let")) {
                             return try self.synthesizeTypedLet(expr, list);
+                        } else if (std.mem.eql(u8, first.symbol, "do")) {
+                            return try self.synthesizeTypedDo(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "if")) {
                             return try self.synthesizeTypedIf(expr, list, typed_elements);
                         } else if (std.mem.eql(u8, first.symbol, "while")) {
@@ -4240,8 +4319,7 @@ pub const BidirectionalTypeChecker = struct {
         const actual = typed.getType();
 
         if (!try self.isSubtype(actual, expected)) {
-            std.debug.print("ERROR: TypeMismatch - expected: {any}, actual: {any}\n", .{ expected, actual });
-            return TypeCheckError.TypeMismatch;
+            return self.recordTypeMismatch(expr, expected, actual);
         }
 
         // Update the type to the expected type (for subsumption)
@@ -4329,8 +4407,45 @@ pub const BidirectionalTypeChecker = struct {
                                 const body_node = second_node.next;
                                 if (body_node) |bn| {
                                     if (bn.value) |body_val| {
+                                        // Check if this is a Struct or Enum definition
+                                        // If so, add a forward reference before parsing to support self-referential types
+                                        var is_struct_or_enum = false;
+                                        if (body_val.isList() and !body_val.list.isEmpty()) {
+                                            if (body_val.list.value) |first_val| {
+                                                if (first_val.isSymbol()) {
+                                                    const sym = first_val.symbol;
+                                                    if (std.mem.eql(u8, sym, "Struct") or std.mem.eql(u8, sym, "Enum")) {
+                                                        is_struct_or_enum = true;
+                                                        // Add placeholder to type_defs for self-reference
+                                                        // Use a minimal struct/enum type as placeholder
+                                                        if (std.mem.eql(u8, sym, "Struct")) {
+                                                            const placeholder_struct = try self.allocator.create(StructType);
+                                                            placeholder_struct.* = StructType{
+                                                                .name = var_name,
+                                                                .fields = &[_]StructField{},
+                                                            };
+                                                            try self.type_defs.put(var_name, Type{ .struct_type = placeholder_struct });
+                                                        } else if (std.mem.eql(u8, sym, "Enum")) {
+                                                            const placeholder_enum = try self.allocator.create(EnumType);
+                                                            placeholder_enum.* = EnumType{
+                                                                .name = var_name,
+                                                                .variants = &[_]EnumVariant{},
+                                                            };
+                                                            try self.type_defs.put(var_name, Type{ .enum_type = placeholder_enum });
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         // Try to parse the body as a type (Struct or Enum)
                                         actual_type = self.parseType(body_val) catch annotated_type;
+
+                                        // If we added a placeholder, update it with the actual parsed type
+                                        if (is_struct_or_enum) {
+                                            // Update the type_defs with the actual type
+                                            try self.type_defs.put(var_name, actual_type);
+                                        }
                                     }
                                 }
                             }

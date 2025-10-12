@@ -623,6 +623,160 @@ test "let - with string binding" {
 }
 
 // ============================================================================
+// POSITIVE TESTS - Do Blocks
+// ============================================================================
+
+test "do - single expression" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(do 42)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .int);
+}
+
+test "do - multiple expressions returns last" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(do 1 2 3)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .int);
+}
+
+test "do - with side effects" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(let [x (: Int) 0] (do (set! x 5) (set! x 10) x))";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .int);
+}
+
+test "do - empty do returns nil" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(do)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .nil);
+}
+
+test "do - nested do blocks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(do (do 1 2) (do 3 4))";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .int);
+}
+
+test "do - with arithmetic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(do (+ 1 2) (* 3 4) (- 10 5))";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .int);
+}
+
+test "do - returns string type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(do 1 2 \"hello\")";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .string);
+}
+
+test "do - inside function" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(def f (: (-> [Int] Int)) (fn [x] (do (+ x 1) (* x 2))))";
+    const expr = try reader.readString(code);
+    const typed = try checker.typeCheck(expr);
+    try std.testing.expect(typed.getType() == .function);
+}
+
+test "do - with let binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(do (let [x (: Int) 5] x) 10)";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .int);
+}
+
+test "do - with if expression" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(do (if true 1 2) (if false 3 4))";
+    const expr = try reader.readString(code);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .int);
+}
+
+// ============================================================================
 // POSITIVE TESTS - Functions
 // ============================================================================
 

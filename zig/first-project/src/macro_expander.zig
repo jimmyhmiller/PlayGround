@@ -301,6 +301,12 @@ pub const MacroExpander = struct {
                 if (std.mem.eql(u8, first_sym, "gensym")) {
                     return try self.handleGensym(list.next);
                 }
+
+                // Handle let: (let [bindings] body)
+                // Evaluate let at expansion time by extending the substitution map
+                if (std.mem.eql(u8, first_sym, "let")) {
+                    return try self.handleExpansionTimeLet(list.next, subst_map);
+                }
             }
 
             // Recursively substitute in list elements
@@ -331,6 +337,90 @@ pub const MacroExpander = struct {
         } else {
             return MacroExpandError.InvalidSyntax;
         }
+    }
+
+    /// Handle expansion-time let: (let [bindings] body)
+    /// Evaluates the let at macro expansion time by extending the substitution map
+    /// and returning the substituted body (not a let form)
+    fn handleExpansionTimeLet(self: *MacroExpander, args: ?*const PersistentLinkedList(*Value), subst_map: *std.StringHashMap(*Value)) MacroExpandError!*Value {
+        // Get bindings vector
+        if (args == null or args.?.value == null) {
+            return MacroExpandError.InvalidSyntax;
+        }
+
+        const bindings_node = args.?;
+        const bindings_val = bindings_node.value.?;
+
+        if (!bindings_val.isVector()) {
+            return MacroExpandError.InvalidSyntax;
+        }
+
+        const bindings = bindings_val.vector;
+
+        // Get body
+        if (bindings_node.next == null or bindings_node.next.?.value == null) {
+            return MacroExpandError.InvalidSyntax;
+        }
+
+        const body = bindings_node.next.?.value.?;
+
+        // Create extended substitution map
+        var extended_map = std.StringHashMap(*Value).init(self.allocator);
+        defer extended_map.deinit();
+
+        // Copy existing bindings
+        var iter = subst_map.iterator();
+        while (iter.next()) |entry| {
+            try extended_map.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        // Process bindings: [name1 (: Type1) value1 name2 (: Type2) value2 ...]
+        // OR simplified: [name1 value1 name2 value2 ...]
+        const bindings_slice = bindings.slice();
+        var i: usize = 0;
+
+        while (i < bindings_slice.len) {
+            // Get binding name
+            if (i >= bindings_slice.len) break;
+            const name_val = bindings_slice[i];
+
+            if (!name_val.isSymbol()) {
+                return MacroExpandError.InvalidSyntax;
+            }
+
+            const name = name_val.symbol;
+            i += 1;
+
+            // Check if next element is a type annotation (: Type)
+            var value_expr: *Value = undefined;
+            if (i < bindings_slice.len and bindings_slice[i].isList()) {
+                const maybe_annotation = bindings_slice[i].list;
+                if (!maybe_annotation.isEmpty() and maybe_annotation.value != null and
+                    maybe_annotation.value.?.isSymbol() and
+                    std.mem.eql(u8, maybe_annotation.value.?.symbol, ":"))
+                {
+                    // Skip type annotation
+                    i += 1;
+                }
+            }
+
+            // Get value expression
+            if (i >= bindings_slice.len) {
+                return MacroExpandError.InvalidSyntax;
+            }
+
+            value_expr = bindings_slice[i];
+            i += 1;
+
+            // Substitute the value expression with current bindings
+            const substituted_value = try self.substitute(value_expr, &extended_map);
+
+            // Add binding to extended map
+            try extended_map.put(name, substituted_value);
+        }
+
+        // Substitute body with extended map
+        return try self.substitute(body, &extended_map);
     }
 
     /// Substitute in a list
