@@ -32,8 +32,8 @@ static long long distance_squared(Point p) {
 }
 int main() {
     init_namespace_user(&g_user);
-    g_user.make_point = fn(0; // unsupported
-    g_user.distance_squared = fn(0; // unsupported
+    g_user.make_point = make_point;
+    g_user.distance_squared = distance_squared;
     g_user.p = g_user.make_point(3, 4);
     g_user.result = g_user.distance_squared(g_user.p);
     printf(((const char*)"%lld\n"), g_user.result);

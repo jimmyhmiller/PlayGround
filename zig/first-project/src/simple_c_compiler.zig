@@ -18,6 +18,7 @@ const IncludeFlags = struct {
     need_stddef: bool = false,
     need_stdlib: bool = false,
     need_stdio: bool = false,
+    need_string: bool = false,
 };
 
 pub const SimpleCCompiler = struct {
@@ -44,6 +45,7 @@ pub const SimpleCCompiler = struct {
         def_names: *std.StringHashMap(void),
         in_init_function: bool = false,
         init_only_def_names: ?*std.StringHashMap(void) = null, // Defs initialized in init (not main)
+        local_bindings: ?*std.StringHashMap(void) = null, // Track let-bound variables in current scope
     };
 
     const SpecialForm = enum {
@@ -746,6 +748,9 @@ pub const SimpleCCompiler = struct {
         if (includes.need_stdlib) {
             try output.appendSlice(self.allocator.*, "#include <stdlib.h>\n");
         }
+        if (includes.need_string) {
+            try output.appendSlice(self.allocator.*, "#include <string.h>\n");
+        }
         try output.appendSlice(self.allocator.*, "\n");
 
         if (forward_decls.items.len > 0) {
@@ -1042,6 +1047,32 @@ pub const SimpleCCompiler = struct {
                                 const sanitized_ns = try self.sanitizeIdentifier(ns_ctx.name.?);
                                 defer self.allocator.*.free(sanitized_ns);
 
+                                // typed is already the body/value of the def (not the whole def form)
+                                // Special case: if it's a function definition, just assign the function name
+                                const value_type = typed.getType();
+                                if (value_type == .function) {
+                                    try body_writer.print("    g_{s}.{s} = {s};\n", .{ sanitized_ns, sanitized_name, sanitized_name });
+                                    return;
+                                }
+
+                                // Special case: if it's an array type, use memcpy
+                                if (value_type == .array) {
+                                    includes.need_string = true;
+                                    try body_writer.print("    memcpy(g_{s}.{s}, ", .{ sanitized_ns, sanitized_name });
+                                    self.writeExpressionTyped(body_writer, typed, ns_ctx, includes) catch |err| {
+                                        switch (err) {
+                                            Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
+                                                try body_writer.print("0, 0); // unsupported\n", .{});
+                                                return;
+                                            },
+                                            else => return err,
+                                        }
+                                    };
+                                    try body_writer.print(", sizeof(g_{s}.{s}));\n", .{ sanitized_ns, sanitized_name });
+                                    return;
+                                }
+
+                                // For non-function, non-array values, emit the expression
                                 try body_writer.print("    g_{s}.{s} = ", .{ sanitized_ns, sanitized_name });
                                 self.writeExpressionTyped(body_writer, typed, ns_ctx, includes) catch |err| {
                                     switch (err) {
@@ -1327,6 +1358,14 @@ pub const SimpleCCompiler = struct {
         // Start compound statement expression
         try writer.print("({{ ", .{});
 
+        // Create a map to track local bindings in this let scope
+        var local_bindings_map = std.StringHashMap(void).init(self.allocator.*);
+        defer local_bindings_map.deinit();
+
+        // Create a new context with local bindings for this let scope
+        var let_ctx = ns_ctx.*;
+        let_ctx.local_bindings = &local_bindings_map;
+
         // Emit each binding as a C variable declaration
         var idx: usize = 0;
         while (idx < binding_count) : (idx += 1) {
@@ -1373,8 +1412,13 @@ pub const SimpleCCompiler = struct {
 
             // Recursively emit the init value - it might be a nested let!
             // For now, emit it as untyped (this is a limitation - we'd need the type checker's typed values for each binding)
-            try self.emitUntypedValueExpression(writer, init_val, ns_ctx, includes);
+            try self.emitUntypedValueExpression(writer, init_val, &let_ctx, includes);
             try writer.print("; ", .{});
+
+            // Add this binding to the local bindings map AFTER emitting the init value
+            // This ensures the init value is evaluated in the context before this binding
+            // (supporting sequential let semantics where later bindings can see earlier ones)
+            try local_bindings_map.put(var_name, {});
         }
 
         // Emit the body - collect all expressions first
@@ -1389,13 +1433,13 @@ pub const SimpleCCompiler = struct {
 
         // Emit all but the last expression as statements (with semicolons)
         for (body_exprs.items[0..body_exprs.items.len - 1]) |stmt_expr| {
-            try self.emitUntypedValueExpression(writer, stmt_expr, ns_ctx, includes);
+            try self.emitUntypedValueExpression(writer, stmt_expr, &let_ctx, includes);
             try writer.print("; ", .{});
         }
 
         // Emit the final expression as the return value (no semicolon)
         const final_expr = body_exprs.items[body_exprs.items.len - 1];
-        try self.emitUntypedValueExpression(writer, final_expr, ns_ctx, includes);
+        try self.emitUntypedValueExpression(writer, final_expr, &let_ctx, includes);
 
         // Close compound statement expression
         try writer.print("; }})", .{});
@@ -1418,8 +1462,15 @@ pub const SimpleCCompiler = struct {
                 return;
             }
 
-            // Check if this symbol is a namespace field
-            if (ns_ctx.def_names.contains(expr.symbol)) {
+            // Check if this symbol is a local binding (let-bound variable)
+            // Local bindings shadow namespace definitions
+            const is_local = if (ns_ctx.local_bindings) |local_map|
+                local_map.contains(expr.symbol)
+            else
+                false;
+
+            // Check if this symbol is a namespace field (and not shadowed by a local binding)
+            if (!is_local and ns_ctx.def_names.contains(expr.symbol)) {
                 if (ns_ctx.name) |_| {
                     const sanitized_field = try self.sanitizeIdentifier(expr.symbol);
                     defer self.allocator.*.free(sanitized_field);
@@ -2074,6 +2125,25 @@ pub const SimpleCCompiler = struct {
             },
             .array_set => {
                 if (l.elements.len != 4 or l.type != .nil) return false;
+
+                // Check if the value being assigned is an array type
+                const value_type = l.elements[3].getType();
+                if (value_type == .array) {
+                    // For array assignments, use memcpy since C doesn't allow direct array assignment
+                    includes.need_string = true;
+                    try writer.print("memcpy(", .{});
+                    try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                    try writer.print("[", .{});
+                    try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                    try writer.print("], ", .{});
+                    try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                    try writer.print(", sizeof(", .{});
+                    try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                    try writer.print("))", .{});
+                    return true;
+                }
+
+                // For non-array values, use regular assignment
                 try writer.print("(", .{});
                 try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
                 try writer.print("[", .{});
@@ -2202,12 +2272,57 @@ pub const SimpleCCompiler = struct {
                 const sanitized_name = try self.sanitizeIdentifier(type_name);
                 defer self.allocator.*.free(sanitized_name);
 
-                try writer.print("({s}){{", .{sanitized_name});
-                for (si.field_values, 0..) |field_val, i| {
-                    if (i > 0) try writer.print(", ", .{});
-                    try self.writeExpressionTyped(writer, field_val, ns_ctx, includes);
+                // Check if any field value is an array type - if so, use special handling
+                var has_array_field = false;
+                for (si.field_values) |field_val| {
+                    if (field_val.getType() == .array) {
+                        has_array_field = true;
+                        break;
+                    }
                 }
-                try writer.print("}}", .{});
+
+                if (has_array_field) {
+                    // Can't use array variables directly in compound literals
+                    // Use compound statement expression with memcpy
+                    includes.need_string = true; // For memcpy
+                    try writer.print("({{ {s} __tmp_struct; ", .{sanitized_name});
+
+                    // Get struct definition to access field names
+                    const struct_def = switch (si.type) {
+                        .struct_type => |st| st,
+                        else => return Error.UnsupportedType,
+                    };
+
+                    // Initialize each field
+                    for (si.field_values, 0..) |field_val, i| {
+                        const field_type = field_val.getType();
+                        const field_name = struct_def.fields[i].name;
+                        const sanitized_field = try self.sanitizeIdentifier(field_name);
+                        defer self.allocator.*.free(sanitized_field);
+
+                        if (field_type == .array) {
+                            // Use memcpy for array fields
+                            try writer.print("memcpy(__tmp_struct.{s}, ", .{sanitized_field});
+                            try self.writeExpressionTyped(writer, field_val, ns_ctx, includes);
+                            try writer.print(", sizeof(__tmp_struct.{s})); ", .{sanitized_field});
+                        } else {
+                            // Regular assignment for non-array fields
+                            try writer.print("__tmp_struct.{s} = ", .{sanitized_field});
+                            try self.writeExpressionTyped(writer, field_val, ns_ctx, includes);
+                            try writer.print("; ", .{});
+                        }
+                    }
+
+                    try writer.print("__tmp_struct; }})", .{});
+                } else {
+                    // No array fields, use regular compound literal
+                    try writer.print("({s}){{", .{sanitized_name});
+                    for (si.field_values, 0..) |field_val, i| {
+                        if (i > 0) try writer.print(", ", .{});
+                        try self.writeExpressionTyped(writer, field_val, ns_ctx, includes);
+                    }
+                    try writer.print("}}", .{});
+                }
             },
             .list => |l| {
                 // Check for c-str operation first
@@ -2410,8 +2525,15 @@ pub const SimpleCCompiler = struct {
                     return;
                 }
 
-                // Check if this symbol is in the namespace
-                if (ns_ctx.def_names.*.contains(sym.name)) {
+                // Check if this symbol is a local binding (let-bound variable)
+                // Local bindings shadow namespace definitions
+                const is_local = if (ns_ctx.local_bindings) |local_map|
+                    local_map.contains(sym.name)
+                else
+                    false;
+
+                // Check if this symbol is in the namespace (and not shadowed by a local binding)
+                if (!is_local and ns_ctx.def_names.*.contains(sym.name)) {
                     if (ns_ctx.name) |_| {
                         const sanitized_field = try self.sanitizeIdentifier(sym.name);
                         defer self.allocator.*.free(sanitized_field);
@@ -2496,6 +2618,18 @@ pub const SimpleCCompiler = struct {
             while (i < dim_count) : (i += 1) {
                 try writer.print("[{d}]", .{dimensions[i]});
             }
+        } else if (var_type == .function) {
+            // Direct function type (treated as function pointer in C)
+            // Function pointer: return_type (*var_name)(params...)
+            const fn_type = var_type.function;
+            const return_type_str = try self.cTypeFor(fn_type.return_type, includes);
+            try writer.print("{s} (*{s})(", .{ return_type_str, var_name });
+            for (fn_type.param_types, 0..) |param_type, i| {
+                if (i > 0) try writer.print(", ", .{});
+                const param_type_str = try self.cTypeFor(param_type, includes);
+                try writer.print("{s}", .{param_type_str});
+            }
+            try writer.print(")", .{});
         } else if (var_type == .pointer) {
             // Check if this is a pointer to a function
             const pointee = var_type.pointer.*;

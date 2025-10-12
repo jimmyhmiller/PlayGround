@@ -27,7 +27,7 @@ static long long get_color_value(Color c) {
 int main() {
     init_namespace_test(&g_test);
     // namespace test
-    g_test.get_color_value = fn(0; // unsupported
+    g_test.get_color_value = get_color_value;
     g_test.result1 = g_test.get_color_value(Color_Red);
     g_test.result2 = g_test.get_color_value(Color_Green);
     g_test.result3 = g_test.get_color_value(Color_Blue);
