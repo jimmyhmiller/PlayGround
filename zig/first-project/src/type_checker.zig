@@ -373,6 +373,7 @@ pub const BidirectionalTypeChecker = struct {
         try self.builtins.put("-", {});
         try self.builtins.put("*", {});
         try self.builtins.put("/", {});
+        try self.builtins.put("div", {});
         try self.builtins.put("%", {});
         try self.builtins.put("<", {});
         try self.builtins.put(">", {});
@@ -727,6 +728,7 @@ pub const BidirectionalTypeChecker = struct {
                             std.mem.eql(u8, first.symbol, "-") or
                             std.mem.eql(u8, first.symbol, "*") or
                             std.mem.eql(u8, first.symbol, "/") or
+                            std.mem.eql(u8, first.symbol, "div") or
                             std.mem.eql(u8, first.symbol, "%"))
                         {
                             return try self.synthesizeArithmetic(expr, list);
@@ -1386,6 +1388,11 @@ pub const BidirectionalTypeChecker = struct {
             result_type = if (std.meta.activeTag(result_type) == .int) Type.float else Type.f64;
         }
 
+        // For div (integer division), ensure integer type and keep it
+        if (std.mem.eql(u8, op, "div") and !isIntegerType(result_type)) {
+            return TypeCheckError.TypeMismatch;
+        }
+
         // For modulo, ensure integer type
         if (std.mem.eql(u8, op, "%") and !isIntegerType(result_type)) {
             return TypeCheckError.TypeMismatch;
@@ -1606,6 +1613,11 @@ pub const BidirectionalTypeChecker = struct {
         // For division of integers, result should be float
         if (std.mem.eql(u8, op, "/") and isIntegerType(result_type)) {
             result_type = if (std.meta.activeTag(result_type) == .int) Type.float else Type.f64;
+        }
+
+        // For div (integer division), ensure integer type and keep it
+        if (std.mem.eql(u8, op, "div") and !isIntegerType(result_type)) {
+            return TypeCheckError.TypeMismatch;
         }
 
         return try TypedExpression.init(self.allocator, expr, result_type);
@@ -2957,6 +2969,7 @@ pub const BidirectionalTypeChecker = struct {
             std.mem.eql(u8, op, "-") or
             std.mem.eql(u8, op, "*") or
             std.mem.eql(u8, op, "/") or
+            std.mem.eql(u8, op, "div") or
             std.mem.eql(u8, op, "%");
     }
 
@@ -3226,6 +3239,7 @@ pub const BidirectionalTypeChecker = struct {
                             std.mem.eql(u8, first.symbol, "-") or
                             std.mem.eql(u8, first.symbol, "*") or
                             std.mem.eql(u8, first.symbol, "/") or
+                            std.mem.eql(u8, first.symbol, "div") or
                             std.mem.eql(u8, first.symbol, "%"))
                         {
                             var operands: [64]*Value = undefined;
@@ -3270,6 +3284,10 @@ pub const BidirectionalTypeChecker = struct {
 
                             if (std.mem.eql(u8, first.symbol, "/") and isIntegerType(result_type)) {
                                 result_type = if (std.meta.activeTag(result_type) == .int) Type.float else Type.f64;
+                            }
+
+                            if (std.mem.eql(u8, first.symbol, "div") and !isIntegerType(result_type)) {
+                                return TypeCheckError.TypeMismatch;
                             }
 
                             if (std.mem.eql(u8, first.symbol, "%") and !isIntegerType(result_type)) {
@@ -3328,6 +3346,9 @@ pub const BidirectionalTypeChecker = struct {
                                 const merged = try self.mergeNumericTypes(left_type, right_type);
                                 if (std.mem.eql(u8, op, "/") and isIntegerType(merged)) {
                                     break :blk if (std.meta.activeTag(merged) == .int) Type.float else Type.f64;
+                                }
+                                if (std.mem.eql(u8, op, "div") and !isIntegerType(merged)) {
+                                    return TypeCheckError.TypeMismatch;
                                 }
                                 break :blk merged;
                             } else if (isBitwiseOp(op))
@@ -3421,6 +3442,10 @@ pub const BidirectionalTypeChecker = struct {
                             var result_type = merged_type_opt.?;
                             if (std.mem.eql(u8, op, "/") and isIntegerType(result_type)) {
                                 result_type = if (std.meta.activeTag(result_type) == .int) Type.float else Type.f64;
+                            }
+
+                            if (std.mem.eql(u8, op, "div") and !isIntegerType(result_type)) {
+                                return TypeCheckError.TypeMismatch;
                             }
 
                             var idx: usize = 0;
