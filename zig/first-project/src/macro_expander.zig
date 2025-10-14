@@ -132,13 +132,19 @@ pub const MacroExpander = struct {
 
         const first = list.value orelse return expr;
 
-        // Check if this is a defmacro form
-        if (first.isSymbol() and std.mem.eql(u8, first.symbol, "defmacro")) {
-            return try self.handleDefmacro(list);
-        }
-
-        // Check if this is a macro call
+        // Check if this is a special form that should not be macro expanded
         if (first.isSymbol()) {
+            // defmacro - register and return
+            if (std.mem.eql(u8, first.symbol, "defmacro")) {
+                return try self.handleDefmacro(list);
+            }
+
+            // ns and require - pass through unchanged
+            if (std.mem.eql(u8, first.symbol, "ns") or std.mem.eql(u8, first.symbol, "require")) {
+                return expr;
+            }
+
+            // Check if this is a macro call
             if (self.env.get(first.symbol)) |macro_def| {
                 // This is a macro call - expand it
                 return try self.expandMacroCall(macro_def, list.next);
