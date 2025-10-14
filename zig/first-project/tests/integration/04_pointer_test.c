@@ -18,7 +18,7 @@ void init_namespace_user(Namespace_user* ns) {
 
 int main() {
     init_namespace_user(&g_user);
-    free(g_user.ptr);
-    printf(((const char*)"%lld\n"), g_user.val);
+    /* unsupported */;
+    printf("%lld\n", g_user.val);
     return 0;
 }
