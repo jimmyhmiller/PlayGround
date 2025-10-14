@@ -1,0 +1,62 @@
+{
+  "name": "Capture CLI Metadata Defaults",
+  "description": "Test that CLI --metadata provides default values for all captured notes",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "defaults.rs",
+      "content": "// @note: First note without inline metadata\nfn first() {\n    println!(\"First\");\n}\n\n// @note: Second note also without inline metadata\nfn second() {\n    println!(\"Second\");\n}\n\n// @note: Third note without inline metadata\nfn third() {\n    println!(\"Third\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add code for CLI metadata defaults test"
+    },
+    {
+      "action": "capture_notes",
+      "file": "defaults.rs",
+      "author": "TestAuthor",
+      "collection": "defaults-test",
+      "metadata": "{\"audience\":\"all-devs\",\"category\":\"onboarding\",\"priority\":5}"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 3,
+      "collection": "defaults-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "First note without inline metadata",
+      "metadata_key": "audience",
+      "metadata_value": "\"all-devs\"",
+      "collection": "defaults-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "First note without inline metadata",
+      "metadata_key": "category",
+      "metadata_value": "\"onboarding\"",
+      "collection": "defaults-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "First note without inline metadata",
+      "metadata_key": "priority",
+      "metadata_value": "5",
+      "collection": "defaults-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Second note also without inline metadata",
+      "metadata_key": "audience",
+      "metadata_value": "\"all-devs\"",
+      "collection": "defaults-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Third note without inline metadata",
+      "metadata_key": "priority",
+      "metadata_value": "5",
+      "collection": "defaults-test"
+    }
+  ]
+}

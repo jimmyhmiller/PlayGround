@@ -227,6 +227,7 @@ pub fn remove_notes(file_path: &Path) -> Result<String> {
 pub struct CapturedNote {
     pub line_number: usize,
     pub content: String,
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 /// Scan a file for @note: markers and extract their content
@@ -252,6 +253,7 @@ pub fn scan_for_note_markers(file_path: &Path) -> Result<Vec<CapturedNote>> {
             let first_line_content = line[marker_start..].trim();
 
             let mut note_content = vec![first_line_content.to_string()];
+            let mut metadata_json: Option<String> = None;
             let start_line = i;
 
             // Check for continuation lines (same indentation + comment prefix, no @note:)
@@ -274,13 +276,35 @@ pub fn scan_for_note_markers(file_path: &Path) -> Result<Vec<CapturedNote>> {
                     break;
                 }
 
+                // Check for @meta: marker
+                if content_after_prefix.starts_with("@meta:") {
+                    let meta_start = content_after_prefix.find("@meta:").unwrap() + "@meta:".len();
+                    metadata_json = Some(content_after_prefix[meta_start..].trim().to_string());
+                    i += 1;
+                    continue;
+                }
+
                 note_content.push(content_after_prefix.to_string());
                 i += 1;
             }
 
+            // Parse metadata if present
+            let metadata = if let Some(json_str) = metadata_json {
+                match serde_json::from_str(&json_str) {
+                    Ok(meta) => Some(meta),
+                    Err(e) => {
+                        eprintln!("Warning: Invalid metadata JSON at line {}: {}", start_line + 1, e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             captured_notes.push(CapturedNote {
                 line_number: start_line,
                 content: note_content.join("\n"),
+                metadata,
             });
 
             continue;

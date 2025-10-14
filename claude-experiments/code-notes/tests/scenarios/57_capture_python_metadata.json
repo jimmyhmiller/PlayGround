@@ -1,0 +1,69 @@
+{
+  "name": "Capture Python Metadata",
+  "description": "Test inline @meta: parsing in Python files with # comment syntax",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "python_meta.py",
+      "content": "# @note: This function needs error handling\n# @meta: {\"tags\":[\"enhancement\"],\"priority\":6}\ndef process_data(data):\n    return data\n\n# @note: Performance bottleneck identified\n# @meta: {\"tags\":[\"performance\",\"profiled\"],\"baseline_ms\":150,\"target_ms\":50}\ndef slow_operation(items):\n    result = []\n    for item in items:\n        result.append(item * 2)\n    return result\n\n# @note: Security issue - validates input\n# @meta: {\"tags\":[\"security\",\"bug\"],\"severity\":\"high\",\"assigned_to\":\"security-team\"}\ndef validate_user_input(user_input):\n    # Missing validation\n    return user_input\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add Python code with inline metadata"
+    },
+    {
+      "action": "capture_notes",
+      "file": "python_meta.py",
+      "author": "PythonDev",
+      "collection": "python-test",
+      "metadata": "{\"language\":\"python\",\"project\":\"test-suite\"}"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 3,
+      "collection": "python-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "This function needs error handling",
+      "metadata_key": "priority",
+      "metadata_value": "6",
+      "collection": "python-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "This function needs error handling",
+      "metadata_key": "language",
+      "metadata_value": "\"python\"",
+      "collection": "python-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Performance bottleneck identified",
+      "metadata_key": "baseline_ms",
+      "metadata_value": "150",
+      "collection": "python-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Performance bottleneck identified",
+      "metadata_key": "target_ms",
+      "metadata_value": "50",
+      "collection": "python-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Security issue - validates input",
+      "metadata_key": "severity",
+      "metadata_value": "\"high\"",
+      "collection": "python-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Security issue - validates input",
+      "metadata_key": "assigned_to",
+      "metadata_value": "\"security-team\"",
+      "collection": "python-test"
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "name": "Capture Complex Metadata",
+  "description": "Test complex metadata structures with nested objects, arrays, and various data types",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "complex_meta.rs",
+      "content": "// @note: Complex metadata with multiple arrays and nested structures\n// @meta: {\"tags\":[\"critical\",\"security\",\"urgent\"],\"priority\":10,\"linked_issues\":[\"SEC-101\",\"BUG-456\",\"EPIC-789\"],\"metadata\":{\"reviewed\":true,\"review_date\":\"2024-01-15\"},\"impact_score\":9.5}\nfn critical_security_issue() {\n    println!(\"Critical\");\n}\n\n// @note: Performance metadata with numeric measurements\n// @meta: {\"performance\":{\"baseline_ms\":250,\"optimized_ms\":50,\"improvement_percent\":80},\"profiled\":true,\"cpu_bound\":false,\"io_bound\":true}\nfn optimized_function() {\n    println!(\"Fast\");\n}\n\n// @note: Technical debt with effort estimation\n// @meta: {\"tech_debt\":true,\"effort\":{\"hours\":16,\"complexity\":\"high\",\"risk\":\"medium\"},\"benefits\":[\"maintainability\",\"testability\",\"performance\"],\"blocked_by\":[]}\nfn legacy_code_refactor() {\n    println!(\"Old code\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add code with complex metadata structures"
+    },
+    {
+      "action": "capture_notes",
+      "file": "complex_meta.rs",
+      "author": "ArchitectTeam",
+      "collection": "complex-test",
+      "metadata": "{\"project\":\"modernization\",\"sprint\":\"2024-Q1-S3\"}"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 3,
+      "collection": "complex-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Complex metadata with multiple arrays and nested structures",
+      "metadata_key": "priority",
+      "metadata_value": "10",
+      "collection": "complex-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Complex metadata with multiple arrays and nested structures",
+      "metadata_key": "impact_score",
+      "metadata_value": "9.5",
+      "collection": "complex-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Complex metadata with multiple arrays and nested structures",
+      "metadata_key": "project",
+      "metadata_value": "\"modernization\"",
+      "collection": "complex-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Performance metadata with numeric measurements",
+      "metadata_key": "profiled",
+      "metadata_value": "true",
+      "collection": "complex-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Performance metadata with numeric measurements",
+      "metadata_key": "cpu_bound",
+      "metadata_value": "false",
+      "collection": "complex-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Performance metadata with numeric measurements",
+      "metadata_key": "io_bound",
+      "metadata_value": "true",
+      "collection": "complex-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Technical debt with effort estimation",
+      "metadata_key": "tech_debt",
+      "metadata_value": "true",
+      "collection": "complex-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Technical debt with effort estimation",
+      "metadata_key": "sprint",
+      "metadata_value": "\"2024-Q1-S3\"",
+      "collection": "complex-test"
+    }
+  ]
+}

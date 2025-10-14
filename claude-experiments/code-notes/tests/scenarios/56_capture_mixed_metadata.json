@@ -1,0 +1,96 @@
+{
+  "name": "Capture Mixed Metadata",
+  "description": "Test multiple notes with different combinations of CLI and inline metadata",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "mixed.rs",
+      "content": "// @note: Note with only inline metadata\n// @meta: {\"tags\":[\"custom\"],\"type\":\"inline-only\"}\nfn inline_only() {\n    println!(\"Inline only\");\n}\n\n// @note: Note with only CLI metadata (no @meta: line)\nfn cli_only() {\n    println!(\"CLI only\");\n}\n\n// @note: Note with both CLI and inline metadata\n// Different keys, so they merge\n// @meta: {\"tags\":[\"both\"],\"inline_key\":\"inline_value\"}\nfn both_merged() {\n    println!(\"Both merged\");\n}\n\n// @note: Note with overlapping metadata keys\n// Inline should win for 'priority'\n// @meta: {\"priority\":10,\"inline_only\":\"yes\"}\nfn overlap() {\n    println!(\"Overlap\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add code for mixed metadata test"
+    },
+    {
+      "action": "capture_notes",
+      "file": "mixed.rs",
+      "author": "TestAuthor",
+      "collection": "mixed-test",
+      "metadata": "{\"audience\":\"devs\",\"priority\":5,\"cli_only\":\"yes\"}"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 4,
+      "collection": "mixed-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Note with only inline metadata",
+      "metadata_key": "type",
+      "metadata_value": "\"inline-only\"",
+      "collection": "mixed-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Note with only inline metadata",
+      "metadata_key": "audience",
+      "metadata_value": "\"devs\"",
+      "collection": "mixed-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Note with only CLI metadata (no @meta: line)",
+      "metadata_key": "audience",
+      "metadata_value": "\"devs\"",
+      "collection": "mixed-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Note with only CLI metadata (no @meta: line)",
+      "metadata_key": "cli_only",
+      "metadata_value": "\"yes\"",
+      "collection": "mixed-test"
+    },
+    {
+      "action": "expect_metadata_not_exists",
+      "content": "Note with only CLI metadata (no @meta: line)",
+      "metadata_key": "inline_key",
+      "collection": "mixed-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Note with both CLI and inline metadata",
+      "metadata_key": "inline_key",
+      "metadata_value": "\"inline_value\"",
+      "collection": "mixed-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Note with both CLI and inline metadata",
+      "metadata_key": "audience",
+      "metadata_value": "\"devs\"",
+      "collection": "mixed-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Note with overlapping metadata keys",
+      "metadata_key": "priority",
+      "metadata_value": "10",
+      "collection": "mixed-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Note with overlapping metadata keys",
+      "metadata_key": "inline_only",
+      "metadata_value": "\"yes\"",
+      "collection": "mixed-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Note with overlapping metadata keys",
+      "metadata_key": "audience",
+      "metadata_value": "\"devs\"",
+      "collection": "mixed-test"
+    }
+  ]
+}

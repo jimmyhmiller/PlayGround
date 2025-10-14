@@ -46,6 +46,10 @@ pub enum Commands {
         /// Collection name (default: "default")
         #[arg(long, default_value = "default")]
         collection: String,
+
+        /// Metadata as JSON string (e.g. '{"tags":["bug","security"],"priority":5}')
+        #[arg(short, long)]
+        metadata: Option<String>,
     },
 
     /// List notes for a file
@@ -191,6 +195,10 @@ pub enum Commands {
         /// Collection name (default: "default")
         #[arg(long, default_value = "default")]
         collection: String,
+
+        /// Metadata as JSON string (e.g. '{"tags":["onboarding"],"audience":"junior-devs"}')
+        #[arg(short, long)]
+        metadata: Option<String>,
     },
 }
 
@@ -231,7 +239,8 @@ pub fn execute_command(cli: Cli) -> Result<()> {
             content,
             author,
             collection,
-        } => cmd_add(file, line, column, content, author, collection),
+            metadata,
+        } => cmd_add(file, line, column, content, author, collection, metadata),
         Commands::List { file, collection, include_deleted } => cmd_list(file, collection, include_deleted),
         Commands::View { id } => cmd_view(id),
         Commands::Update { id, content } => cmd_update(id, content),
@@ -247,7 +256,7 @@ pub fn execute_command(cli: Cli) -> Result<()> {
         Commands::Inject { file, collection, output } => cmd_inject(file, collection, output),
         Commands::RemoveInline { file, output } => cmd_remove_inline(file, output),
         Commands::Extract { file, collection } => cmd_extract(file, collection),
-        Commands::Capture { file, author, collection } => cmd_capture(file, author, collection),
+        Commands::Capture { file, author, collection, metadata } => cmd_capture(file, author, collection, metadata),
     }
 }
 
@@ -258,6 +267,18 @@ fn execute_lang_command(cmd: LangCommands) -> Result<()> {
         LangCommands::ListInstalled => cmd_lang_list_installed(),
         LangCommands::ListAvailable => cmd_lang_list_available(),
         LangCommands::Info { language } => cmd_lang_info(language),
+    }
+}
+
+/// Parse metadata from JSON string
+fn parse_metadata(metadata_json: Option<String>) -> Result<std::collections::HashMap<String, serde_json::Value>> {
+    if let Some(json_str) = metadata_json {
+        let metadata: std::collections::HashMap<String, serde_json::Value> =
+            serde_json::from_str(&json_str)
+                .map_err(|e| anyhow!("Invalid metadata JSON: {}", e))?;
+        Ok(metadata)
+    } else {
+        Ok(std::collections::HashMap::new())
     }
 }
 
@@ -348,6 +369,7 @@ fn cmd_add(
     content: String,
     author: String,
     collection_name: String,
+    metadata_json: Option<String>,
 ) -> Result<()> {
     let repo = GitRepo::discover(".")?;
     let root = repo.root_path()?;
@@ -396,8 +418,16 @@ fn cmd_add(
     let commit_hash = repo.current_commit_hash()?;
     let anchor = builder.build_note_anchor(node, commit_hash)?;
 
+    // Parse metadata
+    let metadata = parse_metadata(metadata_json)?;
+
     // Create note
-    let note = Note::new(content.clone(), author, anchor, collection_name.clone());
+    let mut note = Note::new(content.clone(), author, anchor, collection_name.clone());
+
+    // Set metadata if provided
+    for (key, value) in metadata {
+        note.set_metadata(key, value);
+    }
 
     // Load or create collection
     let mut collection = storage
@@ -409,6 +439,9 @@ fn cmd_add(
 
     println!("Added note {} to collection '{}'", note.id, collection_name);
     println!("Content: {}", content);
+    if !note.metadata.is_empty() {
+        println!("Metadata: {}", serde_json::to_string_pretty(&note.metadata)?);
+    }
     Ok(())
 }
 
@@ -472,6 +505,9 @@ fn cmd_list(file: Option<PathBuf>, collection_name: Option<String>, include_dele
         println!("File: {}:{}", note.anchor.primary.file_path, note.anchor.primary.line_number + 1);
         println!("Author: {}", note.author);
         println!("Content: {}", note.content);
+        if !note.metadata.is_empty() {
+            println!("Metadata: {}", serde_json::to_string(&note.metadata)?);
+        }
         if note.deleted {
             println!("🗑️  DELETED");
         }
@@ -494,10 +530,16 @@ fn cmd_view(id: String) -> Result<()> {
     println!("Note ID: {}", note.id);
     println!("File: {}:{}", note.anchor.primary.file_path, note.anchor.primary.line_number + 1);
     println!("Author: {}", note.author);
+    println!("Collection: {}", note.collection);
     println!("Created: {}", note.created_at);
     println!("Updated: {}", note.updated_at);
     println!("Commit: {}", note.anchor.commit_hash);
     println!("\nContent:\n{}", note.content);
+
+    if !note.metadata.is_empty() {
+        println!("\nMetadata:");
+        println!("{}", serde_json::to_string_pretty(&note.metadata)?);
+    }
 
     if note.is_orphaned {
         println!("\n⚠️  This note is ORPHANED");
@@ -933,7 +975,7 @@ fn cmd_extract(file: Option<PathBuf>, collection_name: Option<String>) -> Result
     Ok(())
 }
 
-fn cmd_capture(file: PathBuf, author: String, collection_name: String) -> Result<()> {
+fn cmd_capture(file: PathBuf, author: String, collection_name: String, metadata_json: Option<String>) -> Result<()> {
     use crate::inline;
 
     let repo = GitRepo::discover(".")?;
@@ -984,6 +1026,9 @@ fn cmd_capture(file: PathBuf, author: String, collection_name: String) -> Result
     let rel_path = repo.relative_path(&resolved_file)?;
     let commit_hash = repo.current_commit_hash()?;
 
+    // Parse CLI metadata (this will be the default for all notes)
+    let cli_metadata = parse_metadata(metadata_json)?;
+
     // Load or create collection
     let mut collection = storage
         .load_collection(&collection_name)
@@ -991,6 +1036,7 @@ fn cmd_capture(file: PathBuf, author: String, collection_name: String) -> Result
 
     // Create notes for each captured marker
     let mut notes_with_ids = Vec::new();
+    let mut notes_with_inline_meta = 0;
 
     for captured in &captured_notes {
         // Find the actual code line (line after the @note: comment)
@@ -1024,7 +1070,25 @@ fn cmd_capture(file: PathBuf, author: String, collection_name: String) -> Result
         let anchor = builder.build_note_anchor(node, commit_hash.clone())?;
 
         // Create note with new UUID
-        let note = Note::new(captured.content.clone(), author.clone(), anchor, collection_name.clone());
+        let mut note = Note::new(captured.content.clone(), author.clone(), anchor, collection_name.clone());
+
+        // Merge metadata: start with CLI metadata, then add/override with inline metadata
+        // CLI metadata acts as the default for all notes
+        let mut final_metadata = cli_metadata.clone();
+
+        if let Some(inline_meta) = &captured.metadata {
+            notes_with_inline_meta += 1;
+            // Merge inline metadata (inline takes precedence over CLI for same keys)
+            for (key, value) in inline_meta {
+                final_metadata.insert(key.clone(), value.clone());
+            }
+        }
+
+        // Set all metadata on the note
+        for (key, value) in final_metadata {
+            note.set_metadata(key, value);
+        }
+
         let note_id = note.id;
 
         // Add to collection
@@ -1045,6 +1109,14 @@ fn cmd_capture(file: PathBuf, author: String, collection_name: String) -> Result
 
     println!("\n✓ Captured {} notes and saved to collection '{}'", notes_with_ids.len(), collection_name);
     println!("✓ Updated {} with full note markers", file.display());
+
+    if !cli_metadata.is_empty() {
+        println!("Default metadata applied to all notes: {}", serde_json::to_string_pretty(&cli_metadata)?);
+    }
+
+    if notes_with_inline_meta > 0 {
+        println!("{} note(s) have inline @meta: specified", notes_with_inline_meta);
+    }
 
     Ok(())
 }

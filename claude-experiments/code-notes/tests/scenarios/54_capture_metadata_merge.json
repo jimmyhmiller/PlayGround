@@ -1,0 +1,70 @@
+{
+  "name": "Capture Metadata Merge",
+  "description": "Test that CLI metadata and inline @meta: are merged together (additive)",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "merge.rs",
+      "content": "// @note: Function with partial metadata\n// @meta: {\"priority\":7,\"assigned_to\":\"alice\"}\nfn merge_test() {\n    println!(\"Merge test\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add code for metadata merge test"
+    },
+    {
+      "action": "capture_notes",
+      "file": "merge.rs",
+      "author": "TestAuthor",
+      "collection": "merge-test",
+      "metadata": "{\"audience\":\"backend-team\",\"category\":\"bug\",\"sprint\":\"2024-Q1\"}"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 1,
+      "collection": "merge-test"
+    },
+    {
+      "action": "expect_note",
+      "content": "Function with partial metadata",
+      "file": "merge.rs",
+      "line": null,
+      "is_orphaned": false,
+      "collection": "merge-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Function with partial metadata",
+      "metadata_key": "priority",
+      "metadata_value": "7",
+      "collection": "merge-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Function with partial metadata",
+      "metadata_key": "assigned_to",
+      "metadata_value": "\"alice\"",
+      "collection": "merge-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Function with partial metadata",
+      "metadata_key": "audience",
+      "metadata_value": "\"backend-team\"",
+      "collection": "merge-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Function with partial metadata",
+      "metadata_key": "category",
+      "metadata_value": "\"bug\"",
+      "collection": "merge-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Function with partial metadata",
+      "metadata_key": "sprint",
+      "metadata_value": "\"2024-Q1\"",
+      "collection": "merge-test"
+    }
+  ]
+}
