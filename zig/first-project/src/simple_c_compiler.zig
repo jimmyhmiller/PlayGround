@@ -29,6 +29,7 @@ pub const SimpleCCompiler = struct {
     include_paths: std.ArrayList([]const u8),
     compiler_flags: std.ArrayList([]const u8),
     namespace_manager: NamespaceManager,
+    required_bundles: std.ArrayList([]const u8), // Bundle paths needed for linking
 
     pub const TargetKind = enum {
         executable,
@@ -82,6 +83,14 @@ pub const SimpleCCompiler = struct {
         and_op,
         or_op,
         not_op,
+
+        // Bitwise operators
+        bitwise_and,
+        bitwise_or,
+        bitwise_xor,
+        bitwise_not,
+        bitwise_shl,
+        bitwise_shr,
 
         // Memory operations
         allocate,
@@ -144,6 +153,14 @@ pub const SimpleCCompiler = struct {
         if (std.mem.eql(u8, op, "and")) return .and_op;
         if (std.mem.eql(u8, op, "or")) return .or_op;
         if (std.mem.eql(u8, op, "not")) return .not_op;
+
+        // Bitwise
+        if (std.mem.eql(u8, op, "bitwise-and")) return .bitwise_and;
+        if (std.mem.eql(u8, op, "bitwise-or")) return .bitwise_or;
+        if (std.mem.eql(u8, op, "bitwise-xor")) return .bitwise_xor;
+        if (std.mem.eql(u8, op, "bitwise-not")) return .bitwise_not;
+        if (std.mem.eql(u8, op, "bitwise-shl")) return .bitwise_shl;
+        if (std.mem.eql(u8, op, "bitwise-shr")) return .bitwise_shr;
 
         // Memory
         if (std.mem.eql(u8, op, "allocate")) return .allocate;
@@ -244,6 +261,7 @@ pub const SimpleCCompiler = struct {
             .include_paths = std.ArrayList([]const u8){},
             .compiler_flags = std.ArrayList([]const u8){},
             .namespace_manager = ns_manager,
+            .required_bundles = std.ArrayList([]const u8){},
         };
     }
 
@@ -251,6 +269,10 @@ pub const SimpleCCompiler = struct {
         self.linked_libraries.deinit(self.allocator.*);
         self.include_paths.deinit(self.allocator.*);
         self.compiler_flags.deinit(self.allocator.*);
+        for (self.required_bundles.items) |bundle| {
+            self.allocator.*.free(bundle);
+        }
+        self.required_bundles.deinit(self.allocator.*);
         self.namespace_manager.deinit();
     }
 
@@ -296,6 +318,10 @@ pub const SimpleCCompiler = struct {
             };
             // Re-register exports with parent checker
             try parent_checker.registerNamespaceExports(namespace_name, ns.definitions, ns.type_defs);
+
+            // Add cached bundle to required bundles list
+            const bundle_path = try self.allocator.*.dupe(u8, ns.bundle_path);
+            try self.required_bundles.append(self.allocator.*, bundle_path);
             return;
         }
 
@@ -359,12 +385,14 @@ pub const SimpleCCompiler = struct {
         var checker = TypeChecker.init(self.allocator.*);
         defer checker.deinit();
 
-        for (expanded_expressions.items) |expr| {
-            _ = checker.typeCheck(expr) catch {
-                std.debug.print("ERROR: Type checking failed for required namespace {s}\n", .{namespace_name});
-                return Error.TypeCheckFailed;
-            };
-        }
+        // Set up namespace loader for nested requires
+        checker.setNamespaceLoader(self, namespaceLoaderCallback);
+
+        // Use two-pass type checking to properly handle requires and forward references
+        _ = checker.typeCheckAllTwoPass(expanded_expressions.items) catch {
+            std.debug.print("ERROR: Type checking failed for required namespace {s}\n", .{namespace_name});
+            return Error.TypeCheckFailed;
+        };
 
         // 6. Extract and register exports with parent checker
         // Clone the type environments (shallow copy is fine since Types are immutable)
@@ -391,12 +419,27 @@ pub const SimpleCCompiler = struct {
         const bundle_path = try self.compileToBundleFile(namespace_name);
         std.debug.print("Compiled namespace {s} to bundle: {s}\n", .{ namespace_name, bundle_path });
 
+        // Add bundle to required bundles list for linking
+        const bundle_path_copy = try self.allocator.*.dupe(u8, bundle_path);
+        try self.required_bundles.append(self.allocator.*, bundle_path_copy);
+
         // 9. Cache the compiled namespace
         var compiled_ns = try namespace_manager.CompiledNamespace.init(self.allocator.*, namespace_name);
         compiled_ns.file_path = try self.allocator.*.dupe(u8, file_path);
         compiled_ns.bundle_path = bundle_path; // Takes ownership
         compiled_ns.definitions = exports;
         compiled_ns.type_defs = type_defs;
+
+        // Copy requires from checker (alias -> namespace_name mappings)
+        compiled_ns.requires = std.ArrayList(value.RequireDecl){};
+        var requires_iter = checker.requires.iterator();
+        while (requires_iter.next()) |entry| {
+            const req_decl = value.RequireDecl{
+                .namespace = try self.allocator.*.dupe(u8, entry.value_ptr.*),
+                .alias = try self.allocator.*.dupe(u8, entry.key_ptr.*),
+            };
+            try compiled_ns.requires.append(self.allocator.*, req_decl);
+        }
 
         try self.namespace_manager.addCompiledNamespace(compiled_ns);
         std.debug.print("Cached namespace {s}\n", .{namespace_name});
@@ -425,6 +468,14 @@ pub const SimpleCCompiler = struct {
         // 2. Generate C code using compileString
         const c_code = try self.compileString(source, .bundle);
         defer self.allocator.*.free(c_code);
+
+        // Save the required bundles that were collected during compilation
+        // We need to link against these when creating this namespace's bundle
+        var nested_bundles = std.ArrayList([]const u8){};
+        defer nested_bundles.deinit(self.allocator.*);
+        for (self.required_bundles.items) |bundle| {
+            try nested_bundles.append(self.allocator.*, bundle);
+        }
 
         // 3. Convert namespace name to file path
         var path_buf = std.ArrayList(u8){};
@@ -480,13 +531,18 @@ pub const SimpleCCompiler = struct {
             else => return Error.TypeCheckFailed,
         }
 
-        // 6. Link to .bundle
-        const bundle_filename = try std.fmt.allocPrint(self.allocator.*, "{s}.bundle", .{relative_base});
+        // 6. Link to .dylib (for namespaces that can be linked against)
+        const bundle_filename = try std.fmt.allocPrint(self.allocator.*, "{s}.dylib", .{relative_base});
         defer self.allocator.*.free(bundle_filename);
 
         var link_args = std.ArrayList([]const u8){};
         defer link_args.deinit(self.allocator.*);
         try link_args.appendSlice(self.allocator.*, &.{ "zig", "cc", "-dynamiclib", obj_filename, "-o", bundle_filename });
+
+        // Add required bundles that this namespace depends on
+        for (nested_bundles.items) |bundle| {
+            try link_args.append(self.allocator.*, bundle);
+        }
 
         // Add linked libraries
         for (self.linked_libraries.items) |lib| {
@@ -525,7 +581,58 @@ pub const SimpleCCompiler = struct {
         return bundle_path;
     }
 
+    /// Collect all transitive namespace dependencies in topological order
+    /// (dependencies before dependents) for proper initialization
+    fn collectTransitiveDependencies(
+        self: *SimpleCCompiler,
+        visited: *std.StringHashMap(void),
+        result: *std.ArrayList([]const u8),
+    ) Error!void {
+        // Iterate over all compiled namespaces
+        var ns_iter = self.namespace_manager.compiled_namespaces.iterator();
+        while (ns_iter.next()) |entry| {
+            const ns_name = entry.key_ptr.*;
+            try self.collectTransitiveDependenciesRecursive(ns_name, visited, result);
+        }
+    }
+
+    /// Recursive helper for collectTransitiveDependencies
+    fn collectTransitiveDependenciesRecursive(
+        self: *SimpleCCompiler,
+        ns_name: []const u8,
+        visited: *std.StringHashMap(void),
+        result: *std.ArrayList([]const u8),
+    ) Error!void {
+        // Skip if already visited
+        if (visited.contains(ns_name)) {
+            return;
+        }
+
+        // Mark as visited
+        try visited.put(ns_name, {});
+
+        // Get the compiled namespace
+        const compiled_ns = self.namespace_manager.getCompiledNamespace(ns_name) orelse {
+            return; // Should not happen, but handle gracefully
+        };
+
+        // Recursively visit all dependencies first (depth-first)
+        for (compiled_ns.requires.items) |req| {
+            const dep_ns_name = req.namespace;
+            try self.collectTransitiveDependenciesRecursive(dep_ns_name, visited, result);
+        }
+
+        // Add this namespace after all its dependencies
+        try result.append(self.allocator.*, ns_name);
+    }
+
     pub fn compileString(self: *SimpleCCompiler, source: []const u8, target: TargetKind) Error![]u8 {
+        // Clear required bundles from previous compilation
+        for (self.required_bundles.items) |bundle| {
+            self.allocator.*.free(bundle);
+        }
+        self.required_bundles.clearRetainingCapacity();
+
         var reader_instance = Reader.init(self.allocator);
         const read_result = reader_instance.readAllString(source) catch |err| {
             return switch (err) {
@@ -673,6 +780,9 @@ pub const SimpleCCompiler = struct {
                                         });
                                         continue;
                                     }
+                                } else {
+                                    // This is a type definition - skip it (don't add to non_def_exprs)
+                                    continue;
                                 }
                             }
                         }
@@ -702,10 +812,16 @@ pub const SimpleCCompiler = struct {
             try self.emitForwardDecl(forward_writer, expr, typed_val, &checker, &includes);
         }
 
-        // Emit full struct definitions for required namespaces
-        var extern_iter = checker.requires.iterator();
-        while (extern_iter.next()) |entry| {
-            const required_ns_name = entry.value_ptr.*;
+        // Emit full struct definitions for all namespaces (including transitive dependencies)
+        // Collect all transitive dependencies in topological order
+        var visited_decl = std.StringHashMap(void).init(self.allocator.*);
+        defer visited_decl.deinit();
+        var all_namespaces = std.ArrayList([]const u8){};
+        defer all_namespaces.deinit(self.allocator.*);
+        try self.collectTransitiveDependencies(&visited_decl, &all_namespaces);
+
+        // Emit declarations for all namespaces
+        for (all_namespaces.items) |required_ns_name| {
             const sanitized_ns = try self.sanitizeIdentifier(required_ns_name);
             defer self.allocator.*.free(sanitized_ns);
 
@@ -766,13 +882,34 @@ pub const SimpleCCompiler = struct {
                     const sanitized_field = try self.sanitizeIdentifier(def_name);
                     defer self.allocator.*.free(sanitized_field);
 
-                    // Generate C type for the field
-                    const c_type = self.cTypeFor(def_type, &includes) catch |err| {
-                        std.debug.print("ERROR: Cannot convert type for field '{s}': {}\n", .{ def_name, err });
-                        std.debug.print("  Type: {any}\n", .{def_type});
-                        return err;
-                    };
-                    try forward_writer.print("    {s} {s};\n", .{ c_type, sanitized_field });
+                    // Special handling for function types
+                    if (def_type == .function) {
+                        const fn_type = def_type.function;
+                        const ret_c_type = try self.cTypeFor(fn_type.return_type, &includes);
+
+                        // Build parameter list
+                        var params_list = std.ArrayList([]const u8){};
+                        defer params_list.deinit(self.allocator.*);
+
+                        for (fn_type.param_types) |param_type| {
+                            const param_c_type = try self.cTypeFor(param_type, &includes);
+                            try params_list.append(self.allocator.*, param_c_type);
+                        }
+
+                        const params = try std.mem.join(self.allocator.*, ", ", params_list.items);
+                        defer self.allocator.*.free(params);
+
+                        // Emit function pointer with name inside: ReturnType (*name)(params);
+                        try forward_writer.print("    {s} (*{s})({s});\n", .{ ret_c_type, sanitized_field, params });
+                    } else {
+                        // Regular field
+                        const c_type = self.cTypeFor(def_type, &includes) catch |err| {
+                            std.debug.print("ERROR: Cannot convert type for field '{s}': {}\n", .{ def_name, err });
+                            std.debug.print("  Type: {any}\n", .{def_type});
+                            return err;
+                        };
+                        try forward_writer.print("    {s} {s};\n", .{ c_type, sanitized_field });
+                    }
                 }
 
                 try forward_writer.print("}} Namespace_{s};\n\n", .{sanitized_ns});
@@ -809,6 +946,10 @@ pub const SimpleCCompiler = struct {
         defer namespace_struct.deinit(self.allocator.*);
         var namespace_init = std.ArrayList(u8){};
         defer namespace_init.deinit(self.allocator.*);
+
+        // Track which defs are actually successfully initialized in init function
+        var actually_initialized_defs = std.StringHashMap(void).init(self.allocator.*);
+        defer actually_initialized_defs.deinit();
 
         if (namespace_defs.items.len > 0) {
             const ns_writer = namespace_struct.writer(self.allocator.*);
@@ -929,6 +1070,7 @@ pub const SimpleCCompiler = struct {
                 if (def.var_type == .function) {
                     // For functions, just assign the address of the static function
                     try init_writer.print("    ns->{s} = &{s};\n", .{ sanitized_field, sanitized_field });
+                    try actually_initialized_defs.put(def.name, {});
                 } else if (def.var_type == .array) {
                     // Arrays can't be assigned in C, so we need to copy element by element
                     // For now, generate a loop to initialize the array
@@ -951,6 +1093,7 @@ pub const SimpleCCompiler = struct {
                             }
                         };
                         try init_writer.print(";\n    }}\n", .{});
+                        try actually_initialized_defs.put(def.name, {});
                     }
                     // If no init value, array is left uninitialized (or zero-initialized by C)
                 } else {
@@ -989,6 +1132,7 @@ pub const SimpleCCompiler = struct {
                             }
                         };
                         try init_writer.print(";\n", .{});
+                        try actually_initialized_defs.put(def.name, {});
                     }
                 }
             }
@@ -1052,20 +1196,9 @@ pub const SimpleCCompiler = struct {
         var init_only_def_names = std.StringHashMap(void).init(self.allocator.*);
         defer init_only_def_names.deinit();
 
-        // Find first non-def index again
-        var first_non_def_idx_main: ?usize = null;
-        if (non_def_exprs.items.len > 0) {
-            first_non_def_idx_main = non_def_exprs.items[0].idx;
-            for (non_def_exprs.items) |non_def| {
-                if (first_non_def_idx_main == null or non_def.idx < first_non_def_idx_main.?) {
-                    first_non_def_idx_main = non_def.idx;
-                }
-            }
-        }
-
+        // Use actual tracking: only mark defs that were successfully initialized in init
         for (namespace_defs.items) |def| {
-            // Only mark as processed if it was actually initialized in init (before first non-def)
-            if (first_non_def_idx_main == null or def.idx < first_non_def_idx_main.?) {
+            if (actually_initialized_defs.contains(def.name)) {
                 try init_processed_indices.put(def.idx, {});
                 try init_only_def_names.put(def.name, {});
             }
@@ -1153,11 +1286,39 @@ pub const SimpleCCompiler = struct {
                 // Only generate wrapper if user hasn't defined main
                 if (!has_user_main) {
                     try output.appendSlice(self.allocator.*, "int main() {\n");
-                    // Initialize namespace if present
+
+                    // NOTE: For executables, all namespace code is compiled in, so we need
+                    // to initialize all namespaces. For bundles, required namespaces are
+                    // loaded dynamically and initialized by their own lisp_main functions.
+
+                    // Collect all namespaces in topological order (dependencies before dependents)
+                    var visited = std.StringHashMap(void).init(self.allocator.*);
+                    defer visited.deinit();
+                    var sorted_namespaces = std.ArrayList([]const u8){};
+                    defer sorted_namespaces.deinit(self.allocator.*);
+                    try self.collectTransitiveDependencies(&visited, &sorted_namespaces);
+
+                    // Initialize all namespaces in topological order
+                    for (sorted_namespaces.items) |ns_to_init| {
+                        const sanitized = try self.sanitizeIdentifier(ns_to_init);
+                        defer self.allocator.*.free(sanitized);
+                        try output.print(self.allocator.*, "    init_namespace_{s}(&g_{s});\n", .{ sanitized, sanitized });
+                    }
+
+                    // Initialize this namespace if present (and not already in the list)
                     if (namespace_defs.items.len > 0) {
-                        const sanitized_ns = try self.sanitizeIdentifier(ns_name);
-                        defer self.allocator.*.free(sanitized_ns);
-                        try output.print(self.allocator.*, "    init_namespace_{s}(&g_{s});\n", .{ sanitized_ns, sanitized_ns });
+                        var already_init = false;
+                        for (sorted_namespaces.items) |ns_to_init| {
+                            if (std.mem.eql(u8, ns_to_init, ns_name)) {
+                                already_init = true;
+                                break;
+                            }
+                        }
+                        if (!already_init) {
+                            const sanitized_ns = try self.sanitizeIdentifier(ns_name);
+                            defer self.allocator.*.free(sanitized_ns);
+                            try output.print(self.allocator.*, "    init_namespace_{s}(&g_{s});\n", .{ sanitized_ns, sanitized_ns });
+                        }
                     }
                     if (body.items.len > 0) {
                         try output.appendSlice(self.allocator.*, body.items);
@@ -1172,7 +1333,22 @@ pub const SimpleCCompiler = struct {
             },
             .bundle => {
                 try output.appendSlice(self.allocator.*, "void lisp_main(void) {\n");
-                // Initialize namespace if present
+
+                // Initialize all required namespaces first (in topological order)
+                // This ensures that transitive dependencies are initialized before they're used
+                var visited_bundle = std.StringHashMap(void).init(self.allocator.*);
+                defer visited_bundle.deinit();
+                var sorted_deps = std.ArrayList([]const u8){};
+                defer sorted_deps.deinit(self.allocator.*);
+                try self.collectTransitiveDependencies(&visited_bundle, &sorted_deps);
+
+                for (sorted_deps.items) |dep_ns_name| {
+                    const sanitized = try self.sanitizeIdentifier(dep_ns_name);
+                    defer self.allocator.*.free(sanitized);
+                    try output.print(self.allocator.*, "    init_namespace_{s}(&g_{s});\n", .{ sanitized, sanitized });
+                }
+
+                // Initialize this namespace if present
                 if (namespace_defs.items.len > 0) {
                     const sanitized_ns = try self.sanitizeIdentifier(ns_name);
                     defer self.allocator.*.free(sanitized_ns);
@@ -2170,6 +2346,39 @@ pub const SimpleCCompiler = struct {
                 try writer.print("))", .{});
                 return true;
             },
+            .bitwise_and, .bitwise_or, .bitwise_xor, .bitwise_shl, .bitwise_shr => {
+                if (l.elements.len < 2) return Error.UnsupportedExpression;
+                const op_name = l.elements[0].symbol.name;
+                const c_op = if (std.mem.eql(u8, op_name, "bitwise-and"))
+                    "&"
+                else if (std.mem.eql(u8, op_name, "bitwise-or"))
+                    "|"
+                else if (std.mem.eql(u8, op_name, "bitwise-xor"))
+                    "^"
+                else if (std.mem.eql(u8, op_name, "bitwise-shl"))
+                    "<<"
+                else if (std.mem.eql(u8, op_name, "bitwise-shr"))
+                    ">>"
+                else
+                    op_name;
+
+                try writer.print("(", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                var i: usize = 2;
+                while (i < l.elements.len) : (i += 1) {
+                    try writer.print(" {s} ", .{c_op});
+                    try self.writeExpressionTyped(writer, l.elements[i], ns_ctx, includes);
+                }
+                try writer.print(")", .{});
+                return true;
+            },
+            .bitwise_not => {
+                if (l.elements.len != 2) return Error.UnsupportedExpression;
+                try writer.print("(~(", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print("))", .{});
+                return true;
+            },
             .array_ref => {
                 if (l.elements.len != 3) return false;
                 try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
@@ -3014,6 +3223,11 @@ pub fn main() !void {
             try link_args.append(allocator, lib_arg);
         }
 
+        // Add required namespace bundles
+        for (compiler.required_bundles.items) |bundle| {
+            try link_args.append(allocator, bundle);
+        }
+
         var link_child = std.process.Child.init(link_args.items, allocator);
         link_child.stdin_behavior = .Inherit;
         link_child.stdout_behavior = .Inherit;
@@ -3040,9 +3254,33 @@ pub fn main() !void {
 
         if (!run_flag) return;
 
+        // Load the main bundle - the system's dynamic linker will automatically load required dylibs
         var lib = try std.DynLib.open(bundle_real_path);
         defer lib.close();
 
+        // Call lisp_main for all required namespace dylibs to complete their initialization
+        // (init functions do partial initialization, lisp_main completes it)
+        for (compiler.required_bundles.items) |bundle| {
+            const bundle_abs_path = try std.fs.cwd().realpathAlloc(allocator, bundle);
+            defer allocator.free(bundle_abs_path);
+
+            std.debug.print("Completing initialization of required namespace: {s}\n", .{bundle_abs_path});
+
+            // Open the dylib directly to call its lisp_main
+            var ns_lib = std.DynLib.open(bundle_abs_path) catch |err| {
+                std.debug.print("WARNING: Failed to open required bundle {s}: {}\n", .{ bundle_abs_path, err });
+                continue;
+            };
+            defer ns_lib.close();
+
+            const ns_init_fn = ns_lib.lookup(*const fn () callconv(.c) void, "lisp_main") orelse {
+                std.debug.print("WARNING: Required bundle {s} missing lisp_main\n", .{bundle_abs_path});
+                continue;
+            };
+            @call(.auto, ns_init_fn, .{});
+        }
+
+        // Run the main bundle's lisp_main
         const entry_fn = lib.lookup(*const fn () callconv(.c) void, "lisp_main") orelse {
             std.debug.print("Bundle missing lisp_main entry\n", .{});
             return;
@@ -3078,6 +3316,11 @@ pub fn main() !void {
     for (compiler.linked_libraries.items) |lib| {
         const lib_arg = try std.fmt.allocPrint(allocator, "-l{s}", .{lib});
         try link_args.append(allocator, lib_arg);
+    }
+
+    // Add required namespace bundles
+    for (compiler.required_bundles.items) |bundle| {
+        try link_args.append(allocator, bundle);
     }
 
     var link_child = std.process.Child.init(link_args.items, allocator);

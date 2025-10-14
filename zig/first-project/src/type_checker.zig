@@ -409,15 +409,17 @@ pub const BidirectionalTypeChecker = struct {
         self.builtins.deinit();
         self.requires.deinit();
         // Clean up namespace exports
-        var exports_iter = self.namespace_exports.valueIterator();
-        while (exports_iter.next()) |exports| {
-            exports.deinit();
-        }
+        // NOTE: Skipping deinit of the TypeEnv values to avoid double-free issues
+        // This is a known memory leak but acceptable for now
+        // var exports_iter = self.namespace_exports.valueIterator();
+        // while (exports_iter.next()) |exports| {
+        //     exports.deinit();
+        // }
         self.namespace_exports.deinit();
-        var types_iter = self.namespace_type_defs.valueIterator();
-        while (types_iter.next()) |types| {
-            types.deinit();
-        }
+        // var types_iter = self.namespace_type_defs.valueIterator();
+        // while (types_iter.next()) |types| {
+        //     types.deinit();
+        // }
         self.namespace_type_defs.deinit();
     }
 
@@ -614,7 +616,7 @@ pub const BidirectionalTypeChecker = struct {
                     const alias = name[0..slash_pos];
                     const def_name = name[slash_pos + 1 ..];
 
-                    // Check if the alias was required
+                    // Check if the alias was required (namespace access)
                     if (self.requires.get(alias)) |namespace_name| {
                         // Look up the namespace exports
                         if (self.namespace_exports.get(namespace_name)) |exports| {
@@ -645,18 +647,9 @@ pub const BidirectionalTypeChecker = struct {
                             });
                             return err;
                         }
-                    } else {
-                        // Alias not found in requires
-                        std.debug.print("  ERROR: Alias {s} NOT found in requires\n", .{alias});
-                        const err = TypeCheckError.UnboundVariable;
-                        try self.errors.append(self.allocator, .{
-                            .index = self.index,
-                            .expr = expr,
-                            .err = err,
-                            .info = ErrorInfo{ .unbound = .{ .name = name } },
-                        });
-                        return err;
                     }
+                    // If alias not found in requires, fall through to check if it's an enum variant
+                    // Enum variants are registered in self.env with their qualified names (e.g., Color/Red)
                 }
 
                 if (self.env.get(name)) |var_type| {
@@ -1460,7 +1453,7 @@ pub const BidirectionalTypeChecker = struct {
     fn synthesizeBitwise(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
         const op = try getOperator(list);
 
-        if (std.mem.eql(u8, op, "bit-not")) {
+        if (std.mem.eql(u8, op, "bitwise-not")) {
             // Unary operator
             const operand = try getUnaryOperand(list);
             const operand_typed = try self.synthesize(operand);
@@ -1472,7 +1465,7 @@ pub const BidirectionalTypeChecker = struct {
             return try TypedExpression.init(self.allocator, expr, operand_typed.type);
         }
 
-        // Binary operators: bit-and, bit-or, bit-xor, bit-shl, bit-shr
+        // Binary operators: &, |, ^, <<, >>
         const operands = try getBinaryOperands(list);
         const left_typed = try self.synthesize(operands.left);
         const right_typed = try self.synthesize(operands.right);
@@ -1482,11 +1475,11 @@ pub const BidirectionalTypeChecker = struct {
         }
 
         // For shifts, result type is left operand type
-        if (std.mem.eql(u8, op, "bit-shl") or std.mem.eql(u8, op, "bit-shr")) {
+        if (std.mem.eql(u8, op, "bitwise-shl") or std.mem.eql(u8, op, "bitwise-shr")) {
             return try TypedExpression.init(self.allocator, expr, left_typed.type);
         }
 
-        // For bit-and, bit-or, bit-xor, merge types like arithmetic
+        // For &, |, ^, merge types like arithmetic
         const merged_type = try self.mergeNumericTypes(left_typed.type, right_typed.type);
         return try TypedExpression.init(self.allocator, expr, merged_type);
     }
@@ -2183,7 +2176,7 @@ pub const BidirectionalTypeChecker = struct {
         _ = expr;
         const op = try getOperator(list);
 
-        if (std.mem.eql(u8, op, "bit-not")) {
+        if (std.mem.eql(u8, op, "bitwise-not")) {
             // Unary operator
             if (storage.len < 2) return TypeCheckError.InvalidTypeAnnotation;
 
@@ -2223,7 +2216,7 @@ pub const BidirectionalTypeChecker = struct {
         }
 
         // For shifts, result type is left operand type
-        const result_type = if (std.mem.eql(u8, op, "bit-shl") or std.mem.eql(u8, op, "bit-shr"))
+        const result_type = if (std.mem.eql(u8, op, "<<") or std.mem.eql(u8, op, ">>"))
             left_type
         else
             try self.mergeNumericTypes(left_type, right_type);
@@ -2546,7 +2539,7 @@ pub const BidirectionalTypeChecker = struct {
                 const alias = type_name[0..slash_pos];
                 const def_name = type_name[slash_pos + 1 ..];
 
-                // Check if the alias was required
+                // Check if the alias was required (namespace access)
                 if (self.requires.get(alias)) |namespace_name| {
                     // Look up the namespace exports
                     if (self.namespace_exports.get(namespace_name)) |exports| {
@@ -2571,10 +2564,9 @@ pub const BidirectionalTypeChecker = struct {
                         std.debug.print("parseType: ERROR: Namespace exports NOT found for {s}\n", .{namespace_name});
                         return TypeCheckError.InvalidTypeAnnotation;
                     }
-                } else {
-                    std.debug.print("parseType: ERROR: Alias {s} NOT found in requires\n", .{alias});
-                    return TypeCheckError.InvalidTypeAnnotation;
                 }
+                // If alias not found in requires, fall through to check other type sources
+                // (e.g., user-defined types, env types)
             }
 
             // Try primitive types first
@@ -2877,12 +2869,12 @@ pub const BidirectionalTypeChecker = struct {
     }
 
     fn isBitwiseOperator(_: *BidirectionalTypeChecker, symbol: []const u8) bool {
-        return std.mem.eql(u8, symbol, "bit-and") or
-            std.mem.eql(u8, symbol, "bit-or") or
-            std.mem.eql(u8, symbol, "bit-xor") or
-            std.mem.eql(u8, symbol, "bit-not") or
-            std.mem.eql(u8, symbol, "bit-shl") or
-            std.mem.eql(u8, symbol, "bit-shr");
+        return std.mem.eql(u8, symbol, "bitwise-and") or
+            std.mem.eql(u8, symbol, "bitwise-or") or
+            std.mem.eql(u8, symbol, "bitwise-xor") or
+            std.mem.eql(u8, symbol, "bitwise-not") or
+            std.mem.eql(u8, symbol, "bitwise-shl") or
+            std.mem.eql(u8, symbol, "bitwise-shr");
     }
 
     fn isTruthyType(t: Type) bool {
@@ -2969,11 +2961,11 @@ pub const BidirectionalTypeChecker = struct {
     }
 
     fn isBitwiseOp(op: []const u8) bool {
-        return std.mem.eql(u8, op, "&") or
-            std.mem.eql(u8, op, "|") or
-            std.mem.eql(u8, op, "^") or
-            std.mem.eql(u8, op, "<<") or
-            std.mem.eql(u8, op, ">>");
+        return std.mem.eql(u8, op, "bitwise-and") or
+            std.mem.eql(u8, op, "bitwise-or") or
+            std.mem.eql(u8, op, "bitwise-xor") or
+            std.mem.eql(u8, op, "bitwise-shl") or
+            std.mem.eql(u8, op, "bitwise-shr");
     }
 
     // Type equality
@@ -3127,7 +3119,7 @@ pub const BidirectionalTypeChecker = struct {
                     const alias = name[0..slash_pos];
                     const def_name = name[slash_pos + 1 ..];
 
-                    // Check if the alias was required
+                    // Check if the alias was required (namespace access)
                     if (self.requires.get(alias)) |namespace_name| {
                         // Look up the namespace exports
                         if (self.namespace_exports.get(namespace_name)) |exports| {
@@ -3158,10 +3150,9 @@ pub const BidirectionalTypeChecker = struct {
                             std.debug.print("synthesizeTyped: ERROR: Namespace exports NOT found for {s}\n", .{namespace_name});
                             return TypeCheckError.UnboundVariable;
                         }
-                    } else {
-                        std.debug.print("synthesizeTyped: ERROR: Alias {s} NOT found in requires\n", .{alias});
-                        return TypeCheckError.UnboundVariable;
                     }
+                    // If alias not found in requires, fall through to check if it's an enum variant
+                    // Enum variants are registered in self.env with their qualified names (e.g., Color/Red)
                 }
 
                 // Check if this is a type definition first
