@@ -702,14 +702,86 @@ pub const SimpleCCompiler = struct {
             try self.emitForwardDecl(forward_writer, expr, typed_val, &checker, &includes);
         }
 
-        // Emit extern declarations for required namespaces
+        // Emit full struct definitions for required namespaces
         var extern_iter = checker.requires.iterator();
         while (extern_iter.next()) |entry| {
             const required_ns_name = entry.value_ptr.*;
             const sanitized_ns = try self.sanitizeIdentifier(required_ns_name);
             defer self.allocator.*.free(sanitized_ns);
+
             try forward_writer.print("// Required namespace: {s}\n", .{required_ns_name});
-            try forward_writer.print("typedef struct Namespace_{s} Namespace_{s};\n", .{ sanitized_ns, sanitized_ns });
+
+            // Get the compiled namespace to access its type info
+            std.debug.print("DEBUG: Looking up namespace {s} in cache\n", .{required_ns_name});
+            if (self.namespace_manager.getCompiledNamespace(required_ns_name)) |compiled_ns| {
+                std.debug.print("DEBUG: Found namespace {s} in cache with {d} definitions\n", .{ required_ns_name, compiled_ns.definitions.count() });
+
+                // Emit type definitions first (struct/enum types used by namespace)
+                var typedef_iter = compiled_ns.type_defs.iterator();
+                while (typedef_iter.next()) |typedef_entry| {
+                    const type_name = typedef_entry.key_ptr.*;
+                    const type_def = typedef_entry.value_ptr.*;
+
+                    if (type_def == .struct_type) {
+                        const st = type_def.struct_type;
+                        const sanitized_type_name = try self.sanitizeIdentifier(type_name);
+                        defer self.allocator.*.free(sanitized_type_name);
+
+                        try forward_writer.print("typedef struct {{\n", .{});
+                        for (st.fields) |field| {
+                            const c_field_type = try self.cTypeFor(field.field_type, &includes);
+                            try forward_writer.print("    {s} {s};\n", .{ c_field_type, field.name });
+                        }
+                        try forward_writer.print("}} {s};\n\n", .{sanitized_type_name});
+                    } else if (type_def == .enum_type) {
+                        const et = type_def.enum_type;
+                        const sanitized_type_name = try self.sanitizeIdentifier(type_name);
+                        defer self.allocator.*.free(sanitized_type_name);
+
+                        try forward_writer.print("typedef enum {{\n", .{});
+                        for (et.variants) |variant| {
+                            const sanitized_variant = try self.sanitizeIdentifier(variant.qualified_name.?);
+                            defer self.allocator.*.free(sanitized_variant);
+                            try forward_writer.print("    {s},\n", .{sanitized_variant});
+                        }
+                        try forward_writer.print("}} {s};\n\n", .{sanitized_type_name});
+                    }
+                }
+
+                // Emit full struct definition
+                try forward_writer.print("typedef struct {{\n", .{});
+
+                // Emit fields for each exported definition
+                var def_iter = compiled_ns.definitions.iterator();
+                while (def_iter.next()) |def_entry| {
+                    const def_name = def_entry.key_ptr.*;
+                    const def_type = def_entry.value_ptr.*;
+
+                    // Skip type definitions (Point, Color, etc.) - they're compile-time only
+                    if (def_type == .type_type) {
+                        std.debug.print("DEBUG: Skipping type definition '{s}' (compile-time only)\n", .{def_name});
+                        continue;
+                    }
+
+                    const sanitized_field = try self.sanitizeIdentifier(def_name);
+                    defer self.allocator.*.free(sanitized_field);
+
+                    // Generate C type for the field
+                    const c_type = self.cTypeFor(def_type, &includes) catch |err| {
+                        std.debug.print("ERROR: Cannot convert type for field '{s}': {}\n", .{ def_name, err });
+                        std.debug.print("  Type: {any}\n", .{def_type});
+                        return err;
+                    };
+                    try forward_writer.print("    {s} {s};\n", .{ c_type, sanitized_field });
+                }
+
+                try forward_writer.print("}} Namespace_{s};\n\n", .{sanitized_ns});
+            } else {
+                // Fallback to forward declaration if namespace not found
+                std.debug.print("DEBUG: Namespace {s} NOT found in cache, using forward declaration\n", .{required_ns_name});
+                try forward_writer.print("typedef struct Namespace_{s} Namespace_{s};\n", .{ sanitized_ns, sanitized_ns });
+            }
+
             try forward_writer.print("extern Namespace_{s} g_{s};\n", .{ sanitized_ns, sanitized_ns });
             try forward_writer.print("void init_namespace_{s}(Namespace_{s}* ns);\n\n", .{ sanitized_ns, sanitized_ns });
         }
