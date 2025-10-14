@@ -1,0 +1,63 @@
+{
+  "name": "Capture Inline Metadata Basic",
+  "description": "Test capturing notes with inline @meta: markers in Rust code",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "metadata_test.rs",
+      "content": "// @note: This function needs optimization\n// @meta: {\"tags\":[\"performance\"],\"priority\":8}\nfn slow_function() {\n    println!(\"Slow\");\n}\n\n// @note: Security vulnerability here\n// @meta: {\"tags\":[\"security\",\"bug\"],\"severity\":\"critical\",\"priority\":9}\nfn vulnerable_auth() {\n    println!(\"Insecure\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add code with inline metadata"
+    },
+    {
+      "action": "capture_notes",
+      "file": "metadata_test.rs",
+      "author": "TestAuthor",
+      "collection": "metadata-test"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 2,
+      "collection": "metadata-test"
+    },
+    {
+      "action": "expect_note",
+      "content": "This function needs optimization",
+      "file": "metadata_test.rs",
+      "line": null,
+      "is_orphaned": false,
+      "collection": "metadata-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "This function needs optimization",
+      "metadata_key": "priority",
+      "metadata_value": "8",
+      "collection": "metadata-test"
+    },
+    {
+      "action": "expect_note",
+      "content": "Security vulnerability here",
+      "file": "metadata_test.rs",
+      "line": null,
+      "is_orphaned": false,
+      "collection": "metadata-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Security vulnerability here",
+      "metadata_key": "severity",
+      "metadata_value": "\"critical\"",
+      "collection": "metadata-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Security vulnerability here",
+      "metadata_key": "priority",
+      "metadata_value": "9",
+      "collection": "metadata-test"
+    }
+  ]
+}

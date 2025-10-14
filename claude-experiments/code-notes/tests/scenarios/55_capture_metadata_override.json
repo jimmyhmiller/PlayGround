@@ -1,0 +1,62 @@
+{
+  "name": "Capture Metadata Override",
+  "description": "Test that inline @meta: overrides CLI metadata when same key is specified",
+  "steps": [
+    {
+      "action": "create_file",
+      "file": "override.rs",
+      "content": "// @note: Critical bug that overrides default priority\n// @meta: {\"priority\":9,\"severity\":\"critical\"}\nfn critical_bug() {\n    println!(\"Critical\");\n}\n\n// @note: Low priority note that overrides default\n// @meta: {\"priority\":2}\nfn low_priority() {\n    println!(\"Low\");\n}\n\n// @note: Note using default priority\nfn default_priority() {\n    println!(\"Default\");\n}\n"
+    },
+    {
+      "action": "git_commit",
+      "message": "Add code for metadata override test"
+    },
+    {
+      "action": "capture_notes",
+      "file": "override.rs",
+      "author": "TestAuthor",
+      "collection": "override-test",
+      "metadata": "{\"priority\":5,\"audience\":\"all-devs\"}"
+    },
+    {
+      "action": "expect_note_count",
+      "count": 3,
+      "collection": "override-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Critical bug that overrides default priority",
+      "metadata_key": "priority",
+      "metadata_value": "9",
+      "collection": "override-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Critical bug that overrides default priority",
+      "metadata_key": "severity",
+      "metadata_value": "\"critical\"",
+      "collection": "override-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Critical bug that overrides default priority",
+      "metadata_key": "audience",
+      "metadata_value": "\"all-devs\"",
+      "collection": "override-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Low priority note that overrides default",
+      "metadata_key": "priority",
+      "metadata_value": "2",
+      "collection": "override-test"
+    },
+    {
+      "action": "expect_metadata",
+      "content": "Note using default priority",
+      "metadata_key": "priority",
+      "metadata_value": "5",
+      "collection": "override-test"
+    }
+  ]
+}

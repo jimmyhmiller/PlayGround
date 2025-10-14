@@ -161,6 +161,22 @@ enum Step {
         file: String,
         author: String,
         collection: String,
+        metadata: Option<String>,
+    },
+
+    #[serde(rename = "expect_metadata")]
+    ExpectMetadata {
+        content: String,
+        metadata_key: String,
+        metadata_value: String,
+        collection: Option<String>,
+    },
+
+    #[serde(rename = "expect_metadata_not_exists")]
+    ExpectMetadataNotExists {
+        content: String,
+        metadata_key: String,
+        collection: Option<String>,
     },
 }
 
@@ -689,14 +705,105 @@ impl TestContext {
         Ok(())
     }
 
-    fn capture_notes(&self, file: &str, author: &str, collection: &str) -> Result<()> {
+    fn capture_notes(&self, file: &str, author: &str, collection: &str, metadata: Option<&str>) -> Result<()> {
+        let mut args = vec!["capture", file, "--author", author, "--collection", collection];
+
+        if let Some(meta) = metadata {
+            args.push("--metadata");
+            args.push(meta);
+        }
+
         let output = Command::new(&self.binary_path)
-            .args(&["capture", file, "--author", author, "--collection", collection])
+            .args(&args)
             .current_dir(&self.repo_path)
             .output()?;
 
         if !output.status.success() {
             return Err(anyhow!("Capture notes failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+
+        Ok(())
+    }
+
+    fn expect_metadata(&self, content: &str, metadata_key: &str, metadata_value: &str, collection: Option<&str>) -> Result<()> {
+        let output = self.list_notes(collection)?;
+
+        // Find the note with matching content
+        let lines: Vec<&str> = output.lines().collect();
+        let mut found_note = false;
+
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains(&format!("Content: {}", content)) {
+                found_note = true;
+
+                // Look for the metadata section
+                let mut metadata_found = false;
+                for j in (i + 1)..(i + 50).min(lines.len()) {
+                    // Check if we hit the next note or end of this note's section
+                    if lines[j].starts_with("ID: ") && j != i + 1 {
+                        break;
+                    }
+
+                    // Look for metadata
+                    if lines[j].contains(&format!("\"{}\": {}", metadata_key, metadata_value))
+                        || lines[j].contains(&format!("\"{}\": \"{}\"", metadata_key, metadata_value))
+                        || lines[j].contains(&format!("\"{}\":\"{}\"", metadata_key, metadata_value))
+                        || lines[j].contains(&format!("\"{}\":{}", metadata_key, metadata_value))
+                    {
+                        metadata_found = true;
+                        break;
+                    }
+                }
+
+                if !metadata_found {
+                    return Err(anyhow!(
+                        "Note with content '{}' found but metadata '{}': '{}' not found\nOutput:\n{}",
+                        content, metadata_key, metadata_value, output
+                    ));
+                }
+                break;
+            }
+        }
+
+        if !found_note {
+            return Err(anyhow!("Note with content '{}' not found", content));
+        }
+
+        Ok(())
+    }
+
+    fn expect_metadata_not_exists(&self, content: &str, metadata_key: &str, collection: Option<&str>) -> Result<()> {
+        let output = self.list_notes(collection)?;
+
+        // Find the note with matching content
+        let lines: Vec<&str> = output.lines().collect();
+        let mut found_note = false;
+
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains(&format!("Content: {}", content)) {
+                found_note = true;
+
+                // Look for the metadata section
+                for j in (i + 1)..(i + 50).min(lines.len()) {
+                    // Check if we hit the next note
+                    if lines[j].starts_with("ID: ") && j != i + 1 {
+                        break;
+                    }
+
+                    // Look for the metadata key
+                    if lines[j].contains(&format!("\"{}\":", metadata_key)) {
+                        return Err(anyhow!(
+                            "Note with content '{}' should not have metadata key '{}' but it does\nOutput:\n{}",
+                            content, metadata_key, output
+                        ));
+                    }
+                }
+                break;
+            }
+        }
+
+        if !found_note {
+            return Err(anyhow!("Note with content '{}' not found", content));
         }
 
         Ok(())
@@ -795,8 +902,14 @@ fn run_scenario(scenario_path: &Path) -> Result<()> {
             Step::ReadFile { file, store_as } => {
                 ctx.read_file(file, store_as)?;
             }
-            Step::CaptureNotes { file, author, collection } => {
-                ctx.capture_notes(file, author, collection)?;
+            Step::CaptureNotes { file, author, collection, metadata } => {
+                ctx.capture_notes(file, author, collection, metadata.as_deref())?;
+            }
+            Step::ExpectMetadata { content, metadata_key, metadata_value, collection } => {
+                ctx.expect_metadata(content, metadata_key, metadata_value, collection.as_deref())?;
+            }
+            Step::ExpectMetadataNotExists { content, metadata_key, collection } => {
+                ctx.expect_metadata_not_exists(content, metadata_key, collection.as_deref())?;
             }
         }
     }
