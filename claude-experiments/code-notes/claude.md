@@ -20,7 +20,7 @@ Code Notes is a layered annotation system for code that persists across git comm
 
 ### Core Architecture
 
-The system is implemented in Rust and consists of five main components:
+The system is implemented in Rust with a Node.js TUI viewer, consisting of six main components:
 
 1. **Models** (`src/models/`)
    - `Note`: Contains content, author, timestamps, anchor, and extensible metadata
@@ -46,6 +46,16 @@ The system is implemented in Rust and consists of five main components:
 5. **CLI** (`src/cli/`)
    - Full-featured command-line interface
    - Commands: init, add, list, view, update, delete, migrate, collections, export, import, orphaned
+   - Metadata management: set-metadata command
+   - Inline note support: inject, remove-inline, extract, capture
+
+6. **Tour Viewer** (`tour-viewer/`)
+   - Interactive TUI (Text User Interface) for viewing tours
+   - PowerPoint-style presentation of code with notes
+   - **Metadata-based tours**: Uses existing notes with `tour_id` and `tour_order` metadata
+   - Branching path support via metadata
+   - Built with Node.js and blessed
+   - See TOUR_METADATA.md and TOUR_IMPLEMENTATION.md for details
 
 ### Key Design Decisions
 

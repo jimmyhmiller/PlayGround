@@ -4,6 +4,7 @@ const reader = @import("reader.zig");
 const value = @import("value.zig");
 const type_checker = @import("type_checker.zig");
 const macro_expander = @import("macro_expander.zig");
+const namespace_manager = @import("namespace_manager.zig");
 
 const Reader = reader.Reader;
 const Value = value.Value;
@@ -11,6 +12,7 @@ const TypeChecker = type_checker.BidirectionalTypeChecker;
 const Type = type_checker.Type;
 const TypedValue = type_checker.TypedValue;
 const MacroExpander = macro_expander.MacroExpander;
+const NamespaceManager = namespace_manager.NamespaceManager;
 
 const IncludeFlags = struct {
     need_stdint: bool = false,
@@ -26,6 +28,7 @@ pub const SimpleCCompiler = struct {
     linked_libraries: std.ArrayList([]const u8),
     include_paths: std.ArrayList([]const u8),
     compiler_flags: std.ArrayList([]const u8),
+    namespace_manager: NamespaceManager,
 
     pub const TargetKind = enum {
         executable,
@@ -46,6 +49,7 @@ pub const SimpleCCompiler = struct {
         in_init_function: bool = false,
         init_only_def_names: ?*std.StringHashMap(void) = null, // Defs initialized in init (not main)
         local_bindings: ?*std.StringHashMap(void) = null, // Track let-bound variables in current scope
+        requires: ?*std.StringHashMap([]const u8) = null, // Map alias -> namespace_name for qualified name resolution
     };
 
     const SpecialForm = enum {
@@ -173,6 +177,13 @@ pub const SimpleCCompiler = struct {
         return .unknown;
     }
 
+    /// Static callback function for namespace loading
+    /// This is called by the type checker when it encounters a require statement
+    fn namespaceLoaderCallback(ctx: *anyopaque, namespace_name: []const u8, parent_checker: *TypeChecker) anyerror!void {
+        const self: *SimpleCCompiler = @ptrCast(@alignCast(ctx));
+        try self.compileNamespaceAndExtractExports(namespace_name, parent_checker);
+    }
+
     pub const Error = error{
         UnsupportedExpression,
         MissingOperand,
@@ -194,6 +205,9 @@ pub const SimpleCCompiler = struct {
         UnterminatedMap,
         InvalidNumber,
         OutOfMemory,
+        FileNotFound,
+        ParseError,
+        MacroExpansionError,
     };
 
     const int_type_name = "long long";
@@ -219,11 +233,17 @@ pub const SimpleCCompiler = struct {
     }
 
     pub fn init(allocator: *std.mem.Allocator) SimpleCCompiler {
+        var ns_manager = NamespaceManager.init(allocator.*);
+        // Add default search paths for namespace resolution
+        ns_manager.addSearchPath(".") catch {};
+        ns_manager.addSearchPath("math") catch {};
+
         return SimpleCCompiler{
             .allocator = allocator,
             .linked_libraries = std.ArrayList([]const u8){},
             .include_paths = std.ArrayList([]const u8){},
             .compiler_flags = std.ArrayList([]const u8){},
+            .namespace_manager = ns_manager,
         };
     }
 
@@ -231,6 +251,278 @@ pub const SimpleCCompiler = struct {
         self.linked_libraries.deinit(self.allocator.*);
         self.include_paths.deinit(self.allocator.*);
         self.compiler_flags.deinit(self.allocator.*);
+        self.namespace_manager.deinit();
+    }
+
+    /// Resolve namespace name to file path
+    /// e.g., "math.utils" -> "math/utils.lisp"
+    fn resolveNamespaceFile(self: *SimpleCCompiler, namespace_name: []const u8) Error![]const u8 {
+        // Convert dots to slashes
+        var path_buf = std.ArrayList(u8){};
+        defer path_buf.deinit(self.allocator.*);
+
+        for (namespace_name) |c| {
+            if (c == '.') {
+                try path_buf.append(self.allocator.*, '/');
+            } else {
+                try path_buf.append(self.allocator.*, c);
+            }
+        }
+        try path_buf.appendSlice(self.allocator.*, ".lisp");
+
+        const relative_path = try path_buf.toOwnedSlice(self.allocator.*);
+
+        // Check if file exists
+        std.fs.cwd().access(relative_path, .{}) catch {
+            std.debug.print("ERROR: Cannot find namespace file: {s}\n", .{relative_path});
+            return Error.FileNotFound;
+        };
+
+        return relative_path;
+    }
+
+    /// Compile a namespace file and extract its type environment
+    /// Used for processing `require` statements
+    pub fn compileNamespaceAndExtractExports(
+        self: *SimpleCCompiler,
+        namespace_name: []const u8,
+        parent_checker: *TypeChecker,
+    ) Error!void {
+        // Check if already compiled and cached
+        if (self.namespace_manager.isCompiled(namespace_name)) {
+            std.debug.print("Namespace {s} already compiled, using cache\n", .{namespace_name});
+            const ns = self.namespace_manager.getCompiledNamespace(namespace_name) orelse {
+                return Error.TypeCheckFailed;
+            };
+            // Re-register exports with parent checker
+            try parent_checker.registerNamespaceExports(namespace_name, ns.definitions, ns.type_defs);
+            return;
+        }
+
+        // Check for circular dependencies
+        if (self.namespace_manager.isInCompilationStack(namespace_name)) {
+            const stack_trace = try self.namespace_manager.getCompilationStackTrace();
+            defer self.allocator.*.free(stack_trace);
+            std.debug.print("ERROR: Circular dependency detected\n{s}\n  -> {s}\n", .{ stack_trace, namespace_name });
+            return Error.TypeCheckFailed;
+        }
+
+        try self.namespace_manager.pushCompilationStack(namespace_name);
+        defer self.namespace_manager.popCompilationStack();
+
+        std.debug.print("Compiling namespace: {s}\n", .{namespace_name});
+
+        // 1. Resolve file path
+        const file_path = try self.resolveNamespaceFile(namespace_name);
+        defer self.allocator.*.free(file_path);
+
+        // 2. Read file
+        const source = std.fs.cwd().readFileAlloc(
+            self.allocator.*,
+            file_path,
+            10 * 1024 * 1024, // 10MB max
+        ) catch |err| {
+            std.debug.print("ERROR: Cannot read namespace file {s}: {}\n", .{ file_path, err });
+            return Error.FileNotFound;
+        };
+        defer self.allocator.*.free(source);
+
+        // 3. Parse
+        var reader_instance = Reader.init(self.allocator);
+        const read_result = reader_instance.readAllString(source) catch {
+            return Error.ParseError;
+        };
+        var expressions = read_result.values;
+        var line_numbers = read_result.line_numbers;
+        defer expressions.deinit(self.allocator.*);
+        defer line_numbers.deinit(self.allocator.*);
+
+        // 4. Expand macros
+        var expander = MacroExpander.init(self.allocator.*);
+        defer expander.deinit();
+
+        var expanded_expressions = std.ArrayList(*Value){};
+        defer expanded_expressions.deinit(self.allocator.*);
+
+        for (expressions.items) |expr| {
+            const expanded = expander.expand(expr) catch {
+                return Error.MacroExpansionError;
+            };
+            if (expanded.isMacro()) {
+                // Skip macro definitions
+                continue;
+            }
+            try expanded_expressions.append(self.allocator.*, expanded);
+        }
+
+        // 5. Type check to extract exports
+        var checker = TypeChecker.init(self.allocator.*);
+        defer checker.deinit();
+
+        for (expanded_expressions.items) |expr| {
+            _ = checker.typeCheck(expr) catch {
+                std.debug.print("ERROR: Type checking failed for required namespace {s}\n", .{namespace_name});
+                return Error.TypeCheckFailed;
+            };
+        }
+
+        // 6. Extract and register exports with parent checker
+        // Clone the type environments (shallow copy is fine since Types are immutable)
+        var exports = type_checker.TypeEnv.init(self.allocator.*);
+        var type_defs = type_checker.TypeEnv.init(self.allocator.*);
+
+        // Copy all definitions from checker.env to exports
+        var env_iter = checker.env.iterator();
+        while (env_iter.next()) |entry| {
+            try exports.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        // Copy all type definitions
+        var typedef_iter = checker.type_defs.iterator();
+        while (typedef_iter.next()) |entry| {
+            try type_defs.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        // 7. Register exports with parent checker
+        // Note: The alias mapping is registered separately by the require handler
+        try parent_checker.registerNamespaceExports(namespace_name, exports, type_defs);
+
+        // 8. Compile namespace to .bundle file
+        const bundle_path = try self.compileToBundleFile(namespace_name);
+        std.debug.print("Compiled namespace {s} to bundle: {s}\n", .{ namespace_name, bundle_path });
+
+        // 9. Cache the compiled namespace
+        var compiled_ns = try namespace_manager.CompiledNamespace.init(self.allocator.*, namespace_name);
+        compiled_ns.file_path = try self.allocator.*.dupe(u8, file_path);
+        compiled_ns.bundle_path = bundle_path; // Takes ownership
+        compiled_ns.definitions = exports;
+        compiled_ns.type_defs = type_defs;
+
+        try self.namespace_manager.addCompiledNamespace(compiled_ns);
+        std.debug.print("Cached namespace {s}\n", .{namespace_name});
+    }
+
+    /// Compile a namespace to a .bundle file
+    /// Returns the absolute path to the compiled bundle
+    fn compileToBundleFile(
+        self: *SimpleCCompiler,
+        namespace_name: []const u8,
+    ) Error![]const u8 {
+        // 1. Resolve and read namespace file
+        const file_path = try self.resolveNamespaceFile(namespace_name);
+        defer self.allocator.*.free(file_path);
+
+        const source = std.fs.cwd().readFileAlloc(
+            self.allocator.*,
+            file_path,
+            10 * 1024 * 1024, // 10MB max
+        ) catch |err| {
+            std.debug.print("ERROR: Cannot read namespace file {s}: {}\n", .{ file_path, err });
+            return Error.FileNotFound;
+        };
+        defer self.allocator.*.free(source);
+
+        // 2. Generate C code using compileString
+        const c_code = try self.compileString(source, .bundle);
+        defer self.allocator.*.free(c_code);
+
+        // 3. Convert namespace name to file path
+        var path_buf = std.ArrayList(u8){};
+        defer path_buf.deinit(self.allocator.*);
+
+        for (namespace_name) |c| {
+            if (c == '.') {
+                try path_buf.append(self.allocator.*, '/');
+            } else {
+                try path_buf.append(self.allocator.*, c);
+            }
+        }
+
+        const relative_base = try path_buf.toOwnedSlice(self.allocator.*);
+        defer self.allocator.*.free(relative_base);
+
+        // 4. Write C file
+        const c_filename = try std.fmt.allocPrint(self.allocator.*, "{s}.c", .{relative_base});
+        defer self.allocator.*.free(c_filename);
+
+        std.fs.cwd().writeFile(.{ .sub_path = c_filename, .data = c_code }) catch |err| {
+            std.debug.print("ERROR: Failed to write C file {s}: {}\n", .{ c_filename, err });
+            return Error.FileNotFound; // Reuse existing error
+        };
+
+        // 5. Compile to .o
+        const obj_filename = try std.fmt.allocPrint(self.allocator.*, "{s}.o", .{relative_base});
+        defer self.allocator.*.free(obj_filename);
+
+        var compile_args = std.ArrayList([]const u8){};
+        defer compile_args.deinit(self.allocator.*);
+        try compile_args.appendSlice(self.allocator.*, &.{ "zig", "cc", "-c", c_filename, "-o", obj_filename });
+
+        var compile_child = std.process.Child.init(compile_args.items, self.allocator.*);
+        compile_child.stdin_behavior = .Inherit;
+        compile_child.stdout_behavior = .Inherit;
+        compile_child.stderr_behavior = .Inherit;
+        compile_child.spawn() catch |err| {
+            std.debug.print("ERROR: Failed to spawn compiler for namespace {s}: {}\n", .{ namespace_name, err });
+            return Error.FileNotFound;
+        };
+        const compile_term = compile_child.wait() catch |err| {
+            std.debug.print("ERROR: Failed to wait for compiler for namespace {s}: {}\n", .{ namespace_name, err });
+            return Error.FileNotFound;
+        };
+        switch (compile_term) {
+            .Exited => |code| {
+                if (code != 0) {
+                    std.debug.print("Compilation failed for namespace {s}\n", .{namespace_name});
+                    return Error.TypeCheckFailed;
+                }
+            },
+            else => return Error.TypeCheckFailed,
+        }
+
+        // 6. Link to .bundle
+        const bundle_filename = try std.fmt.allocPrint(self.allocator.*, "{s}.bundle", .{relative_base});
+        defer self.allocator.*.free(bundle_filename);
+
+        var link_args = std.ArrayList([]const u8){};
+        defer link_args.deinit(self.allocator.*);
+        try link_args.appendSlice(self.allocator.*, &.{ "zig", "cc", "-dynamiclib", obj_filename, "-o", bundle_filename });
+
+        // Add linked libraries
+        for (self.linked_libraries.items) |lib| {
+            const lib_arg = try std.fmt.allocPrint(self.allocator.*, "-l{s}", .{lib});
+            defer self.allocator.*.free(lib_arg);
+            try link_args.append(self.allocator.*, try self.allocator.*.dupe(u8, lib_arg));
+        }
+
+        var link_child = std.process.Child.init(link_args.items, self.allocator.*);
+        link_child.stdin_behavior = .Inherit;
+        link_child.stdout_behavior = .Inherit;
+        link_child.stderr_behavior = .Inherit;
+        link_child.spawn() catch |err| {
+            std.debug.print("ERROR: Failed to spawn linker for namespace {s}: {}\n", .{ namespace_name, err });
+            return Error.FileNotFound;
+        };
+        const link_term = link_child.wait() catch |err| {
+            std.debug.print("ERROR: Failed to wait for linker for namespace {s}: {}\n", .{ namespace_name, err });
+            return Error.FileNotFound;
+        };
+        switch (link_term) {
+            .Exited => |code| {
+                if (code != 0) {
+                    std.debug.print("Linking failed for namespace {s}\n", .{namespace_name});
+                    return Error.TypeCheckFailed;
+                }
+            },
+            else => return Error.TypeCheckFailed,
+        }
+
+        // 7. Return absolute path to bundle
+        const bundle_path = std.fs.cwd().realpathAlloc(self.allocator.*, bundle_filename) catch |err| {
+            std.debug.print("ERROR: Failed to get realpath for bundle {s}: {}\n", .{ bundle_filename, err });
+            return Error.FileNotFound;
+        };
+        return bundle_path;
     }
 
     pub fn compileString(self: *SimpleCCompiler, source: []const u8, target: TargetKind) Error![]u8 {
@@ -272,6 +564,9 @@ pub const SimpleCCompiler = struct {
 
         var checker = TypeChecker.init(self.allocator.*);
         defer checker.deinit();
+
+        // Set up namespace loader so the type checker can load required namespaces on-demand
+        checker.setNamespaceLoader(@ptrCast(self), namespaceLoaderCallback);
 
         var report = try checker.typeCheckAllTwoPass(expanded_expressions.items);
         defer report.typed.deinit(self.allocator.*);
@@ -407,6 +702,18 @@ pub const SimpleCCompiler = struct {
             try self.emitForwardDecl(forward_writer, expr, typed_val, &checker, &includes);
         }
 
+        // Emit extern declarations for required namespaces
+        var extern_iter = checker.requires.iterator();
+        while (extern_iter.next()) |entry| {
+            const required_ns_name = entry.value_ptr.*;
+            const sanitized_ns = try self.sanitizeIdentifier(required_ns_name);
+            defer self.allocator.*.free(sanitized_ns);
+            try forward_writer.print("// Required namespace: {s}\n", .{required_ns_name});
+            try forward_writer.print("typedef struct Namespace_{s} Namespace_{s};\n", .{ sanitized_ns, sanitized_ns });
+            try forward_writer.print("extern Namespace_{s} g_{s};\n", .{ sanitized_ns, sanitized_ns });
+            try forward_writer.print("void init_namespace_{s}(Namespace_{s}* ns);\n\n", .{ sanitized_ns, sanitized_ns });
+        }
+
         // Create empty context for non-namespace code (used in emitDefinition/emitFunctionDefinition)
         var empty_def_names = std.StringHashMap(void).init(self.allocator.*);
         defer empty_def_names.deinit();
@@ -416,6 +723,14 @@ pub const SimpleCCompiler = struct {
             .def_names = &empty_def_names,
         };
         _ = &empty_ctx; // Mark as used (referenced in nested functions)
+
+        // Copy requires map from type checker for qualified name resolution
+        var requires_map = std.StringHashMap([]const u8).init(self.allocator.*);
+        defer requires_map.deinit();
+        var requires_iter = checker.requires.iterator();
+        while (requires_iter.next()) |entry| {
+            try requires_map.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
 
         // If we have namespace defs, generate the namespace struct
         var namespace_struct = std.ArrayList(u8){};
@@ -510,6 +825,7 @@ pub const SimpleCCompiler = struct {
                 .name = ns_name,
                 .def_names = &init_def_names,
                 .in_init_function = true,
+                .requires = &requires_map,
             };
 
             // Generate init function signature
@@ -612,6 +928,7 @@ pub const SimpleCCompiler = struct {
                 .name = ns_name,
                 .def_names = &init_def_names,
                 .in_init_function = false,
+                .requires = &requires_map,
             };
 
             // Emit static function definitions
@@ -688,6 +1005,7 @@ pub const SimpleCCompiler = struct {
             .name = ns_name,
             .def_names = &namespace_def_names,
             .init_only_def_names = &init_only_def_names,
+            .requires = &requires_map,
         };
 
         // Check if user defined a 'main' function
@@ -1010,6 +1328,9 @@ pub const SimpleCCompiler = struct {
         switch (expr.*) {
             .namespace => |ns| {
                 try body_writer.print("    // namespace {s}\n", .{ns.name});
+            },
+            .require => |req| {
+                try body_writer.print("    // require [{s} :as {s}]\n", .{ req.namespace, req.alias });
             },
             .list => |list| {
                 var iter = list.iterator();
@@ -2175,6 +2496,28 @@ pub const SimpleCCompiler = struct {
                     local_map.contains(sym.name)
                 else
                     false;
+
+                // Check if this is a qualified name from a required namespace (contains `/`)
+                // But not an enum variant (already handled above)
+                if (!is_local and sym.type != .enum_type) {
+                    if (std.mem.indexOf(u8, sym.name, "/")) |slash_pos| {
+                        const alias = sym.name[0..slash_pos];
+                        const def_name = sym.name[slash_pos + 1 ..];
+
+                        // Look up the namespace for this alias
+                        if (ns_ctx.requires) |requires_map| {
+                            if (requires_map.get(alias)) |namespace_name| {
+                                // Generate reference to the other namespace's variable
+                                const sanitized_ns = try self.sanitizeIdentifier(namespace_name);
+                                defer self.allocator.*.free(sanitized_ns);
+                                const sanitized_field = try self.sanitizeIdentifier(def_name);
+                                defer self.allocator.*.free(sanitized_field);
+                                try writer.print("g_{s}.{s}", .{ sanitized_ns, sanitized_field });
+                                return;
+                            }
+                        }
+                    }
+                }
 
                 // Check if this symbol is in the namespace (and not shadowed by a local binding)
                 if (!is_local and ns_ctx.def_names.*.contains(sym.name)) {

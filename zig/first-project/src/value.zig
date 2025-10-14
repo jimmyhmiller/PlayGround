@@ -11,6 +11,11 @@ pub const NamespaceDecl = struct {
     name: []const u8,
 };
 
+pub const RequireDecl = struct {
+    namespace: []const u8, // Full namespace name (e.g., "my.namespace")
+    alias: []const u8,     // Short alias (e.g., "my")
+};
+
 pub const MacroDecl = struct {
     name: []const u8,
     params: PersistentVector(*Value), // Parameter list
@@ -27,6 +32,7 @@ pub const Value = union(enum) {
     vector: PersistentVector(*Value),
     map: PersistentMap(*Value, *Value),
     namespace: NamespaceDecl,
+    require: RequireDecl,
     macro_def: MacroDecl,
     nil,
 
@@ -77,6 +83,9 @@ pub const Value = union(enum) {
             .namespace => |ns| {
                 try writer.print("(ns {s})", .{ns.name});
             },
+            .require => |req| {
+                try writer.print("(require [{s} :as {s}])", .{ req.namespace, req.alias });
+            },
             .macro_def => |m| {
                 try writer.print("(defmacro {s} [", .{m.name});
                 const param_slice = m.params.slice();
@@ -110,6 +119,7 @@ pub const Value = union(enum) {
             },
             .map => |m| m.vec.buf.?.ptr == other.map.vec.buf.?.ptr, // pointer comparison for now
             .namespace => |ns| std.mem.eql(u8, ns.name, other.namespace.name),
+            .require => |req| std.mem.eql(u8, req.namespace, other.require.namespace) and std.mem.eql(u8, req.alias, other.require.alias),
             .macro_def => |m| std.mem.eql(u8, m.name, other.macro_def.name),
             .nil => true,
         };
@@ -149,6 +159,10 @@ pub const Value = union(enum) {
 
     pub fn isNamespace(self: *const Value) bool {
         return std.meta.activeTag(self.*) == .namespace;
+    }
+
+    pub fn isRequire(self: *const Value) bool {
+        return std.meta.activeTag(self.*) == .require;
     }
 
     pub fn isNil(self: *const Value) bool {
@@ -226,6 +240,14 @@ pub fn createNamespace(allocator: std.mem.Allocator, name: []const u8) !*Value {
     const val = try allocator.create(Value);
     const owned_name = try allocator.dupe(u8, name);
     val.* = Value{ .namespace = NamespaceDecl{ .name = owned_name } };
+    return val;
+}
+
+pub fn createRequire(allocator: std.mem.Allocator, namespace: []const u8, alias: []const u8) !*Value {
+    const val = try allocator.create(Value);
+    const owned_namespace = try allocator.dupe(u8, namespace);
+    const owned_alias = try allocator.dupe(u8, alias);
+    val.* = Value{ .require = RequireDecl{ .namespace = owned_namespace, .alias = owned_alias } };
     return val;
 }
 

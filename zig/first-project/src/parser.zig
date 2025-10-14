@@ -143,6 +143,10 @@ pub const Parser = struct {
             return self.parseNamespaceDecl();
         }
 
+        if (self.current_token.type == .symbol and std.mem.eql(u8, self.current_token.lexeme, "require")) {
+            return self.parseRequireDecl();
+        }
+
         // Collect elements in correct order
         var elements: [64]*Value = undefined; // Fixed size buffer for simplicity
         var count: usize = 0;
@@ -181,6 +185,50 @@ pub const Parser = struct {
         _ = try self.expect(.right_paren);
 
         return try value.createNamespace(self.allocator.*, name_token.lexeme);
+    }
+
+    fn parseRequireDecl(self: *Parser) ParseError!*Value {
+        _ = try self.expect(.symbol); // consume 'require'
+
+        // Expect opening bracket [
+        if (self.current_token.type != .left_bracket) {
+            std.debug.print("Parse error: Expected [ after require, got {s}\n", .{@tagName(self.current_token.type)});
+            return ParseError.UnexpectedToken;
+        }
+        _ = try self.expect(.left_bracket);
+
+        // Parse namespace name (symbol)
+        const namespace_token = try self.expect(.symbol);
+
+        // Expect :as keyword
+        if (self.current_token.type != .keyword) {
+            std.debug.print("Parse error: Expected :as keyword, got {s}\n", .{@tagName(self.current_token.type)});
+            return ParseError.UnexpectedToken;
+        }
+        const keyword_token = try self.expect(.keyword);
+        if (!std.mem.eql(u8, keyword_token.lexeme[1..], "as")) {
+            std.debug.print("Parse error: Expected :as keyword, got :{s}\n", .{keyword_token.lexeme[1..]});
+            return ParseError.UnexpectedToken;
+        }
+
+        // Parse alias name (symbol)
+        const alias_token = try self.expect(.symbol);
+
+        // Expect closing bracket ]
+        if (self.current_token.type != .right_bracket) {
+            std.debug.print("Parse error: Expected ] after alias, got {s}\n", .{@tagName(self.current_token.type)});
+            return ParseError.UnexpectedToken;
+        }
+        _ = try self.expect(.right_bracket);
+
+        // Expect closing paren )
+        if (self.current_token.type != .right_paren) {
+            std.debug.print("Parse error: Expected ) after require declaration, got {s}\n", .{@tagName(self.current_token.type)});
+            return ParseError.UnexpectedToken;
+        }
+        _ = try self.expect(.right_paren);
+
+        return try value.createRequire(self.allocator.*, namespace_token.lexeme, alias_token.lexeme);
     }
 
     fn parseVector(self: *Parser) ParseError!*Value {
@@ -391,4 +439,30 @@ test "parser namespace declaration" {
 
     try std.testing.expect(val.isNamespace());
     try std.testing.expect(std.mem.eql(u8, val.namespace.name, "my.namespace"));
+}
+
+test "parser require declaration" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var parser = Parser.init(&allocator, "(require [my.namespace :as my])");
+    const val = try parser.parse();
+
+    try std.testing.expect(val.isRequire());
+    try std.testing.expect(std.mem.eql(u8, val.require.namespace, "my.namespace"));
+    try std.testing.expect(std.mem.eql(u8, val.require.alias, "my"));
+}
+
+test "parser require with different alias" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var parser = Parser.init(&allocator, "(require [math.utils :as mu])");
+    const val = try parser.parse();
+
+    try std.testing.expect(val.isRequire());
+    try std.testing.expect(std.mem.eql(u8, val.require.namespace, "math.utils"));
+    try std.testing.expect(std.mem.eql(u8, val.require.alias, "mu"));
 }

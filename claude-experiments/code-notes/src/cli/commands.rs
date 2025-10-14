@@ -200,6 +200,24 @@ pub enum Commands {
         #[arg(short, long)]
         metadata: Option<String>,
     },
+
+    /// Set metadata on an existing note
+    SetMetadata {
+        /// Note ID
+        id: String,
+
+        /// Collection name
+        #[arg(long, default_value = "default")]
+        collection: String,
+
+        /// Metadata key
+        #[arg(short, long)]
+        key: String,
+
+        /// Metadata value (JSON)
+        #[arg(short, long)]
+        value: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -257,6 +275,7 @@ pub fn execute_command(cli: Cli) -> Result<()> {
         Commands::RemoveInline { file, output } => cmd_remove_inline(file, output),
         Commands::Extract { file, collection } => cmd_extract(file, collection),
         Commands::Capture { file, author, collection, metadata } => cmd_capture(file, author, collection, metadata),
+        Commands::SetMetadata { id, collection, key, value } => cmd_set_metadata(id, collection, key, value),
     }
 }
 
@@ -1119,4 +1138,27 @@ fn cmd_capture(file: PathBuf, author: String, collection_name: String, metadata_
     }
 
     Ok(())
+}
+
+fn cmd_set_metadata(id: String, collection_name: String, key: String, value_str: String) -> Result<()> {
+    let repo = GitRepo::discover(".")?;
+    let root = repo.root_path()?;
+    let storage = NoteStorage::new(&root)?;
+
+    let note_id = id.parse()?;
+    let mut collection = storage.load_collection(&collection_name)?;
+
+    // Parse value as JSON
+    let value: serde_json::Value = serde_json::from_str(&value_str)
+        .map_err(|e| anyhow!("Invalid JSON value: {}", e))?;
+
+    // Update the note
+    if let Some(note) = collection.get_note_mut(note_id) {
+        note.set_metadata(key.clone(), value.clone());
+        storage.save_collection(&collection)?;
+        println!("Set metadata '{}' = {} on note {}", key, value, note_id);
+        Ok(())
+    } else {
+        Err(anyhow!("Note not found in collection '{}'", collection_name))
+    }
 }

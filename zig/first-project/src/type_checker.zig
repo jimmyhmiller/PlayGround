@@ -217,6 +217,7 @@ pub const TypedValue = union(enum) {
     map: struct { entries: []*MapEntry, type: Type },
     type_value: struct { value_type: Type, type: Type }, // A type as a value
     namespace: struct { name: []const u8, type: Type },
+    require: struct { namespace: []const u8, alias: []const u8, type: Type },
     struct_instance: struct { field_values: []*TypedValue, type: Type },
 
     pub const MapEntry = struct {
@@ -237,6 +238,7 @@ pub const TypedValue = union(enum) {
             .map => |v| v.type,
             .type_value => |v| v.type,
             .namespace => |v| v.type,
+            .require => |v| v.type,
             .struct_instance => |v| v.type,
         };
     }
@@ -286,9 +288,15 @@ pub const BidirectionalTypeChecker = struct {
     env: TypeEnv,
     type_defs: TypeEnv, // Separate map for type definitions (struct/enum types)
     builtins: std.StringHashMap(void), // Set of builtin special forms
+    requires: std.StringHashMap([]const u8), // Map alias -> namespace name
+    namespace_exports: std.StringHashMap(TypeEnv), // Map namespace -> exported definitions
+    namespace_type_defs: std.StringHashMap(TypeEnv), // Map namespace -> exported type definitions
     next_var_id: u32,
     errors: ArrayList(TypeCheckErrorDetail),
     index: usize,
+    // Namespace loading support (optional, for runtime requires)
+    loader_ctx: ?*anyopaque = null,
+    loader_fn: ?*const fn (ctx: *anyopaque, namespace_name: []const u8, parent_checker: *BidirectionalTypeChecker) anyerror!void = null,
 
     const BindingSnapshot = struct {
         name: []const u8,
@@ -303,15 +311,30 @@ pub const BidirectionalTypeChecker = struct {
             .env = TypeEnv.init(allocator),
             .type_defs = TypeEnv.init(allocator),
             .builtins = std.StringHashMap(void).init(allocator),
+            .requires = std.StringHashMap([]const u8).init(allocator),
+            .namespace_exports = std.StringHashMap(TypeEnv).init(allocator),
+            .namespace_type_defs = std.StringHashMap(TypeEnv).init(allocator),
             .next_var_id = 0,
             .errors = ArrayList(TypeCheckErrorDetail){},
             .index = 0,
+            .loader_ctx = null,
+            .loader_fn = null,
         };
         checker.initBuiltins() catch |err| {
             std.debug.print("FATAL: Failed to initialize builtins: {}\n", .{err});
             @panic("Could not initialize type checker builtins");
         };
         return checker;
+    }
+
+    /// Set the namespace loader callback for runtime require support
+    pub fn setNamespaceLoader(
+        self: *BidirectionalTypeChecker,
+        ctx: *anyopaque,
+        loader_fn: *const fn (ctx: *anyopaque, namespace_name: []const u8, parent_checker: *BidirectionalTypeChecker) anyerror!void,
+    ) void {
+        self.loader_ctx = ctx;
+        self.loader_fn = loader_fn;
     }
 
     fn recordTypeMismatch(self: *BidirectionalTypeChecker, expr: *Value, expected: Type, actual: Type) TypeCheckError {
@@ -384,6 +407,18 @@ pub const BidirectionalTypeChecker = struct {
         self.env.deinit();
         self.type_defs.deinit();
         self.builtins.deinit();
+        self.requires.deinit();
+        // Clean up namespace exports
+        var exports_iter = self.namespace_exports.valueIterator();
+        while (exports_iter.next()) |exports| {
+            exports.deinit();
+        }
+        self.namespace_exports.deinit();
+        var types_iter = self.namespace_type_defs.valueIterator();
+        while (types_iter.next()) |types| {
+            types.deinit();
+        }
+        self.namespace_type_defs.deinit();
     }
 
     // Fresh type variable generation
@@ -391,6 +426,26 @@ pub const BidirectionalTypeChecker = struct {
         const id = self.next_var_id;
         self.next_var_id += 1;
         return Type{ .type_var = id };
+    }
+
+    // Register exports from a namespace (called after compiling a required namespace)
+    // Note: This only registers the namespace's exports, not the alias mapping.
+    // The alias mapping is registered separately when processing the require statement.
+    pub fn registerNamespaceExports(
+        self: *BidirectionalTypeChecker,
+        namespace_name: []const u8,
+        exports: TypeEnv,
+        type_defs: TypeEnv,
+    ) !void {
+        // Store exports if not already present
+        if (!self.namespace_exports.contains(namespace_name)) {
+            try self.namespace_exports.put(namespace_name, exports);
+        }
+
+        // Store type definitions if not already present
+        if (!self.namespace_type_defs.contains(namespace_name)) {
+            try self.namespace_type_defs.put(namespace_name, type_defs);
+        }
     }
 
     fn registerEnumVariants(self: *BidirectionalTypeChecker, type_name: []const u8, enum_type: *EnumType) !void {
@@ -516,6 +571,24 @@ pub const BidirectionalTypeChecker = struct {
                 return try TypedExpression.init(self.allocator, expr, Type.nil);
             },
 
+            .require => |req| {
+                // Load the namespace if we have a loader
+                if (self.loader_fn) |load_fn| {
+                    if (self.loader_ctx) |ctx| {
+                        // Call the loader - if it fails, treat it as UnboundVariable
+                        load_fn(ctx, req.namespace, self) catch |err| {
+                            std.debug.print("Failed to load namespace {s}: {}\n", .{ req.namespace, err });
+                            return TypeCheckError.UnboundVariable;
+                        };
+                    }
+                }
+                // Register the require (alias -> namespace)
+                // Note: The loader should have already called registerNamespaceExports,
+                // but we still need to register the alias mapping
+                try self.requires.put(req.alias, req.namespace);
+                return try TypedExpression.init(self.allocator, expr, Type.nil);
+            },
+
             .macro_def => |m| {
                 // Macros should have been expanded already, this is an error
                 _ = m;
@@ -523,6 +596,7 @@ pub const BidirectionalTypeChecker = struct {
             },
 
             .symbol => |name| {
+
                 // Handle boolean literals
                 if (std.mem.eql(u8, name, "true") or std.mem.eql(u8, name, "false")) {
                     return try TypedExpression.init(self.allocator, expr, Type.bool);
@@ -533,6 +607,56 @@ pub const BidirectionalTypeChecker = struct {
                     // Builtins are handled as special forms in list context
                     // In isolation, they don't have a meaningful type
                     return TypeCheckError.CannotSynthesize;
+                }
+
+                // Check if this is a qualified symbol (contains `/`)
+                if (std.mem.indexOf(u8, name, "/")) |slash_pos| {
+                    const alias = name[0..slash_pos];
+                    const def_name = name[slash_pos + 1 ..];
+
+                    // Check if the alias was required
+                    if (self.requires.get(alias)) |namespace_name| {
+                        // Look up the namespace exports
+                        if (self.namespace_exports.get(namespace_name)) |exports| {
+                            // Look up the definition in the exports
+                            if (exports.get(def_name)) |def_type| {
+                                return try TypedExpression.init(self.allocator, expr, def_type);
+                            } else {
+                                // Definition not found in namespace
+                                std.debug.print("  ERROR: Definition {s} NOT found in exports\n", .{def_name});
+                                const err = TypeCheckError.UnboundVariable;
+                                try self.errors.append(self.allocator, .{
+                                    .index = self.index,
+                                    .expr = expr,
+                                    .err = err,
+                                    .info = ErrorInfo{ .unbound = .{ .name = name } },
+                                });
+                                return err;
+                            }
+                        } else {
+                            // Namespace not loaded yet - this shouldn't happen if require was processed
+                            std.debug.print("  ERROR: Namespace exports NOT found for {s}\n", .{namespace_name});
+                            const err = TypeCheckError.UnboundVariable;
+                            try self.errors.append(self.allocator, .{
+                                .index = self.index,
+                                .expr = expr,
+                                .err = err,
+                                .info = ErrorInfo{ .unbound = .{ .name = name } },
+                            });
+                            return err;
+                        }
+                    } else {
+                        // Alias not found in requires
+                        std.debug.print("  ERROR: Alias {s} NOT found in requires\n", .{alias});
+                        const err = TypeCheckError.UnboundVariable;
+                        try self.errors.append(self.allocator, .{
+                            .index = self.index,
+                            .expr = expr,
+                            .err = err,
+                            .info = ErrorInfo{ .unbound = .{ .name = name } },
+                        });
+                        return err;
+                    }
                 }
 
                 if (self.env.get(name)) |var_type| {
@@ -579,6 +703,10 @@ pub const BidirectionalTypeChecker = struct {
                         {
                             // These are compiler directives, not type-checked values
                             return try TypedExpression.init(self.allocator, expr, Type.nil);
+                        } else if (std.mem.eql(u8, first.symbol, "ns")) {
+                            return try self.synthesizeNs(expr, list);
+                        } else if (std.mem.eql(u8, first.symbol, "require")) {
+                            return try self.synthesizeRequire(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "let")) {
                             return try self.synthesizeLet(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "do")) {
@@ -698,6 +826,60 @@ pub const BidirectionalTypeChecker = struct {
                 }
             },
         }
+    }
+
+    // Type checking for ns forms: (ns namespace.name)
+    fn synthesizeNs(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
+        _ = list;
+        // Namespace declarations are just informational, return nil
+        return try TypedExpression.init(self.allocator, expr, Type.nil);
+    }
+
+    // Type checking for require forms: (require [namespace :as alias])
+    fn synthesizeRequire(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
+        std.debug.print("synthesizeRequire called\n", .{});
+
+        // Parse: (require [namespace :as alias])
+        const current: ?*const @TypeOf(list.*) = list.next;
+        if (current == null) return TypeCheckError.InvalidTypeAnnotation;
+
+        const vec_node = current.?;
+        const vec_val = vec_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+        // The second element should be a vector [namespace :as alias]
+        if (!vec_val.isVector()) return TypeCheckError.InvalidTypeAnnotation;
+        const vec = vec_val.vector;
+
+        // Extract namespace, :as keyword, and alias
+        if (vec.len() != 3) return TypeCheckError.InvalidTypeAnnotation;
+
+        const namespace_val = vec.at(0);
+        const as_keyword = vec.at(1);
+        const alias_val = vec.at(2);
+
+        if (!namespace_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+        if (!as_keyword.isKeyword()) return TypeCheckError.InvalidTypeAnnotation;
+        if (!std.mem.eql(u8, as_keyword.keyword, "as")) return TypeCheckError.InvalidTypeAnnotation;
+        if (!alias_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+
+        const namespace_name = namespace_val.symbol;
+        const alias = alias_val.symbol;
+
+        // Load the namespace if we have a loader
+        if (self.loader_fn) |load_fn| {
+            if (self.loader_ctx) |ctx| {
+                // Call the loader - if it fails, treat it as UnboundVariable
+                load_fn(ctx, namespace_name, self) catch |err| {
+                    std.debug.print("Failed to load namespace {s}: {}\n", .{ namespace_name, err });
+                    return TypeCheckError.UnboundVariable;
+                };
+            }
+        }
+
+        // Register the alias mapping
+        try self.requires.put(alias, namespace_name);
+
+        return try TypedExpression.init(self.allocator, expr, Type.nil);
     }
 
     // Type checking for def forms: (def name (: type) body)
@@ -2359,6 +2541,42 @@ pub const BidirectionalTypeChecker = struct {
         if (type_expr.isSymbol()) {
             const type_name = type_expr.symbol;
 
+            // Check if this is a qualified symbol (contains `/`)
+            if (std.mem.indexOf(u8, type_name, "/")) |slash_pos| {
+                const alias = type_name[0..slash_pos];
+                const def_name = type_name[slash_pos + 1 ..];
+
+                // Check if the alias was required
+                if (self.requires.get(alias)) |namespace_name| {
+                    // Look up the namespace exports
+                    if (self.namespace_exports.get(namespace_name)) |exports| {
+                        // Look up the definition in the exports
+                        if (exports.get(def_name)) |def_type| {
+                            // If this is a type definition (: Type), look up the actual type in namespace_type_defs
+                            if (def_type == .type_type) {
+                                if (self.namespace_type_defs.get(namespace_name)) |type_defs| {
+                                    if (type_defs.get(def_name)) |actual_type| {
+                                        return actual_type;
+                                    }
+                                }
+                                std.debug.print("parseType: WARNING: Type definition not found in namespace_type_defs for {s}\n", .{def_name});
+                            }
+
+                            return def_type;
+                        } else {
+                            std.debug.print("parseType: ERROR: Definition {s} NOT found in exports\n", .{def_name});
+                            return TypeCheckError.InvalidTypeAnnotation;
+                        }
+                    } else {
+                        std.debug.print("parseType: ERROR: Namespace exports NOT found for {s}\n", .{namespace_name});
+                        return TypeCheckError.InvalidTypeAnnotation;
+                    }
+                } else {
+                    std.debug.print("parseType: ERROR: Alias {s} NOT found in requires\n", .{alias});
+                    return TypeCheckError.InvalidTypeAnnotation;
+                }
+            }
+
             // Try primitive types first
             if (parsePrimitiveType(type_name)) |primitive_type| {
                 return primitive_type;
@@ -2892,11 +3110,58 @@ pub const BidirectionalTypeChecker = struct {
                 return result;
             },
 
+            .require => |req| {
+                result.* = TypedValue{ .require = .{ .namespace = req.namespace, .alias = req.alias, .type = Type.nil } };
+                return result;
+            },
+
             .symbol => |name| {
                 // Handle boolean literals
                 if (std.mem.eql(u8, name, "true") or std.mem.eql(u8, name, "false")) {
                     result.* = TypedValue{ .symbol = .{ .name = name, .type = Type.bool } };
                     return result;
+                }
+
+                // Check if this is a qualified symbol (contains `/`)
+                if (std.mem.indexOf(u8, name, "/")) |slash_pos| {
+                    const alias = name[0..slash_pos];
+                    const def_name = name[slash_pos + 1 ..];
+
+                    // Check if the alias was required
+                    if (self.requires.get(alias)) |namespace_name| {
+                        // Look up the namespace exports
+                        if (self.namespace_exports.get(namespace_name)) |exports| {
+                            // Look up the definition in the exports
+                            if (exports.get(def_name)) |def_type| {
+                                // If this is a type definition, look it up in namespace_type_defs
+                                if (def_type == .type_type) {
+                                    if (self.namespace_type_defs.get(namespace_name)) |type_defs| {
+                                        if (type_defs.get(def_name)) |actual_type| {
+                                            result.* = TypedValue{ .type_value = .{
+                                                .value_type = actual_type,
+                                                .type = Type.type_type,
+                                            } };
+                                            return result;
+                                        }
+                                    }
+                                    // If we can't find the type definition, fall through to returning as symbol
+                                    std.debug.print("synthesizeTyped: WARNING: Type definition not found in namespace_type_defs for {s}\n", .{def_name});
+                                }
+
+                                result.* = TypedValue{ .symbol = .{ .name = name, .type = def_type } };
+                                return result;
+                            } else {
+                                std.debug.print("synthesizeTyped: ERROR: Definition {s} NOT found in exports\n", .{def_name});
+                                return TypeCheckError.UnboundVariable;
+                            }
+                        } else {
+                            std.debug.print("synthesizeTyped: ERROR: Namespace exports NOT found for {s}\n", .{namespace_name});
+                            return TypeCheckError.UnboundVariable;
+                        }
+                    } else {
+                        std.debug.print("synthesizeTyped: ERROR: Alias {s} NOT found in requires\n", .{alias});
+                        return TypeCheckError.UnboundVariable;
+                    }
                 }
 
                 // Check if this is a type definition first
@@ -4335,6 +4600,7 @@ pub const BidirectionalTypeChecker = struct {
             .map => |*v| v.type = expected,
             .type_value => |*v| v.type = expected,
             .namespace => |*v| v.type = expected,
+            .require => |*v| v.type = expected,
             .struct_instance => |*v| v.type = expected,
         }
 
@@ -4361,7 +4627,24 @@ pub const BidirectionalTypeChecker = struct {
     // Two-pass type checking for forward references (fully typed)
     pub fn typeCheckAllTwoPass(self: *BidirectionalTypeChecker, expressions: []const *Value) !TypeCheckReport {
         // Pass 1: Collect all top-level definitions and their type signatures
-        for (expressions) |expr| {
+        for (expressions, 0..) |expr, idx| {
+            _ = idx;
+
+            // Handle namespace and require values directly (they may come from parser as special types)
+            if (expr.isNamespace()) {
+                _ = self.synthesize(expr) catch |err| {
+                    std.debug.print("Pass 1: Failed to process namespace: {}\n", .{err});
+                };
+                continue;
+            }
+
+            if (expr.isRequire()) {
+                _ = self.synthesize(expr) catch |err| {
+                    std.debug.print("Pass 1: Failed to process require: {}\n", .{err});
+                };
+                continue;
+            }
+
             if (expr.isList()) {
                 var current: ?*const @TypeOf(expr.list.*) = expr.list;
                 if (current) |node| {
@@ -4378,6 +4661,23 @@ pub const BidirectionalTypeChecker = struct {
                         {
                             _ = self.synthesize(expr) catch |err| {
                                 std.debug.print("Pass 1: Failed to synthesize {s}: {}\n", .{ first.symbol, err });
+                                continue;
+                            };
+                            continue;
+                        }
+
+                        // Handle ns and require in pass 1 (they need to be processed before defs)
+                        if (first.isSymbol() and std.mem.eql(u8, first.symbol, "ns")) {
+                            _ = self.synthesize(expr) catch |err| {
+                                std.debug.print("Pass 1: Failed to process ns: {}\n", .{err});
+                                continue;
+                            };
+                            continue;
+                        }
+
+                        if (first.isSymbol() and std.mem.eql(u8, first.symbol, "require")) {
+                            _ = self.synthesize(expr) catch |err| {
+                                std.debug.print("Pass 1: Failed to process require: {}\n", .{err});
                                 continue;
                             };
                             continue;
@@ -4478,6 +4778,23 @@ pub const BidirectionalTypeChecker = struct {
 
         for (expressions, 0..) |expr, index| {
             self.index = index;
+
+            // Handle namespace and require values directly (skip in pass 2, handled in pass 1)
+            if (expr.isNamespace() or expr.isRequire()) {
+                const typed = self.synthesizeTyped(expr) catch |err| {
+                    if (err == TypeCheckError.OutOfMemory) return err;
+                    try self.errors.append(self.allocator, .{
+                        .index = index,
+                        .expr = expr,
+                        .err = err,
+                        .info = null,
+                    });
+                    continue;
+                };
+                try results.append(self.allocator, typed);
+                continue;
+            }
+
             if (expr.isList()) {
                 var current: ?*const @TypeOf(expr.list.*) = expr.list;
                 if (current) |node| {
@@ -4491,6 +4808,25 @@ pub const BidirectionalTypeChecker = struct {
                             std.mem.eql(u8, first.symbol, "include-header") or
                             std.mem.eql(u8, first.symbol, "link-library") or
                             std.mem.eql(u8, first.symbol, "compiler-flag")))
+                        {
+                            // Synthesize again to get the typed value for the results
+                            const typed = self.synthesizeTyped(expr) catch |err| {
+                                if (err == TypeCheckError.OutOfMemory) return err;
+                                try self.errors.append(self.allocator, .{
+                                    .index = index,
+                                    .expr = expr,
+                                    .err = err,
+                                    .info = null,
+                                });
+                                continue;
+                            };
+                            try results.append(self.allocator, typed);
+                            continue;
+                        }
+
+                        // Skip ns and require in pass 2 - they were handled in pass 1
+                        if (first.isSymbol() and (std.mem.eql(u8, first.symbol, "ns") or
+                            std.mem.eql(u8, first.symbol, "require")))
                         {
                             // Synthesize again to get the typed value for the results
                             const typed = self.synthesizeTyped(expr) catch |err| {
