@@ -85,6 +85,7 @@ pub const SimpleCCompiler = struct {
         dereference,
         pointer_write,
         pointer_equal,
+        address_of,
 
         // Pointer field operations
         pointer_field_read,
@@ -105,6 +106,7 @@ pub const SimpleCCompiler = struct {
         cast,
         field_access,
         printf_fn,
+        c_str,
 
         // Unknown/not a special form
         unknown,
@@ -145,6 +147,7 @@ pub const SimpleCCompiler = struct {
         if (std.mem.eql(u8, op, "dereference")) return .dereference;
         if (std.mem.eql(u8, op, "pointer-write!")) return .pointer_write;
         if (std.mem.eql(u8, op, "pointer-equal?")) return .pointer_equal;
+        if (std.mem.eql(u8, op, "address-of")) return .address_of;
 
         // Pointer fields
         if (std.mem.eql(u8, op, "pointer-field-read")) return .pointer_field_read;
@@ -165,6 +168,7 @@ pub const SimpleCCompiler = struct {
         if (std.mem.eql(u8, op, "cast")) return .cast;
         if (std.mem.eql(u8, op, ".")) return .field_access;
         if (std.mem.eql(u8, op, "printf")) return .printf_fn;
+        if (std.mem.eql(u8, op, "c-str")) return .c_str;
 
         return .unknown;
     }
@@ -398,16 +402,6 @@ pub const SimpleCCompiler = struct {
 
         var includes = IncludeFlags{};
 
-        // Check if any expression uses 'let' - if so, include stdint headers
-        for (expanded_expressions.items) |expr| {
-            if (self.hasLet(expr)) {
-                includes.need_stdint = true;
-                includes.need_stdbool = true;
-                includes.need_stddef = true;
-                break;
-            }
-        }
-
         // First pass: emit forward declarations for functions and structs
         for (expanded_expressions.items, report.typed.items) |expr, typed_val| {
             try self.emitForwardDecl(forward_writer, expr, typed_val, &checker, &includes);
@@ -593,46 +587,20 @@ pub const SimpleCCompiler = struct {
                     }
 
                     if (maybe_value) |value_expr| {
-                        // Check if this is a let expression - handle it specially using compound statement
-                        var is_let = false;
-                        if (value_expr.isList()) {
-                            var check_iter = value_expr.list.iterator();
-                            if (check_iter.next()) |first| {
-                                if (first.isSymbol() and std.mem.eql(u8, first.symbol, "let")) {
-                                    is_let = true;
-                                }
+                        _ = value_expr;
+                        // Evaluate the expression using typed AST (handles let, do, and all other expressions)
+                        try init_writer.print("    ns->{s} = ", .{sanitized_field});
+
+                        self.writeExpressionTyped(init_writer, def.typed, &init_ctx, &includes) catch |err| {
+                            switch (err) {
+                                Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
+                                    try init_writer.print("0; // unsupported expression\n", .{});
+                                    continue;
+                                },
+                                else => return err,
                             }
-                        }
-
-                        if (is_let) {
-                            // Emit let as compound statement expression: ns->field = ({ bindings; body; });
-                            try init_writer.print("    ns->{s} = ", .{sanitized_field});
-                            self.emitLetAsCompoundStatement(init_writer, value_expr, def.typed, &init_ctx, &includes) catch |err| {
-                                switch (err) {
-                                    Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm, Error.InvalidDefinition => {
-                                        try init_writer.print("0; // unsupported let expression\n", .{});
-                                        continue;
-                                    },
-                                    else => return err,
-                                }
-                            };
-                            try init_writer.print(";\n", .{});
-                        } else {
-                            // For regular variables, evaluate the expression
-                            try init_writer.print("    ns->{s} = ", .{sanitized_field});
-
-                            // Use typed AST for code generation
-                            self.writeExpressionTyped(init_writer, def.typed, &init_ctx, &includes) catch |err| {
-                                switch (err) {
-                                    Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
-                                        try init_writer.print("0; // unsupported expression\n", .{});
-                                        continue;
-                                    },
-                                    else => return err,
-                                }
-                            };
-                            try init_writer.print(";\n", .{});
-                        }
+                        };
+                        try init_writer.print(";\n", .{});
                     }
                 }
             }
@@ -1046,12 +1014,12 @@ pub const SimpleCCompiler = struct {
             .list => |list| {
                 var iter = list.iterator();
                 const head_val = iter.next() orelse {
-                    try self.emitStatement(body_writer, expr, typed, includes, ns_ctx, checker);
+                    try self.emitStatement(body_writer, typed, includes, ns_ctx);
                     return;
                 };
 
                 if (!head_val.isSymbol()) {
-                    try self.emitStatement(body_writer, expr, typed, includes, ns_ctx, checker);
+                    try self.emitStatement(body_writer, typed, includes, ns_ctx);
                     return;
                 }
 
@@ -1142,16 +1110,15 @@ pub const SimpleCCompiler = struct {
                     return;
                 }
 
-                try self.emitStatement(body_writer, expr, typed, includes, ns_ctx, checker);
+                try self.emitStatement(body_writer, typed, includes, ns_ctx);
             },
             else => {
-                try self.emitStatement(body_writer, expr, typed, includes, ns_ctx, checker);
+                try self.emitStatement(body_writer, typed, includes, ns_ctx);
             },
         }
     }
 
     fn emitDefinition(self: *SimpleCCompiler, def_writer: anytype, list_expr: *Value, typed: *TypedValue, checker: *TypeChecker, includes: *IncludeFlags, ns_ctx: *NamespaceContext) Error!void {
-
         var iter = list_expr.list.iterator();
         _ = iter.next(); // Skip 'def'
 
@@ -1354,325 +1321,6 @@ pub const SimpleCCompiler = struct {
                 }
             };
             try def_writer.writeAll(";\n}\n");
-        }
-    }
-
-    fn hasLet(self: *SimpleCCompiler, expr: *Value) bool {
-        switch (expr.*) {
-            .list => |list| {
-                var iter = list.iterator();
-                if (iter.next()) |first| {
-                    if (first.isSymbol() and std.mem.eql(u8, first.symbol, "let")) {
-                        return true;
-                    }
-                }
-                // Check nested expressions
-                iter = list.iterator();
-                while (iter.next()) |child| {
-                    if (self.hasLet(child)) return true;
-                }
-                return false;
-            },
-            .vector => |vec| {
-                for (0..vec.len()) |i| {
-                    if (self.hasLet(vec.at(i))) return true;
-                }
-                return false;
-            },
-            else => return false,
-        }
-    }
-
-    // Helper to emit let expressions as C compound statement expressions: ({ stmts; result; })
-    // This handles nested lets recursively by relying on writeExpressionTyped for the body
-    fn emitLetAsCompoundStatement(self: *SimpleCCompiler, writer: anytype, value_expr: *Value, typed: *TypedValue, ns_ctx: *NamespaceContext, includes: *IncludeFlags) Error!void {
-        _ = typed; // We'll use the untyped AST structure and recurse via writeExpressionTyped for typed code generation
-
-        // Check if this is a let expression
-        if (!value_expr.isList()) return Error.InvalidDefinition;
-
-        var expr_iter = value_expr.list.iterator();
-        const first = expr_iter.next() orelse return Error.InvalidDefinition;
-        if (!first.isSymbol() or !std.mem.eql(u8, first.symbol, "let")) {
-            return Error.InvalidDefinition;
-        }
-
-        // Get the bindings vector
-        const bindings_val = expr_iter.next() orelse return Error.InvalidDefinition;
-        if (!bindings_val.isVector()) return Error.InvalidDefinition;
-        const bindings_vec = bindings_val.vector;
-
-        if (bindings_vec.len() % 3 != 0) return Error.InvalidDefinition;
-        const binding_count = bindings_vec.len() / 3;
-
-        // Start compound statement expression
-        try writer.print("({{ ", .{});
-
-        // Create a map to track local bindings in this let scope
-        var local_bindings_map = std.StringHashMap(void).init(self.allocator.*);
-        defer local_bindings_map.deinit();
-
-        // Create a new context with local bindings for this let scope
-        var let_ctx = ns_ctx.*;
-        let_ctx.local_bindings = &local_bindings_map;
-
-        // Emit each binding as a C variable declaration
-        var idx: usize = 0;
-        while (idx < binding_count) : (idx += 1) {
-            const name_val = bindings_vec.at(idx * 3);
-            const annotation_val = bindings_vec.at(idx * 3 + 1);
-            const init_val = bindings_vec.at(idx * 3 + 2);
-
-            if (!name_val.isSymbol()) return Error.InvalidDefinition;
-            const var_name = name_val.symbol;
-
-            // Parse type annotation to get C type
-            const var_type = try self.parseTypeFromAnnotation(annotation_val);
-            const sanitized = try self.sanitizeIdentifier(var_name);
-            defer self.allocator.*.free(sanitized);
-
-            // Special handling for function pointer types
-            // Function pointer: int32_t (*varname)(int32_t, int32_t) = ...
-            // vs regular type: int32_t varname = ...
-            const is_fn_ptr = (var_type == .pointer and var_type.pointer.* == .function) or var_type == .function;
-
-            if (is_fn_ptr) {
-                // For function pointers, we need to inject the variable name into the type
-                // Type format: "RetType (*)(Params)" -> "RetType (*varname)(Params)"
-                const fn_type = if (var_type == .pointer) var_type.pointer.function else var_type.function;
-                const ret_c_type = try self.cTypeFor(fn_type.return_type, includes);
-
-                // Build parameter list
-                var params_list = std.ArrayList(u8){};
-                defer params_list.deinit(self.allocator.*);
-                var params_writer = params_list.writer(self.allocator.*);
-
-                for (fn_type.param_types, 0..) |param_type, i| {
-                    if (i > 0) try params_writer.print(", ", .{});
-                    const param_c_type = try self.cTypeFor(param_type, includes);
-                    try params_writer.print("{s}", .{param_c_type});
-                }
-
-                // Emit: RetType (*varname)(Params) =
-                try writer.print("{s} (*{s})({s}) = ", .{ ret_c_type, sanitized, params_list.items });
-            } else {
-                const c_type = try self.cTypeFor(var_type, includes);
-                try writer.print("{s} {s} = ", .{ c_type, sanitized });
-            }
-
-            // Recursively emit the init value - it might be a nested let!
-            // For now, emit it as untyped (this is a limitation - we'd need the type checker's typed values for each binding)
-            try self.emitUntypedValueExpression(writer, init_val, &let_ctx, includes);
-            try writer.print("; ", .{});
-
-            // Add this binding to the local bindings map AFTER emitting the init value
-            // This ensures the init value is evaluated in the context before this binding
-            // (supporting sequential let semantics where later bindings can see earlier ones)
-            try local_bindings_map.put(var_name, {});
-        }
-
-        // Emit the body - collect all expressions first
-        var body_exprs = std.ArrayList(*Value){};
-        defer body_exprs.deinit(self.allocator.*);
-
-        while (expr_iter.next()) |body_expr| {
-            try body_exprs.append(self.allocator.*, body_expr);
-        }
-
-        if (body_exprs.items.len == 0) return Error.InvalidDefinition;
-
-        // Emit all but the last expression as statements (with semicolons)
-        for (body_exprs.items[0..body_exprs.items.len - 1]) |stmt_expr| {
-            try self.emitUntypedValueExpression(writer, stmt_expr, &let_ctx, includes);
-            try writer.print("; ", .{});
-        }
-
-        // Emit the final expression as the return value (no semicolon)
-        const final_expr = body_exprs.items[body_exprs.items.len - 1];
-        try self.emitUntypedValueExpression(writer, final_expr, &let_ctx, includes);
-
-        // Close compound statement expression
-        try writer.print("; }})", .{});
-    }
-
-    fn emitDoAsCompoundStatement(self: *SimpleCCompiler, writer: anytype, value_expr: *Value, typed: *TypedValue, ns_ctx: *NamespaceContext, includes: *IncludeFlags) Error!void {
-        _ = typed; // We'll use the untyped AST structure
-
-        // Check if this is a do expression
-        if (!value_expr.isList()) return Error.InvalidDefinition;
-
-        var expr_iter = value_expr.list.iterator();
-        const first = expr_iter.next() orelse return Error.InvalidDefinition;
-        if (!first.isSymbol() or !std.mem.eql(u8, first.symbol, "do")) {
-            return Error.InvalidDefinition;
-        }
-
-        // Start compound statement expression
-        try writer.print("({{ ", .{});
-
-        // Collect all body expressions
-        var body_exprs = std.ArrayList(*Value){};
-        defer body_exprs.deinit(self.allocator.*);
-
-        while (expr_iter.next()) |body_expr| {
-            try body_exprs.append(self.allocator.*, body_expr);
-        }
-
-        if (body_exprs.items.len == 0) {
-            // Empty do block returns nil (0)
-            try writer.print("0; }})", .{});
-            return;
-        }
-
-        // Emit all but the last expression as statements (with semicolons)
-        for (body_exprs.items[0..body_exprs.items.len - 1]) |stmt_expr| {
-            try self.emitUntypedValueExpression(writer, stmt_expr, ns_ctx, includes);
-            try writer.print("; ", .{});
-        }
-
-        // Emit the final expression as the return value (no semicolon)
-        const final_expr = body_exprs.items[body_exprs.items.len - 1];
-        try self.emitUntypedValueExpression(writer, final_expr, ns_ctx, includes);
-
-        // Close compound statement expression
-        try writer.print("; }})", .{});
-    }
-
-    // Simplified helper to emit untyped value expressions
-    fn emitUntypedValueExpression(self: *SimpleCCompiler, writer: anytype, expr: *Value, ns_ctx: *NamespaceContext, includes: *IncludeFlags) Error!void {
-        if (expr.isSymbol()) {
-            // Handle special symbols
-            if (std.mem.eql(u8, expr.symbol, "pointer-null")) {
-                try writer.print("NULL", .{});
-                return;
-            }
-            if (std.mem.eql(u8, expr.symbol, "true")) {
-                try writer.print("1", .{});
-                return;
-            }
-            if (std.mem.eql(u8, expr.symbol, "false")) {
-                try writer.print("0", .{});
-                return;
-            }
-
-            // Check if this symbol is a local binding (let-bound variable)
-            // Local bindings shadow namespace definitions
-            const is_local = if (ns_ctx.local_bindings) |local_map|
-                local_map.contains(expr.symbol)
-            else
-                false;
-
-            // Check if this symbol is a namespace field (and not shadowed by a local binding)
-            if (!is_local and ns_ctx.def_names.contains(expr.symbol)) {
-                if (ns_ctx.name) |_| {
-                    const sanitized_field = try self.sanitizeIdentifier(expr.symbol);
-                    defer self.allocator.*.free(sanitized_field);
-
-                    if (ns_ctx.in_init_function) {
-                        // In init function, use ns->field
-                        try writer.print("ns->{s}", .{sanitized_field});
-                    } else {
-                        // In regular code, use g_namespace.field
-                        const sanitized_ns = try self.sanitizeIdentifier(ns_ctx.name.?);
-                        defer self.allocator.*.free(sanitized_ns);
-                        try writer.print("g_{s}.{s}", .{ sanitized_ns, sanitized_field });
-                    }
-                    return;
-                }
-            }
-
-            const sanitized = try self.sanitizeIdentifier(expr.symbol);
-            defer self.allocator.*.free(sanitized);
-            try writer.print("{s}", .{sanitized});
-        } else if (expr.isInt()) {
-            try writer.print("{d}", .{expr.int});
-        } else if (expr.isFloat()) {
-            try writer.print("{d}", .{expr.float});
-        } else if (expr.isString()) {
-            try writer.print("\"{s}\"", .{expr.string});
-        } else if (expr.isList()) {
-            var list_iter = expr.list.iterator();
-            const first = list_iter.next() orelse return Error.MissingOperand;
-
-            if (first.isSymbol()) {
-                const op = first.symbol;
-
-                // Handle nested let recursively
-                if (std.mem.eql(u8, op, "let")) {
-                    // Recursively emit nested let as compound statement
-                    try self.emitLetAsCompoundStatement(writer, expr, undefined, ns_ctx, includes);
-                    return;
-                }
-
-                // Handle nested do recursively
-                if (std.mem.eql(u8, op, "do")) {
-                    // Recursively emit nested do as compound statement
-                    try self.emitDoAsCompoundStatement(writer, expr, undefined, ns_ctx, includes);
-                    return;
-                }
-
-                // Handle cast: (cast TargetType value)
-                if (std.mem.eql(u8, op, "cast")) {
-                    const type_expr = list_iter.next() orelse return Error.MissingOperand;
-                    const value_expr = list_iter.next() orelse return Error.MissingOperand;
-
-                    // Parse the target type
-                    const target_type = try self.parseTypeFromAnnotation_Simple(type_expr);
-                    const c_type = try self.cTypeFor(target_type, includes);
-
-                    // Emit cast: (TargetType)(value)
-                    try writer.print("(({s})(", .{c_type});
-                    try self.emitUntypedValueExpression(writer, value_expr, ns_ctx, includes);
-                    try writer.print("))", .{});
-                    return;
-                }
-
-                // Handle c-str: (c-str string) - cast string literal to const char*
-                if (std.mem.eql(u8, op, "c-str")) {
-                    const str_expr = list_iter.next() orelse return Error.MissingOperand;
-                    try writer.print("((const char*)", .{});
-                    try self.emitUntypedValueExpression(writer, str_expr, ns_ctx, includes);
-                    try writer.print(")", .{});
-                    return;
-                }
-
-                // Handle arithmetic operators
-                if (std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or
-                    std.mem.eql(u8, op, "*") or std.mem.eql(u8, op, "/") or
-                    std.mem.eql(u8, op, "%")) {
-                    try writer.print("(", .{});
-                    var first_arg = true;
-                    while (list_iter.next()) |arg| {
-                        if (!first_arg) {
-                            try writer.print(" {s} ", .{op});
-                        }
-                        try self.emitUntypedValueExpression(writer, arg, ns_ctx, includes);
-                        first_arg = false;
-                    }
-                    try writer.print(")", .{});
-                    return;
-                }
-
-                // Assume it's a function call
-                const sanitized = try self.sanitizeIdentifier(op);
-                defer self.allocator.*.free(sanitized);
-                try writer.print("{s}(", .{sanitized});
-                var first_arg = true;
-                while (list_iter.next()) |arg| {
-                    if (!first_arg) {
-                        try writer.print(", ", .{});
-                    }
-                    try self.emitUntypedValueExpression(writer, arg, ns_ctx, includes);
-                    first_arg = false;
-                }
-                try writer.print(")", .{});
-                return;
-            }
-            std.debug.print("ERROR: Unsupported list form in let binding\n", .{});
-            return Error.UnsupportedExpression;
-        } else {
-            std.debug.print("ERROR: Unsupported value type in let: {s}\n", .{@tagName(expr.*)});
-            return Error.UnsupportedExpression;
         }
     }
 
@@ -1885,90 +1533,8 @@ pub const SimpleCCompiler = struct {
         }
     }
 
-    fn emitStatement(self: *SimpleCCompiler, body_writer: anytype, expr: *Value, typed: *TypedValue, includes: *IncludeFlags, ns_ctx: *NamespaceContext, checker: *TypeChecker) Error!void {
-        _ = checker;
-
-        // Check if the untyped expression is a let - if so, handle it specially
-        var is_let = false;
-        if (expr.isList()) {
-            var let_iter = expr.list.iterator();
-            if (let_iter.next()) |first| {
-                if (first.isSymbol() and std.mem.eql(u8, first.symbol, "let")) {
-                    is_let = true;
-                }
-            }
-        }
-
-        if (is_let) {
-            // For let expressions, emit bindings and body without printing
-            var let_iter = expr.list.iterator();
-            _ = let_iter.next(); // skip 'let'
-            const bindings_val = let_iter.next() orelse return Error.InvalidDefinition;
-            if (!bindings_val.isVector()) return Error.InvalidDefinition;
-            const bindings_vec = bindings_val.vector;
-
-            if (bindings_vec.len() % 3 != 0) return Error.InvalidDefinition;
-            const binding_count = bindings_vec.len() / 3;
-
-            // Emit bindings as variable declarations
-            var idx: usize = 0;
-            while (idx < binding_count) : (idx += 1) {
-                const name_val = bindings_vec.at(idx * 3);
-                const annotation_val = bindings_vec.at(idx * 3 + 1);
-                const value_val = bindings_vec.at(idx * 3 + 2);
-
-                if (!name_val.isSymbol()) continue;
-
-                const var_type = try self.parseTypeFromAnnotation(annotation_val);
-                const c_type = self.cTypeFor(var_type, includes) catch continue;
-
-                if (var_type == .void or var_type == .nil or std.mem.eql(u8, c_type, "void") or std.mem.eql(u8, c_type, "Void")) {
-                    try body_writer.print("    ", .{});
-                    try self.emitUntypedValueExpression(body_writer, value_val, ns_ctx, includes);
-                    try body_writer.print(";\n", .{});
-                    continue;
-                }
-
-                const sanitized_name = try self.sanitizeIdentifier(name_val.symbol);
-                defer self.allocator.*.free(sanitized_name);
-
-                try body_writer.print("    {s} {s} = ", .{ c_type, sanitized_name });
-                // Add explicit cast for pointers to avoid const-qualifier warnings
-                if (var_type == .pointer) {
-                    try body_writer.print("({s})", .{c_type});
-                }
-                try self.emitUntypedValueExpression(body_writer, value_val, ns_ctx, includes);
-                try body_writer.print(";\n", .{});
-            }
-
-            // Emit body expressions as statements
-            while (let_iter.next()) |body_val| {
-                try body_writer.print("    ", .{});
-                try self.emitUntypedValueExpression(body_writer, body_val, ns_ctx, includes);
-                try body_writer.print(";\n", .{});
-            }
-            return;
-        }
-
-        // Check if the untyped expression is a printf call - emit it directly
-        var is_printf = false;
-        if (expr.isList()) {
-            var printf_iter = expr.list.iterator();
-            if (printf_iter.next()) |first| {
-                if (first.isSymbol() and std.mem.eql(u8, first.symbol, "printf")) {
-                    is_printf = true;
-                }
-            }
-        }
-
-        if (is_printf) {
-            try body_writer.print("    ", .{});
-            try self.emitUntypedValueExpression(body_writer, expr, ns_ctx, includes);
-            try body_writer.print(";\n", .{});
-            return;
-        }
-
-        // For all other expressions, just emit as statement
+    fn emitStatement(self: *SimpleCCompiler, body_writer: anytype, typed: *TypedValue, includes: *IncludeFlags, ns_ctx: *NamespaceContext) Error!void {
+        // Emit as statement using typed code path
         try body_writer.print("    ", .{});
         self.writeExpressionTyped(body_writer, typed, ns_ctx, includes) catch |err| {
             switch (err) {
@@ -1979,172 +1545,6 @@ pub const SimpleCCompiler = struct {
             }
         };
         try body_writer.print(";\n", .{});
-    }
-
-    fn emitPrintStatement(self: *SimpleCCompiler, body_writer: anytype, expr: *Value, typed: *TypedValue, includes: *IncludeFlags, ns_ctx: *NamespaceContext, checker: *TypeChecker) Error!void {
-        _ = checker; // Not used anymore, but kept for future use if needed
-        const expr_type = typed.getType();
-
-        // Check if the untyped expression is a let - if so, handle it specially
-        // because the typed AST only contains the final value, not the bindings
-        var is_let = false;
-        if (expr.isList()) {
-            var let_iter = expr.list.iterator();
-            if (let_iter.next()) |first| {
-                if (first.isSymbol() and std.mem.eql(u8, first.symbol, "let")) {
-                    is_let = true;
-                }
-            }
-        }
-
-        if (is_let) {
-            // For let expressions, we need to emit all bindings as statements
-            // Extract bindings and body from the untyped AST
-            var let_iter = expr.list.iterator();
-            _ = let_iter.next(); // skip 'let'
-            const bindings_val = let_iter.next() orelse return Error.InvalidDefinition;
-            if (!bindings_val.isVector()) return Error.InvalidDefinition;
-            const bindings_vec = bindings_val.vector;
-
-            if (bindings_vec.len() % 3 != 0) return Error.InvalidDefinition;
-            const binding_count = bindings_vec.len() / 3;
-
-            // Emit bindings as variable declarations
-            var idx: usize = 0;
-            while (idx < binding_count) : (idx += 1) {
-                const name_val = bindings_vec.at(idx * 3);
-                const annotation_val = bindings_vec.at(idx * 3 + 1);
-                const value_val = bindings_vec.at(idx * 3 + 2);
-
-                if (!name_val.isSymbol()) continue;
-
-                // Parse type annotation to get C type
-                const var_type = try self.parseTypeFromAnnotation(annotation_val);
-                const c_type = self.cTypeFor(var_type, includes) catch continue;
-
-                // Skip void/nil bindings - just emit the expression as a statement
-                if (var_type == .void or var_type == .nil or std.mem.eql(u8, c_type, "void") or std.mem.eql(u8, c_type, "Void")) {
-                    try body_writer.print("    ", .{});
-                    try self.emitUntypedValueExpression(body_writer, value_val, ns_ctx, includes);
-                    try body_writer.print(";\n", .{});
-                    continue;
-                }
-
-                const sanitized_name = try self.sanitizeIdentifier(name_val.symbol);
-                defer self.allocator.*.free(sanitized_name);
-
-                try body_writer.print("    {s} {s} = ", .{ c_type, sanitized_name });
-
-                // Emit the untyped value expression directly
-                try self.emitUntypedValueExpression(body_writer, value_val, ns_ctx, includes);
-                try body_writer.print(";\n", .{});
-            }
-
-            // Now emit the body expressions
-            while (let_iter.next()) |body_val| {
-                // For the last expression, emit as the printed value
-                if (let_iter.peek() == null) {
-                    // This is the last expression
-                    if (expr_type == .nil or expr_type == .void) {
-                        try body_writer.print("    ", .{});
-                        try self.emitUntypedValueExpression(body_writer, body_val, ns_ctx, includes);
-                        try body_writer.print(";\n", .{});
-                    } else {
-                        const format = try self.printfFormatFor(expr_type);
-                        try body_writer.print("    printf(\"{s}\\n\", ", .{format});
-                        const wrap_bool = expr_type == .bool;
-                        if (wrap_bool) {
-                            includes.need_stdbool = true;
-                            try body_writer.writeAll("((");
-                        }
-                        try self.emitUntypedValueExpression(body_writer, body_val, ns_ctx, includes);
-                        if (wrap_bool) {
-                            try body_writer.writeAll(") ? 1 : 0)");
-                        }
-                        try body_writer.print(");\n", .{});
-                    }
-                } else {
-                    // Intermediate body expression - emit using untyped value
-                    try body_writer.print("    ", .{});
-                    try self.emitUntypedValueExpression(body_writer, body_val, ns_ctx, includes);
-                    try body_writer.print(";\n", .{});
-                }
-            }
-            return;
-        }
-
-        // Check if the untyped expression is a printf call - if so, emit it directly
-        // without wrapping to avoid double-wrapping: printf("%d\n", printf(...))
-        var is_printf = false;
-        if (expr.isList()) {
-            var printf_iter = expr.list.iterator();
-            if (printf_iter.next()) |first| {
-                if (first.isSymbol() and std.mem.eql(u8, first.symbol, "printf")) {
-                    is_printf = true;
-                }
-            }
-        }
-
-        if (is_printf) {
-            // Emit printf call directly without wrapping
-            try body_writer.print("    ", .{});
-            try self.emitUntypedValueExpression(body_writer, expr, ns_ctx, includes);
-            try body_writer.print(";\n", .{});
-            return;
-        }
-
-        // Don't print Nil/void statements (e.g., pointer-write!, deallocate, while loops)
-        if (expr_type == .nil or expr_type == .void) {
-            try body_writer.print("    ", .{});
-            // Use typed AST for code generation
-            self.writeExpressionTyped(body_writer, typed, ns_ctx, includes) catch |err| {
-                switch (err) {
-                    Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
-                        const repr = try self.formatValue(expr);
-                        defer self.allocator.*.free(repr);
-                        try body_writer.print("/* unsupported: {s} */", .{repr});
-                    },
-                    else => return err,
-                }
-            };
-            try body_writer.print(";\n", .{});
-            return;
-        }
-
-        const format = self.printfFormatFor(expr_type) catch |err| {
-            if (err == Error.UnsupportedType) {
-                const repr = try self.formatValue(expr);
-                defer self.allocator.*.free(repr);
-                try body_writer.print("    // unsupported expression: {s}\n", .{repr});
-                return;
-            }
-            return err;
-        };
-
-        try body_writer.print("    printf(\"{s}\\n\", ", .{format});
-        const wrap_bool = expr_type == .bool;
-        if (wrap_bool) {
-            includes.need_stdbool = true;
-            try body_writer.writeAll("((");
-        }
-
-        // Use typed AST for code generation
-        self.writeExpressionTyped(body_writer, typed, ns_ctx, includes) catch |err| {
-            switch (err) {
-                Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
-                    const repr = try self.formatValue(expr);
-                    defer self.allocator.*.free(repr);
-                    try body_writer.print("0); // unsupported expression\n", .{});
-                    try body_writer.print("    // {s}\n", .{repr});
-                    return;
-                },
-                else => return err,
-            }
-        };
-        if (wrap_bool) {
-            try body_writer.writeAll(") ? 1 : 0)");
-        }
-        try body_writer.print(");\n", .{});
     }
 
     // Helper method to dispatch special forms using a switch statement
@@ -2247,6 +1647,14 @@ pub const SimpleCCompiler = struct {
 
                 try writer.print("({{ ", .{});
 
+                // Create a map to track local bindings in this let scope
+                var local_bindings_map = std.StringHashMap(void).init(self.allocator.*);
+                defer local_bindings_map.deinit();
+
+                // Create a new context with local bindings for this let scope
+                var let_ctx = ns_ctx.*;
+                let_ctx.local_bindings = &local_bindings_map;
+
                 var i: usize = 0;
                 while (i < binding_count) : (i += 1) {
                     const name_typed = bindings_vec.elements[i * 3];
@@ -2260,7 +1668,7 @@ pub const SimpleCCompiler = struct {
                     const var_type = type_typed.type_value.value_type;
 
                     if (var_type == .nil) {
-                        try self.writeExpressionTyped(writer, value_typed, ns_ctx, includes);
+                        try self.writeExpressionTyped(writer, value_typed, &let_ctx, includes);
                         try writer.print("; ", .{});
                         continue;
                     }
@@ -2274,16 +1682,21 @@ pub const SimpleCCompiler = struct {
                     if (var_type == .pointer) {
                         try writer.print("({s})", .{c_type});
                     }
-                    try self.writeExpressionTyped(writer, value_typed, ns_ctx, includes);
+                    try self.writeExpressionTyped(writer, value_typed, &let_ctx, includes);
                     try writer.print("; ", .{});
+
+                    // Add this binding to the local bindings map AFTER emitting the init value
+                    // This ensures the init value is evaluated in the context before this binding
+                    // (supporting sequential let semantics where later bindings can see earlier ones)
+                    try local_bindings_map.put(var_name, {});
                 }
 
                 for (l.elements[2 .. l.elements.len - 1]) |body_stmt| {
-                    try self.writeExpressionTyped(writer, body_stmt, ns_ctx, includes);
+                    try self.writeExpressionTyped(writer, body_stmt, &let_ctx, includes);
                     try writer.print("; ", .{});
                 }
 
-                try self.writeExpressionTyped(writer, l.elements[l.elements.len - 1], ns_ctx, includes);
+                try self.writeExpressionTyped(writer, l.elements[l.elements.len - 1], &let_ctx, includes);
                 try writer.print("; }})", .{});
                 return true;
             },
@@ -2494,13 +1907,122 @@ pub const SimpleCCompiler = struct {
                 try writer.print(")", .{});
                 return true;
             },
-            .pointer_write, .pointer_equal, .pointer_field_read, .pointer_field_write => {
-                // These are handled earlier in writeExpressionTyped for better organization
+            .c_str => {
+                // c-str just passes through the string literal (element[1])
+                if (l.elements.len == 2 and l.type == .c_string) {
+                    try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                    return true;
+                }
                 return false;
             },
-            .allocate, .deallocate, .dereference, .cast, .field_access => {
-                // These are handled earlier in writeExpressionTyped for better organization
+            .allocate => {
+                // allocate: [allocate, type-marker, value?]
+                if (l.elements.len < 2 or l.elements.len > 3) return false;
+                const ptr_type = l.type;
+                if (ptr_type != .pointer) return false;
+                const pointee = ptr_type.pointer.*;
+                includes.need_stdlib = true;
+                try writer.print("({{ ", .{});
+                const c_type = try self.cTypeFor(pointee, includes);
+                try writer.print("{s}* __tmp_ptr = malloc(sizeof({s})); ", .{ c_type, c_type });
+
+                // Initialize if value provided (element at index 2)
+                if (l.elements.len == 3) {
+                    try writer.print("*__tmp_ptr = ", .{});
+                    try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                    try writer.print("; ", .{});
+                }
+
+                try writer.print("__tmp_ptr; }})", .{});
+                return true;
+            },
+            .deallocate => {
+                // deallocate: 1 element (pointer), result type is nil
+                if (l.elements.len != 2) return false;
+                if (l.elements[1].getType() != .pointer) return false;
+                if (l.type != .nil) return false;
+                includes.need_stdlib = true;
+                try writer.print("free(", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print(")", .{});
+                return true;
+            },
+            .dereference => {
+                // dereference: [dereference, ptr]
+                if (l.elements.len != 2) return false;
+                try writer.print("(*", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print(")", .{});
+                return true;
+            },
+            .cast => {
+                // cast: 2 elements (cast marker symbol, value)
+                // cast generates: ((TargetType)value)
+                if (l.elements.len != 2) return false;
+                const c_type = try self.cTypeFor(l.type, includes);
+                try writer.print("(({s})", .{c_type});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print(")", .{});
+                return true;
+            },
+            .field_access => {
+                // field access: [., struct-expr, field-symbol]
+                if (l.elements.len != 3) return false;
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                if (l.elements[2].* == .symbol) {
+                    try writer.print(".{s}", .{l.elements[2].symbol.name});
+                    return true;
+                }
                 return false;
+            },
+            .pointer_write => {
+                // pointer-write!: [pointer-write!, ptr, value]
+                if (l.elements.len != 3) return false;
+                try writer.print("(*", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print(" = ", .{});
+                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                try writer.print(")", .{});
+                return true;
+            },
+            .pointer_equal => {
+                // pointer-equal?: [pointer-equal?, ptr1, ptr2]
+                if (l.elements.len != 3) return false;
+                try writer.print("(", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print(" == ", .{});
+                try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                try writer.print(")", .{});
+                return true;
+            },
+            .pointer_field_read => {
+                // pointer-field-read: [pointer-field-read, ptr, field]
+                if (l.elements.len != 3) return false;
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print("->", .{});
+                const sanitized = try self.sanitizeIdentifier(l.elements[2].symbol.name);
+                defer self.allocator.*.free(sanitized);
+                try writer.print("{s}", .{sanitized});
+                return true;
+            },
+            .pointer_field_write => {
+                // pointer-field-write!: [pointer-field-write!, ptr, field, value]
+                if (l.elements.len != 4) return false;
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print("->", .{});
+                const sanitized = try self.sanitizeIdentifier(l.elements[2].symbol.name);
+                defer self.allocator.*.free(sanitized);
+                try writer.print("{s} = ", .{sanitized});
+                try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                return true;
+            },
+            .address_of => {
+                // address-of: [address-of, var]
+                if (l.elements.len != 2) return false;
+                try writer.print("(&", .{});
+                try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                try writer.print(")", .{});
+                return true;
             },
             .unknown => {
                 return false;
@@ -2574,134 +2096,7 @@ pub const SimpleCCompiler = struct {
                 }
             },
             .list => |l| {
-                // Check for c-str operation first
-                if (l.elements.len == 1 and l.type == .c_string) {
-                    // c-str just passes through the string literal
-                    try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
-                    return;
-                }
-
-                // Check for allocate operation (by symbol)
-                // allocate: [allocate, type-marker, value?]
-                if (l.elements.len > 0 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "allocate")) {
-                    if (l.elements.len < 2 or l.elements.len > 3) return Error.UnsupportedExpression;
-                    const ptr_type = l.type;
-                    const pointee = ptr_type.pointer.*;
-                    includes.need_stdlib = true;
-                    try writer.print("({{ ", .{});
-                    const c_type = try self.cTypeFor(pointee, includes);
-                    try writer.print("{s}* __tmp_ptr = malloc(sizeof({s})); ", .{ c_type, c_type });
-
-                    // Initialize if value provided (element at index 2)
-                    if (l.elements.len == 3) {
-                        try writer.print("*__tmp_ptr = ", .{});
-                        try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                        try writer.print("; ", .{});
-                    }
-
-                    try writer.print("__tmp_ptr; }})", .{});
-                    return;
-                }
-
-                // Check for deallocate first: 1 element (pointer), result type is nil
-                if (l.elements.len == 1 and l.elements[0].getType() == .pointer and l.type == .nil) {
-                    includes.need_stdlib = true;
-                    try writer.print("free(", .{});
-                    try self.writeExpressionTyped(writer, l.elements[0], ns_ctx, includes);
-                    try writer.print(")", .{});
-                    return;
-                }
-
-                // Check for cast: 2 elements (cast marker symbol, value)
-                // cast generates: ((TargetType)value)
-                if (l.elements.len == 2 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "cast")) {
-                    const c_type = try self.cTypeFor(l.type, includes);
-                    try writer.print("(({s})", .{c_type});
-                    try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                    try writer.print(")", .{});
-                    return;
-                }
-
-                // Check for dereference (by symbol)
-                // dereference: [dereference, ptr]
-                if (l.elements.len == 2 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "dereference")) {
-                    try writer.print("(*", .{});
-                    try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                    try writer.print(")", .{});
-                    return;
-                }
-
-                if (l.elements.len > 0) {
-                    const first = l.elements[0];
-                    // Check for field access
-                    if (first.* == .symbol and std.mem.eql(u8, first.symbol.name, ".")) {
-                        if (l.elements.len == 3) {
-                            try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                            if (l.elements[2].* == .symbol) {
-                                try writer.print(".{s}", .{l.elements[2].symbol.name});
-                                return;
-                            }
-                        }
-                    }
-                    // Check for pointer-write! (by symbol)
-                    // pointer-write!: [pointer-write!, ptr, value]
-                    if (l.elements.len == 3 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "pointer-write!")) {
-                        try writer.print("(*", .{});
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        try writer.print(" = ", .{});
-                        try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                        try writer.print(")", .{});
-                        return;
-                    }
-                    // Check for pointer-equal? (by symbol)
-                    // pointer-equal?: [pointer-equal?, ptr1, ptr2]
-                    if (l.elements.len == 3 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "pointer-equal?")) {
-                        try writer.print("(", .{});
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        try writer.print(" == ", .{});
-                        try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                        try writer.print(")", .{});
-                        return;
-                    }
-                    // Check for pointer-field-read (by symbol)
-                    // pointer-field-read: [pointer-field-read, ptr, field]
-                    if (l.elements.len == 3 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "pointer-field-read")) {
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        try writer.print("->", .{});
-                        const sanitized = try self.sanitizeIdentifier(l.elements[2].symbol.name);
-                        defer self.allocator.*.free(sanitized);
-                        try writer.print("{s}", .{sanitized});
-                        return;
-                    }
-                    // Check for pointer-field-write! (by symbol)
-                    // pointer-field-write!: [pointer-field-write!, ptr, field, value]
-                    if (l.elements.len == 4 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "pointer-field-write!")) {
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        try writer.print("->", .{});
-                        const sanitized = try self.sanitizeIdentifier(l.elements[2].symbol.name);
-                        defer self.allocator.*.free(sanitized);
-                        try writer.print("{s} = ", .{sanitized});
-                        try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
-                        return;
-                    }
-                    // Check for address-of (by symbol)
-                    // address-of: [address-of, var]
-                    if (l.elements.len == 2 and l.elements[0].* == .symbol and std.mem.eql(u8, l.elements[0].symbol.name, "address-of")) {
-                        try writer.print("(&", .{});
-                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                        try writer.print(")", .{});
-                        return;
-                    }
-                    // Try special form dispatch using switch
-                    if (l.elements.len > 0 and l.elements[0].* == .symbol) {
-                        const op = l.elements[0].symbol.name;
-                        const form = identifySpecialForm(op);
-                        const handled = try self.dispatchSpecialForm(writer, form, l, ns_ctx, includes);
-                        if (handled) return;
-                    }
-                }
-
-                // Dispatch special forms using switch-based dispatch
+                // Try special form dispatch first
                 if (l.elements.len > 0 and l.elements[0].* == .symbol) {
                     const op = l.elements[0].symbol.name;
                     const form = identifySpecialForm(op);
@@ -2815,33 +2210,6 @@ pub const SimpleCCompiler = struct {
         }
     }
 
-    // writeExpression has been removed - all code generation now uses writeExpressionTyped with the typed AST
-
-    fn isComparisonOperator(_: *SimpleCCompiler, symbol: []const u8) bool {
-        return std.mem.eql(u8, symbol, "<") or
-            std.mem.eql(u8, symbol, ">") or
-            std.mem.eql(u8, symbol, "<=") or
-            std.mem.eql(u8, symbol, ">=") or
-            std.mem.eql(u8, symbol, "=") or
-            std.mem.eql(u8, symbol, "==") or
-            std.mem.eql(u8, symbol, "!=");
-    }
-
-    fn isLogicalOperator(_: *SimpleCCompiler, symbol: []const u8) bool {
-        return std.mem.eql(u8, symbol, "and") or
-            std.mem.eql(u8, symbol, "or") or
-            std.mem.eql(u8, symbol, "not");
-    }
-
-    fn isBitwiseOperator(_: *SimpleCCompiler, symbol: []const u8) bool {
-        return std.mem.eql(u8, symbol, "bit-and") or
-            std.mem.eql(u8, symbol, "bit-or") or
-            std.mem.eql(u8, symbol, "bit-xor") or
-            std.mem.eql(u8, symbol, "bit-not") or
-            std.mem.eql(u8, symbol, "bit-shl") or
-            std.mem.eql(u8, symbol, "bit-shr");
-    }
-
     // Helper to emit array declarations which have special C syntax: type name[size]
     // For multi-dimensional arrays, we need to emit: type name[size1][size2]...
     fn emitArrayDecl(self: *SimpleCCompiler, writer: anytype, var_name: []const u8, var_type: Type, includes: *IncludeFlags) Error!void {
@@ -2901,94 +2269,6 @@ pub const SimpleCCompiler = struct {
         } else {
             const c_type = try self.cTypeFor(var_type, includes);
             try writer.print("{s} {s}", .{ c_type, var_name });
-        }
-    }
-
-    // Helper function to write a type expression as C type syntax for casting
-    // Handles: Int, U32, (Pointer T), (-> [Args...] ReturnType), etc.
-    fn writeTypeAsCast(self: *SimpleCCompiler, writer: anytype, type_expr: *Value) Error!void {
-        if (type_expr.isSymbol()) {
-            const type_name = type_expr.symbol;
-            const c_type = if (std.mem.eql(u8, type_name, "Int"))
-                int_type_name
-            else if (std.mem.eql(u8, type_name, "Float"))
-                "double"
-            else if (std.mem.eql(u8, type_name, "U8"))
-                "uint8_t"
-            else if (std.mem.eql(u8, type_name, "U16"))
-                "uint16_t"
-            else if (std.mem.eql(u8, type_name, "U32"))
-                "uint32_t"
-            else if (std.mem.eql(u8, type_name, "U64"))
-                "uint64_t"
-            else if (std.mem.eql(u8, type_name, "I8"))
-                "int8_t"
-            else if (std.mem.eql(u8, type_name, "I16"))
-                "int16_t"
-            else if (std.mem.eql(u8, type_name, "I32"))
-                "int32_t"
-            else if (std.mem.eql(u8, type_name, "I64"))
-                "int64_t"
-            else if (std.mem.eql(u8, type_name, "F32"))
-                "float"
-            else if (std.mem.eql(u8, type_name, "F64"))
-                "double"
-            else if (std.mem.eql(u8, type_name, "Bool"))
-                "bool"
-            else if (std.mem.eql(u8, type_name, "Nil"))
-                "void"
-            else
-                type_name; // Custom type name
-            try writer.print("{s}", .{c_type});
-        } else if (type_expr.isList()) {
-            var type_iter = type_expr.list.iterator();
-            const first = type_iter.next() orelse return Error.UnsupportedType;
-            if (!first.isSymbol()) return Error.UnsupportedType;
-
-            if (std.mem.eql(u8, first.symbol, "Pointer")) {
-                // (Pointer T) becomes T*
-                const pointee = type_iter.next() orelse return Error.UnsupportedType;
-
-                // Special case: (Pointer (-> ...)) needs parentheses: RetType (*)(Args...)
-                if (pointee.isList()) {
-                    var pointee_iter = pointee.list.iterator();
-                    const pointee_first = pointee_iter.next() orelse return Error.UnsupportedType;
-                    if (pointee_first.isSymbol() and std.mem.eql(u8, pointee_first.symbol, "->")) {
-                        // Function pointer: (Pointer (-> [Args...] ReturnType))
-                        // C syntax: ReturnType (*)(ArgType1, ArgType2, ...)
-
-                        const args_vec = pointee_iter.next() orelse return Error.UnsupportedType;
-                        const ret_type = pointee_iter.next() orelse return Error.UnsupportedType;
-
-                        if (!args_vec.isVector()) return Error.UnsupportedType;
-
-                        // Write return type
-                        try self.writeTypeAsCast(writer, ret_type);
-                        try writer.print(" (*)(", .{});
-
-                        // Write parameter types
-                        const args = args_vec.vector;
-                        for (0..args.len()) |i| {
-                            if (i > 0) try writer.print(", ", .{});
-                            try self.writeTypeAsCast(writer, args.at(i));
-                        }
-                        try writer.print(")", .{});
-                        return;
-                    }
-                }
-
-                // Regular pointer: T*
-                try self.writeTypeAsCast(writer, pointee);
-                try writer.print("*", .{});
-            } else if (std.mem.eql(u8, first.symbol, "->")) {
-                // Bare function type (not pointer): (-> [Args...] ReturnType)
-                // This is unusual in casts but handle it
-                return Error.UnsupportedType;
-            } else {
-                return Error.UnsupportedType;
-            }
-        } else {
-            return Error.UnsupportedType;
         }
     }
 
@@ -3097,22 +2377,6 @@ pub const SimpleCCompiler = struct {
             .extern_type => |et| et.name,
             .extern_function => Error.UnsupportedType, // Can't have values of extern function type directly
             .array => Error.UnsupportedType, // Arrays need special declaration syntax, handled separately
-            else => Error.UnsupportedType,
-        };
-    }
-
-    fn printfFormatFor(self: *SimpleCCompiler, type_info: Type) Error![]const u8 {
-        _ = self;
-        return switch (type_info) {
-            .int, .i64 => int_printf_format,
-            .i32, .i16, .i8 => "%d",
-            .float, .f64, .f32 => "%f",
-            .u8, .u16, .u32 => "%u",
-            .u64 => "%llu",
-            .usize => "%zu",
-            .bool => "%d",
-            .string => "%s",
-            .enum_type => "%d", // Enums are represented as ints in C
             else => Error.UnsupportedType,
         };
     }
