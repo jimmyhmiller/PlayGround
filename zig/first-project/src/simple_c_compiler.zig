@@ -2530,6 +2530,49 @@ pub fn main() !void {
 
     if (!run_flag) return;
 
+    // Step 1: Compile to .o file
+    const obj_name = try std.fmt.allocPrint(allocator, "{s}.o", .{stem});
+    defer allocator.free(obj_name);
+
+    const obj_path = if (dir_opt) |dir_path|
+        try std.fs.path.join(allocator, &.{ dir_path, obj_name })
+    else
+        try allocator.dupe(u8, obj_name);
+    defer allocator.free(obj_path);
+
+    var compile_args = std.ArrayList([]const u8){};
+    defer compile_args.deinit(allocator);
+    try compile_args.appendSlice(allocator, &.{ "zig", "cc", "-c", c_path, "-o", obj_path });
+
+    // Add compiler flags for compilation
+    for (compiler.compiler_flags.items) |flag| {
+        try compile_args.append(allocator, flag);
+    }
+
+    var compile_child = std.process.Child.init(compile_args.items, allocator);
+    compile_child.stdin_behavior = .Inherit;
+    compile_child.stdout_behavior = .Inherit;
+    compile_child.stderr_behavior = .Inherit;
+    try compile_child.spawn();
+    const compile_term = try compile_child.wait();
+    switch (compile_term) {
+        .Exited => |code| {
+            if (code != 0) {
+                std.debug.print("zig cc compilation failed with code {d}\n", .{code});
+                return;
+            }
+        },
+        else => {
+            std.debug.print("zig cc compilation failed\n", .{});
+            return;
+        },
+    }
+
+    const obj_real_path = try std.fs.cwd().realpathAlloc(allocator, obj_path);
+    defer allocator.free(obj_real_path);
+    std.debug.print("Compiled object file: {s}\n", .{obj_real_path});
+
+    // Step 2: Link to final binary
     if (bundle_flag) {
         const bundle_name = try std.fmt.allocPrint(allocator, "{s}.bundle", .{stem});
         defer allocator.free(bundle_name);
@@ -2540,37 +2583,37 @@ pub fn main() !void {
             try allocator.dupe(u8, bundle_name);
         defer allocator.free(bundle_path);
 
-        // Build command with linked libraries
-        var cc_args = std.ArrayList([]const u8){};
-        defer cc_args.deinit(allocator);
-        try cc_args.appendSlice(allocator, &.{ "zig", "cc", "-dynamiclib", c_path, "-o", bundle_path });
+        // Link command with linked libraries
+        var link_args = std.ArrayList([]const u8){};
+        defer link_args.deinit(allocator);
+        try link_args.appendSlice(allocator, &.{ "zig", "cc", "-dynamiclib", obj_path, "-o", bundle_path });
 
         // Add compiler flags
         for (compiler.compiler_flags.items) |flag| {
-            try cc_args.append(allocator, flag);
+            try link_args.append(allocator, flag);
         }
 
         // Add linked libraries
         for (compiler.linked_libraries.items) |lib| {
             const lib_arg = try std.fmt.allocPrint(allocator, "-l{s}", .{lib});
-            try cc_args.append(allocator, lib_arg);
+            try link_args.append(allocator, lib_arg);
         }
 
-        var cc_child = std.process.Child.init(cc_args.items, allocator);
-        cc_child.stdin_behavior = .Inherit;
-        cc_child.stdout_behavior = .Inherit;
-        cc_child.stderr_behavior = .Inherit;
-        try cc_child.spawn();
-        const cc_term = try cc_child.wait();
-        switch (cc_term) {
+        var link_child = std.process.Child.init(link_args.items, allocator);
+        link_child.stdin_behavior = .Inherit;
+        link_child.stdout_behavior = .Inherit;
+        link_child.stderr_behavior = .Inherit;
+        try link_child.spawn();
+        const link_term = try link_child.wait();
+        switch (link_term) {
             .Exited => |code| {
                 if (code != 0) {
-                    std.debug.print("zig cc exited with code {d}\n", .{code});
+                    std.debug.print("zig cc linking failed with code {d}\n", .{code});
                     return;
                 }
             },
             else => {
-                std.debug.print("zig cc failed to build the bundle\n", .{});
+                std.debug.print("zig cc failed to link the bundle\n", .{});
                 return;
             },
         }
@@ -2606,37 +2649,37 @@ pub fn main() !void {
         try allocator.dupe(u8, exe_name);
     defer allocator.free(exe_path);
 
-    // Build command with linked libraries
-    var cc_args = std.ArrayList([]const u8){};
-    defer cc_args.deinit(allocator);
-    try cc_args.appendSlice(allocator, &.{ "zig", "cc", c_path, "-o", exe_path });
+    // Link command with linked libraries
+    var link_args = std.ArrayList([]const u8){};
+    defer link_args.deinit(allocator);
+    try link_args.appendSlice(allocator, &.{ "zig", "cc", obj_path, "-o", exe_path });
 
     // Add compiler flags
     for (compiler.compiler_flags.items) |flag| {
-        try cc_args.append(allocator, flag);
+        try link_args.append(allocator, flag);
     }
 
     // Add linked libraries
     for (compiler.linked_libraries.items) |lib| {
         const lib_arg = try std.fmt.allocPrint(allocator, "-l{s}", .{lib});
-        try cc_args.append(allocator, lib_arg);
+        try link_args.append(allocator, lib_arg);
     }
 
-    var cc_child = std.process.Child.init(cc_args.items, allocator);
-    cc_child.stdin_behavior = .Inherit;
-    cc_child.stdout_behavior = .Inherit;
-    cc_child.stderr_behavior = .Inherit;
-    try cc_child.spawn();
-    const cc_term = try cc_child.wait();
-    switch (cc_term) {
+    var link_child = std.process.Child.init(link_args.items, allocator);
+    link_child.stdin_behavior = .Inherit;
+    link_child.stdout_behavior = .Inherit;
+    link_child.stderr_behavior = .Inherit;
+    try link_child.spawn();
+    const link_term = try link_child.wait();
+    switch (link_term) {
         .Exited => |code| {
             if (code != 0) {
-                std.debug.print("zig cc exited with code {d}\n", .{code});
+                std.debug.print("zig cc linking failed with code {d}\n", .{code});
                 return;
             }
         },
         else => {
-            std.debug.print("zig cc failed to build the program\n", .{});
+            std.debug.print("zig cc failed to link the program\n", .{});
             return;
         },
     }

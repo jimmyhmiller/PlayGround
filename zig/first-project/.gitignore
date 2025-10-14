@@ -7,5 +7,16 @@ scratch/
 simple_c_compiler
 repl
 
+# Compiled object files
+*.o
+
+# Bundle files
+*.bundle
+
+# Integration test artifacts
+tests/integration/*.c
+tests/integration/*
+!tests/integration/*.lisp
+
 # Emacs
 .example.lisp.~undo-tree~
