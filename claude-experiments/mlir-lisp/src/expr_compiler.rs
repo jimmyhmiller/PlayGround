@@ -1,6 +1,7 @@
 use crate::parser::Value;
 use crate::emitter::Emitter;
 use crate::function_registry::FunctionRegistry;
+use crate::dialect_registry::DialectRegistry;
 use melior::ir::Block;
 use melior::ir::operation::OperationLike;
 
@@ -16,6 +17,7 @@ impl ExprCompiler {
         block: &Block<'c>,
         expr: &Value,
         registry: &FunctionRegistry<'c>,
+        dialect_registry: Option<&DialectRegistry>,
     ) -> Result<String, String> {
         match expr {
             // Symbol - reference to existing value (function argument, etc.)
@@ -51,11 +53,16 @@ impl ExprCompiler {
             // List - function call or special form
             Value::List(elements) if !elements.is_empty() => {
                 if let Value::Symbol(op) = &elements[0] {
+                    // Check if this is an explicit dialect operation (contains '.')
+                    if op.contains('.') {
+                        return Self::compile_dialect_op(emitter, block, op, &elements[1..], registry, dialect_registry);
+                    }
+
                     match op.as_str() {
-                        "if" => Self::compile_if(emitter, block, &elements[1..], registry),
-                        "+" | "-" | "*" | "/" => Self::compile_binop(emitter, block, op, &elements[1..], registry),
-                        "<" | "<=" | ">" | ">=" | "=" => Self::compile_comparison(emitter, block, op, &elements[1..], registry),
-                        _ => Self::compile_call(emitter, block, op, &elements[1..], registry),
+                        "if" => Self::compile_if(emitter, block, &elements[1..], registry, dialect_registry),
+                        "+" | "-" | "*" | "/" => Self::compile_binop(emitter, block, op, &elements[1..], registry, dialect_registry),
+                        "<" | "<=" | ">" | ">=" | "=" => Self::compile_comparison(emitter, block, op, &elements[1..], registry, dialect_registry),
+                        _ => Self::compile_call(emitter, block, op, &elements[1..], registry, dialect_registry),
                     }
                 } else {
                     Err("Expression must start with a symbol".to_string())
@@ -73,22 +80,35 @@ impl ExprCompiler {
         op: &str,
         args: &[Value],
         registry: &FunctionRegistry<'c>,
+        dialect_registry: Option<&DialectRegistry>,
     ) -> Result<String, String> {
         if args.len() != 2 {
             return Err(format!("{} requires exactly 2 arguments", op));
         }
 
         // Recursively compile operands
-        let left = Self::compile_expr(emitter, block, &args[0], registry)?;
-        let right = Self::compile_expr(emitter, block, &args[1], registry)?;
+        let left = Self::compile_expr(emitter, block, &args[0], registry, dialect_registry)?;
+        let right = Self::compile_expr(emitter, block, &args[1], registry, dialect_registry)?;
 
-        // Emit operation
-        let mlir_op = match op {
-            "+" => "arith.addi",
-            "-" => "arith.subi",
-            "*" => "arith.muli",
-            "/" => "arith.divsi",
-            _ => return Err(format!("Unknown binary op: {}", op)),
+        // Check if there's a registered dialect operation for this
+        let mlir_op = if let Some(dreg) = dialect_registry {
+            // Look for a dialect that has an operation for this operator
+            // For now, use arith as default, but this could be configurable
+            match op {
+                "+" => Self::find_dialect_op(dreg, "add").unwrap_or("arith.addi"),
+                "-" => Self::find_dialect_op(dreg, "sub").unwrap_or("arith.subi"),
+                "*" => Self::find_dialect_op(dreg, "mul").unwrap_or("arith.muli"),
+                "/" => Self::find_dialect_op(dreg, "div").unwrap_or("arith.divsi"),
+                _ => return Err(format!("Unknown binary op: {}", op)),
+            }
+        } else {
+            match op {
+                "+" => "arith.addi",
+                "-" => "arith.subi",
+                "*" => "arith.muli",
+                "/" => "arith.divsi",
+                _ => return Err(format!("Unknown binary op: {}", op)),
+            }
         };
 
         let op_form = vec![
@@ -116,14 +136,15 @@ impl ExprCompiler {
         op: &str,
         args: &[Value],
         registry: &FunctionRegistry<'c>,
+        dialect_registry: Option<&DialectRegistry>,
     ) -> Result<String, String> {
         if args.len() != 2 {
             return Err(format!("{} requires exactly 2 arguments", op));
         }
 
         // Recursively compile operands
-        let left = Self::compile_expr(emitter, block, &args[0], registry)?;
-        let right = Self::compile_expr(emitter, block, &args[1], registry)?;
+        let left = Self::compile_expr(emitter, block, &args[0], registry, dialect_registry)?;
+        let right = Self::compile_expr(emitter, block, &args[1], registry, dialect_registry)?;
 
         // Map to MLIR predicate
         let predicate = match op {
@@ -165,6 +186,7 @@ impl ExprCompiler {
         func_name: &str,
         args: &[Value],
         registry: &FunctionRegistry<'c>,
+        dialect_registry: Option<&DialectRegistry>,
     ) -> Result<String, String> {
         // Check if function is declared
         if !registry.is_declared(func_name) {
@@ -180,7 +202,7 @@ impl ExprCompiler {
         // Recursively compile arguments
         let mut arg_names = Vec::new();
         for arg in args {
-            arg_names.push(Value::Symbol(Self::compile_expr(emitter, block, arg, registry)?));
+            arg_names.push(Value::Symbol(Self::compile_expr(emitter, block, arg, registry, dialect_registry)?));
         }
 
         let op_form = vec![
@@ -210,6 +232,7 @@ impl ExprCompiler {
         block: &Block<'c>,
         args: &[Value],
         registry: &FunctionRegistry<'c>,
+        dialect_registry: Option<&DialectRegistry>,
     ) -> Result<String, String> {
         use melior::ir::{Region, Block as MeliorBlock, Location, operation::OperationBuilder, RegionLike, BlockLike};
 
@@ -218,7 +241,7 @@ impl ExprCompiler {
         }
 
         // Compile condition (should yield i1)
-        let cond_name = Self::compile_expr(emitter, block, &args[0], registry)?;
+        let cond_name = Self::compile_expr(emitter, block, &args[0], registry, dialect_registry)?;
         let cond_val = emitter.get_value(&cond_name)
             .ok_or(format!("Cannot find condition value: {}", cond_name))?;
 
@@ -230,7 +253,7 @@ impl ExprCompiler {
             .ok_or("Failed to get then block")?;
 
         // Compile then expression in its block
-        let then_result_name = Self::compile_expr(emitter, &then_block_ref, &args[1], registry)?;
+        let then_result_name = Self::compile_expr(emitter, &then_block_ref, &args[1], registry, dialect_registry)?;
         let then_result = emitter.get_value(&then_result_name)
             .ok_or(format!("Cannot find then result: {}", then_result_name))?;
 
@@ -249,7 +272,7 @@ impl ExprCompiler {
             .ok_or("Failed to get else block")?;
 
         // Compile else expression in its block
-        let else_result_name = Self::compile_expr(emitter, &else_block_ref, &args[2], registry)?;
+        let else_result_name = Self::compile_expr(emitter, &else_block_ref, &args[2], registry, dialect_registry)?;
         let else_result = emitter.get_value(&else_result_name)
             .ok_or(format!("Cannot find else result: {}", else_result_name))?;
 
@@ -304,5 +327,115 @@ impl ExprCompiler {
             // Default to i32
             "i32".to_string()
         }
+    }
+
+    /// Find a dialect operation by short name (e.g., "add" -> "calc.add")
+    /// Returns the full operation name if found in any registered dialect
+    fn find_dialect_op(dialect_registry: &DialectRegistry, op_name: &str) -> Option<&'static str> {
+        // For now, check for the "calc" dialect specifically
+        // In the future, this could be configurable
+        if let Some(dialect) = dialect_registry.get_dialect("calc") {
+            for op in &dialect.operations {
+                if op.name == op_name {
+                    // Return a statically allocated string
+                    // This is a bit hacky, but works for our purposes
+                    return match op_name {
+                        "add" => Some("calc.add"),
+                        "sub" => Some("calc.sub"),
+                        "mul" => Some("calc.mul"),
+                        "div" => Some("calc.div"),
+                        "constant" => Some("calc.constant"),
+                        _ => None,
+                    };
+                }
+            }
+        }
+        None
+    }
+
+    /// Compile an explicit dialect operation like (calc.add x y)
+    fn compile_dialect_op<'c>(
+        emitter: &mut Emitter<'c>,
+        block: &Block<'c>,
+        op_name: &str,
+        args: &[Value],
+        registry: &FunctionRegistry<'c>,
+        dialect_registry: Option<&DialectRegistry>,
+    ) -> Result<String, String> {
+        // Split operation name to get dialect and op
+        let parts: Vec<&str> = op_name.split('.').collect();
+        if parts.len() != 2 {
+            return Err(format!("Invalid dialect operation: {}", op_name));
+        }
+
+        let dialect_name = parts[0];
+        let short_op_name = parts[1];
+
+        // Look up the operation definition in the dialect registry
+        if let Some(dreg) = dialect_registry {
+            if let Some(dialect) = dreg.get_dialect(dialect_name) {
+                for op_def in &dialect.operations {
+                    if op_def.name == short_op_name {
+                        // Handle special case for constant operations
+                        if short_op_name == "constant" {
+                            if args.len() != 1 {
+                                return Err(format!("{} requires exactly 1 argument", op_name));
+                            }
+
+                            // Extract the constant value
+                            let val = match &args[0] {
+                                Value::Integer(n) => *n,
+                                _ => return Err("Constant requires integer argument".to_string()),
+                            };
+
+                            let op_form = vec![
+                                Value::Symbol(op_name.to_string()),
+                                Value::Keyword("attrs".to_string()),
+                                Value::Map(vec![(
+                                    Value::Keyword("value".to_string()),
+                                    Value::Integer(val),
+                                )]),
+                                Value::Keyword("results".to_string()),
+                                Value::Vector(vec![Value::Symbol("i32".to_string())]),
+                            ];
+
+                            if let Some(name) = emitter.emit_op_form_public(block, &op_form)? {
+                                return Ok(name);
+                            } else {
+                                return Err(format!("Failed to emit {}", op_name));
+                            }
+                        }
+
+                        // Handle binary operations (add, mul, etc.)
+                        if args.len() != 2 {
+                            return Err(format!("{} requires exactly 2 arguments", op_name));
+                        }
+
+                        // Recursively compile operands
+                        let left = Self::compile_expr(emitter, block, &args[0], registry, dialect_registry)?;
+                        let right = Self::compile_expr(emitter, block, &args[1], registry, dialect_registry)?;
+
+                        let op_form = vec![
+                            Value::Symbol(op_name.to_string()),
+                            Value::Keyword("operands".to_string()),
+                            Value::Vector(vec![
+                                Value::Symbol(left),
+                                Value::Symbol(right),
+                            ]),
+                            Value::Keyword("results".to_string()),
+                            Value::Vector(vec![Value::Symbol("i32".to_string())]),
+                        ];
+
+                        if let Some(name) = emitter.emit_op_form_public(block, &op_form)? {
+                            return Ok(name);
+                        } else {
+                            return Err(format!("Failed to emit {}", op_name));
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(format!("Unknown dialect operation: {}", op_name))
     }
 }

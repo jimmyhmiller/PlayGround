@@ -50,6 +50,7 @@ fn symbol(input: &str) -> IResult<&str, Value> {
             || c == '%'
             || c == '@'
             || c == '^'
+            || c == '$'
     };
 
     let rest_char = |c: char| {
@@ -164,7 +165,8 @@ fn parse_map(input: &str) -> IResult<&str, Value> {
 
 // Parse multiple forms
 pub fn parse(input: &str) -> IResult<&str, Vec<Value>> {
-    many0(preceded(ws, value))(input)
+    use nom::sequence::terminated;
+    terminated(many0(value), ws)(input)
 }
 
 #[cfg(test)]

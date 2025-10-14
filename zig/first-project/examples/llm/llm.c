@@ -68,6 +68,7 @@ typedef struct {
     void (*gelu_forward)(float*, float*, int32_t);
     void (*attention_forward)(float*, float*, float*, float*, int32_t, int32_t, int32_t, int32_t);
     void (*softmax_forward)(float*, float*, int32_t, int32_t, int32_t, int32_t);
+    void (*gpt2_forward)(int32_t*, GPT2Config, ParameterTensors, ActivationTensors, int32_t, int32_t);
     int32_t (*test_encoder_forward)();
     int32_t (*test_layernorm_forward)();
     int32_t (*test_matmul_forward)();
@@ -87,6 +88,7 @@ static void residual_forward(float*, float*, float*, int32_t);
 static void gelu_forward(float*, float*, int32_t);
 static void attention_forward(float*, float*, float*, float*, int32_t, int32_t, int32_t, int32_t);
 static void softmax_forward(float*, float*, int32_t, int32_t, int32_t, int32_t);
+static void gpt2_forward(int32_t*, GPT2Config, ParameterTensors, ActivationTensors, int32_t, int32_t);
 static int32_t test_encoder_forward();
 static int32_t test_layernorm_forward();
 static int32_t test_matmul_forward();
@@ -104,6 +106,7 @@ void init_namespace_user(Namespace_user* ns) {
     ns->gelu_forward = &gelu_forward;
     ns->attention_forward = &attention_forward;
     ns->softmax_forward = &softmax_forward;
+    ns->gpt2_forward = &gpt2_forward;
     ns->test_encoder_forward = &test_encoder_forward;
     ns->test_layernorm_forward = &test_layernorm_forward;
     ns->test_matmul_forward = &test_matmul_forward;
@@ -134,6 +137,9 @@ static void attention_forward(float* out, float* preatt, float* att, float* inp,
 }
 static void softmax_forward(float* probs, float* logits, int32_t B, int32_t T, int32_t V, int32_t Vp) {
     ({ int32_t b = 0; ({ while ((b < B)) { ({ int32_t t = 0; ({ while ((t < T)) { ({ int32_t logits_bt_offset = (((b * T) * Vp) + (t * Vp)); int32_t probs_bt_offset = (((b * T) * Vp) + (t * Vp)); float maxval = (0 - 10000); int32_t i = 0; ({ while ((i < V)) { ({ float val = logits[(logits_bt_offset + i)]; ({ if ((val > maxval)) { maxval = val; } else { } }); }); i = (i + 1); } }); ({ float sum = 0; i = 0; ({ while ((i < V)) { ({ float expv = expf((logits[(logits_bt_offset + i)] - maxval)); (probs[(probs_bt_offset + i)] = expv); sum = (sum + expv); }); i = (i + 1); } }); i = 0; ({ while ((i < V)) { (probs[(probs_bt_offset + i)] = (probs[(probs_bt_offset + i)] / sum)); i = (i + 1); } }); i = V; ({ while ((i < Vp)) { (probs[(probs_bt_offset + i)] = 0); i = (i + 1); } }); }); }); t = (t + 1); } }); }); b = (b + 1); } }); });
+}
+static void gpt2_forward(int32_t* inputs, GPT2Config config, ParameterTensors params, ActivationTensors acts, int32_t B, int32_t T) {
+    ({ int32_t C = config.channels; int32_t L = config.num_layers; int32_t NH = config.num_heads; int32_t V = config.vocab_size; int32_t Vp = config.padded_vocab_size; g_user.encoder_forward(acts.encoded, inputs, params.wte, params.wpe, B, T, C); ({ int32_t l = 0; ({ while ((l < L)) { ({ int32_t BTC = ((B * T) * C); int32_t BT = (B * T); float* residual = (float*)((l == 0) ? acts.encoded : (acts.residual3 + (((l - 1) * BTC) * 1))); float* l_ln1w = (float*)(params.ln1w + (l * C)); float* l_ln1b = (float*)(params.ln1b + (l * C)); float* l_qkvw = (float*)(params.qkvw + (((l * 3) * C) * C)); float* l_qkvb = (float*)(params.qkvb + ((l * 3) * C)); float* l_attprojw = (float*)(params.attprojw + ((l * C) * C)); float* l_attprojb = (float*)(params.attprojb + (l * C)); float* l_ln2w = (float*)(params.ln2w + (l * C)); float* l_ln2b = (float*)(params.ln2b + (l * C)); float* l_fcw = (float*)(params.fcw + (((l * 4) * C) * C)); float* l_fcb = (float*)(params.fcb + ((l * 4) * C)); float* l_fcprojw = (float*)(params.fcprojw + ((l * C) * (4 * C))); float* l_fcprojb = (float*)(params.fcprojb + (l * C)); float* l_ln1 = (float*)(acts.ln1 + (l * BTC)); float* l_ln1_mean = (float*)(acts.ln1_mean + (l * BT)); float* l_ln1_rstd = (float*)(acts.ln1_rstd + (l * BT)); float* l_qkv = (float*)(acts.qkv + (((l * B) * T) * (3 * C))); float* l_atty = (float*)(acts.atty + (l * BTC)); float* l_preatt = (float*)(acts.preatt + ((((l * B) * NH) * T) * T)); float* l_att = (float*)(acts.att + ((((l * B) * NH) * T) * T)); float* l_attproj = (float*)(acts.attproj + (l * BTC)); float* l_residual2 = (float*)(acts.residual2 + (l * BTC)); float* l_ln2 = (float*)(acts.ln2 + (l * BTC)); float* l_ln2_mean = (float*)(acts.ln2_mean + (l * BT)); float* l_ln2_rstd = (float*)(acts.ln2_rstd + (l * BT)); float* l_fch = (float*)(acts.fch + (((l * B) * T) * (4 * C))); float* l_fch_gelu = (float*)(acts.fch_gelu + (((l * B) * T) * (4 * C))); float* l_fcproj = (float*)(acts.fcproj + (l * BTC)); float* l_residual3 = (float*)(acts.residual3 + (l * BTC)); g_user.layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B, T, C); g_user.matmul_forward_naive(l_qkv, l_ln1, l_qkvw, l_qkvb, B, T, C, (3 * C)); g_user.attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH); g_user.matmul_forward_naive(l_attproj, l_atty, l_attprojw, l_attprojb, B, T, C, C); g_user.residual_forward(l_residual2, residual, l_attproj, BTC); g_user.layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B, T, C); g_user.matmul_forward_naive(l_fch, l_ln2, l_fcw, l_fcb, B, T, C, (4 * C)); g_user.gelu_forward(l_fch_gelu, l_fch, ((B * T) * (4 * C))); g_user.matmul_forward_naive(l_fcproj, l_fch_gelu, l_fcprojw, l_fcprojb, B, T, (4 * C), C); g_user.residual_forward(l_residual3, l_residual2, l_fcproj, BTC); }); l = (l + 1); } }); }); ({ float* residual = (float*)(acts.residual3 + ((((L - 1) * B) * T) * C)); g_user.layernorm_forward(acts.lnf, acts.lnf_mean, acts.lnf_rstd, residual, params.lnfw, params.lnfb, B, T, C); g_user.matmul_forward_naive(acts.logits, acts.lnf, params.wte, NULL, B, T, C, Vp); g_user.softmax_forward(acts.probs, acts.logits, B, T, V, Vp); }); });
 }
 static int32_t test_encoder_forward() {
     printf("Testing encoder_forward...\n");

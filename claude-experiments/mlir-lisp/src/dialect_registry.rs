@@ -332,6 +332,17 @@ impl DialectRegistry {
         self.patterns.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Get all patterns as a vector
+    pub fn get_all_patterns(&self) -> Vec<&PdlPattern> {
+        self.patterns.values().collect()
+    }
+
+    /// Find an operation in a dialect
+    pub fn find_operation(&self, dialect_name: &str, op_name: &str) -> Option<&IrdlOperation> {
+        self.dialects.get(dialect_name)
+            .and_then(|d| d.operations.iter().find(|op| op.name == op_name))
+    }
+
     /// Process expanded forms and register them
     pub fn process_expanded_form(&mut self, expanded: &Value) -> Result<(), String> {
         if let Value::List(elements) = expanded {

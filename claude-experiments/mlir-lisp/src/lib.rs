@@ -10,3 +10,7 @@ pub mod lisp_lowering;
 pub mod transform_dialect;
 pub mod dialect_registry;
 pub mod self_contained;
+pub mod pattern_executor;
+pub mod transform_interpreter;
+pub mod irdl_emitter;
+pub mod transform_emitter;
