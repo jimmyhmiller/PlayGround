@@ -1044,6 +1044,22 @@ pub const SimpleCCompiler = struct {
             // Generate init function signature
             try init_writer.print("void init_namespace_{s}(Namespace_{s}* ns) {{\n", .{ sanitized_ns, sanitized_ns });
 
+            // For bundles, initialize all transitive dependencies first
+            // This ensures extern namespace globals are properly set up
+            if (target == .bundle) {
+                var visited_init = std.StringHashMap(void).init(self.allocator.*);
+                defer visited_init.deinit();
+                var sorted_init_deps = std.ArrayList([]const u8){};
+                defer sorted_init_deps.deinit(self.allocator.*);
+                try self.collectTransitiveDependencies(&visited_init, &sorted_init_deps);
+
+                for (sorted_init_deps.items) |dep_ns_name| {
+                    const sanitized_dep = try self.sanitizeIdentifier(dep_ns_name);
+                    defer self.allocator.*.free(sanitized_dep);
+                    try init_writer.print("    init_namespace_{s}(&g_{s});\n", .{ sanitized_dep, sanitized_dep });
+                }
+            }
+
             // Find the index of the first non-def expression
             // Defs before this index can be initialized in init()
             // Defs after this index must be initialized in main() to preserve source order
@@ -1332,10 +1348,11 @@ pub const SimpleCCompiler = struct {
                 }
             },
             .bundle => {
+                // For bundles, lisp_main just calls the init function
+                // All initialization (including body code) is in init now
                 try output.appendSlice(self.allocator.*, "void lisp_main(void) {\n");
 
                 // Initialize all required namespaces first (in topological order)
-                // This ensures that transitive dependencies are initialized before they're used
                 var visited_bundle = std.StringHashMap(void).init(self.allocator.*);
                 defer visited_bundle.deinit();
                 var sorted_deps = std.ArrayList([]const u8){};
@@ -1348,15 +1365,13 @@ pub const SimpleCCompiler = struct {
                     try output.print(self.allocator.*, "    init_namespace_{s}(&g_{s});\n", .{ sanitized, sanitized });
                 }
 
-                // Initialize this namespace if present
+                // Initialize this namespace (which now does all initialization including body)
                 if (namespace_defs.items.len > 0) {
                     const sanitized_ns = try self.sanitizeIdentifier(ns_name);
                     defer self.allocator.*.free(sanitized_ns);
                     try output.print(self.allocator.*, "    init_namespace_{s}(&g_{s});\n", .{ sanitized_ns, sanitized_ns });
                 }
-                if (body.items.len > 0) {
-                    try output.appendSlice(self.allocator.*, body.items);
-                }
+
                 try output.appendSlice(self.allocator.*, "}\n");
             },
         }
