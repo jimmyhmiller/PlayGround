@@ -6,6 +6,7 @@ const Value = @import("value.zig").Value;
 const BidirectionalTypeChecker = TypeChecker.BidirectionalTypeChecker;
 const Type = TypeChecker.Type;
 const TypedValue = TypeChecker.TypedValue;
+const TypeCheckError = TypeChecker.TypeCheckError;
 
 // ============================================================================
 // POSITIVE TESTS - Basic Types
@@ -290,6 +291,52 @@ test "arithmetic - division" {
     // Division returns numeric type (may be float depending on implementation)
     const result_type = typed.getType();
     try std.testing.expect(result_type == .int or result_type == .float);
+}
+
+test "arithmetic - integer division (div)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    // Integer division should preserve integer type
+    const expr = try reader.readString("(div 20 4)");
+    const typed = try checker.synthesizeTyped(expr);
+    const result_type = typed.getType();
+    try std.testing.expect(result_type == .int or result_type == .u32 or result_type == .i32);
+}
+
+test "arithmetic - integer division with typed integers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    // Test with explicit integer type - result should stay integer
+    const expr1 = try reader.readString("(div 20 4)");
+    const typed1 = try checker.synthesizeTyped(expr1);
+    try std.testing.expect(typed1.getType() == .int);
+}
+
+test "arithmetic - div rejects floats" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    // div should reject float operands
+    const expr = try reader.readString("(div 20.0 4.0)");
+    const result = checker.synthesizeTyped(expr);
+    try std.testing.expectError(TypeCheckError.TypeMismatch, result);
 }
 
 test "arithmetic - modulo" {

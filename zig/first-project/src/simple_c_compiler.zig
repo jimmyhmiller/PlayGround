@@ -69,6 +69,7 @@ pub const SimpleCCompiler = struct {
         subtract,
         multiply,
         divide,
+        div_op, // Integer division
         modulo,
 
         // Comparison operators
@@ -139,6 +140,7 @@ pub const SimpleCCompiler = struct {
         if (std.mem.eql(u8, op, "-")) return .subtract;
         if (std.mem.eql(u8, op, "*")) return .multiply;
         if (std.mem.eql(u8, op, "/")) return .divide;
+        if (std.mem.eql(u8, op, "div")) return .div_op;
         if (std.mem.eql(u8, op, "%")) return .modulo;
 
         // Comparison
@@ -2312,7 +2314,7 @@ pub const SimpleCCompiler = struct {
                 try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
                 return true;
             },
-            .add, .subtract, .multiply, .divide, .modulo => {
+            .add, .subtract, .multiply, .divide, .div_op, .modulo => {
                 if (l.elements.len < 2) return Error.UnsupportedExpression;
                 const op_str = l.elements[0].symbol.name;
 
@@ -2327,7 +2329,9 @@ pub const SimpleCCompiler = struct {
                 try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
                 var i: usize = 2;
                 while (i < l.elements.len) : (i += 1) {
-                    try writer.print(" {s} ", .{op_str});
+                    // Use / for div operator in C (it's integer division for int types)
+                    const c_op = if (form == .div_op) "/" else op_str;
+                    try writer.print(" {s} ", .{c_op});
                     try self.writeExpressionTyped(writer, l.elements[i], ns_ctx, includes);
                 }
                 try writer.print(")", .{});
