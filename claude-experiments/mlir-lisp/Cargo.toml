@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "mlir-lisp"
-path = "src/main.rs"
+path = "src/bin/mlir-lisp.rs"
 
 [[example]]
 name = "custom_dialect_example"
@@ -47,6 +47,10 @@ path = "examples/self_contained_demo.rs"
 name = "modular_demo"
 path = "examples/modular_demo.rs"
 
+[[example]]
+name = "real_end_to_end"
+path = "examples/real_end_to_end.rs"
+
 [dependencies]
-melior = "0.25"
+melior = { git = "https://github.com/jimmyhmiller/melior.git" }
 nom = "7.1"

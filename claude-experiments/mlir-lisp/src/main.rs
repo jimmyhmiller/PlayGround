@@ -1,5 +1,14 @@
-use mlir_lisp::{parser, mlir_context::MlirContext, emitter::Emitter, macro_expander::MacroExpander, expr_compiler::ExprCompiler, function_registry::FunctionRegistry};
+use mlir_lisp::{
+    parser,
+    mlir_context::MlirContext,
+    emitter::Emitter,
+    macro_expander::MacroExpander,
+    expr_compiler::ExprCompiler,
+    function_registry::FunctionRegistry,
+    self_contained::SelfContainedCompiler,
+};
 use melior::{
+    Context,
     pass::PassManager,
     ExecutionEngine,
     ir::r#type::Type,
@@ -229,7 +238,7 @@ fn emit_expr_function<'c>(
     }
 
     // Compile the expression
-    let result_name = ExprCompiler::compile_expr(emitter, &entry_block, body_expr, registry)?;
+    let result_name = ExprCompiler::compile_expr(emitter, &entry_block, body_expr, registry, None)?;
 
     // Emit return
     let return_val = emitter.get_value(&result_name)
@@ -351,17 +360,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check for file argument
     let args: Vec<String> = env::args().collect();
 
-    let code = if args.len() > 1 {
-        // Read from file
+    if args.len() > 1 {
+        // Use SelfContainedCompiler for file-based execution
         let filename = &args[1];
-        println!("Reading file: {}", filename);
-        fs::read_to_string(filename)?
-    } else {
-        // Default example
-        println!("No file specified, running built-in example");
-        println!("Usage: mlir-lisp <file.lisp>\n");
+        println!("Loading: {}\n", filename);
 
-        r#"
+        let code = fs::read_to_string(filename)?;
+
+        // Create a new compiler (it creates its own context internally)
+        let mut compiler = SelfContainedCompiler::new();
+
+        // Evaluate the file
+        match compiler.eval_string(&code) {
+            Ok(_) => {
+                println!("\n✅ Program completed successfully!");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("\n❌ Error: {}", e);
+                return Err(e.into());
+            }
+        }
+    }
+
+    // Legacy path: No file specified, run built-in example
+    println!("No file specified, running built-in example");
+    println!("Usage: mlir-lisp <file.lisp>\n");
+
+    let code = r#"
         (op arith.constant
             :attrs {:value 10}
             :results [i32]
@@ -376,8 +402,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             :as %result)
         (op func.return
             :operands [%result])
-        "#.to_string()
-    };
+        "#.to_string();
 
     // Parse, emit, and JIT execute
     let ctx = MlirContext::new();

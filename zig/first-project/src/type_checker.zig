@@ -1373,6 +1373,7 @@ pub const BidirectionalTypeChecker = struct {
     fn synthesizeArithmetic(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
         var operands: [64]*Value = undefined;
         var operand_count: usize = 0;
+        var operand_types: [64]Type = undefined;
 
         var merged_type_opt: ?Type = null;
 
@@ -1386,14 +1387,20 @@ pub const BidirectionalTypeChecker = struct {
                 operands[operand_count] = operand;
 
                 const operand_typed = try self.synthesize(operand);
-                if (!isNumericType(operand_typed.type)) {
+                operand_types[operand_count] = operand_typed.type;
+
+                // Allow pointers for + and - (pointer arithmetic)
+                if (!isNumericType(operand_typed.type) and operand_typed.type != .pointer) {
                     return self.recordTypeMismatch(operand, Type.int, operand_typed.type);
                 }
 
-                merged_type_opt = if (merged_type_opt) |prev|
-                    try self.mergeNumericTypes(prev, operand_typed.type)
-                else
-                    operand_typed.type;
+                // Only merge numeric types
+                if (isNumericType(operand_typed.type)) {
+                    merged_type_opt = if (merged_type_opt) |prev|
+                        try self.mergeNumericTypes(prev, operand_typed.type)
+                    else
+                        operand_typed.type;
+                }
 
                 operand_count += 1;
             } else {
@@ -1410,6 +1417,27 @@ pub const BidirectionalTypeChecker = struct {
         const op_node = list.value orelse return TypeCheckError.InvalidTypeAnnotation;
         if (!op_node.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
         const op = op_node.symbol;
+
+        // Handle pointer arithmetic for binary + and -
+        if (operand_count == 2 and (std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-"))) {
+            const left_type = operand_types[0];
+            const right_type = operand_types[1];
+            const left_is_ptr = left_type == .pointer;
+            const right_is_ptr = right_type == .pointer;
+            const left_is_int = isIntegerType(left_type);
+            const right_is_int = isIntegerType(right_type);
+
+            if (left_is_ptr and right_is_int) {
+                // ptr + int or ptr - int => ptr
+                return try TypedExpression.init(self.allocator, expr, left_type);
+            } else if (std.mem.eql(u8, op, "+") and left_is_int and right_is_ptr) {
+                // int + ptr => ptr (only for addition)
+                return try TypedExpression.init(self.allocator, expr, right_type);
+            } else if (std.mem.eql(u8, op, "-") and left_is_ptr and right_is_ptr) {
+                // ptr - ptr => isize (pointer difference)
+                return try TypedExpression.init(self.allocator, expr, Type.isize);
+            }
+        }
 
         var result_type = merged_type_opt.?;
 
@@ -1557,6 +1585,29 @@ pub const BidirectionalTypeChecker = struct {
         const result_type: Type = if (isComparisonOp(op) or isLogicalOp(op))
             Type.bool
         else if (isArithmeticOp(op)) blk: {
+            // Check for pointer arithmetic
+            // ptr + int => ptr
+            // int + ptr => ptr
+            // ptr - int => ptr
+            // ptr - ptr => integer (ptrdiff)
+            if (std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-")) {
+                const left_is_ptr = left_typed.type == .pointer;
+                const right_is_ptr = right_typed.type == .pointer;
+                const left_is_int = isIntegerType(left_typed.type);
+                const right_is_int = isIntegerType(right_typed.type);
+
+                if (left_is_ptr and right_is_int) {
+                    // ptr + int or ptr - int => ptr
+                    break :blk left_typed.type;
+                } else if (std.mem.eql(u8, op, "+") and left_is_int and right_is_ptr) {
+                    // int + ptr => ptr (only for addition)
+                    break :blk right_typed.type;
+                } else if (std.mem.eql(u8, op, "-") and left_is_ptr and right_is_ptr) {
+                    // ptr - ptr => isize (pointer difference)
+                    break :blk Type.isize;
+                }
+            }
+
             // For arithmetic, merge types
             const merged = try self.mergeNumericTypes(left_typed.type, right_typed.type);
             // Division of integers produces float
@@ -3306,6 +3357,7 @@ pub const BidirectionalTypeChecker = struct {
                         {
                             var operands: [64]*Value = undefined;
                             var operand_count: usize = 0;
+                            var operand_types: [64]Type = undefined;
                             var merged_type_opt: ?Type = null;
 
                             var node_iter: ?*const @TypeOf(list.*) = list.next;
@@ -3319,14 +3371,20 @@ pub const BidirectionalTypeChecker = struct {
 
                                     const operand_typed = try self.synthesizeTyped(operand);
                                     const operand_type = operand_typed.getType();
-                                    if (!isNumericType(operand_type)) {
+                                    operand_types[operand_count] = operand_type;
+
+                                    // Allow pointers for + and - (pointer arithmetic)
+                                    if (!isNumericType(operand_type) and operand_type != .pointer) {
                                         return self.recordTypeMismatch(operand, Type.int, operand_type);
                                     }
 
-                                    merged_type_opt = if (merged_type_opt) |prev|
-                                        try self.mergeNumericTypes(prev, operand_type)
-                                    else
-                                        operand_type;
+                                    // Only merge numeric types
+                                    if (isNumericType(operand_type)) {
+                                        merged_type_opt = if (merged_type_opt) |prev|
+                                            try self.mergeNumericTypes(prev, operand_type)
+                                        else
+                                            operand_type;
+                                    }
 
                                     // destroy temporary typed value to avoid leaks
                                     self.allocator.destroy(operand_typed);
@@ -3342,7 +3400,31 @@ pub const BidirectionalTypeChecker = struct {
                                 return TypeCheckError.InvalidTypeAnnotation;
                             }
 
-                            var result_type = merged_type_opt.?;
+                            // Handle pointer arithmetic for binary + and -
+                            var result_type: Type = undefined;
+                            if (operand_count == 2 and (std.mem.eql(u8, first.symbol, "+") or std.mem.eql(u8, first.symbol, "-"))) {
+                                const left_type = operand_types[0];
+                                const right_type = operand_types[1];
+                                const left_is_ptr = left_type == .pointer;
+                                const right_is_ptr = right_type == .pointer;
+                                const left_is_int = isIntegerType(left_type);
+                                const right_is_int = isIntegerType(right_type);
+
+                                if (left_is_ptr and right_is_int) {
+                                    // ptr + int or ptr - int => ptr
+                                    result_type = left_type;
+                                } else if (std.mem.eql(u8, first.symbol, "+") and left_is_int and right_is_ptr) {
+                                    // int + ptr => ptr (only for addition)
+                                    result_type = right_type;
+                                } else if (std.mem.eql(u8, first.symbol, "-") and left_is_ptr and right_is_ptr) {
+                                    // ptr - ptr => isize (pointer difference)
+                                    result_type = Type.isize;
+                                } else {
+                                    result_type = merged_type_opt.?;
+                                }
+                            } else {
+                                result_type = merged_type_opt.?;
+                            }
 
                             if (std.mem.eql(u8, first.symbol, "/") and isIntegerType(result_type)) {
                                 result_type = if (std.meta.activeTag(result_type) == .int) Type.float else Type.f64;
@@ -3367,7 +3449,14 @@ pub const BidirectionalTypeChecker = struct {
 
                             var idx: usize = 0;
                             while (idx < operand_count) : (idx += 1) {
-                                typed_elements[idx + 1] = try self.checkTyped(operands[idx], result_type);
+                                // For pointer arithmetic, check against actual operand type, not result type
+                                const check_type = if (operand_count == 2 and
+                                    (std.mem.eql(u8, first.symbol, "+") or std.mem.eql(u8, first.symbol, "-")) and
+                                    (operand_types[0] == .pointer or operand_types[1] == .pointer))
+                                    operand_types[idx]
+                                else
+                                    result_type;
+                                typed_elements[idx + 1] = try self.checkTyped(operands[idx], check_type);
                             }
 
                             result.* = TypedValue{ .list = .{
