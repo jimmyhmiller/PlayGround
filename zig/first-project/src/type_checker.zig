@@ -807,7 +807,7 @@ pub const BidirectionalTypeChecker = struct {
                 if (try self.isSubtype(synthesized.type, expected)) {
                     return try TypedExpression.init(self.allocator, expr, expected);
                 } else {
-                    return TypeCheckError.TypeMismatch;
+                    return self.recordTypeMismatch(expr, expected, synthesized.type);
                 }
             },
 
@@ -817,7 +817,7 @@ pub const BidirectionalTypeChecker = struct {
                 if (try self.isSubtype(synthesized.type, expected)) {
                     return try TypedExpression.init(self.allocator, expr, expected);
                 } else {
-                    return TypeCheckError.TypeMismatch;
+                    return self.recordTypeMismatch(expr, expected, synthesized.type);
                 }
             },
         }
@@ -1106,7 +1106,7 @@ pub const BidirectionalTypeChecker = struct {
             if (!(try self.isSubtype(typed.type, expected.function.return_type))) {
                 self.env.deinit();
                 self.env = old_env;
-                return TypeCheckError.TypeMismatch;
+                return self.recordTypeMismatch(expr, expected.function.return_type, typed.type);
             }
         } else {
             self.env.deinit();
@@ -1122,7 +1122,7 @@ pub const BidirectionalTypeChecker = struct {
     }
 
     // Typed function checking for checkTyped method
-    fn checkFunctionTyped(self: *BidirectionalTypeChecker, _: *Value, list: anytype, expected: Type) TypeCheckError!*TypedValue {
+    fn checkFunctionTyped(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, expected: Type) TypeCheckError!*TypedValue {
         if (expected != .function) return TypeCheckError.TypeMismatch;
 
         var current = list.next; // Skip 'fn'
@@ -1168,7 +1168,38 @@ pub const BidirectionalTypeChecker = struct {
             if (node.value) |body_expr| {
                 body_count += 1;
                 const typed_body = self.synthesizeTyped(body_expr) catch |err| {
-                    std.debug.print("ERROR: Body expr #{} failed with error: {}\n", .{ body_count, err });
+                    std.debug.print("ERROR: Function body expression #{} failed: {}\n", .{ body_count, err });
+                    // Print expression snippet (truncated for readability)
+                    var buf: [200]u8 = undefined;
+                    var stream = std.io.fixedBufferStream(&buf);
+                    body_expr.format("", .{}, stream.writer()) catch {};
+                    const expr_str = if (stream.pos > 180) blk: {
+                        buf[177] = '.';
+                        buf[178] = '.';
+                        buf[179] = '.';
+                        break :blk buf[0..180];
+                    } else buf[0..stream.pos];
+                    std.debug.print("  Expression: {s}\n", .{expr_str});
+                    // Print type mismatch details - find the most recent TypeMismatch in errors
+                    if (self.errors.items.len > 0) {
+                        var err_idx: usize = self.errors.items.len;
+                        while (err_idx > 0) {
+                            err_idx -= 1;
+                            const error_detail = self.errors.items[err_idx];
+                            if (error_detail.err == TypeCheckError.TypeMismatch) {
+                                if (error_detail.info) |info| {
+                                    if (info == .type_mismatch) {
+                                        std.debug.print("  Expected type: {any}\n", .{info.type_mismatch.expected});
+                                        std.debug.print("  Actual type:   {any}\n", .{info.type_mismatch.actual});
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    } else {
+                        std.debug.print("  (See final error report below for type details)\n", .{});
+                    }
                     return err;
                 };
                 try body_exprs.append(self.allocator, typed_body);
@@ -1180,10 +1211,9 @@ pub const BidirectionalTypeChecker = struct {
         // Check that last expression matches return type
         if (last_typed) |typed| {
             if (!(try self.isSubtype(typed.getType(), expected.function.return_type))) {
-                std.debug.print("ERROR: Function body TypeMismatch - expected return: {any}, actual: {any}\n", .{ expected.function.return_type, typed.getType() });
                 self.env.deinit();
                 self.env = old_env;
-                return TypeCheckError.TypeMismatch;
+                return self.recordTypeMismatch(expr, expected.function.return_type, typed.getType());
             }
         } else {
             self.env.deinit();
@@ -1357,7 +1387,7 @@ pub const BidirectionalTypeChecker = struct {
 
                 const operand_typed = try self.synthesize(operand);
                 if (!isNumericType(operand_typed.type)) {
-                    return TypeCheckError.TypeMismatch;
+                    return self.recordTypeMismatch(operand, Type.int, operand_typed.type);
                 }
 
                 merged_type_opt = if (merged_type_opt) |prev|
@@ -1390,12 +1420,12 @@ pub const BidirectionalTypeChecker = struct {
 
         // For div (integer division), ensure integer type and keep it
         if (std.mem.eql(u8, op, "div") and !isIntegerType(result_type)) {
-            return TypeCheckError.TypeMismatch;
+            return self.recordTypeMismatch(expr, Type.int, result_type);
         }
 
         // For modulo, ensure integer type
         if (std.mem.eql(u8, op, "%") and !isIntegerType(result_type)) {
-            return TypeCheckError.TypeMismatch;
+            return self.recordTypeMismatch(expr, Type.int, result_type);
         }
 
         if (operand_count == 1 and !std.mem.eql(u8, op, "-")) {
@@ -1419,12 +1449,15 @@ pub const BidirectionalTypeChecker = struct {
 
         if (isRelationalOperator(op)) {
             if (!isNumericType(left_typed.type) or !isNumericType(right_typed.type)) {
-                return TypeCheckError.TypeMismatch;
+                // Report which operand is not numeric
+                const bad_operand = if (!isNumericType(left_typed.type)) operands.left else operands.right;
+                const bad_type = if (!isNumericType(left_typed.type)) left_typed.type else right_typed.type;
+                return self.recordTypeMismatch(bad_operand, Type.int, bad_type);
             }
         }
 
         if (!try self.areTypesCompatible(left_typed.type, right_typed.type)) {
-            return TypeCheckError.TypeMismatch;
+            return self.recordTypeMismatch(operands.right, left_typed.type, right_typed.type);
         }
 
         return try TypedExpression.init(self.allocator, expr, Type.bool);
@@ -1968,7 +2001,38 @@ pub const BidirectionalTypeChecker = struct {
             if (node.value) |body_expr| {
                 let_body_count += 1;
                 const typed = self.synthesizeTyped(body_expr) catch |err| {
-                    std.debug.print("ERROR: Let body expr #{} failed: {}\n", .{ let_body_count, err });
+                    std.debug.print("ERROR: Let body expression #{} failed: {}\n", .{ let_body_count, err });
+                    // Print expression snippet (truncated for readability)
+                    var buf: [200]u8 = undefined;
+                    var stream = std.io.fixedBufferStream(&buf);
+                    body_expr.format("", .{}, stream.writer()) catch {};
+                    const expr_str = if (stream.pos > 180) blk: {
+                        buf[177] = '.';
+                        buf[178] = '.';
+                        buf[179] = '.';
+                        break :blk buf[0..180];
+                    } else buf[0..stream.pos];
+                    std.debug.print("  Expression: {s}\n", .{expr_str});
+                    // Print type mismatch details - find the most recent TypeMismatch in errors
+                    if (self.errors.items.len > 0) {
+                        var err_idx: usize = self.errors.items.len;
+                        while (err_idx > 0) {
+                            err_idx -= 1;
+                            const error_detail = self.errors.items[err_idx];
+                            if (error_detail.err == TypeCheckError.TypeMismatch) {
+                                if (error_detail.info) |info| {
+                                    if (info == .type_mismatch) {
+                                        std.debug.print("  Expected type: {any}\n", .{info.type_mismatch.expected});
+                                        std.debug.print("  Actual type:   {any}\n", .{info.type_mismatch.actual});
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    } else {
+                        std.debug.print("  (See final error report below for type details)\n", .{});
+                    }
                     return err;
                 };
                 body_typed_elements[body_idx] = typed;
@@ -2295,15 +2359,13 @@ pub const BidirectionalTypeChecker = struct {
     }
 
     fn synthesizeTypedWhile(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
-        _ = expr;
-
         // (while cond body*)
         const cond_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
         const cond_expr = cond_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
         const cond_typed = try self.synthesizeTyped(cond_expr);
 
         if (!isTruthyType(cond_typed.getType())) {
-            return TypeCheckError.TypeMismatch;
+            return self.recordTypeMismatch(expr, Type.bool, cond_typed.getType());
         }
 
         // Type check all body expressions
@@ -3258,7 +3320,7 @@ pub const BidirectionalTypeChecker = struct {
                                     const operand_typed = try self.synthesizeTyped(operand);
                                     const operand_type = operand_typed.getType();
                                     if (!isNumericType(operand_type)) {
-                                        return TypeCheckError.TypeMismatch;
+                                        return self.recordTypeMismatch(operand, Type.int, operand_type);
                                     }
 
                                     merged_type_opt = if (merged_type_opt) |prev|

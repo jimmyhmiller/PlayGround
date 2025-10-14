@@ -3,3 +3,4 @@
 
 (def x (: Int) mu/value)
 (def result (: Int) x)
+(printf (c-str "%lld\n") result)

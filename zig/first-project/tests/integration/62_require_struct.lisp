@@ -9,3 +9,4 @@
 
 ;; Access struct fields
 (def result (: Int) (+ (. p1 x) (. p2 y)))
+(printf (c-str "%lld\n") result)

@@ -10,3 +10,4 @@
 
 ;; Final result
 (def result (: Int) (+ result1 result2))
+(printf (c-str "%lld\n") result)

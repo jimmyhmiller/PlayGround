@@ -109,20 +109,34 @@ fn runIntegrationTest(allocator: std.mem.Allocator, test_dir: []const u8, test_n
     try fs.cwd().writeFile(.{ .sub_path = c_file_path, .data = c_code });
 
     // Compile the C code
-    var compile_process = std.process.Child.init(&[_][]const u8{
-        "clang",
-        c_file_path,
-        "-o",
-        exe_path,
-        "-std=c11",
-        "-Wno-everything",
-    }, arena_alloc);
+    var compile_args = std.ArrayList([]const u8){};
+    defer compile_args.deinit(arena_alloc);
+
+    try compile_args.appendSlice(arena_alloc, &.{ "zig", "cc", c_file_path, "-o", exe_path, "-std=c11", "-Wno-everything" });
+
+    // Propagate compiler flags requested by the source
+    for (compiler.compiler_flags.items) |flag| {
+        try compile_args.append(arena_alloc, flag);
+    }
+
+    // Link against any requested libraries
+    for (compiler.linked_libraries.items) |lib| {
+        const lib_arg = try std.fmt.allocPrint(arena_alloc, "-l{s}", .{lib});
+        try compile_args.append(arena_alloc, lib_arg);
+    }
+
+    // Ensure required namespace bundles are linked in
+    for (compiler.required_bundles.items) |bundle| {
+        try compile_args.append(arena_alloc, bundle);
+    }
+
+    var compile_process = std.process.Child.init(compile_args.items, arena_alloc);
     compile_process.stdout_behavior = .Ignore;
     compile_process.stderr_behavior = .Ignore;
 
     const compile_term = compile_process.spawnAndWait() catch |err| {
         tmp_dir.cleanup();
-        const msg = try std.fmt.allocPrint(allocator, "Failed to spawn clang: {}", .{err});
+        const msg = try std.fmt.allocPrint(allocator, "Failed to spawn zig cc: {}", .{err});
         return TestResult{
             .name = try allocator.dupe(u8, test_name),
             .passed = false,
@@ -132,7 +146,7 @@ fn runIntegrationTest(allocator: std.mem.Allocator, test_dir: []const u8, test_n
 
     if (compile_term != .Exited or compile_term.Exited != 0) {
         tmp_dir.cleanup();
-        const msg = try std.fmt.allocPrint(allocator, "C compilation failed with status: {}", .{compile_term});
+        const msg = try std.fmt.allocPrint(allocator, "zig cc compilation failed with status: {}", .{compile_term});
         return TestResult{
             .name = try allocator.dupe(u8, test_name),
             .passed = false,

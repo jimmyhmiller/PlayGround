@@ -10,6 +10,7 @@ pub const CompiledNamespace = struct {
     file_path: []const u8,
     bundle_path: []const u8,
     definitions: TypeEnv, // def name -> type
+    definition_order: std.ArrayList([]const u8), // maintains definition order for code generation
     type_defs: TypeEnv,   // struct/enum types
     requires: std.ArrayList(RequireDecl), // dependencies
     bundle_handle: ?*std.DynLib = null,   // Loaded dynamic library handle
@@ -22,6 +23,7 @@ pub const CompiledNamespace = struct {
             .file_path = &[_]u8{},
             .bundle_path = &[_]u8{},
             .definitions = TypeEnv.init(allocator),
+            .definition_order = std.ArrayList([]const u8){},
             .type_defs = TypeEnv.init(allocator),
             .requires = std.ArrayList(RequireDecl){},
             .bundle_handle = null,
@@ -47,6 +49,10 @@ pub const CompiledNamespace = struct {
             self.allocator.free(req.alias);
         }
         self.requires.deinit(self.allocator);
+        for (self.definition_order.items) |name| {
+            self.allocator.free(name);
+        }
+        self.definition_order.deinit(self.allocator);
         // Close dynamic library if it was loaded
         if (self.bundle_handle) |handle| {
             handle.close();

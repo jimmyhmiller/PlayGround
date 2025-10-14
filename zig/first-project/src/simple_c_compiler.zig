@@ -396,6 +396,37 @@ pub const SimpleCCompiler = struct {
             return Error.TypeCheckFailed;
         };
 
+        var definition_order = std.ArrayList([]const u8){};
+        var definition_order_owned = false;
+        errdefer if (!definition_order_owned) {
+            for (definition_order.items) |def_name| {
+                self.allocator.*.free(def_name);
+            }
+            definition_order.deinit(self.allocator.*);
+        };
+
+        // Collect exported definition names in source order
+        for (expanded_expressions.items) |expr| {
+            if (expr.* == .list) {
+                var iter = expr.list.iterator();
+                if (iter.next()) |head_val| {
+                    if (head_val.isSymbol() and std.mem.eql(u8, head_val.symbol, "def")) {
+                        if (iter.next()) |name_val| {
+                            if (name_val.isSymbol()) {
+                                const def_name = name_val.symbol;
+                                if (std.mem.eql(u8, def_name, "main")) continue;
+                                if (checker.type_defs.get(def_name) != null) continue;
+                                if (checker.env.get(def_name)) |_| {
+                                    const name_copy = try self.allocator.*.dupe(u8, def_name);
+                                    try definition_order.append(self.allocator.*, name_copy);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 6. Extract and register exports with parent checker
         // Clone the type environments (shallow copy is fine since Types are immutable)
         var exports = type_checker.TypeEnv.init(self.allocator.*);
@@ -431,6 +462,8 @@ pub const SimpleCCompiler = struct {
         compiled_ns.bundle_path = bundle_path; // Takes ownership
         compiled_ns.definitions = exports;
         compiled_ns.type_defs = type_defs;
+        compiled_ns.definition_order = definition_order;
+        definition_order_owned = true;
 
         // Copy requires from checker (alias -> namespace_name mappings)
         compiled_ns.requires = std.ArrayList(value.RequireDecl){};
@@ -761,6 +794,10 @@ pub const SimpleCCompiler = struct {
                             continue;
                         }
                     }
+                    if (head_val.isSymbol() and std.mem.eql(u8, head_val.symbol, "require")) {
+                        // Require statements don't produce runtime expressions; skip from non_def list
+                        continue;
+                    }
                     if (head_val.isSymbol() and std.mem.eql(u8, head_val.symbol, "def")) {
                         if (iter.next()) |name_val| {
                             if (name_val.isSymbol()) {
@@ -790,6 +827,10 @@ pub const SimpleCCompiler = struct {
                         }
                     }
                 }
+            }
+
+            if (expr.* == .require) {
+                continue;
             }
 
             // Not a namespace or def - it's a regular expression
@@ -870,47 +911,95 @@ pub const SimpleCCompiler = struct {
                 try forward_writer.print("typedef struct {{\n", .{});
 
                 // Emit fields for each exported definition
-                var def_iter = compiled_ns.definitions.iterator();
-                while (def_iter.next()) |def_entry| {
-                    const def_name = def_entry.key_ptr.*;
-                    const def_type = def_entry.value_ptr.*;
+                if (compiled_ns.definition_order.items.len > 0) {
+                    for (compiled_ns.definition_order.items) |ordered_name| {
+                        const def_type = compiled_ns.definitions.get(ordered_name) orelse continue;
 
-                    // Skip type definitions (Point, Color, etc.) - they're compile-time only
-                    if (def_type == .type_type) {
-                        std.debug.print("DEBUG: Skipping type definition '{s}' (compile-time only)\n", .{def_name});
-                        continue;
-                    }
-
-                    const sanitized_field = try self.sanitizeIdentifier(def_name);
-                    defer self.allocator.*.free(sanitized_field);
-
-                    // Special handling for function types
-                    if (def_type == .function) {
-                        const fn_type = def_type.function;
-                        const ret_c_type = try self.cTypeFor(fn_type.return_type, &includes);
-
-                        // Build parameter list
-                        var params_list = std.ArrayList([]const u8){};
-                        defer params_list.deinit(self.allocator.*);
-
-                        for (fn_type.param_types) |param_type| {
-                            const param_c_type = try self.cTypeFor(param_type, &includes);
-                            try params_list.append(self.allocator.*, param_c_type);
+                        // Skip type definitions (Point, Color, etc.) - they're compile-time only
+                        if (def_type == .type_type) {
+                            std.debug.print("DEBUG: Skipping type definition '{s}' (compile-time only)\n", .{ordered_name});
+                            continue;
+                        }
+                        // Skip enum variants (Color/Red, etc.) - the enum typedef declares the constants
+                        if (def_type == .enum_type) {
+                            if (std.mem.indexOfScalar(u8, ordered_name, '/')) |_| {
+                                std.debug.print("DEBUG: Skipping enum variant '{s}' (typedef provides constant)\n", .{ordered_name});
+                                continue;
+                            }
                         }
 
-                        const params = try std.mem.join(self.allocator.*, ", ", params_list.items);
-                        defer self.allocator.*.free(params);
+                        const sanitized_field = try self.sanitizeIdentifier(ordered_name);
+                        defer self.allocator.*.free(sanitized_field);
 
-                        // Emit function pointer with name inside: ReturnType (*name)(params);
-                        try forward_writer.print("    {s} (*{s})({s});\n", .{ ret_c_type, sanitized_field, params });
-                    } else {
-                        // Regular field
-                        const c_type = self.cTypeFor(def_type, &includes) catch |err| {
-                            std.debug.print("ERROR: Cannot convert type for field '{s}': {}\n", .{ def_name, err });
-                            std.debug.print("  Type: {any}\n", .{def_type});
-                            return err;
-                        };
-                        try forward_writer.print("    {s} {s};\n", .{ c_type, sanitized_field });
+                        if (def_type == .function) {
+                            const fn_type = def_type.function;
+                            const ret_c_type = try self.cTypeFor(fn_type.return_type, &includes);
+
+                            var params_list = std.ArrayList([]const u8){};
+                            defer params_list.deinit(self.allocator.*);
+
+                            for (fn_type.param_types) |param_type| {
+                                const param_c_type = try self.cTypeFor(param_type, &includes);
+                                try params_list.append(self.allocator.*, param_c_type);
+                            }
+
+                            const params = try std.mem.join(self.allocator.*, ", ", params_list.items);
+                            defer self.allocator.*.free(params);
+
+                            try forward_writer.print("    {s} (*{s})({s});\n", .{ ret_c_type, sanitized_field, params });
+                        } else {
+                            const c_type = self.cTypeFor(def_type, &includes) catch |err| {
+                                std.debug.print("ERROR: Cannot convert type for field '{s}': {}\n", .{ ordered_name, err });
+                                std.debug.print("  Type: {any}\n", .{def_type});
+                                return err;
+                            };
+                            try forward_writer.print("    {s} {s};\n", .{ c_type, sanitized_field });
+                        }
+                    }
+                } else {
+                    var def_iter = compiled_ns.definitions.iterator();
+                    while (def_iter.next()) |def_entry| {
+                        const def_name = def_entry.key_ptr.*;
+                        const def_type = def_entry.value_ptr.*;
+
+                        if (def_type == .type_type) {
+                            std.debug.print("DEBUG: Skipping type definition '{s}' (compile-time only)\n", .{def_name});
+                            continue;
+                        }
+                        if (def_type == .enum_type) {
+                            if (std.mem.indexOfScalar(u8, def_name, '/')) |_| {
+                                std.debug.print("DEBUG: Skipping enum variant '{s}' (typedef provides constant)\n", .{def_name});
+                                continue;
+                            }
+                        }
+
+                        const sanitized_field = try self.sanitizeIdentifier(def_name);
+                        defer self.allocator.*.free(sanitized_field);
+
+                        if (def_type == .function) {
+                            const fn_type = def_type.function;
+                            const ret_c_type = try self.cTypeFor(fn_type.return_type, &includes);
+
+                            var params_list = std.ArrayList([]const u8){};
+                            defer params_list.deinit(self.allocator.*);
+
+                            for (fn_type.param_types) |param_type| {
+                                const param_c_type = try self.cTypeFor(param_type, &includes);
+                                try params_list.append(self.allocator.*, param_c_type);
+                            }
+
+                            const params = try std.mem.join(self.allocator.*, ", ", params_list.items);
+                            defer self.allocator.*.free(params);
+
+                            try forward_writer.print("    {s} (*{s})({s});\n", .{ ret_c_type, sanitized_field, params });
+                        } else {
+                            const c_type = self.cTypeFor(def_type, &includes) catch |err| {
+                                std.debug.print("ERROR: Cannot convert type for field '{s}': {}\n", .{ def_name, err });
+                                std.debug.print("  Type: {any}\n", .{def_type});
+                                return err;
+                            };
+                            try forward_writer.print("    {s} {s};\n", .{ c_type, sanitized_field });
+                        }
                     }
                 }
 
@@ -2447,15 +2536,39 @@ pub const SimpleCCompiler = struct {
             },
             .array_create => {
                 if (l.type != .array) return false;
-                const array_type = l.type.array;
-                const elem_c_type = try self.cTypeFor(array_type.element_type, includes);
+
+                // For multidimensional arrays, we need to unpack all dimensions
+                var dimensions: [16]usize = undefined;
+                var dim_count: usize = 0;
+                var current_type = l.type;
+
+                while (current_type == .array and dim_count < 16) {
+                    dimensions[dim_count] = current_type.array.size;
+                    dim_count += 1;
+                    current_type = current_type.array.element_type;
+                }
+
+                // Get the base element type (non-array)
+                const base_elem_c_type = try self.cTypeFor(current_type, includes);
+
+                // Build array declaration: base_type __tmp_arr[size1][size2]...
+                var arr_decl = std.ArrayList(u8){};
+                defer arr_decl.deinit(self.allocator.*);
+                try arr_decl.writer(self.allocator.*).print("{s} __tmp_arr", .{base_elem_c_type});
+                var i: usize = 0;
+                while (i < dim_count) : (i += 1) {
+                    try arr_decl.writer(self.allocator.*).print("[{d}]", .{dimensions[i]});
+                }
+                const arr_decl_str = try arr_decl.toOwnedSlice(self.allocator.*);
+                defer self.allocator.free(arr_decl_str);
 
                 if (l.elements.len == 3) {
-                    try writer.print("({{ {s} __tmp_arr[{d}]; for (size_t __i = 0; __i < {d}; __i++) __tmp_arr[__i] = ", .{ elem_c_type, array_type.size, array_type.size });
+                    // Only initialize the outermost dimension
+                    try writer.print("({{ {s}; for (size_t __i = 0; __i < {d}; __i++) __tmp_arr[__i] = ", .{ arr_decl_str, dimensions[0] });
                     try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
                     try writer.print("; __tmp_arr; }})", .{});
                 } else {
-                    try writer.print("({{ {s} __tmp_arr[{d}]; __tmp_arr; }})", .{ elem_c_type, array_type.size });
+                    try writer.print("({{ {s}; __tmp_arr; }})", .{arr_decl_str});
                 }
                 return true;
             },
