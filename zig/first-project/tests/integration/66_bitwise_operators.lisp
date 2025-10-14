@@ -1,0 +1,7 @@
+(ns test)
+(def and_result (: U32) (bitwise-and 12 10))
+(def or_result (: U32) (bitwise-or 12 10))
+(def xor_result (: U32) (bitwise-xor 12 10))
+(def not_result (: U32) (bitwise-not 15))
+(def total (: U32) (+ (+ (+ and_result or_result) xor_result) not_result))
+(printf (c-str "%u\n") total)

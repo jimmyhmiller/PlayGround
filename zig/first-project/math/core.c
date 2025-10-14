@@ -13,13 +13,10 @@ typedef struct {
 } Point;
 
 typedef struct {
-    Point (*make_point)(long long, long long);
-    Color Color_Blue;
-    long long (*add_one)(long long);
     long long value;
-    Color Color_Red;
+    long long (*add_one)(long long);
     long long (*add)(long long, long long);
-    Color Color_Green;
+    Point (*make_point)(long long, long long);
     long long (*get_red_value)();
     long long magic_number;
 } Namespace_math_utils;
@@ -39,6 +36,8 @@ static long long add_two(long long);
 
 void init_namespace_math_core(Namespace_math_core* ns) {
     init_namespace_math_utils(&g_math_utils);
+    ns->double_value = (g_math_utils.value * 2);
+    ns->add_two = &add_two;
 }
 
 static long long add_two(long long x) {

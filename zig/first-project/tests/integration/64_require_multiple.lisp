@@ -10,3 +10,4 @@
 
 ;; Combine values from both namespaces
 (def result (: Int) (+ x y))
+(printf (c-str "%lld\n") result)

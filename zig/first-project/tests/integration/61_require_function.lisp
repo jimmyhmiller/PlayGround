@@ -9,3 +9,4 @@
 
 ;; Combine both
 (def result3 (: Int) (mu/add-one (mu/add result1 result2)))
+(printf (c-str "%lld\n") result3)
