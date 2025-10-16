@@ -69,6 +69,10 @@
 - **Address-of**: `(address-of value)` - get pointer to value
 - **Null pointers**: `pointer-null` - null pointer literal
 - **Pointer equality**: `(pointer-equal? ptr1 ptr2)` - compare pointers
+- **Pointer casting**: `(cast TargetType value)` - type conversion for pointers
+  - Example: `(cast (Pointer U8) int32_ptr)` - cast `(Pointer I32)` to `(Pointer U8)`
+  - Useful for C FFI when interfacing with functions expecting different pointer types
+  - Generates C-style casts: `((uint8_t*)ptr)`
 - **Struct field access**:
   - `(pointer-field-read ptr field)` - read struct field through pointer
   - `(pointer-field-write! ptr field value)` - write struct field through pointer
@@ -98,6 +102,64 @@
 ### Namespaces
 - Basic namespace support with `(ns ...)`
 - Qualified name resolution for enum variants
+
+### C FFI (Foreign Function Interface)
+
+The compiler provides two sets of forms for interfacing with C code:
+
+#### `extern-*` Forms (Emit C Declarations)
+Use when you need the compiler to generate extern declarations:
+- `(extern-fn name [params...] -> return-type)` - Generates `extern` function declaration
+- `(extern-type name)` - Generates opaque type typedef
+- `(extern-union name)` - Generates union typedef
+- `(extern-struct name)` - Acknowledges C header-defined struct
+- `(extern-var name type)` - Generates extern variable declaration
+
+**Example:**
+```clojure
+;; Without headers - compiler generates declarations
+(extern-fn my_custom_fn [x I32] -> I32)
+;; Generates: extern int32_t my_custom_fn(int32_t);
+```
+
+#### `declare-*` Forms (Type-Only, No C Emission)
+Use when C headers provide declarations - avoids duplicate declarations:
+- `(declare-fn name [params...] -> return-type)` - Type info only, no C output
+- `(declare-type name)` - Type info only
+- `(declare-union name)` - Type info only
+- `(declare-struct name)` - Type info only
+- `(declare-var name type)` - Type info only
+
+**Example:**
+```clojure
+;; With header - use declare to avoid duplicates
+(include-header "stdio.h")
+(declare-fn printf [fmt (Pointer U8)] -> I32)
+;; No extern declaration emitted - header provides it
+```
+
+#### Best Practices
+- **Use `declare-*` with `include-header`** to avoid duplicate declarations
+- **Use `extern-*` for custom C functions** not in standard headers
+- **Mixing is allowed**: Use `declare-*` for stdlib, `extern-*` for custom code
+
+**Complete Example:**
+```clojure
+;; Standard library - use declare with headers
+(include-header "stdio.h")
+(include-header "stdlib.h")
+(declare-fn printf [fmt (Pointer U8)] -> I32)
+(declare-fn malloc [size I32] -> (Pointer U8))
+
+;; Custom C function - use extern (no header)
+(extern-fn my_custom_parser [input (Pointer U8)] -> I32)
+
+(def main-fn (: (-> [] I32))
+  (fn []
+    (printf (c-str "Hello!\n"))
+    (my_custom_parser (c-str "data"))
+    0))
+```
 
 ### Macros (Compile-Time Metaprogramming)
 - **Macro definitions**: `(defmacro name [params] body)`
@@ -219,14 +281,14 @@
 
 ### Test Suite
 - **Main test runner**: `zig test src/test_all.zig`
-- **260 test cases** covering all major features
+- **261 test cases** covering all major features
 - **Test categories**:
   - Lexer and parser tests
   - Reader tests (S-expression parsing)
   - Type checker comprehensive tests (positive & negative cases)
   - Backend code generation tests
   - Forward reference and mutual recursion tests
-  - Pointer operation tests
+  - Pointer operation tests (including pointer cast test)
   - Struct and enum tests
   - Struct field access tests (`(. struct field)` syntax)
   - **Array tests** (23 tests):

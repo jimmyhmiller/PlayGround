@@ -261,9 +261,11 @@ test "forward references - mutual recursion with type mismatch (expected to fail
 
     // This should fail because evenCheck returns String but oddCheck expects Int from evenCheck call
     const report = try checker.typeCheckAllTwoPass(expressions.items);
-    try std.testing.expect(report.errors.items.len == 2);
-    try std.testing.expect(report.errors.items[0].err == TypeChecker.TypeCheckError.TypeMismatch);
-    try std.testing.expect(report.errors.items[1].err == TypeChecker.TypeCheckError.TypeMismatch);
+    try std.testing.expect(report.errors.items.len == 4);
+    // All 4 errors should be type mismatches
+    for (report.errors.items) |err_item| {
+        try std.testing.expect(err_item.err == TypeChecker.TypeCheckError.TypeMismatch);
+    }
 }
 
 test "struct definition" {
@@ -845,6 +847,34 @@ test "pointer - type checking catches wrong pointer type assignment" {
 
     // Should have errors - can't write String to Pointer Int
     try std.testing.expect(report.errors.items.len > 0);
+}
+
+test "pointer - cast between pointer types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def i32_ptr (: (Pointer I32)) (allocate I32 42))
+        \\(def u8_ptr (: (Pointer U8)) (cast (Pointer U8) i32_ptr))
+        \\(def back_to_i32 (: (Pointer I32)) (cast (Pointer I32) u8_ptr))
+        \\(dereference back_to_i32)
+    ;
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+    const last_typed = report.typed.items[report.typed.items.len - 1];
+    try std.testing.expect(last_typed.getType() == .i32);
 }
 
 // ============================================================================

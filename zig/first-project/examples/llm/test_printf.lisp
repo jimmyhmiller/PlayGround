@@ -2,7 +2,7 @@
 
 (include-header "stdio.h")
 
-(extern-fn printf [fmt (Pointer U8)] -> I32)
+(declare-fn printf [fmt (Pointer U8)] -> I32)
 
 (def main-fn (: (-> [] I32))
   (fn []

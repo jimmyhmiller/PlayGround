@@ -355,6 +355,11 @@ pub const BidirectionalTypeChecker = struct {
         try self.builtins.put("extern-union", {});
         try self.builtins.put("extern-struct", {});
         try self.builtins.put("extern-var", {});
+        try self.builtins.put("declare-fn", {});
+        try self.builtins.put("declare-type", {});
+        try self.builtins.put("declare-union", {});
+        try self.builtins.put("declare-struct", {});
+        try self.builtins.put("declare-var", {});
         try self.builtins.put("include-header", {});
         try self.builtins.put("link-library", {});
         try self.builtins.put("compiler-flag", {});
@@ -690,6 +695,21 @@ pub const BidirectionalTypeChecker = struct {
                         } else if (std.mem.eql(u8, first.symbol, "extern-struct")) {
                             return try self.synthesizeExternType(expr, list, false, true);
                         } else if (std.mem.eql(u8, first.symbol, "extern-var")) {
+                            return try self.synthesizeExternVar(expr, list);
+                        } else if (std.mem.eql(u8, first.symbol, "declare-fn")) {
+                            // declare-fn: same type checking as extern-fn, but no C emission
+                            return try self.synthesizeExternFn(expr, list);
+                        } else if (std.mem.eql(u8, first.symbol, "declare-type")) {
+                            // declare-type: same type checking as extern-type, but no C emission
+                            return try self.synthesizeExternType(expr, list, false, false);
+                        } else if (std.mem.eql(u8, first.symbol, "declare-union")) {
+                            // declare-union: same type checking as extern-union, but no C emission
+                            return try self.synthesizeExternType(expr, list, true, false);
+                        } else if (std.mem.eql(u8, first.symbol, "declare-struct")) {
+                            // declare-struct: same type checking as extern-struct, but no C emission
+                            return try self.synthesizeExternType(expr, list, false, true);
+                        } else if (std.mem.eql(u8, first.symbol, "declare-var")) {
+                            // declare-var: same type checking as extern-var, but no C emission
                             return try self.synthesizeExternVar(expr, list);
                         } else if (std.mem.eql(u8, first.symbol, "include-header") or
                             std.mem.eql(u8, first.symbol, "link-library") or
@@ -3676,11 +3696,16 @@ pub const BidirectionalTypeChecker = struct {
                             std.mem.eql(u8, first.symbol, "extern-union") or
                             std.mem.eql(u8, first.symbol, "extern-struct") or
                             std.mem.eql(u8, first.symbol, "extern-var") or
+                            std.mem.eql(u8, first.symbol, "declare-fn") or
+                            std.mem.eql(u8, first.symbol, "declare-type") or
+                            std.mem.eql(u8, first.symbol, "declare-union") or
+                            std.mem.eql(u8, first.symbol, "declare-struct") or
+                            std.mem.eql(u8, first.symbol, "declare-var") or
                             std.mem.eql(u8, first.symbol, "include-header") or
                             std.mem.eql(u8, first.symbol, "link-library") or
                             std.mem.eql(u8, first.symbol, "compiler-flag"))
                         {
-                            // Extern forms: call synthesize to get the TypedExpression, then wrap it
+                            // Extern/declare forms: call synthesize to get the TypedExpression, then wrap it
                             const typed_expr = try self.synthesize(expr);
                             result.* = TypedValue{
                                 .list = .{
@@ -4816,12 +4841,17 @@ pub const BidirectionalTypeChecker = struct {
                 var current: ?*const @TypeOf(expr.list.*) = expr.list;
                 if (current) |node| {
                     if (node.value) |first| {
-                        // Handle extern declarations in pass 1
+                        // Handle extern and declare declarations in pass 1
                         if (first.isSymbol() and (std.mem.eql(u8, first.symbol, "extern-fn") or
                             std.mem.eql(u8, first.symbol, "extern-type") or
                             std.mem.eql(u8, first.symbol, "extern-union") or
                             std.mem.eql(u8, first.symbol, "extern-struct") or
                             std.mem.eql(u8, first.symbol, "extern-var") or
+                            std.mem.eql(u8, first.symbol, "declare-fn") or
+                            std.mem.eql(u8, first.symbol, "declare-type") or
+                            std.mem.eql(u8, first.symbol, "declare-union") or
+                            std.mem.eql(u8, first.symbol, "declare-struct") or
+                            std.mem.eql(u8, first.symbol, "declare-var") or
                             std.mem.eql(u8, first.symbol, "include-header") or
                             std.mem.eql(u8, first.symbol, "link-library") or
                             std.mem.eql(u8, first.symbol, "compiler-flag")))
@@ -4966,12 +4996,17 @@ pub const BidirectionalTypeChecker = struct {
                 var current: ?*const @TypeOf(expr.list.*) = expr.list;
                 if (current) |node| {
                     if (node.value) |first| {
-                        // Skip extern declarations in pass 2 - they were handled in pass 1
+                        // Skip extern and declare declarations in pass 2 - they were handled in pass 1
                         if (first.isSymbol() and (std.mem.eql(u8, first.symbol, "extern-fn") or
                             std.mem.eql(u8, first.symbol, "extern-type") or
                             std.mem.eql(u8, first.symbol, "extern-union") or
                             std.mem.eql(u8, first.symbol, "extern-struct") or
                             std.mem.eql(u8, first.symbol, "extern-var") or
+                            std.mem.eql(u8, first.symbol, "declare-fn") or
+                            std.mem.eql(u8, first.symbol, "declare-type") or
+                            std.mem.eql(u8, first.symbol, "declare-union") or
+                            std.mem.eql(u8, first.symbol, "declare-struct") or
+                            std.mem.eql(u8, first.symbol, "declare-var") or
                             std.mem.eql(u8, first.symbol, "include-header") or
                             std.mem.eql(u8, first.symbol, "link-library") or
                             std.mem.eql(u8, first.symbol, "compiler-flag")))

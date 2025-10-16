@@ -781,12 +781,17 @@ pub const SimpleCCompiler = struct {
                 var iter = expr.list.iterator();
                 if (iter.next()) |head_val| {
                     if (head_val.isSymbol()) {
-                        // Skip extern declarations and directives - they're handled in forward decl pass
+                        // Skip extern and declare declarations and directives - they're handled in forward decl pass or skipped
                         if (std.mem.eql(u8, head_val.symbol, "extern-fn") or
                             std.mem.eql(u8, head_val.symbol, "extern-type") or
                             std.mem.eql(u8, head_val.symbol, "extern-union") or
                             std.mem.eql(u8, head_val.symbol, "extern-struct") or
                             std.mem.eql(u8, head_val.symbol, "extern-var") or
+                            std.mem.eql(u8, head_val.symbol, "declare-fn") or
+                            std.mem.eql(u8, head_val.symbol, "declare-type") or
+                            std.mem.eql(u8, head_val.symbol, "declare-union") or
+                            std.mem.eql(u8, head_val.symbol, "declare-struct") or
+                            std.mem.eql(u8, head_val.symbol, "declare-var") or
                             std.mem.eql(u8, head_val.symbol, "include-header") or
                             std.mem.eql(u8, head_val.symbol, "link-library") or
                             std.mem.eql(u8, head_val.symbol, "compiler-flag"))
@@ -1479,12 +1484,52 @@ pub const SimpleCCompiler = struct {
 
                 const head = head_val.symbol;
 
+                // Skip declare-* forms - they are type-only declarations, no C emission
+                if (std.mem.eql(u8, head, "declare-fn") or
+                    std.mem.eql(u8, head, "declare-type") or
+                    std.mem.eql(u8, head, "declare-union") or
+                    std.mem.eql(u8, head, "declare-struct") or
+                    std.mem.eql(u8, head, "declare-var"))
+                {
+                    return;
+                }
+
                 // Handle extern declarations
                 if (std.mem.eql(u8, head, "extern-fn")) {
-                    // extern-fn: function is declared in C header, we just acknowledge it exists
-                    // Don't generate any extern declaration - the C header already has it
-                    // This avoids conflicts when headers define functions with different signatures
-                    _ = typed; // Function type info is only needed for type checking
+                    // Generate forward declaration for extern function
+                    // Get the type from typed value
+                    const fn_type = switch (typed.list.type) {
+                        .extern_function => |extern_fn| extern_fn,
+                        else => return, // Shouldn't happen, but handle gracefully
+                    };
+
+                    // Generate return type
+                    const return_type_str = try self.cTypeFor(fn_type.return_type, includes);
+                    // Note: Don't free - cTypeFor returns string literals for simple types
+                    // Arena allocator will clean up any allocated memory
+
+                    // Start function declaration
+                    try forward_writer.print("extern {s} {s}(", .{ return_type_str, fn_type.name });
+
+                    // Generate parameter types
+                    if (fn_type.param_types.len == 0) {
+                        try forward_writer.writeAll("void");
+                    } else {
+                        for (fn_type.param_types, 0..) |param_type, i| {
+                            if (i > 0) try forward_writer.writeAll(", ");
+                            const param_type_str = try self.cTypeFor(param_type, includes);
+                            try forward_writer.writeAll(param_type_str);
+                            // Note: Don't free - cTypeFor returns string literals for simple types
+                        }
+                    }
+
+                    // Handle variadic functions
+                    if (fn_type.variadic) {
+                        if (fn_type.param_types.len > 0) try forward_writer.writeAll(", ");
+                        try forward_writer.writeAll("...");
+                    }
+
+                    try forward_writer.writeAll(");\n");
                     return;
                 } else if (std.mem.eql(u8, head, "extern-type")) {
                     // extern-type just creates a type alias or forward declaration
@@ -1700,12 +1745,17 @@ pub const SimpleCCompiler = struct {
 
                 const head = head_val.symbol;
 
-                // Skip extern declarations - they're already emitted in forward declarations
+                // Skip extern and declare declarations - they're either emitted in forward declarations or skipped entirely
                 if (std.mem.eql(u8, head, "extern-fn") or
                     std.mem.eql(u8, head, "extern-type") or
                     std.mem.eql(u8, head, "extern-union") or
                     std.mem.eql(u8, head, "extern-struct") or
                     std.mem.eql(u8, head, "extern-var") or
+                    std.mem.eql(u8, head, "declare-fn") or
+                    std.mem.eql(u8, head, "declare-type") or
+                    std.mem.eql(u8, head, "declare-union") or
+                    std.mem.eql(u8, head, "declare-struct") or
+                    std.mem.eql(u8, head, "declare-var") or
                     std.mem.eql(u8, head, "include-header") or
                     std.mem.eql(u8, head, "link-library") or
                     std.mem.eql(u8, head, "compiler-flag"))
@@ -2642,8 +2692,9 @@ pub const SimpleCCompiler = struct {
                 return true;
             },
             .c_str => {
-                // c-str just passes through the string literal (element[1])
-                if (l.elements.len == 2 and l.type == .c_string) {
+                // c-str: just emit the string literal (element[1])
+                // Type checker has already validated this, no need to check type here
+                if (l.elements.len == 2) {
                     try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
                     return true;
                 }

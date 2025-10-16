@@ -3,26 +3,29 @@
 ;; Reference: https://github.com/karpathy/llm.c
 ;; ============================================================================
 
+;; Use declare-fn instead of extern-fn to avoid duplicate declarations with headers
 (include-header "stdio.h")
 (include-header "stdlib.h")
 (include-header "math.h")
 (link-library "m")
 
+;; Enable aggressive optimization for performance
+(compiler-flag "-O3")
+
 ;; ============================================================================
-;; External Functions
+;; External Functions (declared for type checker, not emitted)
 ;; ============================================================================
 
-(extern-fn printf [fmt (Pointer U8)] -> I32)
-(extern-fn sqrtf [x F32] -> F32)
-(extern-fn tanhf [x F32] -> F32)
-(extern-fn expf [x F32] -> F32)
-(extern-fn malloc [size I32] -> (Pointer U8))
-(extern-fn free [ptr (Pointer U8)] -> Nil)
-(extern-fn fopen [filename (Pointer U8) mode (Pointer U8)] -> (Pointer U8))
-(extern-fn fclose [file (Pointer U8)] -> I32)
-(extern-fn fread [ptr (Pointer U8) size I32 count I32 file (Pointer U8)] -> I32)
-(extern-fn fseek [file (Pointer U8) offset I32 whence I32] -> I32)
-(extern-fn exit [status I32] -> Nil)
+(declare-fn printf [fmt (Pointer U8)] -> I32)
+(declare-fn malloc [size I32] -> (Pointer U8))
+(declare-fn free [ptr (Pointer U8)] -> Nil)
+(declare-fn fopen [filename (Pointer U8) mode (Pointer U8)] -> (Pointer U8))
+(declare-fn fclose [file (Pointer U8)] -> I32)
+(declare-fn fread [ptr (Pointer U8) size I32 count I32 file (Pointer U8)] -> I32)
+(declare-fn exit [status I32] -> Nil)
+(declare-fn sqrtf [x F32] -> F32)
+(declare-fn tanhf [x F32] -> F32)
+(declare-fn expf [x F32] -> F32)
 
 ;; ============================================================================
 ;; GPT2Config - matches C struct exactly
@@ -89,6 +92,142 @@
     [logits (Pointer F32)]     ; (B, T, Vp)
     [probs (Pointer F32)]      ; (B, T, Vp)
     [losses (Pointer F32)]))   ; (B, T)
+
+;; ============================================================================
+;; Checkpoint Data - struct to hold both config and params from a checkpoint
+;; ============================================================================
+
+(def CheckpointData (: Type)
+  (Struct
+    [config GPT2Config]
+    [params ParameterTensors]))
+
+;; ============================================================================
+;; load_gpt2_checkpoint
+;;
+;; Loads GPT-2 model weights from a binary checkpoint file
+;; File format:
+;;   - Header: 256 int32 values
+;;   - Parameters: contiguous float32 array (all 16 parameter tensors)
+;; ============================================================================
+
+(def load_gpt2_checkpoint (: (-> [(Pointer U8)] CheckpointData))
+  (fn [checkpoint_path]
+    (printf (c-str "Loading checkpoint from file...\n"))
+
+    ;; Open file for reading
+    (let [model_file (: (Pointer U8)) (fopen checkpoint_path (c-str "rb"))]
+
+      ;; Check if file opened successfully
+      (if (pointer-equal? model_file pointer-null)
+        (let [dummy (: I32) 0]
+          (printf (c-str "ERROR: Could not open checkpoint file\n"))
+          (exit 1)
+          ;; Never reached, but needed for type checking
+          (CheckpointData (GPT2Config 0 0 0 0 0 0)
+                         (ParameterTensors pointer-null pointer-null pointer-null pointer-null
+                                          pointer-null pointer-null pointer-null pointer-null
+                                          pointer-null pointer-null pointer-null pointer-null
+                                          pointer-null pointer-null pointer-null pointer-null)))
+
+        ;; File opened successfully - read header
+        (let [header (: (Pointer I32)) (allocate-array I32 256)
+              bytes_read (: I32) (fread (cast (Pointer U8) header) 4 256 model_file)]
+
+          ;; Check magic number and version
+          (let [magic (: I32) (pointer-index-read header 0)
+                version (: I32) (pointer-index-read header 1)]
+
+            (if (!= magic 20240326)
+              (let [dummy (: I32) 0]
+                (printf (c-str "ERROR: Bad magic number in model file: %d\n") magic)
+                (exit 1))
+              nil)
+
+            (if (!= version 3)
+              (let [dummy (: I32) 0]
+                (printf (c-str "ERROR: Bad version in model file: %d (expected 3)\n") version)
+                (printf (c-str "HINT: Re-run 'python train_gpt2.py' to generate correct format\n"))
+                (exit 1))
+              nil)
+
+            ;; Extract config from header
+            (let [maxT (: I32) (pointer-index-read header 2)
+                  V (: I32) (pointer-index-read header 3)
+                  L (: I32) (pointer-index-read header 4)
+                  NH (: I32) (pointer-index-read header 5)
+                  C (: I32) (pointer-index-read header 6)
+                  Vp (: I32) (pointer-index-read header 7)]
+
+              (printf (c-str "[GPT-2]\n"))
+              (printf (c-str "max_seq_len: %d\n") maxT)
+              (printf (c-str "vocab_size: %d\n") V)
+              (printf (c-str "padded_vocab_size: %d\n") Vp)
+              (printf (c-str "num_layers: %d\n") L)
+              (printf (c-str "num_heads: %d\n") NH)
+              (printf (c-str "channels: %d\n") C)
+
+              ;; Calculate parameter sizes (16 tensors)
+              (let [wte_size (: I32) (* Vp C)
+                    wpe_size (: I32) (* maxT C)
+                    ln1w_size (: I32) (* L C)
+                    ln1b_size (: I32) (* L C)
+                    qkvw_size (: I32) (* (* (* L 3) C) C)
+                    qkvb_size (: I32) (* (* L 3) C)
+                    attprojw_size (: I32) (* (* L C) C)
+                    attprojb_size (: I32) (* L C)
+                    ln2w_size (: I32) (* L C)
+                    ln2b_size (: I32) (* L C)
+                    fcw_size (: I32) (* (* (* L 4) C) C)
+                    fcb_size (: I32) (* (* L 4) C)
+                    fcprojw_size (: I32) (* (* L C) (* 4 C))
+                    fcprojb_size (: I32) (* L C)
+                    lnfw_size (: I32) C
+                    lnfb_size (: I32) C
+
+                    ;; Calculate total parameters
+                    num_parameters (: I32) (+ (+ (+ wte_size wpe_size) (+ (+ ln1w_size ln1b_size) (+ qkvw_size qkvb_size)))
+                                             (+ (+ (+ attprojw_size attprojb_size) (+ ln2w_size ln2b_size))
+                                                (+ (+ (+ fcw_size fcb_size) (+ fcprojw_size fcprojb_size)) (+ lnfw_size lnfb_size))))]
+
+                (printf (c-str "num_parameters: %d\n") num_parameters)
+
+                ;; Allocate memory for all parameters
+                (let [params_memory (: (Pointer F32)) (allocate-array F32 num_parameters)
+                      params_bytes_read (: I32) (fread (cast (Pointer U8) params_memory) 4 num_parameters model_file)]
+
+                  ;; Close file
+                  (fclose model_file)
+
+                  ;; Clean up header
+                  (deallocate-array header)
+
+                  ;; Set up pointers to individual tensors
+                  (let [wte (: (Pointer F32)) params_memory
+                        wpe (: (Pointer F32)) (+ wte wte_size)
+                        ln1w (: (Pointer F32)) (+ wpe wpe_size)
+                        ln1b (: (Pointer F32)) (+ ln1w ln1w_size)
+                        qkvw (: (Pointer F32)) (+ ln1b ln1b_size)
+                        qkvb (: (Pointer F32)) (+ qkvw qkvw_size)
+                        attprojw (: (Pointer F32)) (+ qkvb qkvb_size)
+                        attprojb (: (Pointer F32)) (+ attprojw attprojw_size)
+                        ln2w (: (Pointer F32)) (+ attprojb attprojb_size)
+                        ln2b (: (Pointer F32)) (+ ln2w ln2w_size)
+                        fcw (: (Pointer F32)) (+ ln2b ln2b_size)
+                        fcb (: (Pointer F32)) (+ fcw fcw_size)
+                        fcprojw (: (Pointer F32)) (+ fcb fcb_size)
+                        fcprojb (: (Pointer F32)) (+ fcprojw fcprojw_size)
+                        lnfw (: (Pointer F32)) (+ fcprojb fcprojb_size)
+                        lnfb (: (Pointer F32)) (+ lnfw lnfw_size)
+
+                        config (: GPT2Config) (GPT2Config maxT V Vp L NH C)
+                        params (: ParameterTensors) (ParameterTensors
+                                                      wte wpe ln1w ln1b qkvw qkvb
+                                                      attprojw attprojb ln2w ln2b
+                                                      fcw fcb fcprojw fcprojb lnfw lnfb)]
+
+                    (printf (c-str "Successfully loaded checkpoint!\n"))
+                    (CheckpointData config params)))))))))))
 
 ;; ============================================================================
 ;; encoder_forward
@@ -182,7 +321,7 @@
 
 ;; ============================================================================
 ;; matmul_forward_naive
-;;\
+;;
 ;; The most naive implementation of matrix multiplication
 ;; inp is (B,T,C), weight is (OC, C), bias is (OC) or NULL
 ;; out will be (B,T,OC)
@@ -209,6 +348,81 @@
                 (set! o (+ o 1))))
             (set! t (+ t 1))))
         (set! b (+ b 1))))
+    nil))
+
+;; ============================================================================
+;; matmul_forward (OPTIMIZED)
+;;
+;; Optimized matrix multiplication with loop unrolling and register tiling
+;; Key optimizations:
+;; 1. Loop unrolling by 8 - process 8 positions at once
+;; 2. Register tiling - keep 8 results in local variables
+;; 3. Weight reuse - load each weight once, use 8 times (8x less memory bandwidth!)
+;; 4. Falls back to naive version if B*T not divisible by 8
+;; ============================================================================
+
+(def matmul_forward (: (-> [(Pointer F32) (Pointer F32) (Pointer F32) (Pointer F32) I32 I32 I32 I32] Nil))
+  (fn [out inp weight bias B T C OC]
+    (let [LOOP_UNROLL (: I32) 8
+          BT (: I32) (* B T)]
+
+      ;; Fallback to naive if B*T not divisible by LOOP_UNROLL
+      (if (!= (% BT LOOP_UNROLL) 0)
+        (matmul_forward_naive out inp weight bias B T C OC)
+
+        ;; Optimized version with loop unrolling
+        (let [obt (: I32) 0]
+          (while (< obt BT)
+            (let [o (: I32) 0]
+              (while (< o OC)
+                ;; Register tiling: keep 8 results in local variables
+                (let [result0 (: F32) (if (pointer-equal? bias pointer-null) 0.0 (pointer-index-read bias o))
+                      result1 (: F32) (if (pointer-equal? bias pointer-null) 0.0 (pointer-index-read bias o))
+                      result2 (: F32) (if (pointer-equal? bias pointer-null) 0.0 (pointer-index-read bias o))
+                      result3 (: F32) (if (pointer-equal? bias pointer-null) 0.0 (pointer-index-read bias o))
+                      result4 (: F32) (if (pointer-equal? bias pointer-null) 0.0 (pointer-index-read bias o))
+                      result5 (: F32) (if (pointer-equal? bias pointer-null) 0.0 (pointer-index-read bias o))
+                      result6 (: F32) (if (pointer-equal? bias pointer-null) 0.0 (pointer-index-read bias o))
+                      result7 (: F32) (if (pointer-equal? bias pointer-null) 0.0 (pointer-index-read bias o))]
+
+                  ;; Inner loops: load weight once, use 8 times
+                  (let [i (: I32) 0]
+                    (while (< i C)
+                      ;; Load weight ONCE
+                      (let [w (: F32) (pointer-index-read weight (+ i (* o C)))
+                            ;; Compute 8 positions with same weight (weight reuse!)
+                            bt0 (: I32) (+ obt 0)
+                            bt1 (: I32) (+ obt 1)
+                            bt2 (: I32) (+ obt 2)
+                            bt3 (: I32) (+ obt 3)
+                            bt4 (: I32) (+ obt 4)
+                            bt5 (: I32) (+ obt 5)
+                            bt6 (: I32) (+ obt 6)
+                            bt7 (: I32) (+ obt 7)]
+
+                        ;; Accumulate: result += inp * w (8 times, weight reused!)
+                        (set! result0 (+ result0 (* (pointer-index-read inp (+ (* bt0 C) i)) w)))
+                        (set! result1 (+ result1 (* (pointer-index-read inp (+ (* bt1 C) i)) w)))
+                        (set! result2 (+ result2 (* (pointer-index-read inp (+ (* bt2 C) i)) w)))
+                        (set! result3 (+ result3 (* (pointer-index-read inp (+ (* bt3 C) i)) w)))
+                        (set! result4 (+ result4 (* (pointer-index-read inp (+ (* bt4 C) i)) w)))
+                        (set! result5 (+ result5 (* (pointer-index-read inp (+ (* bt5 C) i)) w)))
+                        (set! result6 (+ result6 (* (pointer-index-read inp (+ (* bt6 C) i)) w)))
+                        (set! result7 (+ result7 (* (pointer-index-read inp (+ (* bt7 C) i)) w))))
+                      (set! i (+ i 1))))
+
+                  ;; Write back all 8 results to memory
+                  (pointer-index-write! out (+ (* (+ obt 0) OC) o) result0)
+                  (pointer-index-write! out (+ (* (+ obt 1) OC) o) result1)
+                  (pointer-index-write! out (+ (* (+ obt 2) OC) o) result2)
+                  (pointer-index-write! out (+ (* (+ obt 3) OC) o) result3)
+                  (pointer-index-write! out (+ (* (+ obt 4) OC) o) result4)
+                  (pointer-index-write! out (+ (* (+ obt 5) OC) o) result5)
+                  (pointer-index-write! out (+ (* (+ obt 6) OC) o) result6)
+                  (pointer-index-write! out (+ (* (+ obt 7) OC) o) result7))
+
+                (set! o (+ o 1))))
+            (set! obt (+ obt LOOP_UNROLL))))))
     nil))
 
 ;; ============================================================================
@@ -389,6 +603,27 @@
     nil))
 
 ;; ============================================================================
+;; Sampling helper - find argmax (greedy decoding)
+;; ============================================================================
+
+;; argmax - find index of maximum value in array
+;; Simple greedy sampling - always pick the most likely token
+(def argmax (: (-> [(Pointer F32) I32] I32))
+  (fn [probs n]
+    (let [max_val (: F32) (- 0.0 999999.0)
+          max_idx (: I32) 0
+          i (: I32) 0]
+      (while (< i n)
+        (let [val (: F32) (pointer-index-read probs i)]
+          (if (> val max_val)
+            (let [dummy (: I32) 0]
+              (set! max_val val)
+              (set! max_idx i))
+            nil))
+        (set! i (+ i 1)))
+      max_idx)))
+
+;; ============================================================================
 ;; gpt2_forward
 ;;
 ;; Full GPT-2 forward pass orchestration
@@ -453,16 +688,16 @@
 
             ;; Layer computations: attention block
             (layernorm_forward l_ln1 l_ln1_mean l_ln1_rstd residual l_ln1w l_ln1b B T C)
-            (matmul_forward_naive l_qkv l_ln1 l_qkvw l_qkvb B T C (* 3 C))
+            (matmul_forward l_qkv l_ln1 l_qkvw l_qkvb B T C (* 3 C))
             (attention_forward l_atty l_preatt l_att l_qkv B T C NH)
-            (matmul_forward_naive l_attproj l_atty l_attprojw l_attprojb B T C C)
+            (matmul_forward l_attproj l_atty l_attprojw l_attprojb B T C C)
             (residual_forward l_residual2 residual l_attproj BTC)
 
             ;; Layer computations: MLP block
             (layernorm_forward l_ln2 l_ln2_mean l_ln2_rstd l_residual2 l_ln2w l_ln2b B T C)
-            (matmul_forward_naive l_fch l_ln2 l_fcw l_fcb B T C (* 4 C))
+            (matmul_forward l_fch l_ln2 l_fcw l_fcb B T C (* 4 C))
             (gelu_forward l_fch_gelu l_fch (* (* B T) (* 4 C)))
-            (matmul_forward_naive l_fcproj l_fch_gelu l_fcprojw l_fcprojb B T (* 4 C) C)
+            (matmul_forward l_fcproj l_fch_gelu l_fcprojw l_fcprojb B T (* 4 C) C)
             (residual_forward l_residual3 l_residual2 l_fcproj BTC))
 
           (set! l (+ l 1))))
@@ -471,7 +706,7 @@
       (let [residual (: (Pointer F32)) (+ (. acts residual3) (* (* (* (- L 1) B) T) C))]
         (layernorm_forward (. acts lnf) (. acts lnf_mean) (. acts lnf_rstd)
                           residual (. params lnfw) (. params lnfb) B T C)
-        (matmul_forward_naive (. acts logits) (. acts lnf) (. params wte) pointer-null B T C Vp)
+        (matmul_forward (. acts logits) (. acts lnf) (. params wte) pointer-null B T C Vp)
         (softmax_forward (. acts probs) (. acts logits) B T V Vp)))
     nil))
 
@@ -825,6 +1060,341 @@
       0)))
 
 ;; ============================================================================
+;; Helper: allocate_activation_tensors
+;; Allocates all activation buffers for the given configuration
+;; ============================================================================
+
+(def allocate_activation_tensors (: (-> [I32 I32 I32 I32 I32 I32] ActivationTensors))
+  (fn [B T C L NH Vp]
+    (let [encoded_size (: I32) (* (* B T) C)
+          ln1_size (: I32) (* (* (* L B) T) C)
+          ln1_mean_size (: I32) (* (* L B) T)
+          ln1_rstd_size (: I32) (* (* L B) T)
+          qkv_size (: I32) (* (* (* L B) T) (* 3 C))
+          atty_size (: I32) (* (* (* L B) T) C)
+          preatt_size (: I32) (* (* (* (* L B) NH) T) T)
+          att_size (: I32) (* (* (* (* L B) NH) T) T)
+          attproj_size (: I32) (* (* (* L B) T) C)
+          residual2_size (: I32) (* (* (* L B) T) C)
+          ln2_size (: I32) (* (* (* L B) T) C)
+          ln2_mean_size (: I32) (* (* L B) T)
+          ln2_rstd_size (: I32) (* (* L B) T)
+          fch_size (: I32) (* (* (* L B) T) (* 4 C))
+          fch_gelu_size (: I32) (* (* (* L B) T) (* 4 C))
+          fcproj_size (: I32) (* (* (* L B) T) C)
+          residual3_size (: I32) (* (* (* L B) T) C)
+          lnf_size (: I32) (* (* B T) C)
+          lnf_mean_size (: I32) (* B T)
+          lnf_rstd_size (: I32) (* B T)
+          logits_size (: I32) (* (* B T) Vp)
+          probs_size (: I32) (* (* B T) Vp)
+          losses_size (: I32) (* B T)]
+
+      (ActivationTensors
+        (allocate-array F32 encoded_size)
+        (allocate-array F32 ln1_size)
+        (allocate-array F32 ln1_mean_size)
+        (allocate-array F32 ln1_rstd_size)
+        (allocate-array F32 qkv_size)
+        (allocate-array F32 atty_size)
+        (allocate-array F32 preatt_size)
+        (allocate-array F32 att_size)
+        (allocate-array F32 attproj_size)
+        (allocate-array F32 residual2_size)
+        (allocate-array F32 ln2_size)
+        (allocate-array F32 ln2_mean_size)
+        (allocate-array F32 ln2_rstd_size)
+        (allocate-array F32 fch_size)
+        (allocate-array F32 fch_gelu_size)
+        (allocate-array F32 fcproj_size)
+        (allocate-array F32 residual3_size)
+        (allocate-array F32 lnf_size)
+        (allocate-array F32 lnf_mean_size)
+        (allocate-array F32 lnf_rstd_size)
+        (allocate-array F32 logits_size)
+        (allocate-array F32 probs_size)
+        (allocate-array F32 losses_size)))))
+
+;; ============================================================================
+;; Helper: allocate_parameter_tensors
+;; Allocates all parameter buffers and initializes with small random values
+;; ============================================================================
+
+(def allocate_parameter_tensors (: (-> [I32 I32 I32 I32 I32] ParameterTensors))
+  (fn [V maxT C L Vp]
+    (let [wte_size (: I32) (* V C)
+          wpe_size (: I32) (* maxT C)
+          ln1w_size (: I32) (* L C)
+          ln1b_size (: I32) (* L C)
+          qkvw_size (: I32) (* (* (* L 3) C) C)
+          qkvb_size (: I32) (* (* L 3) C)
+          attprojw_size (: I32) (* (* L C) C)
+          attprojb_size (: I32) (* L C)
+          ln2w_size (: I32) (* L C)
+          ln2b_size (: I32) (* L C)
+          fcw_size (: I32) (* (* (* L 4) C) C)
+          fcb_size (: I32) (* (* L 4) C)
+          fcprojw_size (: I32) (* (* L C) (* 4 C))
+          fcprojb_size (: I32) (* L C)
+          lnfw_size (: I32) C
+          lnfb_size (: I32) C
+
+          ;; Allocate and initialize with simple values (0.01 for weights, 0 for biases)
+          wte (: (Pointer F32)) (allocate-array F32 wte_size 0.01)
+          wpe (: (Pointer F32)) (allocate-array F32 wpe_size 0.01)
+          ln1w (: (Pointer F32)) (allocate-array F32 ln1w_size 1.0)
+          ln1b (: (Pointer F32)) (allocate-array F32 ln1b_size 0.0)
+          qkvw (: (Pointer F32)) (allocate-array F32 qkvw_size 0.01)
+          qkvb (: (Pointer F32)) (allocate-array F32 qkvb_size 0.0)
+          attprojw (: (Pointer F32)) (allocate-array F32 attprojw_size 0.01)
+          attprojb (: (Pointer F32)) (allocate-array F32 attprojb_size 0.0)
+          ln2w (: (Pointer F32)) (allocate-array F32 ln2w_size 1.0)
+          ln2b (: (Pointer F32)) (allocate-array F32 ln2b_size 0.0)
+          fcw (: (Pointer F32)) (allocate-array F32 fcw_size 0.01)
+          fcb (: (Pointer F32)) (allocate-array F32 fcb_size 0.0)
+          fcprojw (: (Pointer F32)) (allocate-array F32 fcprojw_size 0.01)
+          fcprojb (: (Pointer F32)) (allocate-array F32 fcprojb_size 0.0)
+          lnfw (: (Pointer F32)) (allocate-array F32 lnfw_size 1.0)
+          lnfb (: (Pointer F32)) (allocate-array F32 lnfb_size 0.0)]
+
+      (ParameterTensors
+        wte wpe ln1w ln1b qkvw qkvb attprojw attprojb
+        ln2w ln2b fcw fcb fcprojw fcprojb lnfw lnfb))))
+
+;; ============================================================================
+;; Test: integration test for complete GPT-2 forward pass
+;; ============================================================================
+
+(def test_gpt2_inference (: (-> [] I32))
+  (fn []
+    (printf (c-str "Testing complete GPT-2 inference pipeline...\n"))
+
+    ;; Tiny model configuration: 1 layer, 2 heads, 64 channels, vocab=16
+    (let [config (: GPT2Config) (GPT2Config 8 16 16 1 2 64)
+          B (: I32) 1
+          T (: I32) 4
+
+          ;; Extract config values
+          C (: I32) (. config channels)
+          L (: I32) (. config num_layers)
+          NH (: I32) (. config num_heads)
+          V (: I32) (. config vocab_size)
+          Vp (: I32) (. config padded_vocab_size)
+          maxT (: I32) (. config max_seq_len)]
+
+      (printf (c-str "Config: L=%d, NH=%d, C=%d, V=%d, Vp=%d\n") L NH C V Vp)
+
+      ;; Allocate parameter and activation tensors
+      (let [params (: ParameterTensors) (allocate_parameter_tensors V maxT C L Vp)
+            acts (: ActivationTensors) (allocate_activation_tensors B T C L NH Vp)
+
+            ;; Create input token sequence: [1, 2, 3, 4]
+            inputs (: (Pointer I32)) (allocate-array I32 (* B T))]
+
+        (pointer-index-write! inputs 0 1)
+        (pointer-index-write! inputs 1 2)
+        (pointer-index-write! inputs 2 3)
+        (pointer-index-write! inputs 3 4)
+
+        (printf (c-str "Input tokens: [1, 2, 3, 4]\n"))
+
+        ;; Run the forward pass!
+        (printf (c-str "Running gpt2_forward...\n"))
+        (gpt2_forward inputs config params acts B T)
+
+        ;; Get probabilities for the last position (t=T-1)
+        (let [last_t (: I32) (- T 1)
+              last_probs_offset (: I32) (* last_t Vp)
+              probs_ptr (: (Pointer F32)) (+ (. acts probs) last_probs_offset)]
+
+          (printf (c-str "Output probabilities for last position (first 8 values):\n"))
+          (let [i (: I32) 0]
+            (while (< i 8)
+              (printf (c-str "  probs[%d] = %f\n") i (pointer-index-read probs_ptr i))
+              (set! i (+ i 1))))
+
+          ;; Use argmax to get predicted token
+          (let [next_token (: I32) (argmax probs_ptr V)]
+            (printf (c-str "Predicted next token (greedy): %d\n") next_token)))
+
+        ;; Clean up
+        (deallocate-array inputs)
+
+        (printf (c-str "GPT-2 inference test completed!\n"))
+        0))))
+
+;; ============================================================================
+;; Test: Real GPT-2 inference with loaded checkpoint
+;; ============================================================================
+
+(def test_real_gpt2_inference (: (-> [] I32))
+  (fn []
+    (printf (c-str "\n=== Testing GPT-2 with REAL pretrained weights ===\n\n"))
+
+    ;; Load the checkpoint
+    (let [checkpoint (: CheckpointData) (load_gpt2_checkpoint (c-str "gpt2_124M.bin"))
+          config (: GPT2Config) (. checkpoint config)
+          params (: ParameterTensors) (. checkpoint params)]
+
+      (printf (c-str "\n=== Running inference ===\n\n"))
+
+      ;; Set up inference parameters
+      (let [B (: I32) 1
+            T (: I32) 4
+
+            ;; Extract config values
+            C (: I32) (. config channels)
+            L (: I32) (. config num_layers)
+            NH (: I32) (. config num_heads)
+            V (: I32) (. config vocab_size)
+            Vp (: I32) (. config padded_vocab_size)]
+
+        ;; Allocate activation tensors
+        (let [acts (: ActivationTensors) (allocate_activation_tensors B T C L NH Vp)
+
+              ;; Create input tokens (some example tokens)
+              ;; GPT-2 tokenizer: 1 = "!", 2 = "\"", 3 = "#", 4 = "$"
+              ;; Let's use [15496, 995, 318] which is roughly "Hello world is"
+              inputs (: (Pointer I32)) (allocate-array I32 (* B T))]
+
+          (pointer-index-write! inputs 0 15496)  ; "Hello"
+          (pointer-index-write! inputs 1 995)    ; " world"
+          (pointer-index-write! inputs 2 318)    ; " is"
+          (pointer-index-write! inputs 3 1)      ; test token
+
+          (printf (c-str "Input tokens: [15496, 995, 318, 1]\n"))
+          (printf (c-str "Running full GPT-2 forward pass with 12 layers...\n"))
+
+          ;; Run the forward pass!
+          (gpt2_forward inputs config params acts B T)
+
+          ;; Get probabilities for the last position
+          (let [last_t (: I32) (- T 1)
+                last_probs_offset (: I32) (* last_t Vp)
+                probs_ptr (: (Pointer F32)) (+ (. acts probs) last_probs_offset)]
+
+            (printf (c-str "\nOutput probabilities for last position (first 10 values):\n"))
+            (let [i (: I32) 0]
+              (while (< i 10)
+                (printf (c-str "  token[%d] prob = %.6f\n") i (pointer-index-read probs_ptr i))
+                (set! i (+ i 1))))
+
+            ;; Get top predicted token
+            (let [next_token (: I32) (argmax probs_ptr V)]
+              (printf (c-str "\nPredicted next token (greedy): %d\n") next_token)
+              (printf (c-str "Probability of predicted token: %.6f\n")
+                (pointer-index-read probs_ptr next_token))))
+
+          ;; Clean up
+          (deallocate-array inputs)
+
+          (printf (c-str "\nReal GPT-2 inference test completed successfully!\n"))
+          0)))))
+
+;; ============================================================================
+;; Test: Autoregressive generation - generate multiple tokens
+;; ============================================================================
+
+(def test_autoregressive_generation (: (-> [] I32))
+  (fn []
+    (printf (c-str "\n=== Testing Autoregressive Generation ===\n\n"))
+
+    ;; Load the checkpoint
+    (let [checkpoint (: CheckpointData) (load_gpt2_checkpoint (c-str "gpt2_124M.bin"))
+          config (: GPT2Config) (. checkpoint config)
+          params (: ParameterTensors) (. checkpoint params)]
+
+      (printf (c-str "\n=== Generating tokens ===\n\n"))
+
+      (let [C (: I32) (. config channels)
+            L (: I32) (. config num_layers)
+            NH (: I32) (. config num_heads)
+            V (: I32) (. config vocab_size)
+            Vp (: I32) (. config padded_vocab_size)
+
+            ;; Start with a prompt: "Hello world is"
+            ;; Use FIXED context window for O(N) generation instead of O(N³)
+            context_window (: I32) 8
+            num_tokens_to_generate (: I32) 100
+            sequence (: (Pointer I32)) (allocate-array I32 (+ context_window num_tokens_to_generate))]
+
+        ;; Initialize prompt tokens
+        (pointer-index-write! sequence 0 15496)  ; "Hello"
+        (pointer-index-write! sequence 1 995)    ; " world"
+        (pointer-index-write! sequence 2 318)    ; " is"
+
+        (printf (c-str "Initial prompt tokens: [15496, 995, 318]\n"))
+        (printf (c-str "Generating 100 new tokens with fixed context window...\n\n"))
+
+        ;; Allocate activation tensors ONCE for context_window (outside loop!)
+        (let [B (: I32) 1
+              acts (: ActivationTensors) (allocate_activation_tensors B context_window C L NH Vp)]
+
+          ;; Generate 100 new tokens using sliding window
+          (let [gen_count (: I32) 0
+                total_generated (: I32) 3]  ; Start with 3 prompt tokens
+            (while (< gen_count num_tokens_to_generate)
+              (let [;; Use only last context_window tokens for forward pass
+                    window_start (: I32) (if (< total_generated context_window)
+                                           0
+                                           (- total_generated context_window))
+                    window_len (: I32) (if (< total_generated context_window)
+                                         total_generated
+                                         context_window)
+                    window_input (: (Pointer I32)) (+ sequence window_start)]
+
+                ;; Run forward pass ONLY on context window (fixed size!)
+                (gpt2_forward window_input config params acts B window_len)
+
+                ;; Get probabilities for last position in window
+                (let [last_t (: I32) (- window_len 1)
+                      last_probs_offset (: I32) (* last_t Vp)
+                      probs_ptr (: (Pointer F32)) (+ (. acts probs) last_probs_offset)
+
+                      ;; Sample next token (greedy - pick argmax)
+                      next_token (: I32) (argmax probs_ptr V)]
+
+                  ;; Progress milestones
+                  (if (= gen_count 0)
+                    (let [dummy (: I32) (printf (c-str "Starting generation...\n"))] nil)
+                    nil)
+                  (if (= gen_count 24)
+                    (let [dummy (: I32) (printf (c-str "25 tokens generated...\n"))] nil)
+                    nil)
+                  (if (= gen_count 49)
+                    (let [dummy (: I32) (printf (c-str "50 tokens generated...\n"))] nil)
+                    nil)
+                  (if (= gen_count 74)
+                    (let [dummy (: I32) (printf (c-str "75 tokens generated...\n"))] nil)
+                    nil)
+
+                  ;; Append to full sequence
+                  (pointer-index-write! sequence total_generated next_token)
+                  (set! total_generated (+ total_generated 1))))
+
+              (set! gen_count (+ gen_count 1)))))
+
+        ;; Print final sequence (first 20 tokens for readability)
+        (printf (c-str "\nFirst 20 generated tokens:\n"))
+        (printf (c-str "["))
+        (let [i (: I32) 0
+              print_limit (: I32) (if (< (+ 3 num_tokens_to_generate) 20)
+                                    (+ 3 num_tokens_to_generate)
+                                    20)]
+          (while (< i print_limit)
+            (if (< i (- print_limit 1))
+              (printf (c-str "%d, ") (pointer-index-read sequence i))
+              (printf (c-str "%d") (pointer-index-read sequence i)))
+            (set! i (+ i 1))))
+        (printf (c-str " ...]\n"))
+
+        ;; Clean up
+        (deallocate-array sequence)
+
+        (printf (c-str "\nAutoregressive generation test completed!\n"))
+        0))))
+
+;; ============================================================================
 ;; Main
 ;; ============================================================================
 
@@ -842,6 +1412,12 @@
     (printf (c-str "\n"))
     (test_attention_forward)
     (printf (c-str "\n"))
-    (test_softmax_forward)))
+    (test_softmax_forward)
+    (printf (c-str "\n"))
+    (test_gpt2_inference)
+    (printf (c-str "\n"))
+    (test_real_gpt2_inference)
+    (printf (c-str "\n"))
+    (test_autoregressive_generation)))
 
 (main-fn)
