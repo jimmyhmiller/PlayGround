@@ -1,0 +1,41 @@
+;; Add these after the argmax function in llm.lisp:
+
+(declare-fn rand [] -> I32)
+(declare-fn srand [seed I32] -> Nil)
+(declare-fn time [t (Pointer I32)] -> I32)
+
+;; Sample from probability distribution with temperature
+;; Higher temperature = more random, lower = more deterministic
+(def sample_with_temperature (: (-> [(Pointer F32) I32 F32] I32))
+  (fn [probs n temperature]
+    ;; If temperature is very low, just use argmax
+    (if (< temperature 0.01)
+      (argmax probs n)
+
+      ;; Otherwise, sample with temperature
+      (let [;; Apply temperature scaling and find sum
+            sum (: F32) 0.0
+            i (: I32) 0]
+
+        ;; Calculate sum of exp(logit/T)
+        (while (< i n)
+          (let [scaled (: F32) (expf (/ (pointer-index-read probs i) temperature))]
+            (set! sum (+ sum scaled)))
+          (set! i (+ i 1)))
+
+        ;; Generate random number in [0, sum)
+        (let [r (: F32) (* (/ (+ (rand) 0.0) 2147483647.0) sum)
+              cumsum (: F32) 0.0]
+          (set! i 0)
+          (while (< i n)
+            (let [scaled (: F32) (expf (/ (pointer-index-read probs i) temperature))]
+              (set! cumsum (+ cumsum scaled))
+              (if (>= cumsum r)
+                (let [result (: I32) i]
+                  (set! i n)  ;; Break out of loop
+                  result)
+                nil))
+            (set! i (+ i 1)))
+
+          ;; Fallback to last token if we didn't sample
+          (- n 1))))))

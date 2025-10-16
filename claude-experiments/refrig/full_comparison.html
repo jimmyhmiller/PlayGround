@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Complete Refrigerator Comparison - All 7 Models</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+            line-height: 1.6;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #666;
+            font-size: 1.1em;
+            margin-bottom: 30px;
+        }
+
+        .summary {
+            background: white;
+            padding: 25px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+            margin: 20px 0;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            font-size: 0.9em;
+        }
+        .comparison-table th {
+            background: #2c5aa0;
+            color: white;
+            padding: 12px 8px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 0.85em;
+        }
+        .comparison-table td {
+            padding: 12px 8px;
+            border-bottom: 1px solid #eee;
+        }
+        .comparison-table tr:hover {
+            background: #f9f9f9;
+        }
+        .comparison-table tr.best {
+            background: #e8f5e9;
+        }
+        .comparison-table tr.good-value {
+            background: #fff8e1;
+        }
+
+        .store-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            color: white;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+        .homedepot-badge { background: #ff6600; }
+        .lowes-badge { background: #004990; }
+
+        .highlight-box {
+            background: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .highlight-box h3 {
+            margin-top: 0;
+            color: #1976d2;
+        }
+
+        .grid-comparison {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 20px;
+            margin: 30px 0;
+        }
+
+        .fridge-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: transform 0.2s;
+        }
+        .fridge-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }
+        .fridge-card.best {
+            border: 3px solid #4caf50;
+        }
+        .fridge-card.good-value {
+            border: 3px solid #ff9800;
+        }
+
+        .card-header {
+            margin-bottom: 15px;
+        }
+        .card-title {
+            font-size: 1.3em;
+            font-weight: 600;
+            margin: 0 0 5px 0;
+            color: #333;
+        }
+        .card-subtitle {
+            color: #666;
+            font-size: 0.9em;
+        }
+        .card-price {
+            font-size: 2em;
+            color: #2c5aa0;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+
+        .specs-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin: 15px 0;
+        }
+        .spec {
+            background: #f9f9f9;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .spec-label {
+            font-size: 0.8em;
+            color: #666;
+            font-weight: 600;
+        }
+        .spec-value {
+            font-size: 1em;
+            color: #333;
+            margin-top: 3px;
+        }
+
+        .features-list {
+            list-style: none;
+            padding: 0;
+            margin: 15px 0;
+        }
+        .features-list li {
+            padding: 5px 0 5px 20px;
+            position: relative;
+            font-size: 0.9em;
+        }
+        .features-list li:before {
+            content: "✓";
+            position: absolute;
+            left: 0;
+            color: #4caf50;
+            font-weight: bold;
+        }
+
+        .recommendation {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px;
+            border-radius: 8px;
+            margin: 30px 0;
+        }
+        .recommendation h2 {
+            margin-top: 0;
+        }
+
+        .pros-cons {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin: 20px 0;
+        }
+        .pros, .cons {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+        }
+        .pros h4 { color: #4caf50; margin-top: 0; }
+        .cons h4 { color: #f44336; margin-top: 0; }
+        .pros ul, .cons ul {
+            margin: 0;
+            padding-left: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .comparison-table {
+                font-size: 0.75em;
+            }
+            .grid-comparison {
+                grid-template-columns: 1fr;
+            }
+            .specs-grid {
+                grid-template-columns: 1fr;
+            }
+            .pros-cons {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>🧊 Complete Refrigerator Comparison</h1>
+    <div class="subtitle">All 7 Refrigerators - Home Depot & Lowe's</div>
+
+    <div class="summary">
+        <h2>Quick Comparison Table</h2>
+        <table class="comparison-table">
+            <thead>
+                <tr>
+                    <th>Brand & Type</th>
+                    <th>Store</th>
+                    <th>Capacity</th>
+                    <th>Price</th>
+                    <th>Depth Type</th>
+                    <th>Ice Maker</th>
+                    <th>Smart</th>
+                    <th>Dimensions (W×H×D)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr class="good-value">
+                    <td><strong>LG LHFS28XBS</strong></td>
+                    <td><span class="store-badge homedepot-badge">Home Depot</span></td>
+                    <td>27.7 cu ft</td>
+                    <td><strong>$1,698</strong></td>
+                    <td>Standard</td>
+                    <td>Dual + Craft Ice</td>
+                    <td>✓</td>
+                    <td>35.75" × 69.75" × 36.25"</td>
+                </tr>
+                <tr>
+                    <td><strong>Samsung RF27CG5400SR</strong></td>
+                    <td><span class="store-badge homedepot-badge">Home Depot</span></td>
+                    <td>25.5 cu ft</td>
+                    <td><strong>$1,898</strong></td>
+                    <td>Counter</td>
+                    <td>4 Types</td>
+                    <td>✓</td>
+                    <td>35.75" × 70" × 31.75"</td>
+                </tr>
+                <tr>
+                    <td><strong>LG LRFS28XBS</strong></td>
+                    <td><span class="store-badge homedepot-badge">Home Depot</span></td>
+                    <td>27.7 cu ft</td>
+                    <td><strong>$1,799</strong></td>
+                    <td>Standard</td>
+                    <td>Single</td>
+                    <td>✓</td>
+                    <td>35.75" × 69.75" × 36.25"</td>
+                </tr>
+                <tr>
+                    <td><strong>Samsung Mega 26.5</strong></td>
+                    <td><span class="store-badge lowes-badge">Lowe's</span></td>
+                    <td>26.5 cu ft</td>
+                    <td><strong>Check Lowe's</strong></td>
+                    <td>Counter</td>
+                    <td>Dual</td>
+                    <td>✓</td>
+                    <td>35.75" × 70" × 31.75"</td>
+                </tr>
+                <tr>
+                    <td><strong>Samsung Mega 25.5</strong></td>
+                    <td><span class="store-badge lowes-badge">Lowe's</span></td>
+                    <td>25.5 cu ft</td>
+                    <td><strong>Check Lowe's</strong></td>
+                    <td>Counter</td>
+                    <td>Triple</td>
+                    <td>✓</td>
+                    <td>35.75" × 70" × 31.75"</td>
+                </tr>
+                <tr>
+                    <td><strong>Whirlpool 36"</strong></td>
+                    <td><span class="store-badge lowes-badge">Lowe's</span></td>
+                    <td>23.4 cu ft</td>
+                    <td><strong>Check Lowe's</strong></td>
+                    <td>Counter</td>
+                    <td>Dual</td>
+                    <td>✓</td>
+                    <td>36" × 69.87" × 31.43"</td>
+                </tr>
+                <tr>
+                    <td><strong>Frigidaire</strong></td>
+                    <td><span class="store-badge lowes-badge">Lowe's</span></td>
+                    <td>22.6 cu ft</td>
+                    <td><strong>Check Lowe's</strong></td>
+                    <td>Counter</td>
+                    <td>Single</td>
+                    <td>✗</td>
+                    <td>36" × 70" × 30.8"</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="recommendation">
+        <h2>🏆 Top Recommendations</h2>
+
+        <h3>Best Overall Value: LG LHFS28XBS - $1,698 (Home Depot)</h3>
+        <ul>
+            <li><strong>Largest capacity</strong> at 27.7 cu ft for the lowest price</li>
+            <li><strong>Unique Craft Ice</strong> feature - slow-melting round ice spheres</li>
+            <li>Dual ice makers + water dispenser</li>
+            <li>Smart ThinQ technology</li>
+            <li>PrintProof fingerprint-resistant finish</li>
+        </ul>
+
+        <h3>Best Counter Depth: Samsung 26.5 cu ft (Lowe's)</h3>
+        <ul>
+            <li><strong>Largest counter-depth capacity</strong> at 26.5 cu ft</li>
+            <li>Fits flush with cabinets for modern look</li>
+            <li>Dual ice maker with nugget ice option</li>
+            <li>Smart home compatible</li>
+            <li>Fingerprint-resistant stainless</li>
+        </ul>
+
+        <h3>Best Premium Features: Samsung 25.5 cu ft Triple Ice (Lowe's)</h3>
+        <ul>
+            <li><strong>Triple ice maker</strong> - three types of ice including nugget</li>
+            <li>Counter depth with excellent capacity</li>
+            <li>Latest smart technology</li>
+            <li>Mega Capacity series</li>
+        </ul>
+    </div>
+
+    <div class="grid-comparison">
+        <div class="fridge-card good-value">
+            <div class="card-header">
+                <div class="card-title">LG LHFS28XBS</div>
+                <div class="card-subtitle"><span class="store-badge homedepot-badge">Home Depot</span></div>
+            </div>
+            <div class="card-price">$1,698</div>
+
+            <div class="specs-grid">
+                <div class="spec">
+                    <div class="spec-label">Capacity</div>
+                    <div class="spec-value">27.7 cu ft</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Type</div>
+                    <div class="spec-value">Standard Depth</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Width</div>
+                    <div class="spec-value">35.75"</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Depth</div>
+                    <div class="spec-value">36.25"</div>
+                </div>
+            </div>
+
+            <ul class="features-list">
+                <li>Craft Ice - slow-melting round ice</li>
+                <li>Dual ice makers</li>
+                <li>Smart ThinQ technology</li>
+                <li>PrintProof stainless</li>
+                <li>Energy Star certified</li>
+            </ul>
+
+            <div class="pros-cons">
+                <div class="pros">
+                    <h4>Pros</h4>
+                    <ul>
+                        <li>Best price per cu ft</li>
+                        <li>Unique Craft Ice</li>
+                        <li>Largest capacity</li>
+                    </ul>
+                </div>
+                <div class="cons">
+                    <h4>Cons</h4>
+                    <ul>
+                        <li>Standard depth</li>
+                        <li>Protrudes from cabinets</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="fridge-card">
+            <div class="card-header">
+                <div class="card-title">Samsung RF27CG5400SR</div>
+                <div class="card-subtitle"><span class="store-badge homedepot-badge">Home Depot</span></div>
+            </div>
+            <div class="card-price">$1,898</div>
+
+            <div class="specs-grid">
+                <div class="spec">
+                    <div class="spec-label">Capacity</div>
+                    <div class="spec-value">25.5 cu ft</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Type</div>
+                    <div class="spec-value">Counter Depth</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Width</div>
+                    <div class="spec-value">35.75"</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Depth</div>
+                    <div class="spec-value">31.75"</div>
+                </div>
+            </div>
+
+            <ul class="features-list">
+                <li>Four types of ice</li>
+                <li>Counter depth design</li>
+                <li>Smart home enabled</li>
+                <li>ADA compliant</li>
+                <li>Energy Star certified</li>
+            </ul>
+
+            <div class="pros-cons">
+                <div class="pros">
+                    <h4>Pros</h4>
+                    <ul>
+                        <li>Flush with cabinets</li>
+                        <li>Good capacity</li>
+                        <li>4 ice types</li>
+                    </ul>
+                </div>
+                <div class="cons">
+                    <h4>Cons</h4>
+                    <ul>
+                        <li>Higher price</li>
+                        <li>Less capacity</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="fridge-card">
+            <div class="card-header">
+                <div class="card-title">LG LRFS28XBS</div>
+                <div class="card-subtitle"><span class="store-badge homedepot-badge">Home Depot</span></div>
+            </div>
+            <div class="card-price">$1,799</div>
+
+            <div class="specs-grid">
+                <div class="spec">
+                    <div class="spec-label">Capacity</div>
+                    <div class="spec-value">27.7 cu ft</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Type</div>
+                    <div class="spec-value">Standard Depth</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Width</div>
+                    <div class="spec-value">35.75"</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Depth</div>
+                    <div class="spec-value">36.25"</div>
+                </div>
+            </div>
+
+            <ul class="features-list">
+                <li>Ultra-large capacity</li>
+                <li>Tall ice & water dispenser</li>
+                <li>SlimSpacePlus ice system</li>
+                <li>Smart ThinQ technology</li>
+                <li>Energy Star certified</li>
+            </ul>
+        </div>
+
+        <div class="fridge-card best">
+            <div class="card-header">
+                <div class="card-title">Samsung 26.5 cu ft</div>
+                <div class="card-subtitle"><span class="store-badge lowes-badge">Lowe's</span> Mega Capacity</div>
+            </div>
+            <div class="card-price">Check Lowe's</div>
+
+            <div class="specs-grid">
+                <div class="spec">
+                    <div class="spec-label">Capacity</div>
+                    <div class="spec-value">26.5 cu ft</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Type</div>
+                    <div class="spec-value">Counter Depth</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Width</div>
+                    <div class="spec-value">35.75"</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Depth</div>
+                    <div class="spec-value">31.75"</div>
+                </div>
+            </div>
+
+            <ul class="features-list">
+                <li><strong>Largest counter-depth capacity</strong></li>
+                <li>Dual ice maker (cubed/nugget)</li>
+                <li>Fingerprint-resistant</li>
+                <li>Smart compatible</li>
+                <li>Energy Star + CEE Tier I</li>
+            </ul>
+
+            <div class="pros-cons">
+                <div class="pros">
+                    <h4>Pros</h4>
+                    <ul>
+                        <li>Best counter-depth capacity</li>
+                        <li>Nugget ice option</li>
+                        <li>Modern flush look</li>
+                    </ul>
+                </div>
+                <div class="cons">
+                    <h4>Cons</h4>
+                    <ul>
+                        <li>Price TBD</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="fridge-card">
+            <div class="card-header">
+                <div class="card-title">Samsung 25.5 cu ft</div>
+                <div class="card-subtitle"><span class="store-badge lowes-badge">Lowe's</span> Triple Ice</div>
+            </div>
+            <div class="card-price">Check Lowe's</div>
+
+            <div class="specs-grid">
+                <div class="spec">
+                    <div class="spec-label">Capacity</div>
+                    <div class="spec-value">25.5 cu ft</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Type</div>
+                    <div class="spec-value">Counter Depth</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Width</div>
+                    <div class="spec-value">35.75"</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Depth</div>
+                    <div class="spec-value">31.75"</div>
+                </div>
+            </div>
+
+            <ul class="features-list">
+                <li><strong>Triple ice maker</strong></li>
+                <li>3 ice types (cubed/crushed/nugget)</li>
+                <li>Fingerprint-resistant</li>
+                <li>Smart compatible</li>
+                <li>Energy Star + CEE Tier I</li>
+            </ul>
+        </div>
+
+        <div class="fridge-card">
+            <div class="card-header">
+                <div class="card-title">Whirlpool 36"</div>
+                <div class="card-subtitle"><span class="store-badge lowes-badge">Lowe's</span></div>
+            </div>
+            <div class="card-price">Check Lowe's</div>
+
+            <div class="specs-grid">
+                <div class="spec">
+                    <div class="spec-label">Capacity</div>
+                    <div class="spec-value">23.4 cu ft</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Type</div>
+                    <div class="spec-value">Counter Depth</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Width</div>
+                    <div class="spec-value">36"</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Depth</div>
+                    <div class="spec-value">31.43"</div>
+                </div>
+            </div>
+
+            <ul class="features-list">
+                <li>Dual ice makers</li>
+                <li>Fingerprint-resistant</li>
+                <li>Smart compatible</li>
+                <li>Voice controlled</li>
+                <li>Energy Star certified</li>
+            </ul>
+        </div>
+
+        <div class="fridge-card">
+            <div class="card-header">
+                <div class="card-title">Frigidaire 22.6</div>
+                <div class="card-subtitle"><span class="store-badge lowes-badge">Lowe's</span></div>
+            </div>
+            <div class="card-price">Check Lowe's</div>
+
+            <div class="specs-grid">
+                <div class="spec">
+                    <div class="spec-label">Capacity</div>
+                    <div class="spec-value">22.6 cu ft</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Type</div>
+                    <div class="spec-value">Counter Depth</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Width</div>
+                    <div class="spec-value">36"</div>
+                </div>
+                <div class="spec">
+                    <div class="spec-label">Depth</div>
+                    <div class="spec-value">30.8"</div>
+                </div>
+            </div>
+
+            <ul class="features-list">
+                <li>Single ice maker</li>
+                <li>Air filtration</li>
+                <li>Basic model</li>
+                <li>Energy Star certified</li>
+                <li>No smart features</li>
+            </ul>
+
+            <div class="pros-cons">
+                <div class="pros">
+                    <h4>Pros</h4>
+                    <ul>
+                        <li>Likely lowest price</li>
+                        <li>Compact counter depth</li>
+                    </ul>
+                </div>
+                <div class="cons">
+                    <h4>Cons</h4>
+                    <ul>
+                        <li>Smallest capacity</li>
+                        <li>No smart features</li>
+                        <li>Single ice maker</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="summary">
+        <h2>Key Decision Factors</h2>
+
+        <div class="highlight-box">
+            <h3>📏 Standard Depth vs Counter Depth</h3>
+            <p><strong>Standard Depth (36"+ deep):</strong> More storage capacity but protrudes beyond counters. Best if you prioritize maximum space.</p>
+            <p><strong>Counter Depth (30-32" deep):</strong> Sits flush with cabinets for a built-in look but 10-20% less capacity. Best for modern aesthetic.</p>
+        </div>
+
+        <div class="highlight-box">
+            <h3>🧊 Ice Maker Features</h3>
+            <ul>
+                <li><strong>Craft Ice (LG LHFS28XBS):</strong> Unique round ice spheres that melt slowly - great for cocktails</li>
+                <li><strong>Nugget Ice:</strong> Soft, chewable ice (Samsung models at Lowe's)</li>
+                <li><strong>Dual/Triple:</strong> More ice production capacity, less running out</li>
+            </ul>
+        </div>
+
+        <div class="highlight-box">
+            <h3>💰 Price Considerations</h3>
+            <p><strong>Home Depot pricing is visible:</strong> LG LHFS28XBS at $1,698 is the best value for capacity.</p>
+            <p><strong>Lowe's pricing:</strong> Visit store or website to compare. Samsung Mega Capacity models typically range $1,800-$2,200.</p>
+        </div>
+
+        <h3>Bottom Line Recommendations:</h3>
+        <ol>
+            <li><strong>If you want maximum storage and best price:</strong> LG LHFS28XBS ($1,698, Home Depot)</li>
+            <li><strong>If you want counter depth with most capacity:</strong> Samsung 26.5 cu ft (Lowe's)</li>
+            <li><strong>If you want premium ice features:</strong> Samsung 25.5 cu ft Triple Ice (Lowe's) or LG Craft Ice (Home Depot)</li>
+            <li><strong>If budget is priority:</strong> Check Frigidaire 22.6 cu ft pricing (Lowe's)</li>
+        </ol>
+    </div>
+
+</body>
+</html>

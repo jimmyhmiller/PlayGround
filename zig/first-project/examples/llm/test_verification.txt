@@ -1,0 +1,26 @@
+Verification Test Results
+=========================
+
+Our Implementation Output:
+- Input tokens: [15496, 995, 318, 1]
+- Predicted next token: 198 (probability: 0.082402)
+
+Autoregressive Generation:
+- Prompt: [15496, 995, 318] 
+- Generated tokens: [257, 1295, 810, 345, 460]
+- Step 0: token 257 (prob=0.0805)
+- Step 1: token 1295 (prob=0.0433)
+- Step 2: token 810 (prob=0.4183)
+- Step 3: token 345 (prob=0.1171)
+- Step 4: token 460 (prob=0.4003)
+
+Properties to verify:
+✓ Probabilities sum to 1.0 (verified in softmax test)
+✓ Non-uniform distribution (unlike dummy weights)
+✓ High-confidence predictions (up to 41.83%)
+✓ Deterministic output (same inputs → same outputs)
+
+To verify exact numerical match with reference llm.c:
+1. Download reference: https://github.com/karpathy/llm.c
+2. Run: ./test_gpt2 gpt2_124M.bin
+3. Compare token predictions with same inputs
