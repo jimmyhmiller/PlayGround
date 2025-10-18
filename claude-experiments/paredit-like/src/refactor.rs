@@ -14,73 +14,107 @@ impl Refactorer {
         Refactorer { source }
     }
 
+    fn list_chars(list: &SExpr) -> Result<(char, char)> {
+        if let SExpr::List { open, close, .. } = list {
+            Ok((*open, *close))
+        } else {
+            Err(anyhow!("Target is not a list"))
+        }
+    }
+
+    fn ends_with_whitespace(text: &str) -> bool {
+        text.chars().last().map_or(false, |c| c.is_whitespace())
+    }
+
+    fn starts_with_whitespace(text: &str) -> bool {
+        text.chars().next().map_or(false, |c| c.is_whitespace())
+    }
+
+    fn trim_whitespace_before(&self, mut idx: usize) -> usize {
+        while idx > 0 {
+            let ch = self.source[..idx].chars().next_back().unwrap();
+            if ch.is_whitespace() {
+                idx -= ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        idx
+    }
+
+    fn trim_whitespace_after(&self, mut idx: usize, limit: usize) -> usize {
+        let mut pos = idx;
+        while pos < limit {
+            let ch = self.source[pos..].chars().next().unwrap();
+            if ch.is_whitespace() {
+                pos += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        pos
+    }
+
     pub fn slurp_forward(&mut self, forms: &[SExpr], line: usize) -> Result<String> {
-        // Find the list at the given line
         let target_list = self.find_list_at_line(forms, line)?;
+        let (open_char, close_char) = Self::list_chars(target_list)?;
 
-        // Get the position after the closing paren
-        let close_pos = target_list.span().end.offset;
+        let list_end = target_list.span().end.offset;
+        let close_offset = list_end.saturating_sub(1);
 
-        // Find the next form after this list
-        let next_form = self.find_next_form(forms, close_pos)?;
-
-        // Get the text of the next form before modifying anything
+        let next_form = self.find_next_form(forms, list_end)?;
         let next_start = next_form.span().start.offset;
         let next_end = next_form.span().end.offset;
-        let next_text = self.source[next_start..next_end].to_string();
 
-        // Find the start of whitespace before the next form
-        let mut ws_start = close_pos;
-        while ws_start < next_start && self.source.chars().nth(ws_start).map_or(false, |c| c.is_whitespace()) {
-            ws_start += 1;
+        let prefix = &self.source[..close_offset];
+        let next_text = &self.source[next_start..next_end];
+        let suffix = &self.source[next_end..];
+
+        let mut result = String::with_capacity(self.source.len());
+        result.push_str(prefix);
+
+        if !prefix.is_empty() {
+            let last_char = prefix.chars().last().unwrap();
+            if !last_char.is_whitespace() && last_char != open_char {
+                result.push(' ');
+            }
         }
 
-        // Construct the new source
-        let mut result = self.source.clone();
-
-        // Remove the next form and any whitespace after the closing paren
-        result.replace_range(close_pos..next_end, "");
-
-        // Remove the closing paren
-        result.remove(close_pos - 1);
-
-        // Insert the next form before where the closing paren was
-        result.insert_str(close_pos - 1, &format!(" {}", next_text));
-
-        // Add back the closing paren
-        result.insert(close_pos - 1 + next_text.len() + 1, ')');
+        let inserted = next_text.trim_start_matches(|c: char| c.is_whitespace());
+        result.push_str(inserted);
+        result.push(close_char);
+        result.push_str(suffix);
 
         Ok(result)
     }
 
     pub fn slurp_backward(&mut self, forms: &[SExpr], line: usize) -> Result<String> {
-        // Find the list at the given line
         let target_list = self.find_list_at_line(forms, line)?;
+        let (open_char, close_char) = Self::list_chars(target_list)?;
 
-        // Get the position before the opening paren
-        let open_pos = target_list.span().start.offset;
+        let open_offset = target_list.span().start.offset;
+        let close_offset = target_list.span().end.offset - close_char.len_utf8();
 
-        // Find the previous form before this list
-        let prev_form = self.find_prev_form(forms, open_pos)?;
-
-        // Construct the new source
-        let mut result = self.source.clone();
-
-        // Remove the opening paren
-        result.remove(open_pos);
-
-        // Remove the previous form from its original position
+        let prev_form = self.find_prev_form(forms, open_offset)?;
         let prev_start = prev_form.span().start.offset;
         let prev_end = prev_form.span().end.offset;
-        let prev_text = result[prev_start..prev_end].to_string();
-        result.replace_range(prev_start..prev_end, "");
 
-        // Adjust open_pos after removal
-        let adjusted_open = open_pos - (prev_end - prev_start);
+        let prefix = &self.source[..prev_start];
+        let prev_text = &self.source[prev_start..prev_end];
+        let list_inside = &self.source[(open_offset + open_char.len_utf8())..close_offset];
+        let suffix = &self.source[close_offset..];
 
-        // Insert opening paren and previous form
-        result.insert(adjusted_open, '(');
-        result.insert_str(adjusted_open + 1, &format!("{} ", prev_text));
+        let mut result = String::with_capacity(self.source.len() + prev_text.len() + 1);
+        result.push_str(prefix);
+        result.push(open_char);
+        result.push_str(prev_text.trim_end_matches(|c: char| c == ' ' || c == '\t'));
+
+        if !list_inside.is_empty() && !Self::starts_with_whitespace(list_inside) {
+            result.push(' ');
+        }
+
+        result.push_str(list_inside);
+        result.push_str(suffix);
 
         Ok(result)
     }
@@ -88,35 +122,33 @@ impl Refactorer {
     pub fn barf_forward(&mut self, forms: &[SExpr], line: usize) -> Result<String> {
         let target_list = self.find_list_at_line(forms, line)?;
 
-        if let SExpr::List { children, .. } = target_list {
+        if let SExpr::List { children, span, .. } = target_list {
             if children.is_empty() {
                 return Err(anyhow!("Cannot barf from empty list"));
             }
 
             let last_child = children.last().unwrap();
-            let close_pos = target_list.span().end.offset;
+            let (_, close_char) = Self::list_chars(target_list)?;
+            let list_end = span.end.offset;
+            let close_offset = list_end - close_char.len_utf8();
             let child_start = last_child.span().start.offset;
             let child_end = last_child.span().end.offset;
 
-            // Get the child text before modifying anything
-            let child_text = self.source[child_start..child_end].to_string();
+            let ws_start = self.trim_whitespace_before(child_start);
+            let ws_end = self.trim_whitespace_after(child_end, close_offset);
 
-            // Find whitespace before the last child
-            let mut ws_start = child_start;
-            while ws_start > 0 && self.source.chars().nth(ws_start - 1).map_or(false, |c| c.is_whitespace()) {
-                ws_start -= 1;
-            }
+            let before_child = &self.source[..ws_start];
+            let middle = &self.source[ws_end..close_offset];
+            let moved_text = &self.source[child_start..child_end];
+            let suffix = &self.source[list_end..];
 
-            let mut result = String::new();
-
-            // Build: everything before ws_start + ) + space + child_text + everything after close_pos
-            result.push_str(&self.source[..ws_start]);
-            result.push(')');
+            let mut result = String::with_capacity(self.source.len());
+            result.push_str(before_child);
+            result.push_str(middle);
+            result.push(close_char);
             result.push(' ');
-            result.push_str(&child_text);
-            if close_pos < self.source.len() {
-                result.push_str(&self.source[close_pos..]);
-            }
+            result.push_str(moved_text);
+            result.push_str(suffix);
 
             return Ok(result);
         }
@@ -127,31 +159,49 @@ impl Refactorer {
     pub fn barf_backward(&mut self, forms: &[SExpr], line: usize) -> Result<String> {
         let target_list = self.find_list_at_line(forms, line)?;
 
-        if let SExpr::List { children, .. } = target_list {
+        if let SExpr::List { children, span, .. } = target_list {
             if children.is_empty() {
                 return Err(anyhow!("Cannot barf from empty list"));
             }
 
             let first_child = children.first().unwrap();
-            let open_pos = target_list.span().start.offset;
+            let (open_char, close_char) = Self::list_chars(target_list)?;
+            let open_offset = span.start.offset;
+            let close_offset = span.end.offset - close_char.len_utf8();
 
-            let mut result = self.source.clone();
-
-            // Remove the opening paren
-            result.remove(open_pos);
-
-            // Remove the first child
             let child_start = first_child.span().start.offset;
             let child_end = first_child.span().end.offset;
-            let child_text = result[child_start..child_end].to_string();
-            result.replace_range(child_start..child_end, "");
+            let ws_end = self.trim_whitespace_after(child_end, close_offset);
 
-            // Add the child before the opening position
-            result.insert_str(open_pos, &format!("{} ", child_text));
+            let prefix = &self.source[..open_offset];
+            let moved_text = &self.source[child_start..child_end];
+            let list_remainder = &self.source[ws_end..close_offset];
+            let suffix = &self.source[close_offset..];
 
-            // Add opening paren after the child
-            let adjusted_open = open_pos + child_text.len() + 1;
-            result.insert(adjusted_open, '(');
+            let mut result = String::with_capacity(self.source.len() + moved_text.len() + 1);
+            result.push_str(prefix);
+
+            if !prefix.is_empty() {
+                let last_char = prefix.chars().last().unwrap();
+                if !last_char.is_whitespace() {
+                    result.push(' ');
+                }
+            }
+
+            let trimmed_moved = moved_text.trim_end_matches(|c: char| c == ' ' || c == '\t');
+            result.push_str(trimmed_moved);
+
+            if !Self::ends_with_whitespace(&result) {
+                result.push(' ');
+            }
+
+            result.push(open_char);
+
+            if !list_remainder.is_empty() {
+                result.push_str(list_remainder);
+            }
+
+            result.push_str(suffix);
 
             return Ok(result);
         }
@@ -473,20 +523,24 @@ impl Refactorer {
     }
 
     fn find_list_at_line<'a>(&self, forms: &'a [SExpr], line: usize) -> Result<&'a SExpr> {
-        // First try to find lists in direct children
+        let mut candidates = Vec::new();
+        self.collect_lists_at_line(forms, line, &mut candidates);
+
+        candidates
+            .into_iter()
+            .min_by_key(|form| form.span().start.column)
+            .ok_or_else(move || anyhow!("No list found at line {}", line))
+    }
+
+    fn collect_lists_at_line<'a>(&self, forms: &'a [SExpr], line: usize, acc: &mut Vec<&'a SExpr>) {
         for form in forms {
-            if matches!(form, SExpr::List { .. }) && form.span().contains_line(line) {
-                // Check if any nested child also contains this line and is a list (prefer deepest)
-                if let SExpr::List { children, .. } = form {
-                    if let Ok(child_list) = self.find_list_at_line(children, line) {
-                        return Ok(child_list);
-                    }
+            if let SExpr::List { children, .. } = form {
+                if form.span().contains_line(line) {
+                    acc.push(form);
                 }
-                // No deeper list found, return this one
-                return Ok(form);
+                self.collect_lists_at_line(children, line, acc);
             }
         }
-        Err(anyhow!("No list found at line {}", line))
     }
 
     fn find_deepest_at_line<'a>(&self, forms: &'a [SExpr], line: usize) -> Result<&'a SExpr> {

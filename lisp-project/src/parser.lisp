@@ -13,7 +13,7 @@
 
 ;; Include tokenizer types (we'll need to copy them for now)
 (def TokenType (: Type)
-  (Enum LeftParen RightParen LeftBracket RightBracket Number Symbol String EOF))
+  (Enum LeftParen RightParen LeftBracket RightBracket LeftBrace RightBrace Number Symbol String Keyword EOF))
 
 (def Token (: Type)
   (Struct
@@ -23,7 +23,7 @@
 
 ;; Include Value types from reader.lisp
 (def ValueTag (: Type)
-  (Enum Nil Number Symbol String List Vector))
+  (Enum Nil Number Symbol String List Vector Keyword Map))
 
 (def Value (: Type)
   (Struct
@@ -197,6 +197,33 @@
             (pointer-field-write! vec-struct count final-count)
             vec))))))
 
+;; Parse map elements until }
+(def parse-map-elements (: (-> [(Pointer Parser) (Pointer Value) I32] I32))
+  (fn [p map-vec index]
+    (let [tok (: Token) (peek-token p)]
+      (if (= (. tok type) TokenType/RightBrace)
+          (let [_ (: I32) (advance-parser p)]
+            index)
+          (let [elem (: (Pointer Value)) (parse-value p)]
+            (vector-set map-vec index elem)
+            (parse-map-elements p map-vec (+ index 1)))))))
+
+;; Parse a map until }
+(def parse-map (: (-> [(Pointer Parser)] (Pointer Value)))
+  (fn [p]
+    ;; Create map (using vector structure) with initial capacity of 32 for key-value pairs
+    (let [map-vec (: (Pointer Value)) (make-vector-with-capacity 32 32)]
+      (let [final-count (: I32) (parse-map-elements p map-vec 0)]
+        ;; Update the actual count
+        (let [vec-ptr (: (Pointer U8)) (pointer-field-read map-vec vec_val)]
+          (let [vec-struct (: (Pointer Vector)) (cast (Pointer Vector) vec-ptr)]
+            (pointer-field-write! vec-struct count final-count)
+            ;; Create a Map value using the same vec_val but different tag
+            (let [map-val (: (Pointer Value)) (allocate Value (make-nil))]
+              (pointer-field-write! map-val tag ValueTag/Map)
+              (pointer-field-write! map-val vec_val vec-ptr)
+              map-val)))))))
+
 ;; Parse a value (recursive)
 (def parse-value (: (-> [(Pointer Parser)] (Pointer Value)))
   (fn [p]
@@ -207,18 +234,21 @@
           (if (= (. tok type) TokenType/LeftBracket)
               (let [_ (: I32) (advance-parser p)]
                 (parse-vector p))
-              (if (= (. tok type) TokenType/Symbol)
+              (if (= (. tok type) TokenType/LeftBrace)
                   (let [_ (: I32) (advance-parser p)]
-                    ;; Check if it's actually a number
-                    (if (!= (is-number-token tok) 0)
-                        (let [str (: (Pointer U8)) (copy-string (. tok text) (. tok length))]
-                          (let [num (: I64) (atoll str)]
-                            (printf (c-str "[DEBUG] Parsed number: %lld\n") num)
-                            (allocate Value (make-number num))))
-                        (let [str (: (Pointer U8)) (copy-string (. tok text) (. tok length))]
-                          (printf (c-str "[DEBUG] Copied symbol: '%s'\n") str)
-                          (allocate Value (make-symbol str)))))
-                  (if (= (. tok type) TokenType/String)
+                    (parse-map p))
+                  (if (= (. tok type) TokenType/Symbol)
+                      (let [_ (: I32) (advance-parser p)]
+                        ;; Check if it's actually a number
+                        (if (!= (is-number-token tok) 0)
+                            (let [str (: (Pointer U8)) (copy-string (. tok text) (. tok length))]
+                              (let [num (: I64) (atoll str)]
+                                (printf (c-str "[DEBUG] Parsed number: %lld\n") num)
+                                (allocate Value (make-number num))))
+                            (let [str (: (Pointer U8)) (copy-string (. tok text) (. tok length))]
+                              (printf (c-str "[DEBUG] Copied symbol: '%s'\n") str)
+                              (allocate Value (make-symbol str)))))
+                      (if (= (. tok type) TokenType/String)
                       (let [_ (: I32) (advance-parser p)]
                         ;; String token includes quotes, so skip first char and reduce length by 2
                         (let [str-start (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 (. tok text)) 1))]
@@ -226,11 +256,18 @@
                             (let [str (: (Pointer U8)) (copy-string str-start str-len)]
                               (printf (c-str "[DEBUG] Copied string: \"%s\"\n") str)
                               (allocate Value (Value ValueTag/String 0 str pointer-null pointer-null))))))
-                      (allocate Value (make-nil)))))))))
+                      (if (= (. tok type) TokenType/Keyword)
+                          (let [_ (: I32) (advance-parser p)]
+                            ;; Keyword token includes ':', copy as-is
+                            (let [str (: (Pointer U8)) (copy-string (. tok text) (. tok length))]
+                              (printf (c-str "[DEBUG] Copied keyword: %s\n") str)
+                              (allocate Value (Value ValueTag/Keyword 0 str pointer-null pointer-null))))
+                          (allocate Value (make-nil)))))))))))
 
 ;; Print a value (simplified from reader.lisp)
 (declare-fn print-value-ptr [v (Pointer Value)] -> I32)
 (declare-fn print-vector-contents [vec-val (Pointer Value) index I32] -> I32)
+(declare-fn print-map-contents [map-val (Pointer Value) index I32] -> I32)
 
 (def print-vector-contents (: (-> [(Pointer Value) I32] I32))
   (fn [vec-val index]
@@ -249,6 +286,23 @@
                             (print-vector-contents vec-val (+ index 1)))
                           (printf (c-str "]")))))))))))))
 
+(def print-map-contents (: (-> [(Pointer Value) I32] I32))
+  (fn [map-val index]
+    (let [vec-ptr (: (Pointer U8)) (pointer-field-read map-val vec_val)]
+      (let [vec (: (Pointer Vector)) (cast (Pointer Vector) vec-ptr)]
+        (let [count (: I32) (pointer-field-read vec count)]
+          (if (>= index count)
+              (printf (c-str "}"))
+              (let [data (: (Pointer U8)) (pointer-field-read vec data)]
+                (let [elem-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) (* index 8)))]
+                  (let [elem-ptr-ptr (: (Pointer (Pointer Value))) (cast (Pointer (Pointer Value)) elem-loc)]
+                    (let [elem (: (Pointer Value)) (dereference elem-ptr-ptr)]
+                      (print-value-ptr elem)
+                      (if (< (+ index 1) count)
+                          (let [_ (: I32) (printf (c-str " "))]
+                            (print-map-contents map-val (+ index 1)))
+                          (printf (c-str "}")))))))))))))
+
 (def print-value-ptr (: (-> [(Pointer Value)] I32))
   (fn [v]
     (let [tag (: ValueTag) (pointer-field-read v tag)]
@@ -260,13 +314,18 @@
                   (printf (c-str "%s") (pointer-field-read v str_val))
                   (if (= tag ValueTag/String)
                       (printf (c-str "\"%s\"") (pointer-field-read v str_val))
-                      (if (= tag ValueTag/List)
-                          (let [_ (: I32) (printf (c-str "("))]
-                            (print-list-contents v))
-                          (if (= tag ValueTag/Vector)
-                              (let [_ (: I32) (printf (c-str "["))]
-                                (print-vector-contents v 0))
-                              (printf (c-str "<unknown>")))))))))))
+                      (if (= tag ValueTag/Keyword)
+                          (printf (c-str "%s") (pointer-field-read v str_val))
+                          (if (= tag ValueTag/List)
+                              (let [_ (: I32) (printf (c-str "("))]
+                                (print-list-contents v))
+                              (if (= tag ValueTag/Vector)
+                                  (let [_ (: I32) (printf (c-str "["))]
+                                    (print-vector-contents v 0))
+                                  (if (= tag ValueTag/Map)
+                                      (let [_ (: I32) (printf (c-str "{"))]
+                                        (print-map-contents v 0))
+                                      (printf (c-str "<unknown>")))))))))))))
 
 (def print-list-contents (: (-> [(Pointer Value)] I32))
   (fn [v]
@@ -457,7 +516,69 @@
                 (let [result (: (Pointer Value)) (parse-value parser)]
                   (printf (c-str "  Result: "))
                   (print-value-ptr result)
-                  (printf (c-str "\n")))))))))
+                  (printf (c-str "\n\n")))))))))
+
+    ;; Test 7: [:name :age :email] - testing keywords
+    (printf (c-str "Test 7: [:name :age :email]\n"))
+    (let [tokens7 (: (Pointer Token)) (cast (Pointer Token) (malloc 256))]
+      (let [t0 (: (Pointer Token)) tokens7]
+        (pointer-field-write! t0 type TokenType/LeftBracket)
+        (pointer-field-write! t0 text (c-str "["))
+        (pointer-field-write! t0 length 1)
+        (let [t1 (: (Pointer Token)) (cast (Pointer Token) (+ (cast I64 tokens7) 24))]
+          (pointer-field-write! t1 type TokenType/Keyword)
+          (pointer-field-write! t1 text (c-str ":name"))
+          (pointer-field-write! t1 length 5)
+          (let [t2 (: (Pointer Token)) (cast (Pointer Token) (+ (cast I64 tokens7) 48))]
+            (pointer-field-write! t2 type TokenType/Keyword)
+            (pointer-field-write! t2 text (c-str ":age"))
+            (pointer-field-write! t2 length 4)
+            (let [t3 (: (Pointer Token)) (cast (Pointer Token) (+ (cast I64 tokens7) 72))]
+              (pointer-field-write! t3 type TokenType/Keyword)
+              (pointer-field-write! t3 text (c-str ":email"))
+              (pointer-field-write! t3 length 6)
+              (let [t4 (: (Pointer Token)) (cast (Pointer Token) (+ (cast I64 tokens7) 96))]
+                (pointer-field-write! t4 type TokenType/RightBracket)
+                (pointer-field-write! t4 text (c-str "]"))
+                (pointer-field-write! t4 length 1)
+                (let [parser (: (Pointer Parser)) (make-parser tokens7 5)]
+                  (let [result (: (Pointer Value)) (parse-value parser)]
+                    (printf (c-str "  Result: "))
+                    (print-value-ptr result)
+                    (printf (c-str "\n\n"))))))))))
+
+    ;; Test 8: {:name "John" :age 30} - testing maps
+    (printf (c-str "Test 8: {:name \"John\" :age 30}\n"))
+    (let [tokens8 (: (Pointer Token)) (cast (Pointer Token) (malloc 256))]
+      (let [t0 (: (Pointer Token)) tokens8]
+        (pointer-field-write! t0 type TokenType/LeftBrace)
+        (pointer-field-write! t0 text (c-str "{"))
+        (pointer-field-write! t0 length 1)
+        (let [t1 (: (Pointer Token)) (cast (Pointer Token) (+ (cast I64 tokens8) 24))]
+          (pointer-field-write! t1 type TokenType/Keyword)
+          (pointer-field-write! t1 text (c-str ":name"))
+          (pointer-field-write! t1 length 5)
+          (let [t2 (: (Pointer Token)) (cast (Pointer Token) (+ (cast I64 tokens8) 48))]
+            (pointer-field-write! t2 type TokenType/String)
+            (pointer-field-write! t2 text (c-str "\"John\""))
+            (pointer-field-write! t2 length 6)
+            (let [t3 (: (Pointer Token)) (cast (Pointer Token) (+ (cast I64 tokens8) 72))]
+              (pointer-field-write! t3 type TokenType/Keyword)
+              (pointer-field-write! t3 text (c-str ":age"))
+              (pointer-field-write! t3 length 4)
+              (let [t4 (: (Pointer Token)) (cast (Pointer Token) (+ (cast I64 tokens8) 96))]
+                (pointer-field-write! t4 type TokenType/Symbol)
+                (pointer-field-write! t4 text (c-str "30"))
+                (pointer-field-write! t4 length 2)
+                (let [t5 (: (Pointer Token)) (cast (Pointer Token) (+ (cast I64 tokens8) 120))]
+                  (pointer-field-write! t5 type TokenType/RightBrace)
+                  (pointer-field-write! t5 text (c-str "}"))
+                  (pointer-field-write! t5 length 1)
+                  (let [parser (: (Pointer Parser)) (make-parser tokens8 6)]
+                    (let [result (: (Pointer Value)) (parse-value parser)]
+                      (printf (c-str "  Result: "))
+                      (print-value-ptr result)
+                      (printf (c-str "\n")))))))))))
 
     0))
 

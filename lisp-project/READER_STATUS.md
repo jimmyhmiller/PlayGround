@@ -26,23 +26,25 @@ vector [:foo :bar]: [:foo :bar]
 ```
 
 ### 2. Tokenizer (`src/tokenizer.lisp`)
-- **Token types**: `(`, `)`, `[`, `]`, Symbol, Number, EOF
+- **Token types**: `(`, `)`, `[`, `]`, `{`, `}`, Symbol, String, Keyword, EOF
 - **Lexical analysis**: Reads input string and produces token stream
 - **Whitespace handling**: Skips spaces between tokens
-- **Delimiter detection**: Recognizes parentheses and brackets
+- **Comment support**: Skips comments starting with `;` to end of line
+- **Delimiter detection**: Recognizes parentheses, brackets, and braces
+- **String literals**: Reads quoted strings
+- **Keywords**: Recognizes `:keyword` syntax
 
 **Test output:**
 ```
-Testing tokenizer:
-Token 1: type=0 text='('
-Token 2: type=5 text='foo'
-Token 3: type=5 text='bar'
-Token 4: type=2 text='['
-Token 5: type=5 text='1'
-Token 6: type=5 text='2'
-Token 7: type=3 text=']'
-Token 8: type=1 text=')'
+Testing tokenizer with comment:
+Input: ";; comment\n(foo bar)"
+Token 1: type=0 text='('  (LeftParen)
+Token 2: type=7 text='foo'  (Symbol)
+Token 3: type=7 text='bar'  (Symbol)
+Token 4: type=1 text=')'  (RightParen)
+Token 5: type=10 text=''  (EOF)
 ```
+Comment was successfully skipped!
 
 **Key insight**: `and` in lisp0 is binary (2 args only), requires nesting:
 ```lisp
@@ -51,17 +53,24 @@ Token 8: type=1 text=')'
 
 ### 3. Parser (`src/parser.lisp`)
 - **Builds Value structures** from token stream
-- **Recursive descent parsing** for lists
+- **Recursive descent parsing** for lists, vectors, and maps
 - **Symbol handling**: Copies strings from tokens
-- **List construction**: Creates proper cons cell chains
+- **Number parsing**: Distinguishes numbers from symbols using `isdigit`
+- **String parsing**: Strips quotes from string literals
+- **Keyword parsing**: Creates keyword values
+- **Map parsing**: Uses Vector structure internally to store key-value pairs
 
 **Test output:**
 ```
-Parser test - building Value structures from tokens
-
-[DEBUG] Copied symbol: 'foo' (len=3)
-[DEBUG] Copied symbol: 'bar' (len=3)
-Parsed: (foo bar)
+Parser test - all 8 tests pass:
+Test 1: (foo bar)
+Test 2: [a b c]
+Test 3: (foo [bar baz])
+Test 4: (add 1 2)
+Test 5: [42 -5 100]
+Test 6: (println "hello world")
+Test 7: [:name :age :email]
+Test 8: {:name "John" :age 30}
 ```
 
 **Key insight**: Token struct is 24 bytes (not 16) due to padding/alignment
@@ -78,23 +87,28 @@ Parser: builds Value structures
 Output: (foo bar)  ← actual Lisp data structures!
 ```
 
-## What Works
+## What Works ✅
 
 ✅ Reading lists: `(foo bar baz)`
 ✅ Nested lists: `(foo (bar baz))`
+✅ Vectors: `[1 2 3]`, `[:foo :bar]`
+✅ Maps: `{:name "John" :age 30}`
+✅ Numbers: `42`, `-5`, `100`
+✅ Strings: `"hello world"`
+✅ Keywords: `:keyword`, `:name`
 ✅ Symbols: `foo`, `bar`, `my-symbol`
+✅ Comments: `; single line` and `;; double semicolon`
 ✅ Immutable data structures
-✅ Pretty-printing
+✅ Pretty-printing all types
 
 ## What's Next (Future Extensions)
 
-- [ ] Vector parsing: `[1 2 3]`
-- [ ] Map support: `{:key value}`
-- [ ] Number parsing (currently treats as symbols)
-- [ ] String literals: `"hello"`
-- [ ] Keywords: `:keyword`
-- [ ] Comments: `; comment`
-- [ ] Quote/unquote: `'foo`, `~foo`
+- [ ] Quote/unquote: `'foo`, `~foo`, `` `foo``
+- [ ] Deref: `@foo`
+- [ ] Reader macros: `#()`, `#{}`
+- [ ] Character literals: `\a`, `\newline`
+- [ ] Regex patterns: `#"pattern"`
+- [ ] Metadata: `^{:doc "..."}`
 
 ## Incremental Approach
 
@@ -107,10 +121,18 @@ We built this **one small step at a time**, ensuring each piece compiled and ran
 - `src/parser.lisp` - Syntax analysis
 - `tests/` - Various test files demonstrating constraints
 
+## Test Files Status
+
+The reader can now parse all test files in `tests/`:
+- ✅ `tests/simple.lisp` - Contains comments, lists, vectors, maps, strings
+- All necessary features are implemented for reading these files
+
 ## Lessons Learned
 
 1. **`and` is binary**: Must nest for multiple conditions
 2. **Struct alignment**: Token = 24 bytes (not obvious)
 3. **Incremental testing**: Essential for catching issues early
-4. **paredit-like**: Useful but can break function structure
+4. **paredit-like**: Useful but can break function structure - balance carefully!
 5. **Type constraints**: `while` in `let` bodies works fine!
+6. **Nested if-chains**: Proper indentation critical for correct parse tree
+7. **Comment support**: Required for real-world Lisp files
