@@ -88,7 +88,7 @@
 - **Array operations**:
   - `(array-ref arr index)` - read element at index
   - `(array-set! arr index value)` - write element at index
-  - `(array-length arr)` - get compile-time size
+  - `(array-length arr)` - get compile-time size (returns `Int`)
   - `(array-ptr arr index)` - get pointer to element
 - **Heap arrays** (pointer-based):
   - `(allocate-array Type Size)` - allocate array on heap
@@ -96,6 +96,10 @@
   - `(deallocate-array ptr)` - free heap array
   - `(pointer-index-read ptr index)` - read from pointer array
   - `(pointer-index-write! ptr index value)` - write to pointer array
+- **Function integration**:
+  - Arrays can be passed as function parameters
+  - Arrays can be returned from functions
+  - Example: `(def sum-array (: (-> [(Array Int 5)] Int)) ...)`
 - **Type safety**: All array operations are type-checked
 - **Integration**: Arrays work with structs, pointers, and functions
 

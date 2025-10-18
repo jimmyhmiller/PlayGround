@@ -30,6 +30,7 @@ pub const SimpleCCompiler = struct {
     compiler_flags: std.ArrayList([]const u8),
     namespace_manager: NamespaceManager,
     required_bundles: std.ArrayList([]const u8), // Bundle paths needed for linking
+    current_source_path: ?[]const u8 = null,
 
     pub const TargetKind = enum {
         executable,
@@ -51,6 +52,8 @@ pub const SimpleCCompiler = struct {
         init_only_def_names: ?*std.StringHashMap(void) = null, // Defs initialized in init (not main)
         local_bindings: ?*std.StringHashMap(void) = null, // Track let-bound variables in current scope
         requires: ?*std.StringHashMap([]const u8) = null, // Map alias -> namespace_name for qualified name resolution
+        source_path: ?[]const u8 = null,
+        line_numbers: ?[]const u32 = null,
     };
 
     const SpecialForm = enum {
@@ -264,6 +267,7 @@ pub const SimpleCCompiler = struct {
             .compiler_flags = std.ArrayList([]const u8){},
             .namespace_manager = ns_manager,
             .required_bundles = std.ArrayList([]const u8){},
+            .current_source_path = null,
         };
     }
 
@@ -344,6 +348,10 @@ pub const SimpleCCompiler = struct {
         const file_path = try self.resolveNamespaceFile(namespace_name);
         defer self.allocator.*.free(file_path);
 
+        const prev_source_path = self.current_source_path;
+        self.current_source_path = file_path;
+        defer self.current_source_path = prev_source_path;
+
         // 2. Read file
         const source = std.fs.cwd().readFileAlloc(
             self.allocator.*,
@@ -364,6 +372,7 @@ pub const SimpleCCompiler = struct {
         var line_numbers = read_result.line_numbers;
         defer expressions.deinit(self.allocator.*);
         defer line_numbers.deinit(self.allocator.*);
+
 
         // 4. Expand macros
         var expander = MacroExpander.init(self.allocator.*);
@@ -499,6 +508,10 @@ pub const SimpleCCompiler = struct {
             return Error.FileNotFound;
         };
         defer self.allocator.*.free(source);
+
+        const prev_source_path = self.current_source_path;
+        self.current_source_path = file_path;
+        defer self.current_source_path = prev_source_path;
 
         // 2. Generate C code using compileString
         const c_code = try self.compileString(source, .bundle);
@@ -684,6 +697,9 @@ pub const SimpleCCompiler = struct {
         var line_numbers = read_result.line_numbers;
         defer expressions.deinit(self.allocator.*);
         defer line_numbers.deinit(self.allocator.*);
+
+        const active_source_path = self.current_source_path orelse "<input>";
+        const line_number_slice = line_numbers.items;
 
         // MACRO EXPANSION PHASE: Expand all macros before type checking
         var expander = MacroExpander.init(self.allocator.*);
@@ -1026,6 +1042,8 @@ pub const SimpleCCompiler = struct {
         var empty_ctx = NamespaceContext{
             .name = null,
             .def_names = &empty_def_names,
+            .source_path = active_source_path,
+            .line_numbers = line_number_slice,
         };
         _ = &empty_ctx; // Mark as used (referenced in nested functions)
 
@@ -1135,6 +1153,8 @@ pub const SimpleCCompiler = struct {
                 .def_names = &init_def_names,
                 .in_init_function = true,
                 .requires = &requires_map,
+                .source_path = active_source_path,
+                .line_numbers = line_number_slice,
             };
 
             // Generate init function signature
@@ -1257,6 +1277,8 @@ pub const SimpleCCompiler = struct {
                 .def_names = &init_def_names,
                 .in_init_function = false,
                 .requires = &requires_map,
+                .source_path = active_source_path,
+                .line_numbers = line_number_slice,
             };
 
             // Emit static function definitions
@@ -1285,7 +1307,7 @@ pub const SimpleCCompiler = struct {
 
                     if (maybe_fn_expr) |fn_expr| {
                         // Use emitFunctionDefinition which handles both untyped and typed AST
-                        self.emitFunctionDefinition(init_writer, def.name, fn_expr, fn_typed, def.var_type, &includes, &fn_ctx) catch |err| {
+                        self.emitFunctionDefinition(init_writer, def.name, fn_expr, fn_typed, def.var_type, &includes, def.idx, &fn_ctx) catch |err| {
                             std.debug.print("Failed to emit namespace function {s}: {}\n", .{ def.name, err });
                             continue;
                         };
@@ -1323,6 +1345,8 @@ pub const SimpleCCompiler = struct {
             .def_names = &namespace_def_names,
             .init_only_def_names = &init_only_def_names,
             .requires = &requires_map,
+            .source_path = active_source_path,
+            .line_numbers = line_number_slice,
         };
 
         // Check if user defined a 'main' function
@@ -1349,7 +1373,7 @@ pub const SimpleCCompiler = struct {
             if (namespace_defs.items.len > 0 and init_processed_indices.contains(expr_idx)) {
                 continue;
             }
-            try self.emitTopLevel(prelude_writer, body_writer, expr, typed_val, &checker, &includes, &ns_ctx);
+            try self.emitTopLevel(prelude_writer, body_writer, expr, typed_val, &checker, &includes, expr_idx, &ns_ctx);
         }
 
         var output = std.ArrayList(u8){};
@@ -1723,7 +1747,7 @@ pub const SimpleCCompiler = struct {
         }
     }
 
-    fn emitTopLevel(self: *SimpleCCompiler, def_writer: anytype, body_writer: anytype, expr: *Value, typed: *TypedValue, checker: *TypeChecker, includes: *IncludeFlags, ns_ctx: *NamespaceContext) Error!void {
+    fn emitTopLevel(self: *SimpleCCompiler, def_writer: anytype, body_writer: anytype, expr: *Value, typed: *TypedValue, checker: *TypeChecker, includes: *IncludeFlags, expr_idx: usize, ns_ctx: *NamespaceContext) Error!void {
         switch (expr.*) {
             .namespace => |ns| {
                 try body_writer.print("    // namespace {s}\n", .{ns.name});
@@ -1831,7 +1855,7 @@ pub const SimpleCCompiler = struct {
                     // Not a namespace def - reset iterator and emit as normal standalone def
                     iter = list.iterator();
                     _ = iter.next(); // skip 'def' again
-                    try self.emitDefinition(def_writer, expr, typed, checker, includes, ns_ctx);
+                    try self.emitDefinition(def_writer, expr, typed, checker, includes, expr_idx, ns_ctx);
                     return;
                 }
 
@@ -1843,7 +1867,7 @@ pub const SimpleCCompiler = struct {
         }
     }
 
-    fn emitDefinition(self: *SimpleCCompiler, def_writer: anytype, list_expr: *Value, typed: *TypedValue, checker: *TypeChecker, includes: *IncludeFlags, ns_ctx: *NamespaceContext) Error!void {
+    fn emitDefinition(self: *SimpleCCompiler, def_writer: anytype, list_expr: *Value, typed: *TypedValue, checker: *TypeChecker, includes: *IncludeFlags, expr_idx: usize, ns_ctx: *NamespaceContext) Error!void {
         var iter = list_expr.list.iterator();
         _ = iter.next(); // Skip 'def'
 
@@ -1893,7 +1917,7 @@ pub const SimpleCCompiler = struct {
                 if (var_type != .function) {
                     return Error.UnsupportedType;
                 }
-                try self.emitFunctionDefinition(def_writer, name, value_expr, typed, var_type, includes, ns_ctx);
+                try self.emitFunctionDefinition(def_writer, name, value_expr, typed, var_type, includes, expr_idx, ns_ctx);
                 return;
             }
         }
@@ -1927,7 +1951,7 @@ pub const SimpleCCompiler = struct {
         try def_writer.print(";\n", .{});
     }
 
-    fn emitFunctionDefinition(self: *SimpleCCompiler, def_writer: anytype, name: []const u8, fn_expr: *Value, fn_typed: *TypedValue, fn_type: Type, includes: *IncludeFlags, ns_ctx: *NamespaceContext) Error!void {
+    fn emitFunctionDefinition(self: *SimpleCCompiler, def_writer: anytype, name: []const u8, fn_expr: *Value, fn_typed: *TypedValue, fn_type: Type, includes: *IncludeFlags, expr_idx: ?usize, ns_ctx: *NamespaceContext) Error!void {
         if (fn_type != .function) return Error.UnsupportedType;
 
         const param_types = fn_type.function.param_types;
@@ -2035,11 +2059,63 @@ pub const SimpleCCompiler = struct {
             self.writeExpressionTyped(def_writer, last_typed_expr, ns_ctx, includes) catch |err| {
                 switch (err) {
                     Error.UnsupportedExpression, Error.MissingOperand, Error.InvalidIfForm => {
-                        const repr = try self.formatValue(fn_expr);
-                        defer self.allocator.*.free(repr);
+                        const fn_repr = try self.formatValue(fn_expr);
+                        defer self.allocator.*.free(fn_repr);
+
+                        const body_index = typed_body_count - 1;
+                        const maybe_body_expr = self.getFunctionBodyExpr(fn_expr, body_index);
+                        const expr_repr_owned = if (maybe_body_expr) |body_expr|
+                            self.formatValue(body_expr) catch null
+                        else
+                            null;
+                        defer if (expr_repr_owned) |owned| self.allocator.*.free(owned);
+                        const expr_repr = expr_repr_owned orelse "<unknown expression>";
+
+                        const location_path = ns_ctx.source_path orelse (self.current_source_path orelse "<input>");
+                        const line_number: u32 = if (expr_idx) |idx| blk: {
+                            if (ns_ctx.line_numbers) |lines| {
+                                if (idx < lines.len) break :blk lines[idx];
+                            }
+                            break :blk 0;
+                        } else 0;
+
+                        const Diag = struct {
+                            reason: []const u8,
+                            hint: []const u8,
+                        };
+                        const diag = switch (err) {
+                            Error.UnsupportedExpression => Diag{
+                                .reason = "Expression form is not supported in return position",
+                                .hint = "Try binding the value to a name or expand macros into supported primitives.",
+                            },
+                            Error.MissingOperand => Diag{
+                                .reason = "Expression is missing a required operand during code generation",
+                                .hint = "Verify the form has the expected number of arguments.",
+                            },
+                            Error.InvalidIfForm => Diag{
+                                .reason = "Conditional form cannot be lowered to C in return position",
+                                .hint = "Ensure each 'if' branch yields a value or rewrite using supported control flow.",
+                            },
+                            else => Diag{
+                                .reason = "Code generation failed for the return expression",
+                                .hint = "Re-run with additional logging to narrow down the unsupported construct.",
+                            },
+                        };
+
                         try def_writer.writeAll("0;\n}\n");
-                        try def_writer.print("// unsupported function body: {s}\n", .{repr});
-                        std.debug.print("ERROR writing return expression: {s}\n", .{@errorName(err)});
+                        try def_writer.print("// unsupported return expression: {s} -- {s}\n", .{ expr_repr, fn_repr });
+
+                        if (line_number != 0) {
+                            std.debug.print(
+                                "ERROR at {s}:{d}: cannot generate code for return expression {s}. Reason: {s} ({s}). Hint: {s}\n",
+                                .{ location_path, line_number, expr_repr, diag.reason, @errorName(err), diag.hint },
+                            );
+                        } else {
+                            std.debug.print(
+                                "ERROR in {s}: cannot generate code for return expression {s}. Reason: {s} ({s}). Hint: {s}\n",
+                                .{ location_path, expr_repr, diag.reason, @errorName(err), diag.hint },
+                            );
+                        }
                         return;
                     },
                     else => return err,
@@ -2398,17 +2474,79 @@ pub const SimpleCCompiler = struct {
                         continue;
                     }
 
-                    const c_type = try self.cTypeFor(var_type, includes);
                     const sanitized = try self.sanitizeIdentifier(var_name);
                     defer self.allocator.*.free(sanitized);
 
-                    try writer.print("{s} {s} = ", .{ c_type, sanitized });
-                    // Add explicit cast for pointers to avoid const-qualifier warnings
-                    if (var_type == .pointer) {
-                        try writer.print("({s})", .{c_type});
+                    if (var_type == .array) {
+                        try self.emitArrayDecl(writer, sanitized, var_type, includes);
+                        try writer.print("; ", .{});
+
+                        var handled_init = false;
+                        if (value_typed.* == .list) {
+                            const init_list = value_typed.list;
+                            if (init_list.elements.len >= 1) {
+                                const head = init_list.elements[0];
+                                if (head.* == .symbol and std.mem.eql(u8, head.symbol.name, "array")) {
+                                    handled_init = true;
+                                    if (init_list.elements.len == 3) {
+                                        includes.need_stddef = true;
+                                        const array_info = var_type.array;
+                                        try writer.print("for (size_t __i_{s} = 0; __i_{s} < {d}; __i_{s}++) {{ ", .{ sanitized, sanitized, array_info.size, sanitized });
+                                        try writer.print("{s}[__i_{s}] = ", .{ sanitized, sanitized });
+                                        try self.writeExpressionTyped(writer, init_list.elements[2], &let_ctx, includes);
+                                        try writer.print("; }} ", .{});
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!handled_init) {
+                            includes.need_string = true;
+                            try writer.print("memcpy({s}, ", .{sanitized});
+                            try self.writeExpressionTyped(writer, value_typed, &let_ctx, includes);
+                            try writer.print(", sizeof({s})); ", .{sanitized});
+                        }
+                    } else {
+                        // Special case for function pointers: ReturnType (*varname)(Args)
+                        if (var_type == .pointer) {
+                            if (var_type.pointer.* == .function) {
+                                const fn_type = var_type.pointer.function;
+                                const ret_c_type = try self.cTypeFor(fn_type.return_type, includes);
+
+                                // Build parameter list
+                                var params_list = std.ArrayList([]const u8){};
+                                defer params_list.deinit(self.allocator.*);
+
+                                for (fn_type.param_types) |param_type| {
+                                    const param_c_type = try self.cTypeFor(param_type, includes);
+                                    try params_list.append(self.allocator.*, param_c_type);
+                                }
+
+                                const params = try std.mem.join(self.allocator.*, ", ", params_list.items);
+                                defer self.allocator.free(params);
+
+                                // Function pointer declaration: ReturnType (*varname)(Params)
+                                try writer.print("{s} (*{s})({s}) = ", .{ ret_c_type, sanitized, params });
+                                const c_type = try self.cTypeFor(var_type, includes);
+                                try writer.print("({s})", .{c_type});
+                                try self.writeExpressionTyped(writer, value_typed, &let_ctx, includes);
+                                try writer.print("; ", .{});
+
+                                // Add this binding to the local bindings map
+                                try local_bindings_map.put(var_name, {});
+                                continue;
+                            }
+                        }
+
+                        const c_type = try self.cTypeFor(var_type, includes);
+                        try writer.print("{s} {s} = ", .{ c_type, sanitized });
+                        // Add explicit cast for pointers to avoid const-qualifier warnings
+                        if (var_type == .pointer) {
+                            try writer.print("({s})", .{c_type});
+                        }
+                        try self.writeExpressionTyped(writer, value_typed, &let_ctx, includes);
+                        try writer.print("; ", .{});
                     }
-                    try self.writeExpressionTyped(writer, value_typed, &let_ctx, includes);
-                    try writer.print("; ", .{});
 
                     // Add this binding to the local bindings map AFTER emitting the init value
                     // This ensures the init value is evaluated in the context before this binding
@@ -3188,6 +3326,22 @@ pub const SimpleCCompiler = struct {
         };
     }
 
+    fn getFunctionBodyExpr(self: *SimpleCCompiler, fn_expr: *Value, body_index: usize) ?*Value {
+        _ = self;
+        if (!fn_expr.isList()) return null;
+
+        var iter = fn_expr.list.iterator();
+        _ = iter.next(); // Skip 'fn'
+        _ = iter.next(); // Skip params
+
+        var idx: usize = 0;
+        while (iter.next()) |body_expr| {
+            if (idx == body_index) return body_expr;
+            idx += 1;
+        }
+        return null;
+    }
+
     fn formatValue(self: *SimpleCCompiler, expr: *Value) ![]u8 {
         var buf = std.ArrayList(u8){};
         defer buf.deinit(self.allocator.*);
@@ -3214,6 +3368,66 @@ test "simple c compiler basic program" {
         "#include <stdio.h>\n\n" ++ "typedef struct {\n" ++ "    long long answer;\n" ++ "} Namespace_my_app;\n\n" ++ "Namespace_my_app g_my_app;\n\n\n" ++ "void init_namespace_my_app(Namespace_my_app* ns) {\n" ++ "    ns->answer = 41;\n" ++ "}\n\n" ++ "int main() {\n" ++ "    init_namespace_my_app(&g_my_app);\n" ++ "    // namespace my.app\n" ++ "    (g_my_app.answer + 1);\n" ++ "    return 0;\n" ++ "}\n";
 
     try std.testing.expectEqualStrings(expected, output);
+}
+
+test "simple c compiler let array binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var allocator = arena.allocator();
+    var compiler = SimpleCCompiler.init(&allocator);
+
+    const source =
+        "(ns arrays.local)\n" ++
+        "(def main (: Int)\n" ++
+        "  (let [arr (: (Array Int 3)) (array Int 3 0)]\n" ++
+        "    (array-set! arr 0 7)\n" ++
+        "    (array-ref arr 0)))";
+
+    const output = try compiler.compileString(source, .executable);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "long long arr[3];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "arr[__i_arr] = 0;") != null);
+}
+
+test "simple c compiler let array binding copies existing array" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var allocator = arena.allocator();
+    var compiler = SimpleCCompiler.init(&allocator);
+
+    const source =
+        "(ns arrays.copy)\n" ++
+        "(def src (: (Array Int 3)) (array Int 3 1))\n" ++
+        "(def main (: Int)\n" ++
+        "  (let [dst (: (Array Int 3)) src]\n" ++
+        "    (array-ref dst 0)))";
+
+    const output = try compiler.compileString(source, .executable);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "#include <string.h>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "long long dst[3];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "memcpy(dst, g_arrays_copy.src, sizeof(dst));") != null);
+}
+
+test "simple c compiler let array binding multidimensional" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var allocator = arena.allocator();
+    var compiler = SimpleCCompiler.init(&allocator);
+
+    const source =
+        "(ns arrays.multi)\n" ++
+        "(def main (: Int)\n" ++
+        "  (let [matrix (: (Array (Array Int 2) 2)) (array (Array Int 2) 2)]\n" ++
+        "    (array-ref (array-ref matrix 0) 0)))";
+
+    const output = try compiler.compileString(source, .executable);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "long long matrix[2][2];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "memcpy") == null);
 }
 
 test "simple c compiler fibonacci program with zig cc" {
@@ -3300,6 +3514,9 @@ pub fn main() !void {
 
     var compiler = SimpleCCompiler.init(&allocator);
     defer compiler.deinit();
+    const prev_source_path = compiler.current_source_path;
+    compiler.current_source_path = source_path;
+    defer compiler.current_source_path = prev_source_path;
     const c_source = try compiler.compileString(source, target_kind);
     defer allocator.free(c_source);
 

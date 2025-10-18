@@ -1908,9 +1908,71 @@ pub const BidirectionalTypeChecker = struct {
     }
 
     fn synthesizeSet(self: *BidirectionalTypeChecker, expr: *Value, list: anytype) TypeCheckError!*TypedExpression {
-        // (set! var-name value)
+        // (set! target value)
+        // target can be: var-name or (. struct-expr field-name)
         const operands = try getBinaryOperands(list);
 
+        // Check if target is a field access: (. struct-expr field-name)
+        if (operands.left.* == .list) {
+            const target_list = operands.left.list;
+            if (target_list.value) |first| {
+                if (first.isSymbol() and std.mem.eql(u8, first.symbol, ".")) {
+                    // Field access case: (set! (. struct field) value)
+                    const struct_node = target_list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+                    const field_node = struct_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+
+                    const struct_expr = struct_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+                    const field_name_val = field_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+                    if (!field_name_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+                    const field_name = field_name_val.symbol;
+
+                    // Type check the struct expression
+                    const struct_typed = try self.synthesize(struct_expr);
+                    const struct_type = struct_typed.type;
+
+                    // Find the field type
+                    var field_type: ?Type = null;
+                    var fields: ?[]const StructField = null;
+
+                    if (struct_type == .struct_type) {
+                        fields = struct_type.struct_type.fields;
+                    } else if (struct_type == .extern_type) {
+                        fields = struct_type.extern_type.fields;
+                    } else if (struct_type == .pointer) {
+                        const pointee = struct_type.pointer.*;
+                        if (pointee == .struct_type) {
+                            fields = pointee.struct_type.fields;
+                        } else if (pointee == .extern_type) {
+                            fields = pointee.extern_type.fields;
+                        }
+                    }
+
+                    if (fields == null) {
+                        return TypeCheckError.TypeMismatch;
+                    }
+
+                    for (fields.?) |field| {
+                        if (std.mem.eql(u8, field.name, field_name)) {
+                            field_type = field.field_type;
+                            break;
+                        }
+                    }
+
+                    if (field_type == null) {
+                        return TypeCheckError.TypeMismatch;
+                    }
+
+                    // Type check the value against the field type
+                    _ = try self.check(operands.right, field_type.?);
+
+                    // set! returns void/nil
+                    return try TypedExpression.init(self.allocator, expr, Type.void);
+                }
+            }
+        }
+
+        // Simple variable case: (set! var-name value)
         if (!operands.left.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
         const var_name = operands.left.symbol;
 
@@ -2583,9 +2645,99 @@ pub const BidirectionalTypeChecker = struct {
     fn synthesizeTypedSet(self: *BidirectionalTypeChecker, expr: *Value, list: anytype, storage: []*TypedValue) TypeCheckError!*TypedValue {
         _ = expr;
 
-        // (set! var-name value)
+        // (set! target value)
+        // target can be: var-name or (. struct-expr field-name)
         const operands = try getBinaryOperands(list);
 
+        // Check if target is a field access: (. struct-expr field-name)
+        if (operands.left.* == .list) {
+            const target_list = operands.left.list;
+            if (target_list.value) |first| {
+                if (first.isSymbol() and std.mem.eql(u8, first.symbol, ".")) {
+                    // Field access case: (set! (. struct field) value)
+                    const struct_node = target_list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+                    const field_node = struct_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+
+                    const struct_expr = struct_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+                    const field_name_val = field_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+                    if (!field_name_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+                    const field_name = field_name_val.symbol;
+
+                    // Type check the struct expression
+                    const struct_typed = try self.synthesizeTyped(struct_expr);
+                    const struct_type = struct_typed.getType();
+
+                    // Find the field type
+                    var field_type: ?Type = null;
+                    var fields: ?[]const StructField = null;
+
+                    if (struct_type == .struct_type) {
+                        fields = struct_type.struct_type.fields;
+                    } else if (struct_type == .extern_type) {
+                        fields = struct_type.extern_type.fields;
+                    } else if (struct_type == .pointer) {
+                        const pointee = struct_type.pointer.*;
+                        if (pointee == .struct_type) {
+                            fields = pointee.struct_type.fields;
+                        } else if (pointee == .extern_type) {
+                            fields = pointee.extern_type.fields;
+                        }
+                    }
+
+                    if (fields == null) {
+                        return TypeCheckError.TypeMismatch;
+                    }
+
+                    for (fields.?) |field| {
+                        if (std.mem.eql(u8, field.name, field_name)) {
+                            field_type = field.field_type;
+                            break;
+                        }
+                    }
+
+                    if (field_type == null) {
+                        return TypeCheckError.TypeMismatch;
+                    }
+
+                    // Type check the value against the field type
+                    const value_typed = try self.checkTyped(operands.right, field_type.?);
+
+                    // Create typed field access: (. struct-typed field-name)
+                    const dot_symbol = try self.allocator.create(TypedValue);
+                    dot_symbol.* = TypedValue{ .symbol = .{ .name = ".", .type = Type.nil } };
+                    const field_symbol = try self.allocator.create(TypedValue);
+                    field_symbol.* = TypedValue{ .symbol = .{ .name = field_name, .type = Type.nil } };
+
+                    const field_access_elements = try self.allocator.alloc(*TypedValue, 3);
+                    field_access_elements[0] = dot_symbol;
+                    field_access_elements[1] = struct_typed;
+                    field_access_elements[2] = field_symbol;
+
+                    const field_access = try self.allocator.create(TypedValue);
+                    field_access.* = TypedValue{ .list = .{
+                        .elements = field_access_elements,
+                        .type = field_type.?,
+                    } };
+
+                    // Build result: (set! field-access value)
+                    const set_symbol = try self.allocator.create(TypedValue);
+                    set_symbol.* = TypedValue{ .symbol = .{ .name = "set!", .type = Type.void } };
+                    storage[0] = set_symbol;
+                    storage[1] = field_access;
+                    storage[2] = value_typed;
+
+                    const result = try self.allocator.create(TypedValue);
+                    result.* = TypedValue{ .list = .{
+                        .elements = storage[0..3],
+                        .type = Type.void,
+                    } };
+                    return result;
+                }
+            }
+        }
+
+        // Simple variable case: (set! var-name value)
         if (!operands.left.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
         const var_name = operands.left.symbol;
 

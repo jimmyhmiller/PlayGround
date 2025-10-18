@@ -277,3 +277,168 @@ test "struct field access - on string type" {
     // Should have error - can't access field on String
     try std.testing.expect(report.errors.items.len > 0);
 }
+
+// ============================================================================
+// STRUCT FIELD MUTATION TESTS (set! with field access)
+// ============================================================================
+
+test "set! struct field - basic field write" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def Point (: Type) (Struct [x Int] [y Int]))
+        \\(def p (: Point) (Point 10 20))
+        \\(set! (. p x) 30)
+    ;
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+    const last_typed = report.typed.items[report.typed.items.len - 1];
+    try std.testing.expect(last_typed.getType() == .void);
+}
+
+test "set! struct field - multiple field writes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def Point (: Type) (Struct [x Int] [y Int]))
+        \\(def p (: Point) (Point 5 7))
+        \\(set! (. p x) 100)
+        \\(set! (. p y) 200)
+    ;
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+}
+
+test "set! struct field - type mismatch error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def Point (: Type) (Struct [x Int] [y Int]))
+        \\(def p (: Point) (Point 10 20))
+        \\(set! (. p x) "not an int")
+    ;
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    // Should have type mismatch error
+    try std.testing.expect(report.errors.items.len > 0);
+}
+
+test "set! struct field - nested struct field" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def Point (: Type) (Struct [x Int] [y Int]))
+        \\(def Line (: Type) (Struct [start Point] [end Point]))
+        \\(def line (: Line) (Line (Point 0 0) (Point 10 10)))
+        \\(set! (. (. line start) x) 5)
+    ;
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+}
+
+test "set! struct field - nonexistent field error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def Point (: Type) (Struct [x Int] [y Int]))
+        \\(def p (: Point) (Point 10 20))
+        \\(set! (. p z) 30)
+    ;
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    // Should have error - field 'z' doesn't exist
+    try std.testing.expect(report.errors.items.len > 0);
+}
+
+test "set! struct field - in do block" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = TypeChecker.BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code =
+        \\(def Point (: Type) (Struct [x Int] [y Int]))
+        \\(def p (: Point) (Point 10 20))
+        \\(do
+        \\  (set! (. p x) 30)
+        \\  (set! (. p y) 40)
+        \\  (+ (. p x) (. p y)))
+    ;
+    const read_result = try reader.readAllString(code);
+    var expressions = read_result.values;
+    defer expressions.deinit(allocator);
+
+    var report = try checker.typeCheckAllTwoPass(expressions.items);
+    defer report.typed.deinit(allocator);
+    defer report.errors.deinit(allocator);
+
+    try std.testing.expect(report.errors.items.len == 0);
+    const last_typed = report.typed.items[report.typed.items.len - 1];
+    try std.testing.expect(last_typed.getType() == .int);
+}
