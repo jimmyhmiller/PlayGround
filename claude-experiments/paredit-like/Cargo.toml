@@ -1,0 +1,22 @@
+[package]
+name = "paredit-like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+tree-sitter = "0.25"
+tree-sitter-clojure = "0.1"
+similar = "2.4"
+anyhow = "1.0"
+glob = "0.3"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+tempfile = "3.8"
+proptest = "1.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "paredit_benchmarks"
+harness = false

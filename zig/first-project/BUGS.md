@@ -2,58 +2,28 @@
 
 This file tracks bugs discovered during development.
 
-## Pointer arithmetic not working [pesky-tidy-dingo] ✅ RESOLVED
+## Unhelpful error message: 'ERROR writing return expression: UnsupportedExpression' [fortunate-sociable-mastodon]
 
-**ID:** pesky-tidy-dingo
-**Timestamp:** 2025-10-14 17:06:20
-**Resolved:** 2025-10-14
+**ID:** fortunate-sociable-mastodon
+**Timestamp:** 2025-10-18 10:31:59
 **Severity:** high
-**Location:** src/type_checker.zig
-**Tags:** type-system, pointers, arithmetic
+**Location:** src/simple_c_compiler.zig (Error reporting in code generation)
+**Tags:** error-messages, diagnostics, codegen, ux
 
 ### Description
 
-Pointer arithmetic (e.g., adding integers to pointers) is not currently supported. Need to implement pointer arithmetic to work exactly like C: pointer + integer should move the pointer by that many elements.
+When code generation fails for certain expressions, the compiler outputs 'ERROR writing return expression: UnsupportedExpression' with no details about WHICH expression failed, WHERE in the source file, or WHY it's unsupported. This makes debugging nearly impossible for users. The error should include: 1) The source location (file:line), 2) The actual expression that failed, 3) What about it is unsupported, 4) Ideally a hint about how to work around it.
 
-### Resolution
+### Minimal Reproducing Case
 
-Added pointer arithmetic support in `synthesizeCBinaryOp` function in src/type_checker.zig:1560-1580. The implementation now correctly handles:
-- `ptr + int` → returns pointer type
-- `int + ptr` → returns pointer type
-- `ptr - int` → returns pointer type
-- `ptr - ptr` → returns `isize` (pointer difference)
+Any code that triggers a codegen failure (e.g., deallocate in nested contexts) shows this unhelpful error
+
+### Code Snippet
+
+```
+Current: 'ERROR writing return expression: UnsupportedExpression'
+Should be: 'ERROR at example.lisp:42: Cannot generate code for (deallocate ptr) in this context. Hint: deallocate may not work in all expression positions.'
+```
 
 ---
 
-
-## playful-narwhal
-**Title:** Test and implement OpenMP support for parallel compilation flags
-
-**Description:** 
-The compiler supports `(compiler-flag "-fopenmp")` syntax, but we haven't tested if OpenMP pragmas in generated C code actually compile and execute correctly. This would enable multi-threaded parallelization for compute-intensive operations.
-
-**Context:**
-- File: `src/simple_c_compiler.zig` (compiler flag handling)
-- Current status: Untested whether OpenMP flags properly propagate to both compilation and linking
-- Use case: Parallelizing matrix multiplication operations in GPT-2 implementation
-
-**Reproduction:**
-Try adding OpenMP pragma comments to generated C code and verify:
-1. `(compiler-flag "-fopenmp")` passes flag to both compile and link stages
-2. Generated C code with `#pragma omp parallel for` compiles without errors
-3. Multi-threaded execution actually occurs at runtime
-4. No segfaults or race conditions with generated code patterns
-
-**Severity:** low (nice-to-have optimization)
-
-**Tags:** performance, parallelization, openmp, compiler-flags
-
-**Code snippet:**
-```lisp
-(compiler-flag "-fopenmp")
-;; Would need to generate C code like:
-;; #pragma omp parallel for
-;; for (int i = 0; i < n; i++) { ... }
-```
-
-**Metadata:** {"related_issue": "matmul_optimization", "blocked_by": "none"}
