@@ -114,7 +114,8 @@ impl ClojureParser {
                 Some(SExpr::String { span, value })
             }
             "comment" => {
-                let text = node.utf8_text(source.as_bytes()).ok()?.to_string();
+                let raw = node.utf8_text(source.as_bytes()).ok()?.to_string();
+                let text = raw.trim_end_matches(|c| c == '\n' || c == '\r').to_string();
                 Some(SExpr::Comment { span, text })
             }
             "sym_lit" | "kwd_lit" | "num_lit" | "bool_lit" | "nil_lit" | "char_lit" => {

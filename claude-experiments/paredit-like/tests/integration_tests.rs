@@ -195,6 +195,32 @@ fn test_merge_let_command() {
 }
 
 #[test]
+fn test_merge_let_command_with_typed_bindings() {
+    let temp_dir = TempDir::new().unwrap();
+    let content = "(let [user (: User) ctx]\n  (let [name (: Name) user\n        email (: Email) user]\n    {:name name\n     :email email}))";
+    let file_path = create_temp_file(&temp_dir, "typed.clj", content);
+
+    let output = run_paredit_like(&["merge-let", file_path.to_str().unwrap(), "--line", "1"]);
+
+    assert!(output.status.success(), "merge-let command failed: {:?}", output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    assert_eq!(stdout.matches("(let").count(), 1, "expected nested lets to be merged:\n{stdout}");
+    assert!(stdout.contains("user (: User) ctx"), "outer typed binding missing:\n{stdout}");
+    assert!(stdout.contains("name (: Name) user"), "inner typed binding missing:\n{stdout}");
+    assert!(stdout.contains("email (: Email) user"), "second inner typed binding missing:\n{stdout}");
+
+    let idx_user = stdout.find("user (: User) ctx").expect("missing user binding");
+    let idx_name = stdout.find("name (: Name) user").expect("missing name binding");
+    let idx_email = stdout.find("email (: Email) user").expect("missing email binding");
+
+    assert!(
+        idx_user < idx_name && idx_name < idx_email,
+        "bindings not preserved in order:\n{stdout}"
+    );
+}
+
+#[test]
 fn test_batch_command_dry_run() {
     let temp_dir = TempDir::new().unwrap();
     create_temp_file(&temp_dir, "file1.clj", "(defn foo");
