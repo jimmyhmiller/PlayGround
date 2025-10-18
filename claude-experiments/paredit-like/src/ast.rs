@@ -48,7 +48,7 @@ impl Span {
     }
 
     pub fn len(&self) -> usize {
-        self.end.offset - self.start.offset
+        self.end.offset.saturating_sub(self.start.offset)
     }
 }
 
@@ -106,6 +106,13 @@ impl SExpr {
         }
 
         if let SExpr::List { children, .. } = self {
+            for child in children {
+                if matches!(child, SExpr::List { .. }) {
+                    if let Some(found) = child.find_deepest_at_line(line) {
+                        return Some(found);
+                    }
+                }
+            }
             for child in children {
                 if let Some(found) = child.find_deepest_at_line(line) {
                     return Some(found);

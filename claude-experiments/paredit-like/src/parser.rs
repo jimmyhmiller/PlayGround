@@ -1,5 +1,5 @@
 use crate::ast::{SExpr, Span};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use tree_sitter::{Node, Parser, Tree};
 
 pub struct ClojureParser {
@@ -7,6 +7,8 @@ pub struct ClojureParser {
 }
 
 impl ClojureParser {
+    const MAX_DEPTH: usize = 256;
+
     pub fn new() -> Result<Self> {
         let mut parser = Parser::new();
         let language: tree_sitter::Language = tree_sitter_clojure::LANGUAGE.into();
@@ -23,13 +25,31 @@ impl ClojureParser {
     }
 
     pub fn parse_to_sexpr(&mut self, source: &str) -> Result<Vec<SExpr>> {
+        let mut depth = 0usize;
+        for ch in source.chars() {
+            match ch {
+                '(' | '[' | '{' => {
+                    depth += 1;
+                    if depth > Self::MAX_DEPTH {
+                        return Err(anyhow!("Source exceeds maximum nesting depth of {}", Self::MAX_DEPTH));
+                    }
+                }
+                ')' | ']' | '}' => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
         let tree = self.parse(source)?;
         let root = tree.root_node();
         let mut forms = Vec::new();
 
         let mut cursor = root.walk();
         for child in root.children(&mut cursor) {
-            if let Some(sexpr) = self.node_to_sexpr(&child, source) {
+            if let Some(sexpr) = self.node_to_sexpr(&child, source, 0)? {
                 forms.push(sexpr);
             }
         }
@@ -37,7 +57,11 @@ impl ClojureParser {
         Ok(forms)
     }
 
-    fn node_to_sexpr(&self, node: &Node, source: &str) -> Option<SExpr> {
+    fn node_to_sexpr(&self, node: &Node, source: &str, depth: usize) -> Result<Option<SExpr>> {
+        if depth >= Self::MAX_DEPTH {
+            return Err(anyhow!("Exceeded maximum AST depth of {}", Self::MAX_DEPTH));
+        }
+
         let span = Span::from_node(node);
 
         match node.kind() {
@@ -46,93 +70,108 @@ impl ClojureParser {
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
                     if child.kind() != "(" && child.kind() != ")" {
-                        if let Some(sexpr) = self.node_to_sexpr(&child, source) {
+                        if let Some(sexpr) = self.node_to_sexpr(&child, source, depth + 1)? {
                             children.push(sexpr);
                         }
                     }
                 }
-                Some(SExpr::List {
+                Ok(Some(SExpr::List {
                     span,
                     open: '(',
                     close: ')',
                     children,
-                })
+                }))
             }
             "vec_lit" => {
                 let mut children = Vec::new();
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
                     if child.kind() != "[" && child.kind() != "]" {
-                        if let Some(sexpr) = self.node_to_sexpr(&child, source) {
+                        if let Some(sexpr) = self.node_to_sexpr(&child, source, depth + 1)? {
                             children.push(sexpr);
                         }
                     }
                 }
-                Some(SExpr::List {
+                Ok(Some(SExpr::List {
                     span,
                     open: '[',
                     close: ']',
                     children,
-                })
+                }))
             }
             "map_lit" => {
                 let mut children = Vec::new();
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
                     if child.kind() != "{" && child.kind() != "}" {
-                        if let Some(sexpr) = self.node_to_sexpr(&child, source) {
+                        if let Some(sexpr) = self.node_to_sexpr(&child, source, depth + 1)? {
                             children.push(sexpr);
                         }
                     }
                 }
-                Some(SExpr::List {
+                Ok(Some(SExpr::List {
                     span,
                     open: '{',
                     close: '}',
                     children,
-                })
+                }))
             }
             "set_lit" => {
                 let mut children = Vec::new();
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
                     if child.kind() != "#{" && child.kind() != "}" {
-                        if let Some(sexpr) = self.node_to_sexpr(&child, source) {
+                        if let Some(sexpr) = self.node_to_sexpr(&child, source, depth + 1)? {
                             children.push(sexpr);
                         }
                     }
                 }
-                Some(SExpr::List {
+                Ok(Some(SExpr::List {
                     span,
                     open: '{',
                     close: '}',
                     children,
-                })
+                }))
             }
             "str_lit" => {
-                let value = node.utf8_text(source.as_bytes()).ok()?.to_string();
-                Some(SExpr::String { span, value })
+                if let Some(text) = node.utf8_text(source.as_bytes()).ok() {
+                    Ok(Some(SExpr::String {
+                        span,
+                        value: text.to_string(),
+                    }))
+                } else {
+                    Ok(None)
+                }
             }
             "comment" => {
-                let raw = node.utf8_text(source.as_bytes()).ok()?.to_string();
-                let text = raw.trim_end_matches(|c| c == '\n' || c == '\r').to_string();
-                Some(SExpr::Comment { span, text })
+                if let Some(raw) = node.utf8_text(source.as_bytes()).ok() {
+                    let text = raw.trim_end_matches(|c| c == '\n' || c == '\r').to_string();
+                    Ok(Some(SExpr::Comment { span, text }))
+                } else {
+                    Ok(None)
+                }
             }
             "sym_lit" | "kwd_lit" | "num_lit" | "bool_lit" | "nil_lit" | "char_lit" => {
-                let value = node.utf8_text(source.as_bytes()).ok()?.to_string();
-                Some(SExpr::Atom { span, value })
+                if let Some(text) = node.utf8_text(source.as_bytes()).ok() {
+                    Ok(Some(SExpr::Atom {
+                        span,
+                        value: text.to_string(),
+                    }))
+                } else {
+                    Ok(None)
+                }
             }
             _ => {
                 // For other node types, try to recursively parse children
                 if node.child_count() > 0 {
                     let mut cursor = node.walk();
                     for child in node.children(&mut cursor) {
-                        if let Some(sexpr) = self.node_to_sexpr(&child, source) {
-                            return Some(sexpr);
+                        if let Some(sexpr) = self.node_to_sexpr(&child, source, depth + 1)? {
+                            return Ok(Some(sexpr));
                         }
                     }
                 }
-                None
+                Ok(None)
             }
         }
     }

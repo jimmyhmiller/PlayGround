@@ -417,8 +417,7 @@ impl Refactorer {
 
             // Add newline and indentation before each binding (except the first)
             if !is_first {
-                merged.push('\n');
-                merged.push_str("      ");
+                merged.push(' ');
             } else {
                 is_first = false;
             }

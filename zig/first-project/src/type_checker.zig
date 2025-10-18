@@ -2015,18 +2015,21 @@ pub const BidirectionalTypeChecker = struct {
 
             _ = try self.check(value_val, annotated_type);
 
-            const entry = try self.env.getOrPut(name_val.symbol);
-            const had_previous = entry.found_existing;
-            const previous = if (had_previous) entry.value_ptr.* else Type.nil;
-            entry.value_ptr.* = annotated_type;
+            const is_placeholder = std.mem.eql(u8, name_val.symbol, "_");
+            if (!is_placeholder) {
+                const entry = try self.env.getOrPut(name_val.symbol);
+                const had_previous = entry.found_existing;
+                const previous = if (had_previous) entry.value_ptr.* else Type.nil;
+                entry.value_ptr.* = annotated_type;
 
-            snapshot_slice[inserted] = BindingSnapshot{
-                .name = name_val.symbol,
-                .had_previous = had_previous,
-                .previous = previous,
-                .entry_ptr = entry.value_ptr,
-            };
-            inserted += 1;
+                snapshot_slice[inserted] = BindingSnapshot{
+                    .name = name_val.symbol,
+                    .had_previous = had_previous,
+                    .previous = previous,
+                    .entry_ptr = entry.value_ptr,
+                };
+                inserted += 1;
+            }
         }
 
         current = bindings_node.next;
@@ -2089,18 +2092,21 @@ pub const BidirectionalTypeChecker = struct {
             typed_bindings_elements[idx * 3 + 1] = type_typed;
             typed_bindings_elements[idx * 3 + 2] = typed_value;
 
-            const entry = try self.env.getOrPut(name_val.symbol);
-            const had_previous = entry.found_existing;
-            const previous = if (had_previous) entry.value_ptr.* else Type.nil;
-            entry.value_ptr.* = annotated_type;
+            const is_placeholder = std.mem.eql(u8, name_val.symbol, "_");
+            if (!is_placeholder) {
+                const entry = try self.env.getOrPut(name_val.symbol);
+                const had_previous = entry.found_existing;
+                const previous = if (had_previous) entry.value_ptr.* else Type.nil;
+                entry.value_ptr.* = annotated_type;
 
-            snapshot_slice[inserted] = BindingSnapshot{
-                .name = name_val.symbol,
-                .had_previous = had_previous,
-                .previous = previous,
-                .entry_ptr = entry.value_ptr,
-            };
-            inserted += 1;
+                snapshot_slice[inserted] = BindingSnapshot{
+                    .name = name_val.symbol,
+                    .had_previous = had_previous,
+                    .previous = previous,
+                    .entry_ptr = entry.value_ptr,
+                };
+                inserted += 1;
+            }
         }
 
         // Create typed bindings vector

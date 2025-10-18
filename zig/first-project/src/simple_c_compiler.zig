@@ -2468,6 +2468,12 @@ pub const SimpleCCompiler = struct {
                     const var_name = name_typed.symbol.name;
                     const var_type = type_typed.type_value.value_type;
 
+                    if (std.mem.eql(u8, var_name, "_")) {
+                        try self.writeExpressionTyped(writer, value_typed, &let_ctx, includes);
+                        try writer.print("; ", .{});
+                        continue;
+                    }
+
                     if (var_type == .nil) {
                         try self.writeExpressionTyped(writer, value_typed, &let_ctx, includes);
                         try writer.print("; ", .{});

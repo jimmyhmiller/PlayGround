@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ParenType {
@@ -38,16 +38,26 @@ pub struct Parinfer {
 
 impl Parinfer {
     pub fn new(source: &str) -> Self {
-        let lines = source
-            .lines()
-            .map(|line| {
-                let indent = line.chars().take_while(|c| c.is_whitespace()).count();
-                Line {
-                    text: line.to_string(),
+        let mut lines = Vec::new();
+        let mut current = String::new();
+
+        for ch in source.chars() {
+            if ch == '\n' {
+                let indent = current.chars().take_while(|c| c.is_whitespace()).count();
+                lines.push(Line {
+                    text: current.clone(),
                     indent,
-                }
-            })
-            .collect();
+                });
+                current.clear();
+            } else {
+                current.push(ch);
+            }
+        }
+
+        if !source.is_empty() {
+            let indent = current.chars().take_while(|c| c.is_whitespace()).count();
+            lines.push(Line { text: current, indent });
+        }
 
         Parinfer { lines }
     }
@@ -56,10 +66,10 @@ impl Parinfer {
         let mut result = Vec::new();
         let mut paren_stack: Vec<ParenType> = Vec::new();
         let mut indent_stack: Vec<usize> = Vec::new(); // Column where each paren was opened
+        let mut in_string = false;
 
         for (line_idx, line) in self.lines.iter().enumerate() {
             let mut new_line = String::new();
-            let mut in_string = false;
             let mut in_comment = false;
             let mut escape_next = false;
             let line_start_stack_len = paren_stack.len(); // Track how many opens were before this line
@@ -174,7 +184,108 @@ impl Parinfer {
             }
         }
 
-        Ok(result.join("\n"))
+        let output = result.join("\n");
+
+        if !Self::is_structurally_balanced(&output) {
+            eprintln!("structural imbalance detected: {:?}", output);
+            return Err(anyhow!("Balanced output verification failed"));
+        }
+
+        if Self::has_incomplete_unicode_escape(&output) {
+            return Err(anyhow!("Balanced output verification failed"));
+        }
+
+        let mut parser = crate::parser::ClojureParser::new()?;
+        parser.parse_to_sexpr(&output)?;
+
+        Ok(output)
+    }
+    fn has_incomplete_unicode_escape(output: &str) -> bool {
+        let mut chars = output.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                if let Some('u') = chars.peek().copied() {
+                    chars.next();
+                    if let Some('{') = chars.peek().copied() {
+                        chars.next();
+                        let mut found_closing = false;
+                        while let Some(next) = chars.next() {
+                            if next == '}' {
+                                found_closing = true;
+                                break;
+                            }
+                            if next == '\\' {
+                                // Escaped sequence interrupted; treat as incomplete.
+                                break;
+                            }
+                        }
+                        if !found_closing {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn is_structurally_balanced(output: &str) -> bool {
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut in_comment = false;
+
+        let mut parens = 0i32;
+        let mut brackets = 0i32;
+        let mut braces = 0i32;
+
+        for ch in output.chars() {
+            let was_escaped = escape_next;
+            escape_next = false;
+
+            if ch == '\\' && in_string && !was_escaped {
+                escape_next = true;
+                continue;
+            }
+
+            if ch == '"' && !in_comment && !was_escaped {
+                in_string = !in_string;
+                continue;
+            }
+
+            if ch == ';' && !in_string {
+                in_comment = true;
+            }
+
+            if ch == '\n' {
+                in_comment = false;
+            }
+
+            if was_escaped {
+                continue;
+            }
+
+            if in_string || in_comment {
+                continue;
+            }
+
+            match ch {
+                '(' => parens += 1,
+                ')' => parens -= 1,
+                '[' => brackets += 1,
+                ']' => brackets -= 1,
+                '{' => braces += 1,
+                '}' => braces -= 1,
+                _ => {}
+            }
+
+            if parens < 0 || brackets < 0 || braces < 0 {
+                return false;
+            }
+        }
+
+        !in_string && parens == 0 && brackets == 0 && braces == 0
     }
 }
 

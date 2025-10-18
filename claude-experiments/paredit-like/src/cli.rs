@@ -361,7 +361,7 @@ impl Output {
             Ok(())
         } else if dry_run {
             // Just print the modified output (dry-run = don't write to file)
-            println!("{}", self.modified);
+            print!("{}", self.modified);
             Ok(())
         } else if in_place {
             // Write to file
@@ -371,7 +371,7 @@ impl Output {
             Ok(())
         } else {
             // Print to stdout
-            println!("{}", self.modified);
+            print!("{}", self.modified);
             Ok(())
         }
     }
