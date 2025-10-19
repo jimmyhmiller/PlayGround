@@ -1,16 +1,17 @@
 #include <stdio.h>
 
 // Required namespace: math.utils
+typedef struct Point Point;
 typedef enum {
     Color_Red,
     Color_Green,
     Color_Blue,
 } Color;
 
-typedef struct {
+struct Point {
     long long x;
     long long y;
-} Point;
+};
 
 typedef struct {
     long long value;

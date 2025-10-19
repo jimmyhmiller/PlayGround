@@ -53,6 +53,7 @@ All examples are fully tested and working:
 | 08 | `08_macros.lisp` | Macro definitions, syntax-quote, gensym |
 | 09 | `09_linked_list.lisp` | Recursive data structures, pointers |
 | 10 | `10_enums_and_pattern_matching.lisp` | Enums, pattern matching with if |
+| 11 | `11_modules_and_require.lisp` | Module system, importing namespaces, qualified names |
 
 ### Running All Examples
 
@@ -74,6 +75,7 @@ done
 - ✅ Structs and enums (algebraic data types)
 - ✅ Manual memory management (pointers, allocate, deallocate)
 - ✅ Heap-allocated arrays
+- ✅ Module system with `require` for code organization
 - ✅ C FFI (include headers, declare/extern functions)
 - ✅ Compile-time macros with hygiene support (gensym)
 - ✅ Control flow (if, while, c-for)
@@ -114,7 +116,6 @@ done
 - No variadic macros (`& rest` syntax)
 - No garbage collection (manual memory management only)
 - No pattern matching (must use if/else chains)
-- No module system beyond basic namespaces
 
 ---
 
@@ -177,6 +178,17 @@ Compile and run:
   (fn []
     (printf (c-str "fib(10) = %u\n") (fib 10))
     0))
+```
+
+---
+
+## Building from Source
+
+If you need to rebuild the compiler:
+
+```bash
+cd /path/to/first-project
+zig build-exe src/simple_c_compiler.zig -O ReleaseFast -femit-bin=build0/bin/lisp0
 ```
 
 ---

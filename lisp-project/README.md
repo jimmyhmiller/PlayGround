@@ -87,7 +87,7 @@ lisp-project/
 
 ### Challenges Encountered
 
-1. **Multi-file Compilation**: The `lisp0` compiler doesn't have a built-in module system, making it difficult to compose multiple source files. Each module (`src/*.lisp`) was designed to be standalone but would need manual integration.
+1. **Multi-file Compilation**: The `lisp0` compiler has a `require` module system that allows importing definitions from other namespaces. Each module (`src/*.lisp`) can be organized into separate namespaces and imported using `(require [namespace.path :as alias])`.
 
 2. **Type System Complexity**: Our Lisp's type system required explicit annotations for complex nested expressions, especially with MLIR's opaque types.
 
@@ -100,7 +100,7 @@ The **`demo_compiler.lisp`** successfully demonstrates:
 - Parsing and executing MLIR programs
 - The exact pipeline that would be used for op/block compilation
 
-All the infrastructure pieces (`src/*.lisp`) are **correctly implemented** according to the plan. The challenge is purely in the integration layer due to `lisp0`'s module system limitations.
+All the infrastructure pieces (`src/*.lisp`) are **correctly implemented** according to the plan. With the `require` module system, these can be integrated into a cohesive compiler by organizing them into namespaces and importing them as needed.
 
 ### Test Files
 
@@ -138,4 +138,4 @@ The project showcases:
 3. JIT compilation technology
 4. Compiler design and implementation
 
-While a fully integrated single-binary compiler would require `lisp0` to have a module system, the **demonstration successfully executes op/block programs through MLIR JIT compilation**, proving the viability of the entire approach.
+The **demonstration successfully executes op/block programs through MLIR JIT compilation**, proving the viability of the entire approach. With the `require` module system now available in `lisp0`, the individual modules can be integrated into a fully cohesive compiler.
