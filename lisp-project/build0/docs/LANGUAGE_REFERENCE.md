@@ -20,7 +20,7 @@
 11. [Arrays](#arrays)
 12. [C Foreign Function Interface](#c-foreign-function-interface)
 13. [Macros](#macros)
-14. [Namespaces](#namespaces)
+14. [Namespaces and Modules](#namespaces-and-modules)
 15. [Error Handling](#error-handling)
 
 ---
@@ -180,8 +180,6 @@ Create local bindings with `let`:
 (let [x (: Int) 10]
   (+ x 5))  ; => 15
 ```
-
-Let bindings MUST have a type
 
 Multiple bindings in sequence:
 
@@ -969,7 +967,9 @@ Macros can call other macros:
 
 ---
 
-## Namespaces
+## Namespaces and Modules
+
+### Basic Namespaces
 
 Basic namespace support with `ns`:
 
@@ -984,6 +984,143 @@ Qualified name resolution for enum variants:
 Color/Red
 Color/Green
 ```
+
+### Module System with `require`
+
+The `require` form allows you to import definitions from other namespaces, enabling modular code organization.
+
+#### Basic Syntax
+
+```lisp
+(require [namespace.path :as alias])
+```
+
+The namespace path uses dot notation (e.g., `math.utils`) which maps to a file path (`math/utils.lisp`). All imports must use an alias.
+
+#### Importing and Using Definitions
+
+```lisp
+(ns my.app)
+(require [math.utils :as mu])
+
+;; Access imported values
+(def x (: Int) mu/value)
+
+;; Call imported functions
+(def result (: Int) (mu/add-one 10))
+
+;; Use multiple imports
+(def sum (: Int) (mu/add 5 7))
+```
+
+#### Importing Types
+
+To use an imported type in type annotations, you must first bind it locally:
+
+```lisp
+(require [math.utils :as mu])
+
+;; Bind the imported type locally
+(def Point (: Type) mu/Point)
+
+;; Now you can use it in annotations
+(def origin (: Point) (mu/make-point 0 0))
+```
+
+**Note:** Direct type aliases like `(: mu/Point)` are not supported.
+
+#### Qualified Names
+
+All imported definitions are accessed using qualified names with the alias prefix:
+
+- `alias/value` - imported constant
+- `alias/function-name` - imported function
+- `alias/TypeName` - imported type
+
+#### Module Resolution
+
+- Module paths use dot notation: `math.utils` → `math/utils.lisp`
+- Paths are resolved relative to the working directory
+- Each module is compiled to a dynamic library (`.dylib` on macOS)
+- The compiler caches compiled modules for faster builds
+
+#### Chained Requires
+
+Modules can require other modules. If module A requires module B, and you require module A:
+- You can use A's exported definitions (which may internally use B)
+- You cannot directly access B's definitions
+- You must explicitly require B if you need its definitions
+
+Example:
+
+```lisp
+;; math/utils.lisp
+(ns math.utils)
+(def value (: Int) 42)
+
+;; math/core.lisp
+(ns math.core)
+(require [math.utils :as mu])
+(def double-value (: Int) (* mu/value 2))
+
+;; your-app.lisp
+(ns your.app)
+(require [math.core :as mc])
+;; Can use: mc/double-value
+;; Cannot use: mu/value (need to require math.utils separately)
+```
+
+#### Error Cases
+
+The compiler catches these module-related errors:
+
+**Undefined namespace:**
+```lisp
+(require [nonexistent.module :as nm])
+;; ERROR: Module not found
+```
+
+**Undefined qualified name:**
+```lisp
+(require [math.utils :as mu])
+(def x (: Int) mu/nonexistent)
+;; ERROR: Undefined qualified name 'mu/nonexistent'
+```
+
+**Missing require:**
+```lisp
+(def x (: Int) mu/value)
+;; ERROR: Unbound variable 'mu/value'
+```
+
+#### Complete Example
+
+```lisp
+(include-header "stdio.h")
+(declare-fn printf [fmt (Pointer U8)] -> I32)
+
+(ns example.app)
+(require [math.utils :as mu])
+
+;; Use imported values and functions
+(def imported-value (: Int) mu/value)
+(def incremented (: Int) (mu/add-one 10))
+(def sum (: Int) (mu/add 5 7))
+
+;; Compose imported functions
+(def composed (: Int)
+  (mu/add-one (mu/add imported-value incremented)))
+
+(def main-fn (: (-> [] I32))
+  (fn []
+    (printf (c-str "Value: %lld\n") imported-value)
+    (printf (c-str "Result: %lld\n") composed)
+    0))
+
+(main-fn)
+```
+
+See `examples/11_modules_and_require.lisp` for a comprehensive demonstration.
 
 ---
 

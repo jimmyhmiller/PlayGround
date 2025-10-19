@@ -267,6 +267,7 @@ pub const TypeCheckError = error{
     CannotApplyNonFunction,
     ArgumentCountMismatch,
     InvalidTypeAnnotation,
+    TypeAliasNotSupported,
     OutOfMemory,
 };
 
@@ -4978,8 +4979,6 @@ pub const BidirectionalTypeChecker = struct {
     pub fn typeCheckAllTwoPass(self: *BidirectionalTypeChecker, expressions: []const *Value) !TypeCheckReport {
         // Pass 1: Collect all top-level definitions and their type signatures
         for (expressions, 0..) |expr, idx| {
-            _ = idx;
-
             // Handle namespace and require values directly (they may come from parser as special types)
             if (expr.isNamespace()) {
                 _ = self.synthesize(expr) catch |err| {
@@ -5062,6 +5061,18 @@ pub const BidirectionalTypeChecker = struct {
                                 const body_node = second_node.next;
                                 if (body_node) |bn| {
                                     if (bn.value) |body_val| {
+                                        // Detect type aliases: (def Point (: Type) PointImpl)
+                                        if (body_val.isSymbol()) {
+                                            const detail = TypeCheckErrorDetail{
+                                                .index = idx,
+                                                .expr = expr,
+                                                .err = TypeCheckError.TypeAliasNotSupported,
+                                                .info = null,
+                                            };
+                                            try self.errors.append(self.allocator, detail);
+                                            continue;
+                                        }
+
                                         // Check if this is a Struct or Enum definition
                                         // If so, add a forward reference before parsing to support self-referential types
                                         var is_struct_or_enum = false;

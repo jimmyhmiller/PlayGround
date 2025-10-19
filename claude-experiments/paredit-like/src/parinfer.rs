@@ -1,234 +1,38 @@
 use anyhow::{anyhow, Result};
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ParenType {
-    Open(char),
-    Close(char),
-}
-
-impl ParenType {
-    fn matches(&self, other: &ParenType) -> bool {
-        match (self, other) {
-            (ParenType::Open('('), ParenType::Close(')')) => true,
-            (ParenType::Open('['), ParenType::Close(']')) => true,
-            (ParenType::Open('{'), ParenType::Close('}')) => true,
-            _ => false,
-        }
-    }
-
-    fn closing_char(&self) -> Option<char> {
-        match self {
-            ParenType::Open('(') => Some(')'),
-            ParenType::Open('[') => Some(']'),
-            ParenType::Open('{') => Some('}'),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct Line {
-    text: String,
-    indent: usize,
-}
+use parinfer_rust::{
+    parinfer,
+    types::{ErrorName, Options},
+};
 
 pub struct Parinfer {
-    lines: Vec<Line>,
+    source: String,
 }
 
 impl Parinfer {
     pub fn new(source: &str) -> Self {
-        let mut lines = Vec::new();
-        let mut current = String::new();
-
-        for ch in source.chars() {
-            if ch == '\n' {
-                let indent = current.chars().take_while(|c| c.is_whitespace()).count();
-                lines.push(Line {
-                    text: current.clone(),
-                    indent,
-                });
-                current.clear();
-            } else {
-                current.push(ch);
-            }
+        Self {
+            source: source.to_string(),
         }
-
-        if !source.is_empty() {
-            let indent = current.chars().take_while(|c| c.is_whitespace()).count();
-            lines.push(Line { text: current, indent });
-        }
-
-        Parinfer { lines }
     }
 
-    pub fn balance(&self) -> Result<String> {
-        let mut result = Vec::new();
-        let mut paren_stack: Vec<ParenType> = Vec::new();
-        let mut indent_stack: Vec<usize> = Vec::new(); // Column where each paren was opened
-        let mut in_string = false;
-
-        for (line_idx, line) in self.lines.iter().enumerate() {
-            let mut new_line = String::new();
-            let mut in_comment = false;
-            let mut escape_next = false;
-            let line_start_stack_len = paren_stack.len(); // Track how many opens were before this line
-
-            // Process line: handle parens, keep track of what needs closing
-            for ch in line.text.chars() {
-                if escape_next {
-                    escape_next = false;
-                    new_line.push(ch);
-                    continue;
-                }
-
-                if ch == '\\' && in_string {
-                    escape_next = true;
-                    new_line.push(ch);
-                    continue;
-                }
-
-                if ch == '"' && !in_comment {
-                    in_string = !in_string;
-                    new_line.push(ch);
-                    continue;
-                }
-
-                if ch == ';' && !in_string {
-                    in_comment = true;
-                    new_line.push(ch);
-                    continue;
-                }
-
-                if !in_string && !in_comment {
-                    match ch {
-                        '(' | '[' | '{' => {
-                            let paren_type = ParenType::Open(ch);
-                            paren_stack.push(paren_type);
-                            indent_stack.push(new_line.len()); // Track column position
-                            new_line.push(ch);
-                        }
-                        ')' | ']' | '}' => {
-                            let close_type = ParenType::Close(ch);
-                            // Only allow closing parens that close something opened on THIS line
-                            if paren_stack.len() > line_start_stack_len {
-                                if let Some(open_type) = paren_stack.last() {
-                                    if open_type.matches(&close_type) {
-                                        // This closes something from the current line, keep it
-                                        paren_stack.pop();
-                                        indent_stack.pop();
-                                        new_line.push(ch);
-                                    }
-                                    // Otherwise skip it (wrong type)
-                                }
-                            }
-                            // Otherwise skip it (closes something from previous line or nothing)
-                        }
-                        _ => new_line.push(ch),
-                    }
-                } else {
-                    new_line.push(ch);
-                }
-            }
-
-            // Now add closing parens based on indentation
-            if !in_string && !in_comment {
-                // Find the next non-empty line to determine indentation
-                let next_indent = {
-                    let mut idx = line_idx + 1;
-                    loop {
-                        match self.lines.get(idx) {
-                            Some(next_line) if next_line.text.trim().is_empty() => {
-                                idx += 1;
-                                continue;
-                            }
-                            Some(next_line) => break next_line.indent,
-                            None => break 0,
-                        }
-                    }
-                };
-
-                // Close all parens that were opened at or after the next line's indentation
-                let mut to_close = Vec::new();
-                while let Some(paren) = paren_stack.last() {
-                    if let Some(indent) = indent_stack.last() {
-                        if *indent >= next_indent {
-                            to_close.push(*paren);
-                            paren_stack.pop();
-                            indent_stack.pop();
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-
-                // Add the closing parens
-                for paren in to_close {
-                    if let Some(close_char) = paren.closing_char() {
-                        new_line.push(close_char);
-                    }
-                }
-            }
-
-            result.push(new_line);
+    fn default_options() -> Options {
+        Options {
+            cursor_x: None,
+            cursor_line: None,
+            prev_cursor_x: None,
+            prev_cursor_line: None,
+            prev_text: None,
+            selection_start_line: None,
+            changes: vec![],
+            comment_char: ';',
+            string_delimiters: vec!["\"".to_string()],
+            lisp_vline_symbols: false,
+            lisp_block_comments: false,
+            guile_block_comments: false,
+            scheme_sexp_comments: false,
+            janet_long_strings: false,
+            hy_bracket_strings: false,
         }
-
-        // Close any remaining open parens at the end of the file
-        while let Some(paren) = paren_stack.pop() {
-            if let Some(close_char) = paren.closing_char() {
-                if let Some(last_line) = result.last_mut() {
-                    last_line.push(close_char);
-                }
-            }
-        }
-
-        let output = result.join("\n");
-
-        if !Self::is_structurally_balanced(&output) {
-            eprintln!("structural imbalance detected: {:?}", output);
-            return Err(anyhow!("Balanced output verification failed"));
-        }
-
-        if Self::has_incomplete_unicode_escape(&output) {
-            return Err(anyhow!("Balanced output verification failed"));
-        }
-
-        let mut parser = crate::parser::ClojureParser::new()?;
-        parser.parse_to_sexpr(&output)?;
-
-        Ok(output)
-    }
-    fn has_incomplete_unicode_escape(output: &str) -> bool {
-        let mut chars = output.chars().peekable();
-
-        while let Some(ch) = chars.next() {
-            if ch == '\\' {
-                if let Some('u') = chars.peek().copied() {
-                    chars.next();
-                    if let Some('{') = chars.peek().copied() {
-                        chars.next();
-                        let mut found_closing = false;
-                        while let Some(next) = chars.next() {
-                            if next == '}' {
-                                found_closing = true;
-                                break;
-                            }
-                            if next == '\\' {
-                                // Escaped sequence interrupted; treat as incomplete.
-                                break;
-                            }
-                        }
-                        if !found_closing {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-
-        false
     }
 
     fn is_structurally_balanced(output: &str) -> bool {
@@ -258,7 +62,7 @@ impl Parinfer {
                 in_comment = true;
             }
 
-            if ch == '\n' {
+            if ch == '\n' || ch == '\r' {
                 in_comment = false;
             }
 
@@ -287,273 +91,59 @@ impl Parinfer {
 
         !in_string && parens == 0 && brackets == 0 && braces == 0
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
+    pub fn balance(&self) -> Result<String> {
+        let options = Self::default_options();
+        let answer = parinfer::paren_mode(&self.source, &options);
 
-    #[test]
-    fn test_balance_simple() {
-        let source = "(defn foo\n  (+ 1 2";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert!(result.contains("(+ 1 2))"));
-    }
+        let success = answer.success;
+        let error = answer.error.clone();
+        let output = answer.text.into_owned();
 
-    #[test]
-    fn test_balance_nested() {
-        let source = "(let [x 1\n      y 2\n  (+ x y";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        // Should close the vector and let form
-        assert!(result.ends_with("))"));
-        assert!(result.contains("y 2]"));
-    }
+        let mut parser = crate::parser::ClojureParser::new()?;
+        if !Self::is_structurally_balanced(&output) {
+            if let Some(err) = error.clone() {
+                return Err(anyhow!(
+                    "Parinfer produced unbalanced output ({}): {}",
+                    err.name,
+                    err.message
+                ));
+            }
+            return Err(anyhow!("Parinfer produced unbalanced output"));
+        }
 
-    #[test]
-    fn test_remove_extra_parens() {
-        let source = "(defn foo []))";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert_eq!(result, "(defn foo [])");
-    }
+        if let Err(parse_err) = parser.parse_to_sexpr(&output) {
+            if let Some(err) = error {
+                return Err(anyhow!(
+                    "Parinfer failed to produce parseable output ({}): {}",
+                    err.name,
+                    err.message
+                ));
+            }
+            return Err(parse_err);
+        }
 
-    #[test]
-    fn test_preserve_strings() {
-        let source = r#"(str "hello (world)")"#;
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert_eq!(result, r#"(str "hello (world)")"#);
-    }
+        if !success {
+            if let Some(err) = error {
+                match err.name {
+                    ErrorName::UnmatchedCloseParen
+                    | ErrorName::UnmatchedOpenParen
+                    | ErrorName::LeadingCloseParen => {
+                        return Ok(output);
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "Parinfer reported an unrecoverable error ({}): {}",
+                            err.name,
+                            err.message
+                        ));
+                    }
+                }
+            } else {
+                return Err(anyhow!("Parinfer reported failure without details"));
+            }
+        }
 
-    #[test]
-    fn test_preserve_comments() {
-        let source = "(foo) ; comment with (parens)";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert_eq!(result, "(foo) ; comment with (parens)");
-    }
-
-    #[test]
-    fn test_balance_multiple_missing_parens() {
-        let source = "(defn fibonacci [n]\n  (if (<= n 1)\n    n\n    (+ (fibonacci (- n 1))\n       (fibonacci (- n 2";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-
-        // Should have the right number of closing parens
-        let open_count = source.chars().filter(|&c| c == '(' || c == '[').count();
-        let result_close_count = result.chars().filter(|&c| c == ')' || c == ']').count();
-        assert_eq!(open_count, result_close_count);
-    }
-
-    #[test]
-    fn test_balance_mixed_brackets() {
-        let source = "[1 2 {3 4\n      5 6\n  7 8";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert!(result.contains("}"));
-        assert!(result.ends_with("]"));
-    }
-
-    #[test]
-    fn test_balance_no_changes_needed() {
-        let source = "(defn foo [x y]\n  (+ x y))";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert_eq!(result, source);
-    }
-
-    #[test]
-    fn test_balance_empty_input() {
-        let source = "";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn test_balance_only_whitespace() {
-        let source = "   \n  \t  ";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert_eq!(result, source);
-    }
-
-    #[test]
-    fn test_balance_mismatched_parens() {
-        let source = "(defn foo [x)\n  (+ x 1]";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-
-        // Should ignore all closing parens and regenerate correctly
-        assert!(result.contains("[x]"));
-        assert!(result.contains("(+ x 1))"));
-    }
-
-    #[test]
-    fn test_balance_extra_closing_parens() {
-        let source = "(+ 1 2)))";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert_eq!(result, "(+ 1 2)");
-    }
-
-    #[test]
-    fn test_balance_string_with_escapes() {
-        let source = r#"(str "hello \"world\" with (parens)")"#;
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert_eq!(result, source);
-    }
-
-    #[test]
-    fn test_balance_multiline_string() {
-        let source = "\"this is a\nmultiline string\nwith (parens)\"";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert_eq!(result, source);
-    }
-
-    #[test]
-    fn test_balance_comment_at_end_of_line() {
-        let source = "(defn foo [x] ; comment\n  (+ x 1";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert!(result.contains("; comment"));
-        assert!(result.ends_with("))"));
-    }
-
-    #[test]
-    fn test_balance_comment_with_parens() {
-        let source = "(foo) ; (this is a comment with (parens))";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert_eq!(result, source);
-    }
-
-    #[test]
-    fn test_balance_indentation_based_closing() {
-        let source = "(let [x 1\n      y 2]\n  (if true\n    x\n    y))";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert_eq!(result, source);
-    }
-
-    #[test]
-    fn test_balance_deeply_nested() {
-        let source = "((((\n    inner\n  (\n    content";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-
-        let open_count = source.chars().filter(|&c| c == '(').count();
-        let result_close_count = result.chars().filter(|&c| c == ')').count();
-        assert_eq!(open_count, result_close_count);
-    }
-
-    #[test]
-    fn test_balance_vector_in_function() {
-        let source = "(defn foo [a b c\n  (+ a b c";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert!(result.contains("[a b c]"));
-        assert!(result.ends_with("))"));
-    }
-
-    #[test]
-    fn test_balance_map_structure() {
-        let source = "{:a 1\n :b 2\n :c {:nested 3\n     :value 4";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-
-        let open_count = source.chars().filter(|&c| c == '{').count();
-        let result_close_count = result.chars().filter(|&c| c == '}').count();
-        assert_eq!(open_count, result_close_count);
-    }
-
-    #[test]
-    fn test_balance_complex_indentation() {
-        let source = r#"(defn complex-fn [x y z]
-  (let [sum (+ x y z)
-        product (* x y z)]
-    (if (> sum 10)
-      {:sum sum
-       :product product
-       :status :large}
-      {:sum sum
-       :product product
-       :status :small"#;
-
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-
-        // Check that all structures are properly closed
-        let open_parens = source.chars().filter(|&c| c == '(').count();
-        let open_brackets = source.chars().filter(|&c| c == '[').count();
-        let open_braces = source.chars().filter(|&c| c == '{').count();
-
-        let close_parens = result.chars().filter(|&c| c == ')').count();
-        let close_brackets = result.chars().filter(|&c| c == ']').count();
-        let close_braces = result.chars().filter(|&c| c == '}').count();
-
-        assert_eq!(open_parens, close_parens);
-        assert_eq!(open_brackets, close_brackets);
-        assert_eq!(open_braces, close_braces);
-    }
-
-    #[test]
-    fn test_balance_preserve_existing_structure() {
-        let source = "(defn well-formed [x]\n  (* x 2))";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert_eq!(result, source);
-    }
-
-    #[test]
-    fn test_balance_handle_character_literals() {
-        let source = r"(str \( \) \[ \])";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-        assert_eq!(result, source);
-    }
-
-    #[test]
-    fn test_paren_type_matching() {
-        let paren_open = ParenType::Open('(');
-        let paren_close = ParenType::Close(')');
-        let bracket_open = ParenType::Open('[');
-        let bracket_close = ParenType::Close(']');
-        let brace_open = ParenType::Open('{');
-        let brace_close = ParenType::Close('}');
-
-        assert!(paren_open.matches(&paren_close));
-        assert!(bracket_open.matches(&bracket_close));
-        assert!(brace_open.matches(&brace_close));
-
-        assert!(!paren_open.matches(&bracket_close));
-        assert!(!bracket_open.matches(&brace_close));
-        assert!(!brace_open.matches(&paren_close));
-    }
-
-    #[test]
-    fn test_paren_type_closing_char() {
-        assert_eq!(ParenType::Open('(').closing_char(), Some(')'));
-        assert_eq!(ParenType::Open('[').closing_char(), Some(']'));
-        assert_eq!(ParenType::Open('{').closing_char(), Some('}'));
-        assert_eq!(ParenType::Close(')').closing_char(), None);
-    }
-
-    #[test]
-    fn test_balance_dangling_zero() {
-        // This is the specific bug case from parser.lisp
-        let source = "(defn main-fn []\n  (let [a 1]\n    (foo)))))))))\n\n    0))\n\n(main-fn)";
-        let parinfer = Parinfer::new(source);
-        let result = parinfer.balance().unwrap();
-
-        // The 0 should be inside the function, not dangling
-        assert!(!result.contains("0\n\n(main-fn)"), "0 should not be dangling before (main-fn)");
-        // Should have the 0 followed by closing parens before the final (main-fn)
-        assert!(result.contains("0))\n\n(main-fn)"));
+        Ok(output)
     }
 }

@@ -1,15 +1,17 @@
 #include <stdio.h>
 
-typedef struct {
-    long long x;
-    long long y;
-} Point;
-
+// Local type definitions
+typedef struct Point Point;
 typedef enum {
     Color_Red,
     Color_Green,
     Color_Blue,
 } Color;
+
+struct Point {
+    long long x;
+    long long y;
+};
 
 
 typedef struct {

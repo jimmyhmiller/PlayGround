@@ -11,6 +11,7 @@ const Value = value.Value;
 const TypeChecker = type_checker.BidirectionalTypeChecker;
 const Type = type_checker.Type;
 const TypedValue = type_checker.TypedValue;
+const StructType = type_checker.StructType;
 const MacroExpander = macro_expander.MacroExpander;
 const NamespaceManager = namespace_manager.NamespaceManager;
 
@@ -31,6 +32,7 @@ pub const SimpleCCompiler = struct {
     namespace_manager: NamespaceManager,
     required_bundles: std.ArrayList([]const u8), // Bundle paths needed for linking
     current_source_path: ?[]const u8 = null,
+    verbose: bool = false,
 
     pub const TargetKind = enum {
         executable,
@@ -220,6 +222,7 @@ pub const SimpleCCompiler = struct {
         CannotApplyNonFunction,
         ArgumentCountMismatch,
         InvalidTypeAnnotation,
+        TypeAliasNotSupported,
         UnexpectedToken,
         UnterminatedString,
         UnterminatedList,
@@ -284,6 +287,8 @@ pub const SimpleCCompiler = struct {
 
     /// Resolve namespace name to file path
     /// e.g., "math.utils" -> "math/utils.lisp"
+    /// Also tries snake_case variant: "thing-stuff" -> "thing_stuff.lisp"
+    /// Tries current directory first, then src/ subdirectory
     fn resolveNamespaceFile(self: *SimpleCCompiler, namespace_name: []const u8) Error![]const u8 {
         // Convert dots to slashes
         var path_buf = std.ArrayList(u8){};
@@ -300,10 +305,57 @@ pub const SimpleCCompiler = struct {
 
         const relative_path = try path_buf.toOwnedSlice(self.allocator.*);
 
-        // Check if file exists
+        // Also create snake_case variant (replace - with _)
+        var snake_path_buf = std.ArrayList(u8){};
+        defer snake_path_buf.deinit(self.allocator.*);
+        for (relative_path) |c| {
+            if (c == '-') {
+                try snake_path_buf.append(self.allocator.*, '_');
+            } else {
+                try snake_path_buf.append(self.allocator.*, c);
+            }
+        }
+        const snake_path = try snake_path_buf.toOwnedSlice(self.allocator.*);
+        defer self.allocator.*.free(snake_path);
+
+        // Try relative path first (kebab-case)
         std.fs.cwd().access(relative_path, .{}) catch {
-            std.debug.print("ERROR: Cannot find namespace file: {s}\n", .{relative_path});
-            return Error.FileNotFound;
+            // Try snake_case variant
+            std.fs.cwd().access(snake_path, .{}) catch {
+                // If not found, try src/ prefix with kebab-case
+                const src_path = try std.fmt.allocPrint(self.allocator.*, "src/{s}", .{relative_path});
+                defer self.allocator.*.free(src_path);
+
+                std.fs.cwd().access(src_path, .{}) catch {
+                    // Try src/ with snake_case
+                    const src_snake_path = try std.fmt.allocPrint(self.allocator.*, "src/{s}", .{snake_path});
+                    defer self.allocator.*.free(src_snake_path);
+
+                    std.fs.cwd().access(src_snake_path, .{}) catch {
+                        const cwd_path = std.fs.cwd().realpathAlloc(self.allocator.*, ".") catch ".";
+                        defer if (!std.mem.eql(u8, cwd_path, ".")) self.allocator.*.free(cwd_path);
+                        std.debug.print("ERROR: Cannot find namespace file: {s}\n", .{relative_path});
+                        std.debug.print("       Looked in: {s}/{s}\n", .{ cwd_path, relative_path });
+                        std.debug.print("       Looked in: {s}/{s}\n", .{ cwd_path, snake_path });
+                        std.debug.print("       Looked in: {s}/{s}\n", .{ cwd_path, src_path });
+                        std.debug.print("       Looked in: {s}/{s}\n", .{ cwd_path, src_snake_path });
+                        self.allocator.*.free(relative_path);
+                        return Error.FileNotFound;
+                    };
+
+                    // Found in src/ with snake_case
+                    self.allocator.*.free(relative_path);
+                    return try self.allocator.*.dupe(u8, src_snake_path);
+                };
+
+                // Found in src/ with kebab-case
+                self.allocator.*.free(relative_path);
+                return try self.allocator.*.dupe(u8, src_path);
+            };
+
+            // Found with snake_case
+            self.allocator.*.free(relative_path);
+            return try self.allocator.*.dupe(u8, snake_path);
         };
 
         return relative_path;
@@ -318,7 +370,9 @@ pub const SimpleCCompiler = struct {
     ) Error!void {
         // Check if already compiled and cached
         if (self.namespace_manager.isCompiled(namespace_name)) {
-            std.debug.print("Namespace {s} already compiled, using cache\n", .{namespace_name});
+            if (self.verbose) {
+                std.debug.print("Namespace {s} already compiled, using cache\n", .{namespace_name});
+            }
             const ns = self.namespace_manager.getCompiledNamespace(namespace_name) orelse {
                 return Error.TypeCheckFailed;
             };
@@ -342,7 +396,9 @@ pub const SimpleCCompiler = struct {
         try self.namespace_manager.pushCompilationStack(namespace_name);
         defer self.namespace_manager.popCompilationStack();
 
-        std.debug.print("Compiling namespace: {s}\n", .{namespace_name});
+        if (self.verbose) {
+            std.debug.print("Compiling namespace: {s}\n", .{namespace_name});
+        }
 
         // 1. Resolve file path
         const file_path = try self.resolveNamespaceFile(namespace_name);
@@ -459,7 +515,9 @@ pub const SimpleCCompiler = struct {
 
         // 8. Compile namespace to .bundle file
         const bundle_path = try self.compileToBundleFile(namespace_name);
-        std.debug.print("Compiled namespace {s} to bundle: {s}\n", .{ namespace_name, bundle_path });
+        if (self.verbose) {
+            std.debug.print("Compiled namespace {s} to bundle: {s}\n", .{ namespace_name, bundle_path });
+        }
 
         // Add bundle to required bundles list for linking
         const bundle_path_copy = try self.allocator.*.dupe(u8, bundle_path);
@@ -486,7 +544,9 @@ pub const SimpleCCompiler = struct {
         }
 
         try self.namespace_manager.addCompiledNamespace(compiled_ns);
-        std.debug.print("Cached namespace {s}\n", .{namespace_name});
+        if (self.verbose) {
+            std.debug.print("Cached namespace {s}\n", .{namespace_name});
+        }
     }
 
     /// Compile a namespace to a .bundle file
@@ -518,26 +578,24 @@ pub const SimpleCCompiler = struct {
         defer self.allocator.*.free(c_code);
 
         // Save the required bundles that were collected during compilation
-        // We need to link against these when creating this namespace's bundle
+        // INCLUDING transitive dependencies - we need to link against all of them
         var nested_bundles = std.ArrayList([]const u8){};
         defer nested_bundles.deinit(self.allocator.*);
-        for (self.required_bundles.items) |bundle| {
-            try nested_bundles.append(self.allocator.*, bundle);
-        }
+        try self.collectTransitiveBundles(&nested_bundles);
 
-        // 3. Convert namespace name to file path
-        var path_buf = std.ArrayList(u8){};
-        defer path_buf.deinit(self.allocator.*);
+        // 3. Determine output file base path from source file location
+        // Use the same directory as the source file, not the namespace name
+        const basename = std.fs.path.basename(file_path);
+        const stem = if (std.mem.lastIndexOfScalar(u8, basename, '.')) |idx|
+            basename[0..idx]
+        else
+            basename;
 
-        for (namespace_name) |c| {
-            if (c == '.') {
-                try path_buf.append(self.allocator.*, '/');
-            } else {
-                try path_buf.append(self.allocator.*, c);
-            }
-        }
-
-        const relative_base = try path_buf.toOwnedSlice(self.allocator.*);
+        const dir_opt = std.fs.path.dirname(file_path);
+        const relative_base = if (dir_opt) |dir|
+            try std.fs.path.join(self.allocator.*, &.{ dir, stem })
+        else
+            try self.allocator.*.dupe(u8, stem);
         defer self.allocator.*.free(relative_base);
 
         // 4. Write C file
@@ -588,6 +646,7 @@ pub const SimpleCCompiler = struct {
         try link_args.appendSlice(self.allocator.*, &.{ "zig", "cc", "-dynamiclib", obj_filename, "-o", bundle_filename });
 
         // Add required bundles that this namespace depends on
+        // Use nested_bundles which were saved before compileString cleared required_bundles
         for (nested_bundles.items) |bundle| {
             try link_args.append(self.allocator.*, bundle);
         }
@@ -631,17 +690,100 @@ pub const SimpleCCompiler = struct {
 
     /// Collect all transitive namespace dependencies in topological order
     /// (dependencies before dependents) for proper initialization
+    /// Only collects dependencies starting from the namespaces in required_bundles
     fn collectTransitiveDependencies(
         self: *SimpleCCompiler,
         visited: *std.StringHashMap(void),
         result: *std.ArrayList([]const u8),
     ) Error!void {
-        // Iterate over all compiled namespaces
-        var ns_iter = self.namespace_manager.compiled_namespaces.iterator();
-        while (ns_iter.next()) |entry| {
-            const ns_name = entry.key_ptr.*;
-            try self.collectTransitiveDependenciesRecursive(ns_name, visited, result);
+        // Start from required bundles and collect their namespace dependencies transitively
+        // This ensures we only include namespaces that are actually needed, not all cached ones
+        for (self.required_bundles.items) |bundle_path| {
+            // Find the namespace with this bundle path
+            var ns_iter = self.namespace_manager.compiled_namespaces.iterator();
+            while (ns_iter.next()) |entry| {
+                const ns = entry.value_ptr;
+                if (std.mem.eql(u8, ns.bundle_path, bundle_path)) {
+                    try self.collectTransitiveDependenciesRecursive(ns.name, visited, result);
+                    break;
+                }
+            }
         }
+    }
+
+    /// Collect all transitive bundle paths needed for linking
+    fn collectTransitiveBundles(
+        self: *SimpleCCompiler,
+        result: *std.ArrayList([]const u8),
+    ) Error!void {
+        var visited_bundles = std.StringHashMap(void).init(self.allocator.*);
+        defer visited_bundles.deinit();
+
+        // Process each required bundle and collect transitives
+        for (self.required_bundles.items) |bundle_path| {
+            try self.collectBundleTransitivelyByPath(bundle_path, &visited_bundles, result);
+        }
+    }
+
+    /// Helper to collect a bundle and its transitive dependencies by bundle path
+    fn collectBundleTransitivelyByPath(
+        self: *SimpleCCompiler,
+        bundle_path: []const u8,
+        visited: *std.StringHashMap(void),
+        result: *std.ArrayList([]const u8),
+    ) Error!void {
+        if (visited.contains(bundle_path)) return;
+        try visited.put(bundle_path, {});
+
+        // Find the namespace with this bundle path
+        var ns_iter = self.namespace_manager.compiled_namespaces.iterator();
+        var found_ns: ?*namespace_manager.CompiledNamespace = null;
+        while (ns_iter.next()) |entry| {
+            const ns = entry.value_ptr;
+            if (std.mem.eql(u8, ns.bundle_path, bundle_path)) {
+                found_ns = ns;
+                break;
+            }
+        }
+
+        if (found_ns) |ns| {
+            // Recursively collect dependencies first
+            for (ns.requires.items) |req| {
+                const req_ns = self.namespace_manager.getCompiledNamespace(req.namespace) orelse continue;
+                try self.collectBundleTransitivelyByPath(req_ns.bundle_path, visited, result);
+            }
+        }
+
+        // Add this bundle
+        const bundle_copy = try self.allocator.*.dupe(u8, bundle_path);
+        try result.append(self.allocator.*, bundle_copy);
+    }
+
+    /// Recursive helper to collect bundles for a namespace and its dependencies
+    fn collectTransitiveBundlesRecursive(
+        self: *SimpleCCompiler,
+        ns_name: []const u8,
+        visited: *std.StringHashMap(void),
+        result: *std.ArrayList([]const u8),
+    ) Error!void {
+        if (visited.contains(ns_name)) {
+            return;
+        }
+
+        try visited.put(ns_name, {});
+
+        const compiled_ns = self.namespace_manager.getCompiledNamespace(ns_name) orelse {
+            return; // Namespace not found, skip
+        };
+
+        // Recursively collect dependencies first
+        for (compiled_ns.requires.items) |req| {
+            try self.collectTransitiveBundlesRecursive(req.namespace, visited, result);
+        }
+
+        // Add this namespace's bundle
+        const bundle_copy = try self.allocator.*.dupe(u8, compiled_ns.bundle_path);
+        try result.append(self.allocator.*, bundle_copy);
     }
 
     /// Recursive helper for collectTransitiveDependencies
@@ -672,6 +814,122 @@ pub const SimpleCCompiler = struct {
 
         // Add this namespace after all its dependencies
         try result.append(self.allocator.*, ns_name);
+    }
+
+    /// Collect type dependencies from a struct type
+    fn collectTypeDependenciesFromStruct(
+        self: *SimpleCCompiler,
+        struct_type: *const StructType,
+        deps: *std.ArrayList([]const u8),
+        allocator: std.mem.Allocator,
+    ) Error!void {
+        for (struct_type.fields) |field| {
+            try self.collectTypeDependenciesFromType(field.field_type, deps, allocator);
+        }
+    }
+
+    /// Collect type dependencies from a type
+    fn collectTypeDependenciesFromType(
+        self: *SimpleCCompiler,
+        typ: Type,
+        deps: *std.ArrayList([]const u8),
+        allocator: std.mem.Allocator,
+    ) Error!void {
+        switch (typ) {
+            .struct_type => |st| {
+                // Add the struct type name as a dependency
+                try deps.append(allocator, st.name);
+            },
+            .enum_type => |et| {
+                // Add the enum type name as a dependency
+                try deps.append(allocator, et.name);
+            },
+            .pointer => |ptr| {
+                // Recursively check pointer target type
+                try self.collectTypeDependenciesFromType(ptr.*, deps, allocator);
+            },
+            .array => |arr| {
+                // Recursively check array element type
+                try self.collectTypeDependenciesFromType(arr.element_type, deps, allocator);
+            },
+            else => {
+                // Other types don't create struct dependencies
+            },
+        }
+    }
+
+    /// Topologically sort type definitions based on their dependencies
+    fn topologicalSortTypes(
+        self: *SimpleCCompiler,
+        type_defs: anytype,
+    ) Error!std.ArrayList([]const u8) {
+        var sorted = std.ArrayList([]const u8){};
+        var visited = std.StringHashMap(void).init(self.allocator.*);
+        defer visited.deinit();
+        var temp_mark = std.StringHashMap(void).init(self.allocator.*);
+        defer temp_mark.deinit();
+
+        // Visit each type definition
+        var iter = type_defs.iterator();
+        while (iter.next()) |entry| {
+            const type_name = entry.key_ptr.*;
+            try self.visitType(type_name, type_defs, &visited, &temp_mark, &sorted);
+        }
+
+        return sorted;
+    }
+
+    /// DFS visit for topological sort
+    fn visitType(
+        self: *SimpleCCompiler,
+        type_name: []const u8,
+        type_defs: anytype,
+        visited: *std.StringHashMap(void),
+        temp_mark: *std.StringHashMap(void),
+        sorted: *std.ArrayList([]const u8),
+    ) Error!void {
+        // If already visited, skip
+        if (visited.contains(type_name)) {
+            return;
+        }
+
+        // Check for cycles (temp mark means we're in the middle of processing this type)
+        if (temp_mark.contains(type_name)) {
+            // Cycle detected - this is OK for struct types with pointers
+            // We'll handle this with forward declarations
+            return;
+        }
+
+        // Mark as temporarily visited
+        try temp_mark.put(type_name, {});
+
+        // Get the type definition
+        if (type_defs.get(type_name)) |type_def| {
+            if (type_def == .struct_type) {
+                // Collect dependencies from struct fields
+                var deps = std.ArrayList([]const u8){};
+                defer deps.deinit(self.allocator.*);
+                try self.collectTypeDependenciesFromStruct(type_def.struct_type, &deps, self.allocator.*);
+
+                // Visit each dependency
+                for (deps.items) |dep_name| {
+                    // Only visit if it's a different type and exists in type_defs
+                    if (!std.mem.eql(u8, dep_name, type_name) and type_defs.contains(dep_name)) {
+                        try self.visitType(dep_name, type_defs, visited, temp_mark, sorted);
+                    }
+                }
+            }
+            // Enums don't have dependencies, but we still need to process them
+        }
+
+        // Remove temp mark
+        _ = temp_mark.remove(type_name);
+
+        // Mark as permanently visited
+        try visited.put(type_name, {});
+
+        // Add to sorted list
+        try sorted.append(self.allocator.*, type_name);
     }
 
     pub fn compileString(self: *SimpleCCompiler, source: []const u8, target: TargetKind) Error![]u8 {
@@ -751,24 +1009,34 @@ pub const SimpleCCompiler = struct {
                 const line = if (detail.index < line_numbers.items.len) line_numbers.items[detail.index] else 0;
                 const maybe_str = self.formatValue(detail.expr) catch null;
 
-                std.debug.print("Type error at line {d} (expr #{d}): {s}", .{ line, detail.index, @errorName(detail.err) });
-
-                if (detail.info) |info| {
-                    switch (info) {
-                        .unbound => |unbound| {
-                            std.debug.print(" - unbound variable '{s}'", .{unbound.name});
-                        },
-                        .type_mismatch => |mismatch| {
-                            std.debug.print("\n  Expected: {any}\n  Actual:   {any}", .{ mismatch.expected, mismatch.actual });
-                        },
+                // Special handling for TypeAliasNotSupported
+                if (detail.err == error.TypeAliasNotSupported) {
+                    std.debug.print("Type error at line {d} (expr #{d}): Type aliases are not supported\n", .{ line, detail.index });
+                    std.debug.print("  Hint: Define the type inline instead of creating an alias\n", .{});
+                    if (maybe_str) |expr_str| {
+                        defer self.allocator.*.free(expr_str);
+                        std.debug.print("  Expression: {s}\n", .{expr_str});
                     }
-                }
-
-                if (maybe_str) |expr_str| {
-                    defer self.allocator.*.free(expr_str);
-                    std.debug.print("\n  Expression: {s}\n", .{expr_str});
                 } else {
-                    std.debug.print("\n", .{});
+                    std.debug.print("Type error at line {d} (expr #{d}): {s}", .{ line, detail.index, @errorName(detail.err) });
+
+                    if (detail.info) |info| {
+                        switch (info) {
+                            .unbound => |unbound| {
+                                std.debug.print(" - unbound variable '{s}'", .{unbound.name});
+                            },
+                            .type_mismatch => |mismatch| {
+                                std.debug.print("\n  Expected: {any}\n  Actual:   {any}", .{ mismatch.expected, mismatch.actual });
+                            },
+                        }
+                    }
+
+                    if (maybe_str) |expr_str| {
+                        defer self.allocator.*.free(expr_str);
+                        std.debug.print("\n  Expression: {s}\n", .{expr_str});
+                    } else {
+                        std.debug.print("\n", .{});
+                    }
                 }
             }
             // Return the first specific error instead of generic TypeCheckFailed
@@ -871,12 +1139,8 @@ pub const SimpleCCompiler = struct {
 
         var includes = IncludeFlags{};
 
-        // First pass: emit forward declarations for functions and structs
-        for (expanded_expressions.items, report.typed.items) |expr, typed_val| {
-            try self.emitForwardDecl(forward_writer, expr, typed_val, &checker, &includes);
-        }
-
         // Emit full struct definitions for all namespaces (including transitive dependencies)
+        // IMPORTANT: Required namespace types must come BEFORE local types since local types may depend on them
         // Collect all transitive dependencies in topological order
         var visited_decl = std.StringHashMap(void).init(self.allocator.*);
         defer visited_decl.deinit();
@@ -892,27 +1156,50 @@ pub const SimpleCCompiler = struct {
             try forward_writer.print("// Required namespace: {s}\n", .{required_ns_name});
 
             // Get the compiled namespace to access its type info
-            std.debug.print("DEBUG: Looking up namespace {s} in cache\n", .{required_ns_name});
             if (self.namespace_manager.getCompiledNamespace(required_ns_name)) |compiled_ns| {
-                std.debug.print("DEBUG: Found namespace {s} in cache with {d} definitions\n", .{ required_ns_name, compiled_ns.definitions.count() });
+                // BUGFIX: Ensure this namespace's bundle is in required_bundles for linking
+                // This is needed when a namespace is accessed for codegen but wasn't explicitly
+                // loaded during this compilation (it was already cached from a previous build)
+                const bundle_already_required = for (self.required_bundles.items) |existing_bundle| {
+                    if (std.mem.eql(u8, existing_bundle, compiled_ns.bundle_path)) break true;
+                } else false;
 
-                // Emit type definitions first (struct/enum types used by namespace)
-                var typedef_iter = compiled_ns.type_defs.iterator();
-                while (typedef_iter.next()) |typedef_entry| {
-                    const type_name = typedef_entry.key_ptr.*;
-                    const type_def = typedef_entry.value_ptr.*;
+                if (!bundle_already_required) {
+                    const bundle_path_copy = try self.allocator.*.dupe(u8, compiled_ns.bundle_path);
+                    try self.required_bundles.append(self.allocator.*, bundle_path_copy);
+                }
+
+                // Topologically sort type definitions to ensure dependencies come first
+                var sorted_types = try self.topologicalSortTypes(compiled_ns.type_defs);
+                defer sorted_types.deinit(self.allocator.*);
+
+                // First emit forward declarations for all struct types
+                for (sorted_types.items) |type_name| {
+                    const type_def = compiled_ns.type_defs.get(type_name).?;
+                    if (type_def == .struct_type) {
+                        const sanitized_type_name = try self.sanitizeIdentifier(type_name);
+                        defer self.allocator.*.free(sanitized_type_name);
+                        try forward_writer.print("typedef struct {s} {s};\n", .{ sanitized_type_name, sanitized_type_name });
+                    }
+                }
+
+                // Then emit full type definitions in topological order
+                for (sorted_types.items) |type_name| {
+                    const type_def = compiled_ns.type_defs.get(type_name).?;
 
                     if (type_def == .struct_type) {
                         const st = type_def.struct_type;
                         const sanitized_type_name = try self.sanitizeIdentifier(type_name);
                         defer self.allocator.*.free(sanitized_type_name);
 
-                        try forward_writer.print("typedef struct {{\n", .{});
+                        try forward_writer.print("struct {s} {{\n", .{sanitized_type_name});
                         for (st.fields) |field| {
                             const c_field_type = try self.cTypeFor(field.field_type, &includes);
-                            try forward_writer.print("    {s} {s};\n", .{ c_field_type, field.name });
+                            const sanitized_field = try self.sanitizeIdentifier(field.name);
+                            defer self.allocator.*.free(sanitized_field);
+                            try forward_writer.print("    {s} {s};\n", .{ c_field_type, sanitized_field });
                         }
-                        try forward_writer.print("}} {s};\n\n", .{sanitized_type_name});
+                        try forward_writer.print("}};\n\n", .{});
                     } else if (type_def == .enum_type) {
                         const et = type_def.enum_type;
                         const sanitized_type_name = try self.sanitizeIdentifier(type_name);
@@ -938,13 +1225,11 @@ pub const SimpleCCompiler = struct {
 
                         // Skip type definitions (Point, Color, etc.) - they're compile-time only
                         if (def_type == .type_type) {
-                            std.debug.print("DEBUG: Skipping type definition '{s}' (compile-time only)\n", .{ordered_name});
                             continue;
                         }
                         // Skip enum variants (Color/Red, etc.) - the enum typedef declares the constants
                         if (def_type == .enum_type) {
                             if (std.mem.indexOfScalar(u8, ordered_name, '/')) |_| {
-                                std.debug.print("DEBUG: Skipping enum variant '{s}' (typedef provides constant)\n", .{ordered_name});
                                 continue;
                             }
                         }
@@ -984,12 +1269,10 @@ pub const SimpleCCompiler = struct {
                         const def_type = def_entry.value_ptr.*;
 
                         if (def_type == .type_type) {
-                            std.debug.print("DEBUG: Skipping type definition '{s}' (compile-time only)\n", .{def_name});
                             continue;
                         }
                         if (def_type == .enum_type) {
                             if (std.mem.indexOfScalar(u8, def_name, '/')) |_| {
-                                std.debug.print("DEBUG: Skipping enum variant '{s}' (typedef provides constant)\n", .{def_name});
                                 continue;
                             }
                         }
@@ -1027,12 +1310,71 @@ pub const SimpleCCompiler = struct {
                 try forward_writer.print("}} Namespace_{s};\n\n", .{sanitized_ns});
             } else {
                 // Fallback to forward declaration if namespace not found
-                std.debug.print("DEBUG: Namespace {s} NOT found in cache, using forward declaration\n", .{required_ns_name});
                 try forward_writer.print("typedef struct Namespace_{s} Namespace_{s};\n", .{ sanitized_ns, sanitized_ns });
             }
 
             try forward_writer.print("extern Namespace_{s} g_{s};\n", .{ sanitized_ns, sanitized_ns });
             try forward_writer.print("void init_namespace_{s}(Namespace_{s}* ns);\n\n", .{ sanitized_ns, sanitized_ns });
+        }
+
+        // Emit local type definitions in topological order AFTER required namespaces
+        if (checker.type_defs.count() > 0) {
+            try forward_writer.print("// Local type definitions\n", .{});
+
+            // Topologically sort local type definitions
+            var sorted_local_types = try self.topologicalSortTypes(checker.type_defs);
+            defer sorted_local_types.deinit(self.allocator.*);
+
+            // First emit forward declarations for all struct types
+            for (sorted_local_types.items) |type_name| {
+                const type_def = checker.type_defs.get(type_name).?;
+                if (type_def == .struct_type) {
+                    const sanitized_type_name = try self.sanitizeIdentifier(type_name);
+                    defer self.allocator.*.free(sanitized_type_name);
+                    try forward_writer.print("typedef struct {s} {s};\n", .{ sanitized_type_name, sanitized_type_name });
+                }
+            }
+
+            // Then emit full type definitions in topological order
+            for (sorted_local_types.items) |type_name| {
+                const type_def = checker.type_defs.get(type_name).?;
+
+                if (type_def == .struct_type) {
+                    const st = type_def.struct_type;
+                    const sanitized_type_name = try self.sanitizeIdentifier(type_name);
+                    defer self.allocator.*.free(sanitized_type_name);
+
+                    try forward_writer.print("struct {s} {{\n", .{sanitized_type_name});
+                    for (st.fields) |field| {
+                        const sanitized_field = try self.sanitizeIdentifier(field.name);
+                        defer self.allocator.*.free(sanitized_field);
+                        try forward_writer.print("    ", .{});
+                        self.emitArrayDecl(forward_writer, sanitized_field, field.field_type, &includes) catch {
+                            try forward_writer.print("// unsupported field type: {s}\n", .{field.name});
+                            continue;
+                        };
+                        try forward_writer.print(";\n", .{});
+                    }
+                    try forward_writer.print("}};\n\n", .{});
+                } else if (type_def == .enum_type) {
+                    const et = type_def.enum_type;
+                    const sanitized_type_name = try self.sanitizeIdentifier(type_name);
+                    defer self.allocator.*.free(sanitized_type_name);
+
+                    try forward_writer.print("typedef enum {{\n", .{});
+                    for (et.variants) |variant| {
+                        const sanitized_variant = try self.sanitizeIdentifier(variant.qualified_name.?);
+                        defer self.allocator.*.free(sanitized_variant);
+                        try forward_writer.print("    {s},\n", .{sanitized_variant});
+                    }
+                    try forward_writer.print("}} {s};\n\n", .{sanitized_type_name});
+                }
+            }
+        }
+
+        // Emit forward declarations for functions (skip type defs as they're already handled)
+        for (expanded_expressions.items, report.typed.items) |expr, typed_val| {
+            try self.emitForwardDecl(forward_writer, expr, typed_val, &checker, &includes);
         }
 
         // Create empty context for non-namespace code (used in emitDefinition/emitFunctionDefinition)
@@ -1622,70 +1964,9 @@ pub const SimpleCCompiler = struct {
                     if (!name_val.isSymbol()) return;
                     const name = name_val.symbol;
 
-                    // Check if this is a struct or enum definition by looking it up in type_defs
-                    if (checker.type_defs.get(name)) |type_def| {
-                        if (type_def == .struct_type) {
-                            // This is a struct definition - emit struct declaration
-                            const sanitized_name = try self.sanitizeIdentifier(name);
-                            defer self.allocator.*.free(sanitized_name);
-
-                            // Check if this is a self-referential struct (contains pointer to itself)
-                            var is_self_referential = false;
-                            for (type_def.struct_type.fields) |field| {
-                                if (field.field_type == .pointer) {
-                                    const pointee = field.field_type.pointer.*;
-                                    if (pointee == .struct_type) {
-                                        if (std.mem.eql(u8, pointee.struct_type.name, name)) {
-                                            is_self_referential = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // If self-referential, emit forward declaration first
-                            if (is_self_referential) {
-                                try forward_writer.print("typedef struct {s} {s};\n", .{ sanitized_name, sanitized_name });
-                            }
-
-                            // Emit struct definition
-                            if (is_self_referential) {
-                                try forward_writer.print("struct {s} {{\n", .{sanitized_name});
-                            } else {
-                                try forward_writer.print("typedef struct {{\n", .{});
-                            }
-
-                            for (type_def.struct_type.fields) |field| {
-                                const sanitized_field = try self.sanitizeIdentifier(field.name);
-                                defer self.allocator.*.free(sanitized_field);
-                                try forward_writer.print("    ", .{});
-                                self.emitArrayDecl(forward_writer, sanitized_field, field.field_type, includes) catch {
-                                    try forward_writer.print("// unsupported field type: {s}\n", .{field.name});
-                                    continue;
-                                };
-                                try forward_writer.print(";\n", .{});
-                            }
-
-                            if (is_self_referential) {
-                                try forward_writer.print("}};\n\n", .{});
-                            } else {
-                                try forward_writer.print("}} {s};\n\n", .{sanitized_name});
-                            }
-                            return;
-                        } else if (type_def == .enum_type) {
-                            // This is an enum definition - emit enum declaration
-                            const sanitized_name = try self.sanitizeIdentifier(name);
-                            defer self.allocator.*.free(sanitized_name);
-
-                            try forward_writer.print("typedef enum {{\n", .{});
-                            for (type_def.enum_type.variants) |variant| {
-                                const sanitized_variant = try self.sanitizeIdentifier(variant.qualified_name.?);
-                                defer self.allocator.*.free(sanitized_variant);
-                                try forward_writer.print("    {s},\n", .{sanitized_variant});
-                            }
-                            try forward_writer.print("}} {s};\n\n", .{sanitized_name});
-                            return;
-                        }
+                    // Skip type definitions - they're already handled in topological order
+                    if (checker.type_defs.get(name)) |_| {
+                        return;
                     }
 
                     // Check if this is a function definition
@@ -3091,8 +3372,30 @@ pub const SimpleCCompiler = struct {
                 // Check if this is an enum variant (has type enum_type AND qualified name with /)
                 // We need to distinguish enum variants (Color/Red) from variables of enum type (pc: Color)
                 if (sym.type == .enum_type and std.mem.indexOf(u8, sym.name, "/") != null) {
-                    // Enum variants like Color/Red become ENUM_VARIANT in C
-                    const sanitized = try self.sanitizeIdentifier(sym.name);
+                    // Enum variants can be:
+                    // - Local: Color/Red → Color_Red
+                    // - From namespace: types/TokenType/EOF → TokenType_EOF (drop namespace prefix)
+
+                    // Count slashes to determine if this is a namespaced enum variant
+                    var slash_count: usize = 0;
+                    for (sym.name) |c| {
+                        if (c == '/') slash_count += 1;
+                    }
+
+                    const variant_name = if (slash_count >= 2) blk: {
+                        // Namespaced variant: types/TokenType/EOF
+                        // Drop first part (namespace), keep EnumType/Variant
+                        if (std.mem.indexOf(u8, sym.name, "/")) |first_slash| {
+                            const after_ns = sym.name[first_slash + 1..];
+                            break :blk after_ns;
+                        }
+                        break :blk sym.name;
+                    } else blk: {
+                        // Local variant: Color/Red - use full name
+                        break :blk sym.name;
+                    };
+
+                    const sanitized = try self.sanitizeIdentifier(variant_name);
                     defer self.allocator.*.free(sanitized);
                     try writer.print("{s}", .{sanitized});
                     return;
@@ -3502,11 +3805,14 @@ pub fn main() !void {
 
     var run_flag = false;
     var bundle_flag = false;
+    var verbose_flag = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--run")) {
             run_flag = true;
         } else if (std.mem.eql(u8, arg, "--bundle")) {
             bundle_flag = true;
+        } else if (std.mem.eql(u8, arg, "--verbose")) {
+            verbose_flag = true;
         } else {
             std.debug.print("Unknown argument: {s}\n", .{arg});
             return;
@@ -3520,6 +3826,7 @@ pub fn main() !void {
 
     var compiler = SimpleCCompiler.init(&allocator);
     defer compiler.deinit();
+    compiler.verbose = verbose_flag;
     const prev_source_path = compiler.current_source_path;
     compiler.current_source_path = source_path;
     defer compiler.current_source_path = prev_source_path;
@@ -3556,9 +3863,14 @@ pub fn main() !void {
     const c_real_path = try std.fs.cwd().realpathAlloc(allocator, c_path);
     defer allocator.free(c_real_path);
 
-    std.debug.print("Generated C file: {s}\n", .{c_real_path});
+    if (compiler.verbose) {
+        std.debug.print("Generated C file: {s}\n", .{c_real_path});
+    }
 
-    if (!run_flag) return;
+    // If neither --run nor --bundle is specified, just generate C and exit
+    // If --bundle is specified, we always compile (to create the .dylib/.bundle)
+    // If --run is specified (with or without --bundle), we compile and run
+    if (!run_flag and !bundle_flag) return;
 
     // Step 1: Compile to .o file
     const obj_name = try std.fmt.allocPrint(allocator, "{s}.o", .{stem});
@@ -3600,11 +3912,14 @@ pub fn main() !void {
 
     const obj_real_path = try std.fs.cwd().realpathAlloc(allocator, obj_path);
     defer allocator.free(obj_real_path);
-    std.debug.print("Compiled object file: {s}\n", .{obj_real_path});
+    if (compiler.verbose) {
+        std.debug.print("Compiled object file: {s}\n", .{obj_real_path});
+    }
 
     // Step 2: Link to final binary
     if (bundle_flag) {
-        const bundle_name = try std.fmt.allocPrint(allocator, "{s}.bundle", .{stem});
+        // Always use .dylib extension for dynamic libraries
+        const bundle_name = try std.fmt.allocPrint(allocator, "{s}.dylib", .{stem});
         defer allocator.free(bundle_name);
 
         const bundle_path = if (dir_opt) |dir_path|
@@ -3629,8 +3944,16 @@ pub fn main() !void {
             try link_args.append(allocator, lib_arg);
         }
 
-        // Add required namespace bundles
-        for (compiler.required_bundles.items) |bundle| {
+        // Add required namespace bundles (including transitive dependencies)
+        var all_bundles = std.ArrayList([]const u8){};
+        defer {
+            for (all_bundles.items) |bundle| {
+                allocator.free(bundle);
+            }
+            all_bundles.deinit(allocator);
+        }
+        try compiler.collectTransitiveBundles(&all_bundles);
+        for (all_bundles.items) |bundle| {
             try link_args.append(allocator, bundle);
         }
 
@@ -3656,7 +3979,9 @@ pub fn main() !void {
         const bundle_real_path = try std.fs.cwd().realpathAlloc(allocator, bundle_path);
         defer allocator.free(bundle_real_path);
 
-        std.debug.print("Built bundle: {s}\n", .{bundle_real_path});
+        if (compiler.verbose) {
+            std.debug.print("Built bundle: {s}\n", .{bundle_real_path});
+        }
 
         if (!run_flag) return;
 
@@ -3724,8 +4049,16 @@ pub fn main() !void {
         try link_args.append(allocator, lib_arg);
     }
 
-    // Add required namespace bundles
-    for (compiler.required_bundles.items) |bundle| {
+    // Add required namespace bundles (including transitive dependencies)
+    var all_bundles = std.ArrayList([]const u8){};
+    defer {
+        for (all_bundles.items) |bundle| {
+            allocator.free(bundle);
+        }
+        all_bundles.deinit(allocator);
+    }
+    try compiler.collectTransitiveBundles(&all_bundles);
+    for (all_bundles.items) |bundle| {
         try link_args.append(allocator, bundle);
     }
 
@@ -3751,7 +4084,9 @@ pub fn main() !void {
     const exe_real_path = try std.fs.cwd().realpathAlloc(allocator, exe_path);
     defer allocator.free(exe_real_path);
 
-    std.debug.print("Built executable: {s}\n", .{exe_real_path});
+    if (compiler.verbose) {
+        std.debug.print("Built executable: {s}\n", .{exe_real_path});
+    }
 
     if (!run_flag) return;
 
