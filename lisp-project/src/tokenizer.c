@@ -2,6 +2,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "stdio.h"
+#include "stdlib.h"
+#include "string.h"
+#include "ctype.h"
+
 // Required namespace: types
 typedef struct Cons Cons;
 typedef struct Token Token;
@@ -84,10 +89,6 @@ struct Tokenizer {
     int32_t length;
 };
 
-#include "stdio.h"
-#include "stdlib.h"
-#include "string.h"
-#include "ctype.h"
 
 typedef struct {
     Tokenizer* (*make_tokenizer)(uint8_t*);
@@ -136,23 +137,23 @@ static Tokenizer* make_tokenizer(uint8_t* input) {
     return ({ Tokenizer* tok = (Tokenizer*)({ Tokenizer* __tmp_ptr = malloc(sizeof(Tokenizer)); *__tmp_ptr = (Tokenizer){NULL, 0, 0}; __tmp_ptr; }); tok->input = input; tok->position = 0; tok->length = strlen(input); tok; });
 }
 static int32_t peek_char(Tokenizer* tok) {
-    return ({ int32_t pos = tok->position; int32_t len = tok->length; ((pos >= len) ? ((int32_t)0) : ({ uint8_t* input = (uint8_t*)tok->input; int64_t char_loc = (((int64_t)input) + ((int64_t)pos)); uint8_t* char_ptr = (uint8_t*)((uint8_t*)char_loc); uint8_t byte_val = (*char_ptr); ((int32_t)byte_val); })); });
+    return ({ int32_t pos = tok->position; int32_t len = tok->length; ({ int32_t __if_result; if ((pos >= len)) { __if_result = ((int32_t)0); } else { __if_result = ({ uint8_t* input = (uint8_t*)tok->input; int64_t char_loc = (((int64_t)input) + ((int64_t)pos)); uint8_t* char_ptr = (uint8_t*)((uint8_t*)char_loc); uint8_t byte_val = (*char_ptr); ((int32_t)byte_val); }); } __if_result; }); });
 }
 static int32_t advance(Tokenizer* tok) {
     return ({ int32_t pos = tok->position; tok->position = (pos + 1); 0; });
 }
 static int32_t skip_to_eol(Tokenizer* tok) {
-    return ({ int32_t c = g_tokenizer.peek_char(tok); (((c != 0) && (c != 10)) ? ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.skip_to_eol(tok); }) : 0); });
+    return ({ int32_t c = g_tokenizer.peek_char(tok); ({ long long __if_result; if (((c != 0) && (c != 10))) { __if_result = ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.skip_to_eol(tok); }); } else { __if_result = 0; } __if_result; }); });
 }
 static int32_t skip_whitespace(Tokenizer* tok) {
-    return ({ int32_t c = g_tokenizer.peek_char(tok); ((c == 59) ? ({ int32_t _1 = g_tokenizer.skip_to_eol(tok); g_tokenizer.skip_whitespace(tok); }) : (((c != 0) && (isspace(c) != 0)) ? ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.skip_whitespace(tok); }) : 0)); });
+    return ({ int32_t c = g_tokenizer.peek_char(tok); ({ long long __if_result; if ((c == 59)) { __if_result = ({ int32_t _1 = g_tokenizer.skip_to_eol(tok); g_tokenizer.skip_whitespace(tok); }); } else { __if_result = ({ long long __if_result; if (((c != 0) && (isspace(c) != 0))) { __if_result = ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.skip_whitespace(tok); }); } else { __if_result = 0; } __if_result; }); } __if_result; }); });
 }
 static Token make_token(TokenType type, uint8_t* text, int32_t length) {
     return (Token){type, text, length};
 }
 static Token next_token(Tokenizer* tok) {
     g_tokenizer.skip_whitespace(tok);
-    return ({ int32_t c = g_tokenizer.peek_char(tok); ((c == 0) ? g_tokenizer.make_token(TokenType_EOF, ((uint8_t*)0), 0) : ((c == 40) ? ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.make_token(TokenType_LeftParen, "(", 1); }) : ((c == 41) ? ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.make_token(TokenType_RightParen, ")", 1); }) : ((c == 91) ? ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.make_token(TokenType_LeftBracket, "[", 1); }) : ((c == 93) ? ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.make_token(TokenType_RightBracket, "]", 1); }) : ((c == 123) ? ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.make_token(TokenType_LeftBrace, "{", 1); }) : ((c == 125) ? ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.make_token(TokenType_RightBrace, "}", 1); }) : ((c == 34) ? g_tokenizer.read_string(tok) : ((c == 58) ? g_tokenizer.read_keyword(tok) : g_tokenizer.read_symbol(tok)))))))))); });
+    return ({ int32_t c = g_tokenizer.peek_char(tok); ((c == 0) ? g_tokenizer.make_token(TokenType_EOF, ((uint8_t*)0), 0) : ({ Token __if_result; if ((c == 40)) { __if_result = ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.make_token(TokenType_LeftParen, "(", 1); }); } else { __if_result = ({ Token __if_result; if ((c == 41)) { __if_result = ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.make_token(TokenType_RightParen, ")", 1); }); } else { __if_result = ({ Token __if_result; if ((c == 91)) { __if_result = ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.make_token(TokenType_LeftBracket, "[", 1); }); } else { __if_result = ({ Token __if_result; if ((c == 93)) { __if_result = ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.make_token(TokenType_RightBracket, "]", 1); }); } else { __if_result = ({ Token __if_result; if ((c == 123)) { __if_result = ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.make_token(TokenType_LeftBrace, "{", 1); }); } else { __if_result = ({ Token __if_result; if ((c == 125)) { __if_result = ({ int32_t _1 = g_tokenizer.advance(tok); g_tokenizer.make_token(TokenType_RightBrace, "}", 1); }); } else { __if_result = ((c == 34) ? g_tokenizer.read_string(tok) : ((c == 58) ? g_tokenizer.read_keyword(tok) : g_tokenizer.read_symbol(tok))); } __if_result; }); } __if_result; }); } __if_result; }); } __if_result; }); } __if_result; }); } __if_result; })); });
 }
 static Token read_symbol(Tokenizer* tok) {
     return ({ int32_t start_pos = tok->position; uint8_t* input = (uint8_t*)tok->input; uint8_t* start_ptr = (uint8_t*)((uint8_t*)(((int64_t)input) + ((int64_t)start_pos))); int32_t len = 0; ({ while (((g_tokenizer.peek_char(tok) != 0) && ((isspace(g_tokenizer.peek_char(tok)) == 0) && ((g_tokenizer.peek_char(tok) != 40) && ((g_tokenizer.peek_char(tok) != 41) && ((g_tokenizer.peek_char(tok) != 91) && (g_tokenizer.peek_char(tok) != 93))))))) { g_tokenizer.advance(tok); len = (len + 1); } }); g_tokenizer.make_token(TokenType_Symbol, start_ptr, len); });
