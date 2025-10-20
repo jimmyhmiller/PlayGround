@@ -299,8 +299,6 @@ pub const BidirectionalTypeChecker = struct {
     // Namespace loading support (optional, for runtime requires)
     loader_ctx: ?*anyopaque = null,
     loader_fn: ?*const fn (ctx: *anyopaque, namespace_name: []const u8, parent_checker: *BidirectionalTypeChecker) anyerror!void = null,
-    // Strictness flags
-    require_let_type_annotations: bool = true,
 
     const BindingSnapshot = struct {
         name: []const u8,
@@ -1204,26 +1202,7 @@ pub const BidirectionalTypeChecker = struct {
                         break :blk buf[0..180];
                     } else buf[0..stream.pos];
                     std.debug.print("  Expression: {s}\n", .{expr_str});
-                    // Print type mismatch details - find the most recent TypeMismatch in errors
-                    if (self.errors.items.len > 0) {
-                        var err_idx: usize = self.errors.items.len;
-                        while (err_idx > 0) {
-                            err_idx -= 1;
-                            const error_detail = self.errors.items[err_idx];
-                            if (error_detail.err == TypeCheckError.TypeMismatch) {
-                                if (error_detail.info) |info| {
-                                    if (info == .type_mismatch) {
-                                        std.debug.print("  Expected type: {any}\n", .{info.type_mismatch.expected});
-                                        std.debug.print("  Actual type:   {any}\n", .{info.type_mismatch.actual});
-                                        break;
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    } else {
-                        std.debug.print("  (See final error report below for type details)\n", .{});
-                    }
+                    // Note: Type details will be shown in the final error report below
                     return err;
                 };
                 try body_exprs.append(self.allocator, typed_body);
@@ -2003,8 +1982,8 @@ pub const BidirectionalTypeChecker = struct {
         // or the untyped format [name value ...] (only allowed if strictness is disabled)
         if (bindings_vec.len() % 3 != 0) {
             // Check if it's the untyped format [name value ...]
-            if (bindings_vec.len() % 2 == 0 and self.require_let_type_annotations) {
-                // User is trying to use untyped let bindings but strictness is enabled
+            if (bindings_vec.len() % 2 == 0) {
+                // User is trying to use untyped let bindings - this is not supported
                 return TypeCheckError.MissingLetTypeAnnotation;
             }
             return TypeCheckError.InvalidTypeAnnotation;
@@ -2024,16 +2003,14 @@ pub const BidirectionalTypeChecker = struct {
 
             if (!name_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
 
-            // Check if type annotation is missing when strictness is enabled
-            if (self.require_let_type_annotations) {
-                const is_missing = !annotation_val.isList() or blk: {
-                    const list_node = annotation_val.list;
-                    const first = list_node.value orelse break :blk true;
-                    break :blk !first.isKeyword() or !std.mem.eql(u8, first.keyword, "");
-                };
-                if (is_missing) {
-                    return TypeCheckError.MissingLetTypeAnnotation;
-                }
+            // Check if type annotation is missing
+            const is_missing = !annotation_val.isList() or blk: {
+                const list_node = annotation_val.list;
+                const first = list_node.value orelse break :blk true;
+                break :blk !first.isKeyword() or !std.mem.eql(u8, first.keyword, "");
+            };
+            if (is_missing) {
+                return TypeCheckError.MissingLetTypeAnnotation;
             }
 
             const annotated_type = try self.parseTypeAnnotation(annotation_val);
@@ -2089,8 +2066,8 @@ pub const BidirectionalTypeChecker = struct {
         // or the untyped format [name value ...] (only allowed if strictness is disabled)
         if (bindings_vec.len() % 3 != 0) {
             // Check if it's the untyped format [name value ...]
-            if (bindings_vec.len() % 2 == 0 and self.require_let_type_annotations) {
-                // User is trying to use untyped let bindings but strictness is enabled
+            if (bindings_vec.len() % 2 == 0) {
+                // User is trying to use untyped let bindings - this is not supported
                 return TypeCheckError.MissingLetTypeAnnotation;
             }
             return TypeCheckError.InvalidTypeAnnotation;
@@ -2186,26 +2163,7 @@ pub const BidirectionalTypeChecker = struct {
                         break :blk buf[0..180];
                     } else buf[0..stream.pos];
                     std.debug.print("  Expression: {s}\n", .{expr_str});
-                    // Print type mismatch details - find the most recent TypeMismatch in errors
-                    if (self.errors.items.len > 0) {
-                        var err_idx: usize = self.errors.items.len;
-                        while (err_idx > 0) {
-                            err_idx -= 1;
-                            const error_detail = self.errors.items[err_idx];
-                            if (error_detail.err == TypeCheckError.TypeMismatch) {
-                                if (error_detail.info) |info| {
-                                    if (info == .type_mismatch) {
-                                        std.debug.print("  Expected type: {any}\n", .{info.type_mismatch.expected});
-                                        std.debug.print("  Actual type:   {any}\n", .{info.type_mismatch.actual});
-                                        break;
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    } else {
-                        std.debug.print("  (See final error report below for type details)\n", .{});
-                    }
+                    // Note: Type details will be shown in the final error report below
                     return err;
                 };
                 body_typed_elements[body_idx] = typed;

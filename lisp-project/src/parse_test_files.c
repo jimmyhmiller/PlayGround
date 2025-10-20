@@ -76,6 +76,34 @@ typedef struct {
 extern Namespace_types g_types;
 void init_namespace_types(Namespace_types* ns);
 
+// Required namespace: parser
+typedef struct Parser Parser;
+struct Parser {
+    Token* tokens;
+    int32_t position;
+    int32_t count;
+};
+
+typedef struct {
+    Parser* (*make_parser)(Token*, int32_t);
+    Token (*peek_token)(Parser*);
+    int32_t (*advance_parser)(Parser*);
+    Value* (*parse_list)(Parser*);
+    int32_t (*parse_vector_elements)(Parser*, Value*, int32_t);
+    Value* (*parse_vector)(Parser*);
+    int32_t (*parse_map_elements)(Parser*, Value*, int32_t);
+    Value* (*parse_map)(Parser*);
+    Value* (*parse_value)(Parser*);
+    int32_t (*print_vector_contents)(Value*, int32_t);
+    int32_t (*print_map_contents)(Value*, int32_t);
+    int32_t (*print_value_ptr)(Value*);
+    int32_t (*print_list_contents)(Value*);
+    int32_t (*main_fn)();
+} Namespace_parser;
+
+extern Namespace_parser g_parser;
+void init_namespace_parser(Namespace_parser* ns);
+
 // Required namespace: mlir-ast
 typedef struct OpNode OpNode;
 typedef struct BlockNode BlockNode;
@@ -136,7 +164,7 @@ void init_namespace_parse_test_files(Namespace_parse_test_files* ns) {
 
 static int32_t test_simple_expr() {
     printf("=== Test 1: Parse simple list (foo bar) ===\n");
-    ({ Token* tokens = (Token*)((Token*)malloc(128)); Token* t0 = (Token*)tokens; t0->type = TokenType_LeftParen; t0->text = "("; t0->length = 1; ({ Token* t1 = (Token*)((Token*)(((long long)tokens) + 24)); t1->type = TokenType_Symbol; t1->text = "foo"; t1->length = 3; ({ Token* t2 = (Token*)((Token*)(((long long)tokens) + 48)); t2->type = TokenType_Symbol; t2->text = "bar"; t2->length = 3; ({ Token* t3 = (Token*)((Token*)(((long long)tokens) + 72)); t3->type = TokenType_RightParen; t3->text = ")"; t3->length = 1; ({ Parser* p = (Parser*)g_parser.make_parser(tokens, 4); Value* result = (Value*)g_parser.parse_value(p); printf("Parsed: "); g_parser.print_value_ptr(result); printf("\n\n"); 0; }); }); }); }); });
+    ({ Token* tokens = (Token*)((Token*)malloc(128)); tokens->type = TokenType_LeftParen; tokens->text = "("; tokens->length = 1; ({ Token* t1 = (Token*)((Token*)(((long long)tokens) + 24)); t1->type = TokenType_Symbol; t1->text = "foo"; t1->length = 3; ({ Token* t2 = (Token*)((Token*)(((long long)tokens) + 48)); t2->type = TokenType_Symbol; t2->text = "bar"; t2->length = 3; ({ Token* t3 = (Token*)((Token*)(((long long)tokens) + 72)); t3->type = TokenType_RightParen; t3->text = ")"; t3->length = 1; ({ Parser* p = (Parser*)g_parser.make_parser(tokens, 4); Value* result = (Value*)g_parser.parse_value(p); printf("Parsed: "); g_parser.print_value_ptr(result); printf("\n\n"); 0; }); }); }); }); });
     return 0;
 }
 static int32_t test_op_form() {
@@ -161,6 +189,7 @@ static int32_t main_fn() {
 }
 int main() {
     init_namespace_types(&g_types);
+    init_namespace_parser(&g_parser);
     init_namespace_mlir_ast(&g_mlir_ast);
     init_namespace_parse_test_files(&g_parse_test_files);
     // namespace parse-test-files

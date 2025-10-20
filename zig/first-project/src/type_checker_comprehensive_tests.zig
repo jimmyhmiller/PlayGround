@@ -2405,3 +2405,39 @@ test "c-for - with multiple expressions in body returning different types" {
     const typed = try checker.synthesizeTyped(expr);
     try std.testing.expect(typed.getType() == .void);
 }
+
+// ============================================================================
+// STRICTNESS - Let Type Annotation Requirements
+// ============================================================================
+
+test "strictness - let without type annotation should error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(let [x 42] (+ x 1))";
+    const expr = try reader.readString(code);
+
+    const result = checker.synthesizeTyped(expr);
+    try std.testing.expectError(TypeCheckError.MissingLetTypeAnnotation, result);
+}
+
+test "strictness - let with type annotation should succeed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    var reader = Reader.init(&allocator);
+    var checker = BidirectionalTypeChecker.init(allocator);
+    defer checker.deinit();
+
+    const code = "(let [x (: Int) 42] (+ x 1))";
+    const expr = try reader.readString(code);
+
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .int);
+}

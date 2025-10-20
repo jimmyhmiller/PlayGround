@@ -33,7 +33,7 @@ pub const SimpleCCompiler = struct {
     required_bundles: std.ArrayList([]const u8), // Bundle paths needed for linking
     current_source_path: ?[]const u8 = null,
     verbose: bool = false,
-    require_let_type_annotations: bool = true,
+    early_exit_on_missing_type: bool = true, // Exit early with clear error for missing let type annotations
 
     pub const TargetKind = enum {
         executable,
@@ -453,7 +453,6 @@ pub const SimpleCCompiler = struct {
         // 5. Type check to extract exports
         var checker = TypeChecker.init(self.allocator.*);
         defer checker.deinit();
-        checker.require_let_type_annotations = self.require_let_type_annotations;
 
         // Set up namespace loader for nested requires
         checker.setNamespaceLoader(self, namespaceLoaderCallback);
@@ -576,6 +575,20 @@ pub const SimpleCCompiler = struct {
         self.current_source_path = file_path;
         defer self.current_source_path = prev_source_path;
 
+        // Save the parent's required_bundles before compiling this namespace
+        // because compileString will clear it
+        var saved_bundles = std.ArrayList([]const u8){};
+        defer {
+            for (saved_bundles.items) |bundle| {
+                self.allocator.*.free(bundle);
+            }
+            saved_bundles.deinit(self.allocator.*);
+        }
+        for (self.required_bundles.items) |bundle| {
+            const bundle_copy = try self.allocator.*.dupe(u8, bundle);
+            try saved_bundles.append(self.allocator.*, bundle_copy);
+        }
+
         // 2. Generate C code using compileString
         const c_code = try self.compileString(source, .bundle);
         defer self.allocator.*.free(c_code);
@@ -585,6 +598,16 @@ pub const SimpleCCompiler = struct {
         var nested_bundles = std.ArrayList([]const u8){};
         defer nested_bundles.deinit(self.allocator.*);
         try self.collectTransitiveBundles(&nested_bundles);
+
+        // Restore the parent's required_bundles
+        for (self.required_bundles.items) |bundle| {
+            self.allocator.*.free(bundle);
+        }
+        self.required_bundles.clearRetainingCapacity();
+        for (saved_bundles.items) |bundle| {
+            const bundle_copy = try self.allocator.*.dupe(u8, bundle);
+            try self.required_bundles.append(self.allocator.*, bundle_copy);
+        }
 
         // 3. Determine output file base path from source file location
         // Use the same directory as the source file, not the namespace name
@@ -935,6 +958,55 @@ pub const SimpleCCompiler = struct {
         try sorted.append(self.allocator.*, type_name);
     }
 
+    /// Format a type into a human-readable string for error messages
+    fn typeToString(self: *SimpleCCompiler, typ: Type) ![]const u8 {
+        var buf = std.ArrayList(u8){};
+        errdefer buf.deinit(self.allocator.*);
+        const writer = buf.writer(self.allocator.*);
+
+        switch (typ) {
+            .int => try writer.writeAll("Int"),
+            .float => try writer.writeAll("Float"),
+            .string => try writer.writeAll("String"),
+            .bool => try writer.writeAll("Bool"),
+            .nil => try writer.writeAll("Nil"),
+            .u8 => try writer.writeAll("U8"),
+            .u16 => try writer.writeAll("U16"),
+            .u32 => try writer.writeAll("U32"),
+            .u64 => try writer.writeAll("U64"),
+            .i8 => try writer.writeAll("I8"),
+            .i16 => try writer.writeAll("I16"),
+            .i32 => try writer.writeAll("I32"),
+            .i64 => try writer.writeAll("I64"),
+            .f32 => try writer.writeAll("F32"),
+            .f64 => try writer.writeAll("F64"),
+            .void => try writer.writeAll("Void"),
+            .pointer => |pointee| {
+                try writer.writeAll("(Pointer ");
+                const inner = try self.typeToString(pointee.*);
+                defer self.allocator.*.free(inner);
+                try writer.writeAll(inner);
+                try writer.writeAll(")");
+            },
+            .struct_type => |s| {
+                try writer.writeAll(s.name);
+                try writer.writeAll(" (struct)");
+            },
+            .enum_type => |e| {
+                try writer.writeAll(e.name);
+                try writer.writeAll(" (enum)");
+            },
+            .function => {
+                try writer.writeAll("(function)");
+            },
+            else => {
+                try writer.writeAll("(complex type)");
+            },
+        }
+
+        return buf.toOwnedSlice(self.allocator.*);
+    }
+
     pub fn compileString(self: *SimpleCCompiler, source: []const u8, target: TargetKind) Error![]u8 {
         // Clear required bundles from previous compilation
         for (self.required_bundles.items) |bundle| {
@@ -983,7 +1055,6 @@ pub const SimpleCCompiler = struct {
 
         var checker = TypeChecker.init(self.allocator.*);
         defer checker.deinit();
-        checker.require_let_type_annotations = self.require_let_type_annotations;
 
         // Set up namespace loader so the type checker can load required namespaces on-demand
         checker.setNamespaceLoader(@ptrCast(self), namespaceLoaderCallback);
@@ -1009,30 +1080,32 @@ pub const SimpleCCompiler = struct {
                 }
                 std.debug.print("\nNote: {d} expressions type-checked successfully, {d} failed\n", .{ report.typed.items.len, expanded_expressions.items.len - report.typed.items.len });
             }
-            // Check for MissingLetTypeAnnotation first - if found, only show this error
-            for (report.errors.items) |detail| {
-                if (detail.err == error.MissingLetTypeAnnotation) {
-                    const line = if (detail.index < line_numbers.items.len) line_numbers.items[detail.index] else 0;
-                    const maybe_str = self.formatValue(detail.expr) catch null;
+            // Check for MissingLetTypeAnnotation first - if enabled, exit early with clear error
+            if (self.early_exit_on_missing_type) {
+                for (report.errors.items) |detail| {
+                    if (detail.err == error.MissingLetTypeAnnotation) {
+                        const line = if (detail.index < line_numbers.items.len) line_numbers.items[detail.index] else 0;
+                        const maybe_str = self.formatValue(detail.expr) catch null;
 
-                    std.debug.print("\n", .{});
-                    std.debug.print("ERROR: Missing type annotation in let binding at {s}:{d}\n", .{ active_source_path, line });
-                    std.debug.print("\n", .{});
-                    std.debug.print("All let bindings must have explicit type annotations.\n", .{});
-                    std.debug.print("\n", .{});
-                    std.debug.print("Example of correct syntax:\n", .{});
-                    std.debug.print("  (let [x (: Int) 42]\n", .{});
-                    std.debug.print("    (+ x 1))\n", .{});
-                    std.debug.print("\n", .{});
-                    if (maybe_str) |expr_str| {
-                        defer self.allocator.*.free(expr_str);
-                        std.debug.print("Your expression:\n", .{});
-                        std.debug.print("  {s}\n", .{expr_str});
                         std.debug.print("\n", .{});
+                        std.debug.print("ERROR: Missing type annotation in let binding at {s}:{d}\n", .{ active_source_path, line });
+                        std.debug.print("\n", .{});
+                        std.debug.print("All let bindings must have explicit type annotations.\n", .{});
+                        std.debug.print("\n", .{});
+                        std.debug.print("Example of correct syntax:\n", .{});
+                        std.debug.print("  (let [x (: Int) 42]\n", .{});
+                        std.debug.print("    (+ x 1))\n", .{});
+                        std.debug.print("\n", .{});
+                        if (maybe_str) |expr_str| {
+                            defer self.allocator.*.free(expr_str);
+                            std.debug.print("Your expression:\n", .{});
+                            std.debug.print("  {s}\n", .{expr_str});
+                            std.debug.print("\n", .{});
+                        }
+                        std.debug.print("Untyped let bindings are not supported.\n", .{});
+                        std.debug.print("\n", .{});
+                        return Error.TypeCheckFailed;
                     }
-                    std.debug.print("To allow untyped let bindings, use the --allow-untyped-lets flag.\n", .{});
-                    std.debug.print("\n", .{});
-                    return Error.TypeCheckFailed;
                 }
             }
 
@@ -1057,7 +1130,11 @@ pub const SimpleCCompiler = struct {
                                 std.debug.print(" - unbound variable '{s}'", .{unbound.name});
                             },
                             .type_mismatch => |mismatch| {
-                                std.debug.print("\n  Expected: {any}\n  Actual:   {any}", .{ mismatch.expected, mismatch.actual });
+                                const expected_str = self.typeToString(mismatch.expected) catch "(error formatting type)";
+                                defer self.allocator.*.free(expected_str);
+                                const actual_str = self.typeToString(mismatch.actual) catch "(error formatting type)";
+                                defer self.allocator.*.free(actual_str);
+                                std.debug.print("\n  Expected: {s}\n  Actual:   {s}", .{ expected_str, actual_str });
                             },
                         }
                     }
@@ -3837,7 +3914,7 @@ pub fn main() !void {
     var run_flag = false;
     var bundle_flag = false;
     var verbose_flag = false;
-    var allow_untyped_lets = false;
+    var early_exit_flag = true; // Enabled by default
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--run")) {
             run_flag = true;
@@ -3845,8 +3922,8 @@ pub fn main() !void {
             bundle_flag = true;
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             verbose_flag = true;
-        } else if (std.mem.eql(u8, arg, "--allow-untyped-lets")) {
-            allow_untyped_lets = true;
+        } else if (std.mem.eql(u8, arg, "--no-early-exit")) {
+            early_exit_flag = false;
         } else {
             std.debug.print("Unknown argument: {s}\n", .{arg});
             return;
@@ -3861,7 +3938,7 @@ pub fn main() !void {
     var compiler = SimpleCCompiler.init(&allocator);
     defer compiler.deinit();
     compiler.verbose = verbose_flag;
-    compiler.require_let_type_annotations = !allow_untyped_lets;
+    compiler.early_exit_on_missing_type = early_exit_flag;
     const prev_source_path = compiler.current_source_path;
     compiler.current_source_path = source_path;
     defer compiler.current_source_path = prev_source_path;
