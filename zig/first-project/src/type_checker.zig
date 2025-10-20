@@ -3940,8 +3940,8 @@ pub const BidirectionalTypeChecker = struct {
                             type_marker.* = TypedValue{ .type_value = .{ .value_type = pointee_type, .type = Type.type_type } };
 
                             // For extern types, allow allocation without initialization
-                            if (pointee_type == .extern_type) {
-                                // No initialization value needed for extern types
+                            if (pointee_type == .extern_type and args == null) {
+                                // No initialization value needed for extern types (when no value provided)
                                 typed_elements[0] = alloc_symbol;
                                 typed_elements[1] = type_marker;
                                 result.* = TypedValue{ .list = .{

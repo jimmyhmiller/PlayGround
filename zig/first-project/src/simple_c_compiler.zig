@@ -155,6 +155,7 @@ pub const SimpleCCompiler = struct {
         if (std.mem.eql(u8, op, "<=")) return .less_equal;
         if (std.mem.eql(u8, op, ">=")) return .greater_equal;
         if (std.mem.eql(u8, op, "=")) return .equal;
+        if (std.mem.eql(u8, op, "==")) return .equal; // Alias for =
         if (std.mem.eql(u8, op, "!=")) return .not_equal;
 
         // Logical
@@ -1234,6 +1235,8 @@ pub const SimpleCCompiler = struct {
             try non_def_exprs.append(self.allocator.*, .{ .expr = expr, .typed = typed_val, .idx = expr_idx });
         }
 
+        var custom_includes = std.ArrayList(u8){};
+        defer custom_includes.deinit(self.allocator.*);
         var forward_decls = std.ArrayList(u8){};
         defer forward_decls.deinit(self.allocator.*);
         var prelude = std.ArrayList(u8){};
@@ -1241,6 +1244,7 @@ pub const SimpleCCompiler = struct {
         var body = std.ArrayList(u8){};
         defer body.deinit(self.allocator.*);
 
+        const custom_includes_writer = custom_includes.writer(self.allocator.*);
         const forward_writer = forward_decls.writer(self.allocator.*);
         const prelude_writer = prelude.writer(self.allocator.*);
         const body_writer = body.writer(self.allocator.*);
@@ -1482,7 +1486,7 @@ pub const SimpleCCompiler = struct {
 
         // Emit forward declarations for functions (skip type defs as they're already handled)
         for (expanded_expressions.items, report.typed.items) |expr, typed_val| {
-            try self.emitForwardDecl(forward_writer, expr, typed_val, &checker, &includes);
+            try self.emitForwardDecl(custom_includes_writer, forward_writer, expr, typed_val, &checker, &includes);
         }
 
         // Create empty context for non-namespace code (used in emitDefinition/emitFunctionDefinition)
@@ -1847,6 +1851,12 @@ pub const SimpleCCompiler = struct {
         }
         try output.appendSlice(self.allocator.*, "\n");
 
+        // Custom includes from (include-header ...) must come before forward decls
+        if (custom_includes.items.len > 0) {
+            try output.appendSlice(self.allocator.*, custom_includes.items);
+            try output.appendSlice(self.allocator.*, "\n");
+        }
+
         if (forward_decls.items.len > 0) {
             try output.appendSlice(self.allocator.*, forward_decls.items);
             try output.appendSlice(self.allocator.*, "\n");
@@ -1949,7 +1959,7 @@ pub const SimpleCCompiler = struct {
         return output.toOwnedSlice(self.allocator.*);
     }
 
-    fn emitForwardDecl(self: *SimpleCCompiler, forward_writer: anytype, expr: *Value, typed: *TypedValue, checker: *TypeChecker, includes: *IncludeFlags) Error!void {
+    fn emitForwardDecl(self: *SimpleCCompiler, custom_includes_writer: anytype, forward_writer: anytype, expr: *Value, typed: *TypedValue, checker: *TypeChecker, includes: *IncludeFlags) Error!void {
         switch (expr.*) {
             .list => |list| {
                 var iter = list.iterator();
@@ -2046,8 +2056,8 @@ pub const SimpleCCompiler = struct {
                     if (!header_val.isString()) return;
                     const header_name = header_val.string;
 
-                    // Emit the #include directive
-                    try forward_writer.print("#include \"{s}\"\n", .{header_name});
+                    // Emit the #include directive to custom includes (before forward decls)
+                    try custom_includes_writer.print("#include \"{s}\"\n", .{header_name});
                     return;
                 } else if (std.mem.eql(u8, head, "link-library")) {
                     // Collect library for linking
@@ -2748,27 +2758,60 @@ pub const SimpleCCompiler = struct {
                 const if_type = l.type;
                 const is_void_if = if_type == .nil or if_type == .void;
 
-                if (is_void_if) {
+                // Helper to check if an expression uses statement-expression forms (let, do, while, c-for)
+                const needsStatementForm = struct {
+                    fn check(expr: *TypedValue) bool {
+                        if (expr.* != .list) return false;
+                        const list_expr = expr.list;
+                        if (list_expr.elements.len == 0) return false;
+                        const head = list_expr.elements[0];
+                        if (head.* != .symbol) return false;
+                        const sym = head.symbol.name;
+                        return std.mem.eql(u8, sym, "let") or
+                            std.mem.eql(u8, sym, "do") or
+                            std.mem.eql(u8, sym, "while") or
+                            std.mem.eql(u8, sym, "c-for");
+                    }
+                }.check;
+
+                const then_needs_stmt = needsStatementForm(l.elements[2]);
+                const else_needs_stmt = needsStatementForm(l.elements[3]);
+                const use_statement_form = is_void_if or then_needs_stmt or else_needs_stmt;
+
+                if (use_statement_form) {
                     // Emit as if-else statement wrapped in compound expression
-                    // Check if branches are bare nil to avoid emitting unused `0;`
+                    // Check if branches are bare nil to avoid emitting unused expressions
                     const then_is_nil = l.elements[2].* == .nil;
                     const else_is_nil = l.elements[3].* == .nil;
 
-                    try writer.print("({{ if (", .{});
-                    try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
-                    try writer.print(") {{ ", .{});
-                    if (!then_is_nil) {
+                    if (is_void_if) {
+                        // Void if - no return value needed
+                        try writer.print("({{ if (", .{});
+                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                        try writer.print(") {{ ", .{});
+                        if (!then_is_nil) {
+                            try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
+                            try writer.print("; ", .{});
+                        }
+                        try writer.print("}} else {{ ", .{});
+                        if (!else_is_nil) {
+                            try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
+                            try writer.print("; ", .{});
+                        }
+                        try writer.print("}} }})", .{});
+                    } else {
+                        // Non-void if with statement expressions - use temporary variable
+                        const c_type = try self.cTypeFor(if_type, includes);
+                        try writer.print("({{ {s} __if_result; if (", .{c_type});
+                        try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
+                        try writer.print(") {{ __if_result = ", .{});
                         try self.writeExpressionTyped(writer, l.elements[2], ns_ctx, includes);
-                        try writer.print("; ", .{});
-                    }
-                    try writer.print("}} else {{ ", .{});
-                    if (!else_is_nil) {
+                        try writer.print("; }} else {{ __if_result = ", .{});
                         try self.writeExpressionTyped(writer, l.elements[3], ns_ctx, includes);
-                        try writer.print("; ", .{});
+                        try writer.print("; }} __if_result; }})", .{});
                     }
-                    try writer.print("}} }})", .{});
                 } else {
-                    // Emit as ternary expression for non-void types
+                    // Emit as ternary expression for non-void types with simple expressions
                     try writer.print("(", .{});
                     try self.writeExpressionTyped(writer, l.elements[1], ns_ctx, includes);
                     try writer.print(" ? ", .{});
@@ -2969,7 +3012,7 @@ pub const SimpleCCompiler = struct {
                     try writer.print("; ", .{});
                 }
 
-                // Emit the final expression as the return value
+                // Emit the final expression as the return value (without trailing semicolon)
                 if (l.elements.len > 1) {
                     try self.writeExpressionTyped(writer, l.elements[l.elements.len - 1], ns_ctx, includes);
                 } else {
