@@ -33,6 +33,7 @@ pub const SimpleCCompiler = struct {
     required_bundles: std.ArrayList([]const u8), // Bundle paths needed for linking
     current_source_path: ?[]const u8 = null,
     verbose: bool = false,
+    require_let_type_annotations: bool = true,
 
     pub const TargetKind = enum {
         executable,
@@ -223,6 +224,7 @@ pub const SimpleCCompiler = struct {
         ArgumentCountMismatch,
         InvalidTypeAnnotation,
         TypeAliasNotSupported,
+        MissingLetTypeAnnotation,
         UnexpectedToken,
         UnterminatedString,
         UnterminatedList,
@@ -451,6 +453,7 @@ pub const SimpleCCompiler = struct {
         // 5. Type check to extract exports
         var checker = TypeChecker.init(self.allocator.*);
         defer checker.deinit();
+        checker.require_let_type_annotations = self.require_let_type_annotations;
 
         // Set up namespace loader for nested requires
         checker.setNamespaceLoader(self, namespaceLoaderCallback);
@@ -980,6 +983,7 @@ pub const SimpleCCompiler = struct {
 
         var checker = TypeChecker.init(self.allocator.*);
         defer checker.deinit();
+        checker.require_let_type_annotations = self.require_let_type_annotations;
 
         // Set up namespace loader so the type checker can load required namespaces on-demand
         checker.setNamespaceLoader(@ptrCast(self), namespaceLoaderCallback);
@@ -1005,6 +1009,33 @@ pub const SimpleCCompiler = struct {
                 }
                 std.debug.print("\nNote: {d} expressions type-checked successfully, {d} failed\n", .{ report.typed.items.len, expanded_expressions.items.len - report.typed.items.len });
             }
+            // Check for MissingLetTypeAnnotation first - if found, only show this error
+            for (report.errors.items) |detail| {
+                if (detail.err == error.MissingLetTypeAnnotation) {
+                    const line = if (detail.index < line_numbers.items.len) line_numbers.items[detail.index] else 0;
+                    const maybe_str = self.formatValue(detail.expr) catch null;
+
+                    std.debug.print("\n", .{});
+                    std.debug.print("ERROR: Missing type annotation in let binding at {s}:{d}\n", .{ active_source_path, line });
+                    std.debug.print("\n", .{});
+                    std.debug.print("All let bindings must have explicit type annotations.\n", .{});
+                    std.debug.print("\n", .{});
+                    std.debug.print("Example of correct syntax:\n", .{});
+                    std.debug.print("  (let [x (: Int) 42]\n", .{});
+                    std.debug.print("    (+ x 1))\n", .{});
+                    std.debug.print("\n", .{});
+                    if (maybe_str) |expr_str| {
+                        defer self.allocator.*.free(expr_str);
+                        std.debug.print("Your expression:\n", .{});
+                        std.debug.print("  {s}\n", .{expr_str});
+                        std.debug.print("\n", .{});
+                    }
+                    std.debug.print("To allow untyped let bindings, use the --allow-untyped-lets flag.\n", .{});
+                    std.debug.print("\n", .{});
+                    return Error.TypeCheckFailed;
+                }
+            }
+
             for (report.errors.items) |detail| {
                 const line = if (detail.index < line_numbers.items.len) line_numbers.items[detail.index] else 0;
                 const maybe_str = self.formatValue(detail.expr) catch null;
@@ -3806,6 +3837,7 @@ pub fn main() !void {
     var run_flag = false;
     var bundle_flag = false;
     var verbose_flag = false;
+    var allow_untyped_lets = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--run")) {
             run_flag = true;
@@ -3813,6 +3845,8 @@ pub fn main() !void {
             bundle_flag = true;
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             verbose_flag = true;
+        } else if (std.mem.eql(u8, arg, "--allow-untyped-lets")) {
+            allow_untyped_lets = true;
         } else {
             std.debug.print("Unknown argument: {s}\n", .{arg});
             return;
@@ -3827,6 +3861,7 @@ pub fn main() !void {
     var compiler = SimpleCCompiler.init(&allocator);
     defer compiler.deinit();
     compiler.verbose = verbose_flag;
+    compiler.require_let_type_annotations = !allow_untyped_lets;
     const prev_source_path = compiler.current_source_path;
     compiler.current_source_path = source_path;
     defer compiler.current_source_path = prev_source_path;
