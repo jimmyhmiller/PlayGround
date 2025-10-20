@@ -108,6 +108,11 @@ typedef struct {
     Value* (*get_block_operations)(Value*);
     OpNode* (*parse_op)(Value*);
     BlockNode* (*parse_block)(Value*);
+    int32_t (*print_indent)(int32_t);
+    int32_t (*process_vector_elements)(Value*, int32_t);
+    int32_t (*parse_and_print_recursive)(Value*, int32_t);
+    BlockNode* (*parse_block_recursive)(Value*);
+    OpNode* (*parse_op_recursive)(Value*);
     int32_t (*main_fn)();
 } Namespace_mlir_ast;
 
@@ -126,6 +131,11 @@ static Value* get_block_args(Value*);
 static Value* get_block_operations(Value*);
 static OpNode* parse_op(Value*);
 static BlockNode* parse_block(Value*);
+static int32_t print_indent(int32_t);
+static int32_t process_vector_elements(Value*, int32_t);
+static int32_t parse_and_print_recursive(Value*, int32_t);
+static BlockNode* parse_block_recursive(Value*);
+static OpNode* parse_op_recursive(Value*);
 static int32_t main_fn();
 
 void init_namespace_mlir_ast(Namespace_mlir_ast* ns) {
@@ -143,6 +153,11 @@ void init_namespace_mlir_ast(Namespace_mlir_ast* ns) {
     ns->get_block_operations = &get_block_operations;
     ns->parse_op = &parse_op;
     ns->parse_block = &parse_block;
+    ns->print_indent = &print_indent;
+    ns->process_vector_elements = &process_vector_elements;
+    ns->parse_and_print_recursive = &parse_and_print_recursive;
+    ns->parse_block_recursive = &parse_block_recursive;
+    ns->parse_op_recursive = &parse_op_recursive;
     ns->main_fn = &main_fn;
 }
 
@@ -184,6 +199,21 @@ static OpNode* parse_op(Value* op_form) {
 }
 static BlockNode* parse_block(Value* block_form) {
     return ((g_mlir_ast.is_block(block_form) == 1) ? ({ Value* args = (Value*)g_mlir_ast.get_block_args(block_form); Value* operations = (Value*)g_mlir_ast.get_block_operations(block_form); BlockNode* node = (BlockNode*)((BlockNode*)malloc(16)); node->args = args; node->operations = operations; node; }) : ((BlockNode*)0));
+}
+static int32_t print_indent(int32_t depth) {
+    return ((depth > 0) ? ({ printf("  "); g_mlir_ast.print_indent((depth - 1)); }) : 0);
+}
+static int32_t process_vector_elements(Value* vec, int32_t depth) {
+    return ({ ValueTag tag = vec->tag; ((tag == ValueTag_Vector) ? ({ uint8_t* vec_ptr = (uint8_t*)vec->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t count = vector_struct->count; uint8_t* data = (uint8_t*)vector_struct->data; int32_t idx = 0; ({ while ((idx < count)) { ({ int64_t elem_offset = (((long long)idx) * 8); uint8_t* elem_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + elem_offset)); Value** elem_ptr_ptr = (Value**)((Value**)elem_ptr_loc); Value* elem = (Value*)(*elem_ptr_ptr); g_mlir_ast.parse_and_print_recursive(elem, depth); idx = (idx + 1); }); } }); 0; }) : 0); });
+}
+static int32_t parse_and_print_recursive(Value* val, int32_t depth) {
+    return ({ ValueTag tag = val->tag; int32_t is_op_val = g_mlir_ast.is_op(val); int32_t is_block_val = g_mlir_ast.is_block(val); ((is_op_val == 1) ? ({ OpNode* op_node = (OpNode*)g_mlir_ast.parse_op(val); ((((int64_t)op_node) != 0) ? ({ uint8_t* name_str = (uint8_t*)op_node->name; Value* regions = (Value*)op_node->regions; g_mlir_ast.print_indent(depth); printf("OpNode: %s\n", name_str); g_mlir_ast.process_vector_elements(regions, (depth + 1)); 0; }) : 0); }) : ((is_block_val == 1) ? ({ BlockNode* block_node = (BlockNode*)g_mlir_ast.parse_block(val); g_mlir_ast.print_indent(depth); printf("BlockNode\n"); ((((int64_t)block_node) != 0) ? ({ Value* operations = (Value*)block_node->operations; g_mlir_ast.process_vector_elements(operations, (depth + 1)); 0; }) : 0); }) : ((tag == ValueTag_Vector) ? ({ g_mlir_ast.print_indent(depth); printf("Region (vector of blocks)\n"); g_mlir_ast.process_vector_elements(val, (depth + 1)); 0; }) : 0))); });
+}
+static BlockNode* parse_block_recursive(Value* block_form) {
+    return ((g_mlir_ast.is_block(block_form) == 1) ? ({ Value* args = (Value*)g_mlir_ast.get_block_args(block_form); Value* operations = (Value*)g_mlir_ast.get_block_operations(block_form); BlockNode* node = (BlockNode*)((BlockNode*)malloc(16)); node->args = args; node->operations = operations; node; }) : ((BlockNode*)0));
+}
+static OpNode* parse_op_recursive(Value* op_form) {
+    return ((g_mlir_ast.is_op(op_form) == 1) ? ({ Value* name_val = (Value*)g_mlir_ast.get_op_name(op_form); ValueTag name_tag = name_val->tag; ((name_tag == ValueTag_String) ? ({ uint8_t* name = (uint8_t*)name_val->str_val; Value* result_types = (Value*)g_mlir_ast.get_op_result_types(op_form); Value* operands = (Value*)g_mlir_ast.get_op_operands(op_form); Value* attributes = (Value*)g_mlir_ast.get_op_attributes(op_form); Value* regions = (Value*)g_mlir_ast.get_op_regions(op_form); OpNode* node = (OpNode*)((OpNode*)malloc(40)); node->name = name; node->result_types = result_types; node->operands = operands; node->attributes = attributes; node->regions = regions; node; }) : ((OpNode*)0)); }) : ((OpNode*)0));
 }
 static int32_t main_fn() {
     printf("Testing is-symbol-op:\n");
