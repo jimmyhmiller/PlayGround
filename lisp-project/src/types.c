@@ -2,6 +2,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "stdio.h"
+#include "stdlib.h"
+#include "string.h"
+#include "ctype.h"
+
 // Local type definitions
 typedef struct Cons Cons;
 typedef struct Token Token;
@@ -57,10 +62,6 @@ struct Value {
     uint8_t* vec_val;
 };
 
-#include "stdio.h"
-#include "stdlib.h"
-#include "string.h"
-#include "ctype.h"
 
 typedef struct {
     Value (*make_nil)();
@@ -144,7 +145,7 @@ static uint8_t* copy_string(uint8_t* src, int32_t len) {
     return ({ uint8_t* dest = (uint8_t*)malloc((len + 1)); strncpy(dest, src, len); ({ uint8_t* null_pos = (uint8_t*)((uint8_t*)(((int64_t)dest) + ((int64_t)len))); (*((uint8_t*)null_pos) = ((uint8_t)0)); }); dest; });
 }
 static int32_t is_number_token(Token tok) {
-    return ((tok.length == 0) ? 0 : ({ uint8_t first_char = (*tok.text); int32_t is_digit = isdigit(((int32_t)first_char)); ((is_digit != 0) ? 1 : (((first_char == ((uint8_t)45)) && (tok.length > 1)) ? ({ uint8_t* second_char_ptr = (uint8_t*)((uint8_t*)(((long long)tok.text) + 1)); uint8_t second_char = (*second_char_ptr); int32_t is_digit2 = isdigit(((int32_t)second_char)); ((is_digit2 != 0) ? 1 : 0); }) : 0)); }));
+    return ({ long long __if_result; if ((tok.length == 0)) { __if_result = 0; } else { __if_result = ({ uint8_t first_char = (*tok.text); int32_t is_digit = isdigit(((int32_t)first_char)); ((is_digit != 0) ? 1 : ({ long long __if_result; if (((first_char == ((uint8_t)45)) && (tok.length > 1))) { __if_result = ({ uint8_t* second_char_ptr = (uint8_t*)((uint8_t*)(((long long)tok.text) + 1)); uint8_t second_char = (*second_char_ptr); int32_t is_digit2 = isdigit(((int32_t)second_char)); ((is_digit2 != 0) ? 1 : 0); }); } else { __if_result = 0; } __if_result; })); }); } __if_result; });
 }
 static int32_t vector_set(Value* vec_val, int32_t index, Value* elem) {
     return ({ uint8_t* vec_ptr = (uint8_t*)vec_val->vec_val; Vector* vec = (Vector*)((Vector*)vec_ptr); uint8_t* data = (uint8_t*)vec->data; uint8_t* elem_loc = (uint8_t*)((uint8_t*)(((long long)data) + (index * 8))); Value** elem_ptr = (Value**)((Value**)elem_loc); (*elem_ptr = elem); 0; });
