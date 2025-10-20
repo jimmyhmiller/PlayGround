@@ -233,6 +233,112 @@
         node)
       (cast (Pointer BlockNode) 0))))
 
+;; Print indentation helper
+(def print-indent (: (-> [I32] I32))
+  (fn [depth]
+    (if (> depth 0)
+      (let [_ (: I32) (printf (c-str "  "))]
+        (print-indent (- depth 1)))
+      0)))
+
+;; Recursively process a vector of values (like operations or regions)
+;; Calls the callback for each element
+(def process-vector-elements (: (-> [(Pointer types/Value) I32] I32))
+  (fn [vec depth]
+    (let [tag (: types/ValueTag) (pointer-field-read vec tag)]
+      (if (= tag types/ValueTag/Vector)
+        (let [vec-ptr (: (Pointer U8)) (pointer-field-read vec vec_val)
+              vector-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) vec-ptr)
+              count (: I32) (pointer-field-read vector-struct count)
+              data (: (Pointer U8)) (pointer-field-read vector-struct data)
+              idx (: I32) 0]
+          ;; Iterate through vector elements
+          (while (< idx count)
+            (let [elem-offset (: I64) (* (cast I64 idx) 8)
+                  elem-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) elem-offset))
+                  elem-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) elem-ptr-loc)
+                  elem (: (Pointer types/Value)) (dereference elem-ptr-ptr)]
+              ;; Process this element recursively
+              (parse-and-print-recursive elem depth)
+              (set! idx (+ idx 1))))
+          0)
+        0))))
+
+;; Recursively parse and print the entire tree
+(def parse-and-print-recursive (: (-> [(Pointer types/Value) I32] I32))
+  (fn [val depth]
+    (let [tag (: types/ValueTag) (pointer-field-read val tag)
+          is-op-val (: I32) (is-op val)
+          is-block-val (: I32) (is-block val)]
+      (if (= is-op-val 1)
+        ;; It's an op
+        (let [op-node (: (Pointer OpNode)) (parse-op val)]
+          (if (!= (cast I64 op-node) 0)
+            (let [name-str (: (Pointer U8)) (pointer-field-read op-node name)
+                  regions (: (Pointer types/Value)) (pointer-field-read op-node regions)
+                  _ (: I32) (print-indent depth)
+                  _ (: I32) (printf (c-str "OpNode: %s\n") name-str)]
+              ;; Recursively process regions (which is a vector of region-vectors)
+              ;; Each region is itself a vector of blocks
+              (process-vector-elements regions (+ depth 1))
+              0)
+            0))
+        (if (= is-block-val 1)
+          ;; It's a block
+          (let [block-node (: (Pointer BlockNode)) (parse-block val)
+                _ (: I32) (print-indent depth)
+                _ (: I32) (printf (c-str "BlockNode\n"))]
+            (if (!= (cast I64 block-node) 0)
+              (let [operations (: (Pointer types/Value)) (pointer-field-read block-node operations)]
+                ;; Recursively process operations
+                (process-vector-elements operations (+ depth 1))
+                0)
+              0))
+          ;; It's a vector (could be a region vector containing blocks)
+          (if (= tag types/ValueTag/Vector)
+            (let [_ (: I32) (print-indent depth)
+                  _ (: I32) (printf (c-str "Region (vector of blocks)\n"))]
+              ;; Process each block in this region
+              (process-vector-elements val (+ depth 1))
+              0)
+            0))))))
+
+;; Recursively parse a block - parses all operations inside
+(def parse-block-recursive (: (-> [(Pointer types/Value)] (Pointer BlockNode)))
+  (fn [block-form]
+    (if (= (is-block block-form) 1)
+      (let [args (: (Pointer types/Value)) (get-block-args block-form)
+            operations (: (Pointer types/Value)) (get-block-operations block-form)
+            ;; TODO: Recursively parse each operation in the operations vector
+            node (: (Pointer BlockNode)) (cast (Pointer BlockNode) (malloc 16))]
+        (pointer-field-write! node args args)
+        (pointer-field-write! node operations operations)
+        node)
+      (cast (Pointer BlockNode) 0))))
+
+;; Recursively parse an op - parses all regions inside
+(def parse-op-recursive (: (-> [(Pointer types/Value)] (Pointer OpNode)))
+  (fn [op-form]
+    (if (= (is-op op-form) 1)
+      (let [name-val (: (Pointer types/Value)) (get-op-name op-form)
+            name-tag (: types/ValueTag) (pointer-field-read name-val tag)]
+        (if (= name-tag types/ValueTag/String)
+          (let [name (: (Pointer U8)) (pointer-field-read name-val str_val)
+                result-types (: (Pointer types/Value)) (get-op-result-types op-form)
+                operands (: (Pointer types/Value)) (get-op-operands op-form)
+                attributes (: (Pointer types/Value)) (get-op-attributes op-form)
+                regions (: (Pointer types/Value)) (get-op-regions op-form)
+                ;; TODO: Recursively parse each region (which contains blocks)
+                node (: (Pointer OpNode)) (cast (Pointer OpNode) (malloc 40))]
+            (pointer-field-write! node name name)
+            (pointer-field-write! node result-types result-types)
+            (pointer-field-write! node operands operands)
+            (pointer-field-write! node attributes attributes)
+            (pointer-field-write! node regions regions)
+            node)
+          (cast (Pointer OpNode) 0)))
+      (cast (Pointer OpNode) 0))))
+
 ;; Main - test our helper
 (def main-fn (: (-> [] I32))
   (fn []

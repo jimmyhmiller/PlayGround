@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <stdint.h>
-#include <stdlib.h>
 
 // Required namespace: types
 typedef struct Cons Cons;
@@ -134,68 +133,97 @@ typedef struct {
     Value* (*get_block_operations)(Value*);
     OpNode* (*parse_op)(Value*);
     BlockNode* (*parse_block)(Value*);
+    int32_t (*print_indent)(int32_t);
+    int32_t (*process_vector_elements)(Value*, int32_t);
+    int32_t (*parse_and_print_recursive)(Value*, int32_t);
+    BlockNode* (*parse_block_recursive)(Value*);
+    OpNode* (*parse_op_recursive)(Value*);
     int32_t (*main_fn)();
 } Namespace_mlir_ast;
 
 extern Namespace_mlir_ast g_mlir_ast;
 void init_namespace_mlir_ast(Namespace_mlir_ast* ns);
 
+// Required namespace: tokenizer
+typedef struct Tokenizer Tokenizer;
+struct Tokenizer {
+    uint8_t* input;
+    int32_t position;
+    int32_t length;
+};
 
 typedef struct {
-    int32_t (*test_simple_expr)();
-    int32_t (*test_op_form)();
-    int32_t (*test_block_form)();
+    Tokenizer* (*make_tokenizer)(uint8_t*);
+    int32_t (*peek_char)(Tokenizer*);
+    int32_t (*advance)(Tokenizer*);
+    int32_t (*skip_to_eol)(Tokenizer*);
+    int32_t (*skip_whitespace)(Tokenizer*);
+    Token (*make_token)(TokenType, uint8_t*, int32_t);
+    Token (*next_token)(Tokenizer*);
+    Token (*read_symbol)(Tokenizer*);
+    Token (*read_string)(Tokenizer*);
+    Token (*read_keyword)(Tokenizer*);
+    int32_t (*main_fn)();
+} Namespace_tokenizer;
+
+extern Namespace_tokenizer g_tokenizer;
+void init_namespace_tokenizer(Namespace_tokenizer* ns);
+
+#include "stdio.h"
+#include "stdlib.h"
+
+typedef struct {
+    uint8_t* (*read_file)(uint8_t*);
+    Token* (*tokenize_file)(uint8_t*);
+    int32_t (*parse_single_file)(uint8_t*);
     int32_t (*main_fn)();
 } Namespace_parse_test_files;
 
 Namespace_parse_test_files g_parse_test_files;
 
-static int32_t test_simple_expr();
-static int32_t test_op_form();
-static int32_t test_block_form();
+static uint8_t* read_file(uint8_t*);
+static Token* tokenize_file(uint8_t*);
+static int32_t parse_single_file(uint8_t*);
 static int32_t main_fn();
 
 void init_namespace_parse_test_files(Namespace_parse_test_files* ns) {
-    ns->test_simple_expr = &test_simple_expr;
-    ns->test_op_form = &test_op_form;
-    ns->test_block_form = &test_block_form;
+    ns->read_file = &read_file;
+    ns->tokenize_file = &tokenize_file;
+    ns->parse_single_file = &parse_single_file;
     ns->main_fn = &main_fn;
 }
 
-static int32_t test_simple_expr() {
-    printf("=== Test 1: Parse simple list (foo bar) ===\n");
-    ({ Token* tokens = (Token*)((Token*)malloc(128)); tokens->type = TokenType_LeftParen; tokens->text = "("; tokens->length = 1; ({ Token* t1 = (Token*)((Token*)(((long long)tokens) + 24)); t1->type = TokenType_Symbol; t1->text = "foo"; t1->length = 3; ({ Token* t2 = (Token*)((Token*)(((long long)tokens) + 48)); t2->type = TokenType_Symbol; t2->text = "bar"; t2->length = 3; ({ Token* t3 = (Token*)((Token*)(((long long)tokens) + 72)); t3->type = TokenType_RightParen; t3->text = ")"; t3->length = 1; ({ Parser* p = (Parser*)g_parser.make_parser(tokens, 4); Value* result = (Value*)g_parser.parse_value(p); printf("Parsed: "); g_parser.print_value_ptr(result); printf("\n\n"); 0; }); }); }); }); });
-    return 0;
+static uint8_t* read_file(uint8_t* filename) {
+    return ({ uint8_t* file = (uint8_t*)fopen(filename, "r"); ((((int64_t)file) == 0) ? ({ printf("Error: Could not open file %s\n", filename); ((uint8_t*)0); }) : ({ fseek(file, 0, 2); int32_t size = ftell(file); rewind(file); uint8_t* buffer = (uint8_t*)malloc((size + 1)); int32_t read_count = fread(buffer, 1, size, file); fclose(file); ({ int64_t null_pos = (((int64_t)buffer) + ((int64_t)size)); uint8_t* null_ptr = (uint8_t*)((uint8_t*)null_pos); (*null_ptr = ((uint8_t)0)); buffer; }); })); });
 }
-static int32_t test_op_form() {
-    printf("=== Test 2: Parse and inspect op form ===\n");
-    printf("Input: (op \"arith.constant\" [\"i32\"] [] {} [])\n");
-    return ({ Value* nil_val = (Value*)({ Value* __tmp_ptr = malloc(sizeof(Value)); *__tmp_ptr = g_types.make_nil(); __tmp_ptr; }); Value* regions = (Value*)g_types.make_empty_vector(); Value* rest5 = (Value*)g_types.make_cons(regions, nil_val); Value* attrs = (Value*)g_types.make_empty_map(); Value* rest4 = (Value*)g_types.make_cons(attrs, rest5); Value* operands = (Value*)g_types.make_empty_vector(); Value* rest3 = (Value*)g_types.make_cons(operands, rest4); Value* result_types = (Value*)g_types.make_empty_vector(); Value* rest2 = (Value*)g_types.make_cons(result_types, rest3); Value* name = (Value*)({ Value* __tmp_ptr = malloc(sizeof(Value)); *__tmp_ptr = g_types.make_string("arith.constant"); __tmp_ptr; }); Value* rest1 = (Value*)g_types.make_cons(name, rest2); Value* op_sym = (Value*)({ Value* __tmp_ptr = malloc(sizeof(Value)); *__tmp_ptr = g_types.make_symbol("op"); __tmp_ptr; }); Value* op_form = (Value*)g_types.make_cons(op_sym, rest1); ({ int32_t is_op_result = g_mlir_ast.is_op(op_form); printf("Is this an op form? %s\n", ((is_op_result == 1) ? "YES" : "NO")); }); ({ Value* extracted_name = (Value*)g_mlir_ast.get_op_name(op_form); ValueTag name_tag = extracted_name->tag; ((name_tag == ValueTag_String) ? ({ uint8_t* name_str = (uint8_t*)extracted_name->str_val; printf("Op name: \"%s\"\n", name_str); }) : printf("ERROR: Could not extract op name\n")); }); ({ OpNode* op_node = (OpNode*)g_mlir_ast.parse_op(op_form); ((((int64_t)op_node) != 0) ? ({ uint8_t* parsed_name = (uint8_t*)op_node->name; printf("Parsed OpNode with name: \"%s\"\n", parsed_name); }) : printf("ERROR: parse-op failed\n")); }); printf("\n"); 0; });
+static Token* tokenize_file(uint8_t* content) {
+    return ({ Tokenizer* tok = (Tokenizer*)g_tokenizer.make_tokenizer(content); int32_t max_tokens = 1000; int32_t token_size = 24; Token* tokens = (Token*)((Token*)malloc((max_tokens * token_size))); int32_t count = 0; ({ while ((count < max_tokens)) { ({ Token token = g_tokenizer.next_token(tok); TokenType token_type = token.type; int64_t token_offset = (((int64_t)count) * ((int64_t)token_size)); Token* token_ptr = (Token*)((Token*)(((int64_t)tokens) + token_offset)); token_ptr->type = token.type; token_ptr->text = token.text; token_ptr->length = token.length; count = (count + 1); ({ if ((token_type == TokenType_EOF)) { count = max_tokens; } else { count = count; } }); }); } }); tokens; });
 }
-static int32_t test_block_form() {
-    printf("=== Test 3: Parse and inspect block form ===\n");
-    printf("Input: (block [] [])\n");
-    return ({ Value* nil_val = (Value*)({ Value* __tmp_ptr = malloc(sizeof(Value)); *__tmp_ptr = g_types.make_nil(); __tmp_ptr; }); Value* operations = (Value*)g_types.make_empty_vector(); Value* rest2 = (Value*)g_types.make_cons(operations, nil_val); Value* block_args = (Value*)g_types.make_empty_vector(); Value* rest1 = (Value*)g_types.make_cons(block_args, rest2); Value* block_sym = (Value*)({ Value* __tmp_ptr = malloc(sizeof(Value)); *__tmp_ptr = g_types.make_symbol("block"); __tmp_ptr; }); Value* block_form = (Value*)g_types.make_cons(block_sym, rest1); ({ int32_t is_block_result = g_mlir_ast.is_block(block_form); printf("Is this a block form? %s\n", ((is_block_result == 1) ? "YES" : "NO")); }); ({ BlockNode* block_node = (BlockNode*)g_mlir_ast.parse_block(block_form); ((((int64_t)block_node) != 0) ? printf("Successfully parsed BlockNode\n") : printf("ERROR: parse-block failed\n")); }); printf("\n"); 0; });
+static int32_t parse_single_file(uint8_t* filename) {
+    printf("=== Parsing: %s ===\n", filename);
+    return ({ uint8_t* content = (uint8_t*)g_parse_test_files.read_file(filename); ((((int64_t)content) == 0) ? ({ printf("ERROR: Failed to read file\n"); 1; }) : ({ printf("File content:\n%s\n\n", content); printf("Tokenizing...\n"); Token* tokens = (Token*)g_parse_test_files.tokenize_file(content); int32_t token_count = 0; int32_t found_eof = 0; ({ while (((token_count < 1000) && (found_eof == 0))) { ({ int64_t token_offset = (((long long)token_count) * 24); Token* token_ptr = (Token*)((Token*)(((int64_t)tokens) + token_offset)); TokenType token_type = token_ptr->type; token_count = (token_count + 1); ({ if ((token_type == TokenType_EOF)) { found_eof = 1; } else { found_eof = 0; } }); }); } }); ({ printf("Found %d tokens\n\n", token_count); printf("Parsing...\n"); Parser* p = (Parser*)g_parser.make_parser(tokens, token_count); ({ while ((((int32_t)g_parser.peek_token(p).type) != ((int32_t)TokenType_EOF))) { ({ Value* result = (Value*)g_parser.parse_value(p); printf("\nRecursively parsing entire tree:\n"); g_mlir_ast.parse_and_print_recursive(result, 0); printf("\n"); }); } }); printf("\n"); 0; }); })); });
 }
 static int32_t main_fn() {
     printf("=== MLIR AST Parser Demo ===\n\n");
     printf("This demo shows parsing of MLIR-style op and block forms\n");
     printf("using the modular parser and AST libraries.\n\n");
-    g_parse_test_files.test_simple_expr();
-    g_parse_test_files.test_op_form();
-    g_parse_test_files.test_block_form();
-    printf("=== Demo Complete ===\n");
+    g_parse_test_files.parse_single_file("tests/simple.lisp");
+    g_parse_test_files.parse_single_file("tests/add.lisp");
+    g_parse_test_files.parse_single_file("tests/fib.lisp");
+    printf("=== All Files Parsed Successfully ===\n");
     return 0;
 }
 int main() {
     init_namespace_types(&g_types);
     init_namespace_parser(&g_parser);
     init_namespace_mlir_ast(&g_mlir_ast);
+    init_namespace_tokenizer(&g_tokenizer);
     init_namespace_parse_test_files(&g_parse_test_files);
     // namespace parse-test-files
     // require [types :as types]
     // require [parser :as parser]
     // require [mlir-ast :as ast]
+    // require [tokenizer :as tokenizer]
     g_parse_test_files.main_fn();
     return 0;
 }

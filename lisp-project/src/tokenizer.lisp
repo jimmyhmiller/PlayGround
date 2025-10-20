@@ -1,6 +1,9 @@
 ;; Simple Tokenizer for Clojure-style syntax
 ;; Incrementally building - starting with basic tokens
 
+(ns tokenizer)
+
+(require [types :as types])
 
 (include-header "stdio.h")
 (include-header "stdlib.h")
@@ -10,17 +13,6 @@
 (declare-fn isdigit [c I32] -> I32)
 (declare-fn isspace [c I32] -> I32)
 (declare-fn strlen [s (Pointer U8)] -> I32)
-
-;; Token types
-(def TokenType (: Type)
-  (Enum LeftParen RightParen LeftBracket RightBracket LeftBrace RightBrace Number Symbol String Keyword EOF))
-
-;; Token structure
-(def Token (: Type)
-  (Struct
-    [type TokenType]
-    [text (Pointer U8)]
-    [length I32]))
 
 ;; Tokenizer state
 (def Tokenizer (: Type)
@@ -80,35 +72,35 @@
           0)))))
 
 ;; Create a token
-(def make-token (: (-> [TokenType (Pointer U8) I32] Token))
+(def make-token (: (-> [types/TokenType (Pointer U8) I32] types/Token))
   (fn [type text length]
-    (Token type text length)))
+    (types/Token type text length)))
 
 ;; Get next token
-(def next-token (: (-> [(Pointer Tokenizer)] Token))
+(def next-token (: (-> [(Pointer Tokenizer)] types/Token))
   (fn [tok]
     (skip-whitespace tok)
     (let [c (: I32) (peek-char tok)]
       (if (= c 0)
-        (make-token TokenType/EOF pointer-null 0)
+        (make-token types/TokenType/EOF (cast (Pointer U8) 0) 0)
         (if (= c 40)  ; '('
           (let [_1 (: I32) (advance tok)]
-            (make-token TokenType/LeftParen (c-str "(") 1))
+            (make-token types/TokenType/LeftParen (c-str "(") 1))
           (if (= c 41)  ; ')'
             (let [_1 (: I32) (advance tok)]
-              (make-token TokenType/RightParen (c-str ")") 1))
+              (make-token types/TokenType/RightParen (c-str ")") 1))
             (if (= c 91)  ; '['
               (let [_1 (: I32) (advance tok)]
-                (make-token TokenType/LeftBracket (c-str "[") 1))
+                (make-token types/TokenType/LeftBracket (c-str "[") 1))
               (if (= c 93)  ; ']'
                 (let [_1 (: I32) (advance tok)]
-                  (make-token TokenType/RightBracket (c-str "]") 1))
+                  (make-token types/TokenType/RightBracket (c-str "]") 1))
                 (if (= c 123)  ; '{'
                   (let [_1 (: I32) (advance tok)]
-                    (make-token TokenType/LeftBrace (c-str "{") 1))
+                    (make-token types/TokenType/LeftBrace (c-str "{") 1))
                   (if (= c 125)  ; '}'
                     (let [_1 (: I32) (advance tok)]
-                      (make-token TokenType/RightBrace (c-str "}") 1))
+                      (make-token types/TokenType/RightBrace (c-str "}") 1))
                     (if (= c 34)  ; '"'
                       (read-string tok)
                       (if (= c 58)  ; ':'
@@ -117,7 +109,7 @@
                         (read-symbol tok)))))))))))))
 
 ;; Helper to read a symbol token
-(def read-symbol (: (-> [(Pointer Tokenizer)] Token))
+(def read-symbol (: (-> [(Pointer Tokenizer)] types/Token))
   (fn [tok]
     (let [start-pos (: I32) (pointer-field-read tok position)
           input (: (Pointer U8)) (pointer-field-read tok input)
@@ -132,10 +124,10 @@
                 (!= (peek-char tok) 93))))))
         (advance tok)
         (set! len (+ len 1))) ;; Return the token with the accumulated length
-      (make-token TokenType/Symbol start-ptr len))))
+      (make-token types/TokenType/Symbol start-ptr len))))
 
 ;; Helper to read a string token
-(def read-string (: (-> [(Pointer Tokenizer)] Token))
+(def read-string (: (-> [(Pointer Tokenizer)] types/Token))
   (fn [tok]
     (let [start-pos (: I32) (pointer-field-read tok position)
           input (: (Pointer U8)) (pointer-field-read tok input)
@@ -144,16 +136,21 @@
       (let [_ (: I32) (advance tok)
             len (: I32) 1]
         ; Start with 1 for opening quote
-        ;; Read until closing quote
+        ;; Read until closing quote, handling escapes
         (while (and (!= (peek-char tok) 0)
           (!= (peek-char tok) 34))  ; 34 is "
-          (advance tok)
-          (set! len (+ len 1))) ;; Advance past closing quote and include it in length
+          (if (= (peek-char tok) 92)  ; 92 is backslash
+            ;; Skip escaped character
+            (let [_ (: I32) (advance tok)]
+              (advance tok)
+              (set! len (+ len 2)))
+            (let [_ (: I32) (advance tok)]
+              (set! len (+ len 1))))) ;; Advance past closing quote and include it in length
         (let [_ (: I32) (advance tok)]
-          (make-token TokenType/String start-ptr (+ len 1)))))))
+          (make-token types/TokenType/String start-ptr (+ len 1)))))))
 
 ;; Helper to read a keyword token
-(def read-keyword (: (-> [(Pointer Tokenizer)] Token))
+(def read-keyword (: (-> [(Pointer Tokenizer)] types/Token))
   (fn [tok]
     (let [start-pos (: I32) (pointer-field-read tok position)
           input (: (Pointer U8)) (pointer-field-read tok input)
@@ -170,7 +167,7 @@
                     (!= (peek-char tok) 125))))))))
         (advance tok)
         (set! len (+ len 1))) ;; Return the token with the accumulated length
-      (make-token TokenType/Keyword start-ptr len))))
+      (make-token types/TokenType/Keyword start-ptr len))))
 
 ;; Test
 (def main-fn (: (-> [] I32))
@@ -178,20 +175,20 @@
     (printf (c-str "Testing tokenizer:\n"))
 
     (let [tok (: (Pointer Tokenizer)) (make-tokenizer (c-str ";; comment\n(foo bar)"))
-          t1 (: Token) (next-token tok)]
-      (printf (c-str "Token 1: type=%d text='%.*s'\n") (cast I32 (. t1 type)) (. t1 length) (. t1 text)) (let [t2 (: Token) (next-token tok)]
+          t1 (: types/Token) (next-token tok)]
+      (printf (c-str "Token 1: type=%d text='%.*s'\n") (cast I32 (. t1 type)) (. t1 length) (. t1 text)) (let [t2 (: types/Token) (next-token tok)]
         (printf (c-str "Token 2: type=%d text='%.*s'\n") (cast I32 (. t2 type)) (. t2 length) (. t2 text))
-        (let [t3 (: Token) (next-token tok)]
+        (let [t3 (: types/Token) (next-token tok)]
           (printf (c-str "Token 3: type=%d text='%.*s'\n") (cast I32 (. t3 type)) (. t3 length) (. t3 text))
-          (let [t4 (: Token) (next-token tok)]
+          (let [t4 (: types/Token) (next-token tok)]
             (printf (c-str "Token 4: type=%d text='%.*s'\n") (cast I32 (. t4 type)) (. t4 length) (. t4 text))
-            (let [t5 (: Token) (next-token tok)]
+            (let [t5 (: types/Token) (next-token tok)]
               (printf (c-str "Token 5: type=%d text='%.*s'\n") (cast I32 (. t5 type)) (. t5 length) (. t5 text))
-              (let [t6 (: Token) (next-token tok)]
+              (let [t6 (: types/Token) (next-token tok)]
                 (printf (c-str "Token 6: type=%d text='%.*s'\n") (cast I32 (. t6 type)) (. t6 length) (. t6 text))
-                (let [t7 (: Token) (next-token tok)]
+                (let [t7 (: types/Token) (next-token tok)]
                   (printf (c-str "Token 7: type=%d text='%.*s'\n") (cast I32 (. t7 type)) (. t7 length) (. t7 text))
-                  (let [t8 (: Token) (next-token tok)]
+                  (let [t8 (: types/Token) (next-token tok)]
                     (printf (c-str "Token 8: type=%d text='%.*s'\n") (cast I32 (. t8 type)) (. t8 length) (. t8 text))
                     0))))))))
 

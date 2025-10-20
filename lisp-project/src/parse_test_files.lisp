@@ -6,153 +6,137 @@
 (require [types :as types])
 (require [parser :as parser])
 (require [mlir-ast :as ast])
+(require [tokenizer :as tokenizer])
+
+(include-header "stdio.h")
+(include-header "stdlib.h")
 
 ;; C library functions
+(declare-fn printf [fmt (Pointer U8)] -> I32)
 (declare-fn malloc [size I32] -> (Pointer U8))
+(declare-fn fopen [filename (Pointer U8) mode (Pointer U8)] -> (Pointer U8))
+(declare-fn fclose [file (Pointer U8)] -> I32)
+(declare-fn fseek [file (Pointer U8) offset I32 whence I32] -> I32)
+(declare-fn ftell [file (Pointer U8)] -> I32)
+(declare-fn fread [ptr (Pointer U8) size I32 count I32 file (Pointer U8)] -> I32)
+(declare-fn rewind [file (Pointer U8)] -> Nil)
 
-;; Test parsing a simple expression
-(def test-simple-expr (: (-> [] I32))
-  (fn []
-    (printf (c-str "=== Test 1: Parse simple list (foo bar) ===\n"))
+;; Read entire file into a string
+(def read-file (: (-> [(Pointer U8)] (Pointer U8)))
+  (fn [filename]
+    (let [file (: (Pointer U8)) (fopen filename (c-str "r"))]
+      (if (= (cast I64 file) 0)
+        (let [_ (: I32) (printf (c-str "Error: Could not open file %s\n") filename)]
+          (cast (Pointer U8) 0))
+        (let [;; Seek to end to get file size
+              _ (: I32) (fseek file 0 2)  ; SEEK_END = 2
+              size (: I32) (ftell file)
+              _ (: Nil) (rewind file)
 
-    ;; Create tokens manually for: (foo bar)
-    (let [tokens (: (Pointer types/Token)) (cast (Pointer types/Token) (malloc 128))]
+              ;; Allocate buffer (size + 1 for null terminator)
+              buffer (: (Pointer U8)) (malloc (+ size 1))
 
-      ;; Token 0: (
-      (pointer-field-write! tokens type types/TokenType/LeftParen)
-      (pointer-field-write! tokens text (c-str "("))
-      (pointer-field-write! tokens length 1)
+              ;; Read file contents
+              read-count (: I32) (fread buffer 1 size file)
+              _ (: I32) (fclose file)]
 
-      ;; Token 1: foo
-      (let [t1 (: (Pointer types/Token)) (cast (Pointer types/Token) (+ (cast I64 tokens) 24))]
-        (pointer-field-write! t1 type types/TokenType/Symbol)
-        (pointer-field-write! t1 text (c-str "foo"))
-        (pointer-field-write! t1 length 3)
+          ;; Null terminate the buffer
+          (let [null-pos (: I64) (+ (cast I64 buffer) (cast I64 size))
+                null-ptr (: (Pointer U8)) (cast (Pointer U8) null-pos)]
+            (pointer-write! null-ptr (cast U8 0))
+            buffer))))))
 
-        ;; Token 2: bar
-        (let [t2 (: (Pointer types/Token)) (cast (Pointer types/Token) (+ (cast I64 tokens) 48))]
-          (pointer-field-write! t2 type types/TokenType/Symbol)
-          (pointer-field-write! t2 text (c-str "bar"))
-          (pointer-field-write! t2 length 3)
+;; Collect all tokens from a file into an array
+(def tokenize-file (: (-> [(Pointer U8)] (Pointer types/Token)))
+  (fn [content]
+    (let [tok (: (Pointer tokenizer/Tokenizer)) (tokenizer/make-tokenizer content)
+          ;; Allocate space for up to 1000 tokens
+          max-tokens (: I32) 1000
+          token-size (: I32) 24  ; sizeof(Token)
+          tokens (: (Pointer types/Token)) (cast (Pointer types/Token) (malloc (* max-tokens token-size)))
+          count (: I32) 0]
 
-          ;; Token 3: )
-          (let [t3 (: (Pointer types/Token)) (cast (Pointer types/Token) (+ (cast I64 tokens) 72))]
-            (pointer-field-write! t3 type types/TokenType/RightParen)
-            (pointer-field-write! t3 text (c-str ")"))
-            (pointer-field-write! t3 length 1)
+      ;; Collect tokens until EOF
+      (while (< count max-tokens)
+        (let [token (: types/Token) (tokenizer/next-token tok)
+              token-type (: types/TokenType) (. token type)
+              ;; Calculate offset for this token
+              token-offset (: I64) (* (cast I64 count) (cast I64 token-size))
+              token-ptr (: (Pointer types/Token)) (cast (Pointer types/Token) (+ (cast I64 tokens) token-offset))]
 
-            ;; Create parser and parse
-            (let [p (: (Pointer parser/Parser)) (parser/make-parser tokens 4)
-                  result (: (Pointer types/Value)) (parser/parse-value p)]
-              (printf (c-str "Parsed: "))
-              (parser/print-value-ptr result)
-              (printf (c-str "\n\n"))
-              0)))))
-    0))
+          ;; Always write the token (including EOF)
+          (pointer-field-write! token-ptr type (. token type))
+          (pointer-field-write! token-ptr text (. token text))
+          (pointer-field-write! token-ptr length (. token length))
+          (set! count (+ count 1))
 
-;; Test parsing an op form
-(def test-op-form (: (-> [] I32))
-  (fn []
-    (printf (c-str "=== Test 2: Parse and inspect op form ===\n"))
-    (printf (c-str "Input: (op \"arith.constant\" [\"i32\"] [] {} [])\n"))
+          ;; Break if we just wrote EOF
+          (if (= token-type types/TokenType/EOF)
+            (set! count max-tokens)  ; Break loop
+            (set! count count))))
 
-    ;; Manually build the op form: (op "arith.constant" ["i32"] [] {} [])
-    (let [nil-val (: (Pointer types/Value)) (allocate types/Value (types/make-nil))
+      ;; Return the tokens array
+      tokens)))
 
-          ;; Build empty regions vector: []
-          regions (: (Pointer types/Value)) (types/make-empty-vector)
-          rest5 (: (Pointer types/Value)) (types/make-cons regions nil-val)
+;; Parse a single file
+(def parse-single-file (: (-> [(Pointer U8)] I32))
+  (fn [filename]
+    (printf (c-str "=== Parsing: %s ===\n") filename)
 
-          ;; Build empty attributes map: {}
-          attrs (: (Pointer types/Value)) (types/make-empty-map)
-          rest4 (: (Pointer types/Value)) (types/make-cons attrs rest5)
+    ;; Read the file
+    (let [content (: (Pointer U8)) (read-file filename)]
+      (if (= (cast I64 content) 0)
+        (let [_ (: I32) (printf (c-str "ERROR: Failed to read file\n"))]
+          1)
+        (let [_ (: I32) (printf (c-str "File content:\n%s\n\n") content)
 
-          ;; Build empty operands vector: []
-          operands (: (Pointer types/Value)) (types/make-empty-vector)
-          rest3 (: (Pointer types/Value)) (types/make-cons operands rest4)
+              ;; Tokenize the content
+              _ (: I32) (printf (c-str "Tokenizing...\n"))
+              tokens (: (Pointer types/Token)) (tokenize-file content)
 
-          ;; Build result types vector: ["i32"]
-          result-types (: (Pointer types/Value)) (types/make-empty-vector)
-          rest2 (: (Pointer types/Value)) (types/make-cons result-types rest3)
+              ;; Count tokens
+              token-count (: I32) 0
+              found-eof (: I32) 0]
 
-          ;; Build name string: "arith.constant"
-          name (: (Pointer types/Value)) (allocate types/Value (types/make-string (c-str "arith.constant")))
-          rest1 (: (Pointer types/Value)) (types/make-cons name rest2)
+          ;; Count tokens loop (count until we hit EOF, including the EOF token)
+          (while (and (< token-count 1000) (= found-eof 0))
+            (let [token-offset (: I64) (* (cast I64 token-count) 24)
+                  token-ptr (: (Pointer types/Token)) (cast (Pointer types/Token) (+ (cast I64 tokens) token-offset))
+                  token-type (: types/TokenType) (pointer-field-read token-ptr type)]
+              (set! token-count (+ token-count 1))
+              (if (= token-type types/TokenType/EOF)
+                (set! found-eof 1)
+                (set! found-eof 0))))
 
-          ;; Build op symbol
-          op-sym (: (Pointer types/Value)) (allocate types/Value (types/make-symbol (c-str "op")))
-          op-form (: (Pointer types/Value)) (types/make-cons op-sym rest1)]
+          (let [_ (: I32) (printf (c-str "Found %d tokens\n\n") token-count)
 
-      ;; Test if it's recognized as an op
-      (let [is-op-result (: I32) (ast/is-op op-form)]
-        (printf (c-str "Is this an op form? %s\n")
-                (if (= is-op-result 1) (c-str "YES") (c-str "NO"))))
+                ;; Parse the tokens
+                _ (: I32) (printf (c-str "Parsing...\n"))
+                p (: (Pointer parser/Parser)) (parser/make-parser tokens token-count)]
 
-      ;; Extract and print the op name
-      (let [extracted-name (: (Pointer types/Value)) (ast/get-op-name op-form)
-            name-tag (: types/ValueTag) (pointer-field-read extracted-name tag)]
-        (if (= name-tag types/ValueTag/String)
-          (let [name-str (: (Pointer U8)) (pointer-field-read extracted-name str_val)]
-            (printf (c-str "Op name: \"%s\"\n") name-str))
-          (printf (c-str "ERROR: Could not extract op name\n"))))
+            ;; Parse all top-level values and recursively convert to data structures
+            (while (!= (cast I32 (. (parser/peek-token p) type)) (cast I32 types/TokenType/EOF))
+              (let [result (: (Pointer types/Value)) (parser/parse-value p)]
+                (printf (c-str "\nRecursively parsing entire tree:\n"))
+                ;; Recursively parse and print the entire tree
+                (ast/parse-and-print-recursive result 0)
+                (printf (c-str "\n"))))
 
-      ;; Parse into OpNode structure
-      (let [op-node (: (Pointer ast/OpNode)) (ast/parse-op op-form)]
-        (if (!= (cast I64 op-node) 0)
-          (let [parsed-name (: (Pointer U8)) (pointer-field-read op-node name)]
-            (printf (c-str "Parsed OpNode with name: \"%s\"\n") parsed-name))
-          (printf (c-str "ERROR: parse-op failed\n"))))
+            (printf (c-str "\n"))
+            0))))))
 
-      (printf (c-str "\n"))
-      0)))
-
-;; Test parsing a block form
-(def test-block-form (: (-> [] I32))
-  (fn []
-    (printf (c-str "=== Test 3: Parse and inspect block form ===\n"))
-    (printf (c-str "Input: (block [] [])\n"))
-
-    ;; Manually build: (block [] [])
-    (let [nil-val (: (Pointer types/Value)) (allocate types/Value (types/make-nil))
-
-          ;; Build empty operations vector: []
-          operations (: (Pointer types/Value)) (types/make-empty-vector)
-          rest2 (: (Pointer types/Value)) (types/make-cons operations nil-val)
-
-          ;; Build empty block-args vector: []
-          block-args (: (Pointer types/Value)) (types/make-empty-vector)
-          rest1 (: (Pointer types/Value)) (types/make-cons block-args rest2)
-
-          ;; Build block symbol
-          block-sym (: (Pointer types/Value)) (allocate types/Value (types/make-symbol (c-str "block")))
-          block-form (: (Pointer types/Value)) (types/make-cons block-sym rest1)]
-
-      ;; Test if it's recognized as a block
-      (let [is-block-result (: I32) (ast/is-block block-form)]
-        (printf (c-str "Is this a block form? %s\n")
-                (if (= is-block-result 1) (c-str "YES") (c-str "NO"))))
-
-      ;; Parse into BlockNode structure
-      (let [block-node (: (Pointer ast/BlockNode)) (ast/parse-block block-form)]
-        (if (!= (cast I64 block-node) 0)
-          (printf (c-str "Successfully parsed BlockNode\n"))
-          (printf (c-str "ERROR: parse-block failed\n"))))
-
-      (printf (c-str "\n"))
-      0)))
-
-;; Main function
 (def main-fn (: (-> [] I32))
   (fn []
     (printf (c-str "=== MLIR AST Parser Demo ===\n\n"))
     (printf (c-str "This demo shows parsing of MLIR-style op and block forms\n"))
     (printf (c-str "using the modular parser and AST libraries.\n\n"))
 
-    (test-simple-expr)
-    (test-op-form)
-    (test-block-form)
+    ;; Parse all test files
+    (parse-single-file (c-str "tests/simple.lisp"))
+    (parse-single-file (c-str "tests/add.lisp"))
+    (parse-single-file (c-str "tests/fib.lisp"))
 
-    (printf (c-str "=== Demo Complete ===\n"))
+    (printf (c-str "=== All Files Parsed Successfully ===\n"))
     0))
 
 (main-fn)
