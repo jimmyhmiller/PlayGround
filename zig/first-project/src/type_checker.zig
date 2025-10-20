@@ -268,6 +268,7 @@ pub const TypeCheckError = error{
     ArgumentCountMismatch,
     InvalidTypeAnnotation,
     TypeAliasNotSupported,
+    MissingLetTypeAnnotation,
     OutOfMemory,
 };
 
@@ -298,6 +299,8 @@ pub const BidirectionalTypeChecker = struct {
     // Namespace loading support (optional, for runtime requires)
     loader_ctx: ?*anyopaque = null,
     loader_fn: ?*const fn (ctx: *anyopaque, namespace_name: []const u8, parent_checker: *BidirectionalTypeChecker) anyerror!void = null,
+    // Strictness flags
+    require_let_type_annotations: bool = true,
 
     const BindingSnapshot = struct {
         name: []const u8,
@@ -1996,7 +1999,16 @@ pub const BidirectionalTypeChecker = struct {
         if (!bindings_value.isVector()) return TypeCheckError.InvalidTypeAnnotation;
         const bindings_vec = bindings_value.vector;
 
-        if (bindings_vec.len() % 3 != 0) return TypeCheckError.InvalidTypeAnnotation;
+        // Check if bindings follow the typed format [name (: Type) value ...]
+        // or the untyped format [name value ...] (only allowed if strictness is disabled)
+        if (bindings_vec.len() % 3 != 0) {
+            // Check if it's the untyped format [name value ...]
+            if (bindings_vec.len() % 2 == 0 and self.require_let_type_annotations) {
+                // User is trying to use untyped let bindings but strictness is enabled
+                return TypeCheckError.MissingLetTypeAnnotation;
+            }
+            return TypeCheckError.InvalidTypeAnnotation;
+        }
         const binding_count = bindings_vec.len() / 3;
 
         const snapshots_storage = try self.allocator.alloc(BindingSnapshot, binding_count);
@@ -2011,6 +2023,18 @@ pub const BidirectionalTypeChecker = struct {
             const value_val = bindings_vec.at(idx * 3 + 2);
 
             if (!name_val.isSymbol()) return TypeCheckError.InvalidTypeAnnotation;
+
+            // Check if type annotation is missing when strictness is enabled
+            if (self.require_let_type_annotations) {
+                const is_missing = !annotation_val.isList() or blk: {
+                    const list_node = annotation_val.list;
+                    const first = list_node.value orelse break :blk true;
+                    break :blk !first.isKeyword() or !std.mem.eql(u8, first.keyword, "");
+                };
+                if (is_missing) {
+                    return TypeCheckError.MissingLetTypeAnnotation;
+                }
+            }
 
             const annotated_type = try self.parseTypeAnnotation(annotation_val);
 
@@ -2061,7 +2085,16 @@ pub const BidirectionalTypeChecker = struct {
         if (!bindings_value.isVector()) return TypeCheckError.InvalidTypeAnnotation;
         const bindings_vec = bindings_value.vector;
 
-        if (bindings_vec.len() % 3 != 0) return TypeCheckError.InvalidTypeAnnotation;
+        // Check if bindings follow the typed format [name (: Type) value ...]
+        // or the untyped format [name value ...] (only allowed if strictness is disabled)
+        if (bindings_vec.len() % 3 != 0) {
+            // Check if it's the untyped format [name value ...]
+            if (bindings_vec.len() % 2 == 0 and self.require_let_type_annotations) {
+                // User is trying to use untyped let bindings but strictness is enabled
+                return TypeCheckError.MissingLetTypeAnnotation;
+            }
+            return TypeCheckError.InvalidTypeAnnotation;
+        }
         const binding_count = bindings_vec.len() / 3;
 
         const snapshots_storage = try self.allocator.alloc(BindingSnapshot, binding_count);
