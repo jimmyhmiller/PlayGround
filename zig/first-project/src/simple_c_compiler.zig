@@ -1122,6 +1122,9 @@ pub const SimpleCCompiler = struct {
                         defer self.allocator.*.free(expr_str);
                         std.debug.print("  Expression: {s}\n", .{expr_str});
                     }
+                } else if (detail.err == error.InvalidTypeAnnotation) {
+                    std.debug.print("Type error at line {d} (expr #{d}): Invalid type annotation\n", .{ line, detail.index });
+                    std.debug.print("  (See type checker ERROR messages above for specific details)\n", .{});
                 } else {
                     std.debug.print("Type error at line {d} (expr #{d}): {s}", .{ line, detail.index, @errorName(detail.err) });
 
@@ -2625,6 +2628,11 @@ pub const SimpleCCompiler = struct {
             if (std.mem.eql(u8, type_name, "F64")) return Type.f64;
 
             // For unknown type names, treat them as extern types
+            // DEBUG: Show what type we're creating as extern
+            if (std.mem.indexOf(u8, type_name, "/")) |_| {
+                std.debug.print("DEBUG: Creating extern type for qualified name: '{s}'\n", .{type_name});
+                std.debug.print("  Note: This will likely fail because qualified names need namespace resolution\n", .{});
+            }
             const extern_type_ptr = try self.allocator.*.create(type_checker.ExternType);
             extern_type_ptr.* = .{
                 .name = type_name,
@@ -2945,6 +2953,35 @@ pub const SimpleCCompiler = struct {
                             try writer.print(", sizeof({s})); ", .{sanitized});
                         }
                     } else {
+                        // Special case for direct function types: ReturnType (*varname)(Args)
+                        if (var_type == .function) {
+                            const fn_type = var_type.function;
+                            const ret_c_type = try self.cTypeFor(fn_type.return_type, includes);
+
+                            // Build parameter list
+                            var params_list = std.ArrayList([]const u8){};
+                            defer params_list.deinit(self.allocator.*);
+
+                            for (fn_type.param_types) |param_type| {
+                                const param_c_type = try self.cTypeFor(param_type, includes);
+                                try params_list.append(self.allocator.*, param_c_type);
+                            }
+
+                            const params = try std.mem.join(self.allocator.*, ", ", params_list.items);
+                            defer self.allocator.free(params);
+
+                            // Function pointer declaration: ReturnType (*varname)(Params)
+                            try writer.print("{s} (*{s})({s}) = ", .{ ret_c_type, sanitized, params });
+                            const c_type = try self.cTypeFor(var_type, includes);
+                            try writer.print("({s})", .{c_type});
+                            try self.writeExpressionTyped(writer, value_typed, &let_ctx, includes);
+                            try writer.print("; ", .{});
+
+                            // Add this binding to the local bindings map
+                            try local_bindings_map.put(var_name, {});
+                            continue;
+                        }
+
                         // Special case for function pointers: ReturnType (*varname)(Args)
                         if (var_type == .pointer) {
                             if (var_type.pointer.* == .function) {
@@ -3799,6 +3836,45 @@ pub const SimpleCCompiler = struct {
             if (idx == body_index) return body_expr;
             idx += 1;
         }
+        return null;
+    }
+
+    // Helper to find the first type annotation in an expression tree
+    fn findTypeAnnotationInExpr(self: *SimpleCCompiler, expr: *Value) ?*Value {
+        _ = self;
+
+        // Check if this expression itself is a type annotation (: ...)
+        if (expr.isList()) {
+            var iter = expr.list.iterator();
+            if (iter.next()) |first| {
+                if (first.isKeyword() and first.keyword.len == 0) {
+                    // This is a type annotation!
+                    return expr;
+                }
+            }
+        }
+
+        // Recursively search through lists
+        if (expr.isList()) {
+            var iter = expr.list.iterator();
+            while (iter.next()) |item| {
+                if (findTypeAnnotationInExpr(undefined, item)) |found| {
+                    return found;
+                }
+            }
+        }
+
+        // Recursively search through vectors
+        if (expr.isVector()) {
+            var i: usize = 0;
+            while (i < expr.vector.len()) : (i += 1) {
+                const item = expr.vector.at(i);
+                if (findTypeAnnotationInExpr(undefined, item)) |found| {
+                    return found;
+                }
+            }
+        }
+
         return null;
     }
 

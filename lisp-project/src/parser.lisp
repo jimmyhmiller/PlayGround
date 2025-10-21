@@ -145,7 +145,9 @@
                     ;; Keyword token includes ':', copy as-is
                     (let [str (: (Pointer U8)) (types/copy-string (. tok text) (. tok length))]
                       (allocate types/Value (types/Value types/ValueTag/Keyword 0 str pointer-null pointer-null))))
-                  (allocate types/Value (types/make-nil)))))))))))
+                  ;; Unknown token type - advance parser to avoid infinite loop
+                  (let [_ (: I32) (advance-parser p)]
+                    (allocate types/Value (types/make-nil))))))))))))
 
 ;; Print a value (simplified from reader.lisp)
 (declare-fn print-value-ptr [v (Pointer types/Value)] -> I32)

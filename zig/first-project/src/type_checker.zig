@@ -2834,29 +2834,45 @@ pub const BidirectionalTypeChecker = struct {
                 const alias = type_name[0..slash_pos];
                 const def_name = type_name[slash_pos + 1 ..];
 
+                std.debug.print("DEBUG: Parsing qualified type '{s}' - alias='{s}' def='{s}'\n", .{ type_name, alias, def_name });
+
                 // Check if the alias was required (namespace access)
                 if (self.requires.get(alias)) |namespace_name| {
+                    std.debug.print("DEBUG: Found namespace '{s}' for alias '{s}'\n", .{ namespace_name, alias });
                     // Look up the namespace exports
                     if (self.namespace_exports.get(namespace_name)) |exports| {
+                        std.debug.print("DEBUG: Found exports for namespace '{s}'\n", .{namespace_name});
                         // Look up the definition in the exports
                         if (exports.get(def_name)) |def_type| {
+                            std.debug.print("DEBUG: Found '{s}' in exports, type: {any}\n", .{ def_name, def_type });
                             // If this is a type definition (: Type), look up the actual type in namespace_type_defs
                             if (def_type == .type_type) {
+                                std.debug.print("DEBUG: '{s}' is a type_type, looking in namespace_type_defs['{s}']\n", .{ def_name, namespace_name });
                                 if (self.namespace_type_defs.get(namespace_name)) |type_defs| {
+                                    std.debug.print("DEBUG: Found type_defs for namespace '{s}'\n", .{namespace_name});
                                     if (type_defs.get(def_name)) |actual_type| {
+                                        std.debug.print("DEBUG: Successfully found actual type for '{s}'\n", .{def_name});
                                         return actual_type;
                                     }
+                                    std.debug.print("ERROR: Type '{s}' not found in namespace_type_defs for namespace '{s}'\n", .{ def_name, namespace_name });
+                                    return TypeCheckError.InvalidTypeAnnotation;
+                                } else {
+                                    std.debug.print("ERROR: No type_defs map found for namespace '{s}'\n", .{namespace_name});
+                                    return TypeCheckError.InvalidTypeAnnotation;
                                 }
-                                std.debug.print("parseType: WARNING: Type definition not found in namespace_type_defs for {s}\n", .{def_name});
                             }
 
                             return def_type;
                         } else {
-                            std.debug.print("parseType: ERROR: Definition {s} NOT found in exports\n", .{def_name});
+                            std.debug.print("ERROR: Type '{s}' not found in namespace '{s}'\n", .{ def_name, namespace_name });
+                            std.debug.print("  The type annotation (: {s}) refers to a type from namespace '{s}'\n", .{ type_name, namespace_name });
+                            std.debug.print("  but '{s}' is not exported from that namespace\n", .{def_name});
                             return TypeCheckError.InvalidTypeAnnotation;
                         }
                     } else {
-                        std.debug.print("parseType: ERROR: Namespace exports NOT found for {s}\n", .{namespace_name});
+                        std.debug.print("ERROR: Cannot resolve namespace-qualified type '{s}'\n", .{type_name});
+                        std.debug.print("  The type annotation uses alias '{s}' which maps to namespace '{s}'\n", .{ alias, namespace_name });
+                        std.debug.print("  but namespace '{s}' has not been compiled/loaded yet\n", .{namespace_name});
                         return TypeCheckError.InvalidTypeAnnotation;
                     }
                 }

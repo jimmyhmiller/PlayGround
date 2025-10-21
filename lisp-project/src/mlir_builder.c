@@ -209,8 +209,10 @@ typedef struct {
     MlirType (*parse_type_string_helper)(MLIRBuilderContext*, uint8_t*);
     MlirType (*parse_type_string)(MLIRBuilderContext*, uint8_t*);
     int64_t (*parse_int_attr_value)(uint8_t*);
-    MlirAttribute (*create_attribute)(MLIRBuilderContext*, uint8_t*, uint8_t*);
-    MlirNamedAttribute (*create_named_attribute)(MLIRBuilderContext*, uint8_t*, uint8_t*);
+    MlirAttribute (*parse_integer_value_attr)(MLIRBuilderContext*, Value*);
+    MlirAttribute (*parse_function_type_attr)(MLIRBuilderContext*, Value*);
+    MlirAttribute (*create_attribute_from_value)(MLIRBuilderContext*, uint8_t*, Value*);
+    MlirNamedAttribute (*create_named_attribute_from_value)(MLIRBuilderContext*, uint8_t*, Value*);
     MlirRegion (*build_mlir_region)(MLIRBuilderContext*, Value*, ValueTracker*);
     MlirBlock (*build_mlir_block)(MLIRBuilderContext*, Value*, ValueTracker*);
     int32_t (*add_result_types_to_state)(MLIRBuilderContext*, MlirOperationState*, Value*);
@@ -237,8 +239,10 @@ static MlirValue value_tracker_lookup(ValueTracker*, int32_t);
 static MlirType parse_type_string_helper(MLIRBuilderContext*, uint8_t*);
 static MlirType parse_type_string(MLIRBuilderContext*, uint8_t*);
 static int64_t parse_int_attr_value(uint8_t*);
-static MlirAttribute create_attribute(MLIRBuilderContext*, uint8_t*, uint8_t*);
-static MlirNamedAttribute create_named_attribute(MLIRBuilderContext*, uint8_t*, uint8_t*);
+static MlirAttribute parse_integer_value_attr(MLIRBuilderContext*, Value*);
+static MlirAttribute parse_function_type_attr(MLIRBuilderContext*, Value*);
+static MlirAttribute create_attribute_from_value(MLIRBuilderContext*, uint8_t*, Value*);
+static MlirNamedAttribute create_named_attribute_from_value(MLIRBuilderContext*, uint8_t*, Value*);
 static MlirRegion build_mlir_region(MLIRBuilderContext*, Value*, ValueTracker*);
 static MlirBlock build_mlir_block(MLIRBuilderContext*, Value*, ValueTracker*);
 static int32_t add_result_types_to_state(MLIRBuilderContext*, MlirOperationState*, Value*);
@@ -264,8 +268,10 @@ void init_namespace_mlir_builder(Namespace_mlir_builder* ns) {
     ns->parse_type_string_helper = &parse_type_string_helper;
     ns->parse_type_string = &parse_type_string;
     ns->parse_int_attr_value = &parse_int_attr_value;
-    ns->create_attribute = &create_attribute;
-    ns->create_named_attribute = &create_named_attribute;
+    ns->parse_integer_value_attr = &parse_integer_value_attr;
+    ns->parse_function_type_attr = &parse_function_type_attr;
+    ns->create_attribute_from_value = &create_attribute_from_value;
+    ns->create_named_attribute_from_value = &create_named_attribute_from_value;
     ns->build_mlir_region = &build_mlir_region;
     ns->build_mlir_block = &build_mlir_block;
     ns->add_result_types_to_state = &add_result_types_to_state;
@@ -310,11 +316,17 @@ static MlirType parse_type_string(MLIRBuilderContext* builder, uint8_t* type_str
 static int64_t parse_int_attr_value(uint8_t* value_str) {
     return ((int64_t)atoi(value_str));
 }
-static MlirAttribute create_attribute(MLIRBuilderContext* builder, uint8_t* key, uint8_t* value) {
-    return ({ MlirContext ctx = builder->ctx; mlirStringAttrGet(ctx, mlirStringRefCreateFromCString(value)); });
+static MlirAttribute parse_integer_value_attr(MLIRBuilderContext* builder, Value* value_list) {
+    return ({ Value* first_elem = (Value*)g_types.car(value_list); Value* rest = (Value*)g_types.cdr(value_list); ValueTag rest_tag = rest->tag; ({ MlirAttribute __if_result; if ((rest_tag == ValueTag_List)) { __if_result = ({ Value* second_elem = (Value*)g_types.car(rest); uint8_t* int_str = (uint8_t*)first_elem->str_val; int64_t int_val = ((int64_t)atoi(int_str)); uint8_t* type_str = (uint8_t*)second_elem->str_val; MlirType mlir_type = g_mlir_builder.parse_type_string(builder, type_str); printf("    Parsed integer attr: %lld : %s\n", int_val, type_str); mlirIntegerAttrGet(mlir_type, int_val); }); } else { __if_result = ({ MlirContext ctx = builder->ctx; printf("    ERROR: Invalid integer value format\n"); mlirStringAttrGet(ctx, mlirStringRefCreateFromCString("ERROR")); }); } __if_result; }); });
 }
-static MlirNamedAttribute create_named_attribute(MLIRBuilderContext* builder, uint8_t* key, uint8_t* value) {
-    return ({ MlirContext ctx = builder->ctx; MlirIdentifier name_id = mlirIdentifierGet(ctx, mlirStringRefCreateFromCString(key)); MlirAttribute attr = g_mlir_builder.create_attribute(builder, key, value); mlirNamedAttributeGet(name_id, attr); });
+static MlirAttribute parse_function_type_attr(MLIRBuilderContext* builder, Value* value_list) {
+    return ({ MlirContext ctx = builder->ctx; printf("    WARNING: function_type parsing not fully implemented\n"); ({ MlirType i32_type = builder->i32Type; MlirType inputs[1]; MlirType results[1]; (inputs[0] = i32_type); (results[0] = i32_type); ({ MlirType fn_type = mlirFunctionTypeGet(ctx, 1, (&inputs[0]), 1, (&results[0])); mlirTypeAttrGet(fn_type); }); }); });
+}
+static MlirAttribute create_attribute_from_value(MLIRBuilderContext* builder, uint8_t* key, Value* value_val) {
+    return ({ MlirContext ctx = builder->ctx; ValueTag value_tag = value_val->tag; printf("  Creating attribute: %s (tag=%d)\n", key, ((int32_t)value_tag)); ({ MlirAttribute __if_result; if ((value_tag == ValueTag_String)) { __if_result = ({ uint8_t* value_str = (uint8_t*)value_val->str_val; ({ MlirAttribute __if_result; if ((strcmp(key, "predicate") == 0)) { __if_result = ({ int64_t pred_val = ((strcmp(value_str, "sle") == 0) ? 3 : ((strcmp(value_str, "eq") == 0) ? 0 : ((strcmp(value_str, "ne") == 0) ? 1 : ((strcmp(value_str, "slt") == 0) ? 2 : ((strcmp(value_str, "sgt") == 0) ? 4 : ((strcmp(value_str, "sge") == 0) ? 5 : ((strcmp(value_str, "ult") == 0) ? 6 : ((strcmp(value_str, "ule") == 0) ? 7 : ((strcmp(value_str, "ugt") == 0) ? 8 : ((strcmp(value_str, "uge") == 0) ? 9 : 0)))))))))); MlirType i64_type = builder->i64Type; mlirIntegerAttrGet(i64_type, pred_val); }); } else { __if_result = mlirStringAttrGet(ctx, mlirStringRefCreateFromCString(value_str)); } __if_result; }); }); } else { __if_result = ({ MlirAttribute __if_result; if ((value_tag == ValueTag_List)) { __if_result = ((strcmp(key, "function_type") == 0) ? g_mlir_builder.parse_function_type_attr(builder, value_val) : ((strcmp(key, "value") == 0) ? g_mlir_builder.parse_integer_value_attr(builder, value_val) : ({ MlirAttribute __if_result; if ((strcmp(key, "callee") == 0)) { __if_result = ({ Value* first_elem = (Value*)g_types.car(value_val); uint8_t* str_val = (uint8_t*)first_elem->str_val; mlirStringAttrGet(ctx, mlirStringRefCreateFromCString(str_val)); }); } else { __if_result = ({ printf("    WARNING: Unknown list attribute type\n"); mlirStringAttrGet(ctx, mlirStringRefCreateFromCString("TODO")); }); } __if_result; }))); } else { __if_result = ({ printf("    ERROR: Unknown attribute value type\n"); mlirStringAttrGet(ctx, mlirStringRefCreateFromCString("ERROR")); }); } __if_result; }); } __if_result; }); });
+}
+static MlirNamedAttribute create_named_attribute_from_value(MLIRBuilderContext* builder, uint8_t* key, Value* value_val) {
+    return ({ MlirContext ctx = builder->ctx; MlirIdentifier name_id = mlirIdentifierGet(ctx, mlirStringRefCreateFromCString(key)); MlirAttribute attr = g_mlir_builder.create_attribute_from_value(builder, key, value_val); mlirNamedAttributeGet(name_id, attr); });
 }
 static MlirRegion build_mlir_region(MLIRBuilderContext* builder, Value* region_vec, ValueTracker* tracker) {
     return ({ MlirRegion region = mlirRegionCreate(); ValueTag tag = region_vec->tag; ({ MlirRegion __if_result; if ((tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)region_vec->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t count = vector_struct->count; uint8_t* data = (uint8_t*)vector_struct->data; int32_t idx = 0; ({ while ((idx < count)) { ({ int64_t elem_offset = (((long long)idx) * 8); uint8_t* elem_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + elem_offset)); Value** elem_ptr_ptr = (Value**)((Value**)elem_ptr_loc); Value* block_form = (Value*)(*elem_ptr_ptr); MlirBlock mlir_block = g_mlir_builder.build_mlir_block(builder, block_form, tracker); mlirRegionAppendOwnedBlock(region, mlir_block); idx = (idx + 1); }); } }); region; }); } else { __if_result = region; } __if_result; }); });
@@ -329,7 +341,7 @@ static int32_t add_operands_to_state(MLIRBuilderContext* builder, MlirOperationS
     return ({ ValueTag tag = operands_val->tag; ({ long long __if_result; if ((tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)operands_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t count = vector_struct->count; ({ long long __if_result; if ((count > 0)) { __if_result = ({ uint8_t* data = (uint8_t*)vector_struct->data; MlirValue operands_array[8]; int32_t idx = 0; ({ while ((idx < count)) { ({ int64_t elem_offset = (((long long)idx) * 8); uint8_t* elem_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + elem_offset)); Value** elem_ptr_ptr = (Value**)((Value**)elem_ptr_loc); Value* elem = (Value*)(*elem_ptr_ptr); ValueTag elem_tag = elem->tag; ({ if ((elem_tag == ValueTag_String)) { ({ uint8_t* operand_str = (uint8_t*)elem->str_val; int32_t operand_idx = atoi(operand_str); MlirValue operand_val = g_mlir_builder.value_tracker_lookup(tracker, operand_idx); (operands_array[idx] = operand_val); idx = (idx + 1); }); } else { idx = (idx + 1); } }); }); } }); mlirOperationStateAddOperands(state_ptr, ((int64_t)count), (&operands_array[0])); count; }); } else { __if_result = 0; } __if_result; }); }); } else { __if_result = 0; } __if_result; }); });
 }
 static int32_t add_attributes_to_state(MLIRBuilderContext* builder, MlirOperationState* state_ptr, Value* attributes_val) {
-    return ({ ValueTag tag = attributes_val->tag; ({ long long __if_result; if ((tag == ValueTag_Map)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)attributes_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t vec_count = vector_struct->count; int32_t attr_count = ((int32_t)(((double)vec_count) / 2)); ({ long long __if_result; if ((attr_count > 0)) { __if_result = ({ uint8_t* data = (uint8_t*)vector_struct->data; MlirNamedAttribute attrs_array[16]; int32_t idx = 0; ({ while ((idx < attr_count)) { ({ int32_t key_idx = (idx * 2); int32_t val_idx = ((idx * 2) + 1); int64_t key_offset = (((long long)key_idx) * 8); uint8_t* key_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + key_offset)); Value** key_ptr_ptr = (Value**)((Value**)key_ptr_loc); Value* key_val = (Value*)(*key_ptr_ptr); int64_t val_offset = (((long long)val_idx) * 8); uint8_t* val_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + val_offset)); Value** val_ptr_ptr = (Value**)((Value**)val_ptr_loc); Value* val_val = (Value*)(*val_ptr_ptr); ({ uint8_t* key_str = (uint8_t*)key_val->str_val; uint8_t* val_str = (uint8_t*)val_val->str_val; MlirNamedAttribute named_attr = g_mlir_builder.create_named_attribute(builder, key_str, val_str); (attrs_array[idx] = named_attr); idx = (idx + 1); }); }); } }); mlirOperationStateAddAttributes(state_ptr, ((int64_t)attr_count), (&attrs_array[0])); attr_count; }); } else { __if_result = 0; } __if_result; }); }); } else { __if_result = 0; } __if_result; }); });
+    return ({ ValueTag tag = attributes_val->tag; ({ long long __if_result; if ((tag == ValueTag_Map)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)attributes_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t vec_count = vector_struct->count; int32_t attr_count = ((int32_t)(((double)vec_count) / 2)); ({ long long __if_result; if ((attr_count > 0)) { __if_result = ({ uint8_t* data = (uint8_t*)vector_struct->data; MlirNamedAttribute attrs_array[16]; int32_t idx = 0; ({ while ((idx < attr_count)) { ({ int32_t key_idx = (idx * 2); int32_t val_idx = ((idx * 2) + 1); int64_t key_offset = (((long long)key_idx) * 8); uint8_t* key_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + key_offset)); Value** key_ptr_ptr = (Value**)((Value**)key_ptr_loc); Value* key_val = (Value*)(*key_ptr_ptr); int64_t val_offset = (((long long)val_idx) * 8); uint8_t* val_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + val_offset)); Value** val_ptr_ptr = (Value**)((Value**)val_ptr_loc); Value* val_val = (Value*)(*val_ptr_ptr); ({ uint8_t* key_str = (uint8_t*)key_val->str_val; MlirNamedAttribute named_attr = g_mlir_builder.create_named_attribute_from_value(builder, key_str, val_val); (attrs_array[idx] = named_attr); idx = (idx + 1); }); }); } }); mlirOperationStateAddAttributes(state_ptr, ((int64_t)attr_count), (&attrs_array[0])); attr_count; }); } else { __if_result = 0; } __if_result; }); }); } else { __if_result = 0; } __if_result; }); });
 }
 static int32_t add_regions_to_state(MLIRBuilderContext* builder, MlirOperationState* state_ptr, Value* regions_val, ValueTracker* tracker) {
     return ({ ValueTag tag = regions_val->tag; ({ long long __if_result; if ((tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)regions_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t count = vector_struct->count; ({ long long __if_result; if ((count > 0)) { __if_result = ({ uint8_t* data = (uint8_t*)vector_struct->data; MlirRegion regions_array[4]; int32_t idx = 0; ({ while ((idx < count)) { ({ int64_t elem_offset = (((long long)idx) * 8); uint8_t* elem_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + elem_offset)); Value** elem_ptr_ptr = (Value**)((Value**)elem_ptr_loc); Value* region_vec = (Value*)(*elem_ptr_ptr); MlirRegion mlir_region = g_mlir_builder.build_mlir_region(builder, region_vec, tracker); (regions_array[idx] = mlir_region); idx = (idx + 1); }); } }); mlirOperationStateAddOwnedRegions(state_ptr, ((int64_t)count), (&regions_array[0])); count; }); } else { __if_result = 0; } __if_result; }); }); } else { __if_result = 0; } __if_result; }); });
@@ -356,7 +368,7 @@ static int32_t compile_file(MLIRBuilderContext* builder, uint8_t* filename) {
 }
 static int32_t main_fn() {
     printf("=== MLIR Builder - File Compilation Test ===\n\n");
-    return ({ MLIRBuilderContext* builder = (MLIRBuilderContext*)g_mlir_builder.mlir_builder_init(); printf("Builder initialized successfully\n\n"); ({ int32_t result = g_mlir_builder.compile_file(builder, "tests/simple.lisp"); g_mlir_builder.mlir_builder_destroy(builder); printf("\nDone!\n"); result; }); });
+    return ({ MLIRBuilderContext* builder = (MLIRBuilderContext*)g_mlir_builder.mlir_builder_init(); printf("Builder initialized successfully\n\n"); ({ int32_t result = g_mlir_builder.compile_file(builder, "tests/fib.lisp"); g_mlir_builder.mlir_builder_destroy(builder); printf("\nDone!\n"); result; }); });
 }
 int main() {
     init_namespace_types(&g_types);

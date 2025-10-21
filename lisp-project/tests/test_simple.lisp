@@ -1,1 +1,1 @@
-(op "func.func" [] [] {"sym_name" "\"main\""} [])
+(op "func.func" [] [] {sym_name "main"} [])
