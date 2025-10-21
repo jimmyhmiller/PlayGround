@@ -763,7 +763,6 @@
               (cast I32 -1))
             (let [callable (: (Pointer (-> [I32] I32))) (cast (Pointer (-> [I32] I32)) fn-ptr)
                   result (: I32) (callable arg0)]
-              (printf (c-str "JIT result %s(%d) = %d\n") fn-name arg0 result)
               (mlirExecutionEngineDestroy engine)
               result)))))))
 
@@ -831,8 +830,6 @@
 ;; Compile a top-level OpNode to MLIR
 (def compile-op-to-mlir (: (-> [(Pointer MLIRBuilderContext) (Pointer types/Value)] I32))
   (fn [builder op-form]
-    (printf (c-str "=== Starting MLIR Compilation ===\n"))
-
     ;; Parse the top-level op
     (let [op-node (: (Pointer ast/OpNode)) (ast/parse-op op-form)]
       (if (!= (cast I64 op-node) 0)
@@ -843,9 +840,6 @@
               tracker (: (Pointer ValueTracker)) (value-tracker-create)
               _ (: MlirOperation) (build-mlir-operation builder op-node tracker mod-block)]
 
-          (printf (c-str "=== Dumping MLIR Module ===\n"))
-          (mlirOperationDump mod-op)
-          (printf (c-str "\n"))
           0)
         (do
           (printf (c-str "ERROR: Failed to parse op\n"))
@@ -949,23 +943,15 @@
 ;; Main test
 (def main-fn (: (-> [] I32))
   (fn []
-    (printf (c-str "=== MLIR Builder - File Compilation Test ===\n\n"))
     (let [builder (: (Pointer MLIRBuilderContext)) (mlir-builder-init)]
-      (printf (c-str "Builder initialized successfully\n\n"))
-
       ;; Compile the fib test file
       (let [compile-res (: I32) (compile-file builder (c-str "tests/fib.lisp"))]
         (if (= compile-res 0)
-          (let [_ (: I32) (printf (c-str "Running lowering pipeline...\n"))
-                lower-res (: I32) (run-lowering-passes builder)]
+          (let [lower-res (: I32) (run-lowering-passes builder)]
             (if (= lower-res 0)
-              (let [_ (: I32) (printf (c-str "=== Lowered MLIR Module ===\n"))
-                    mod (: MlirModule) (pointer-field-read builder mod)
-                    mod-op (: MlirOperation) (mlirModuleGetOperation mod)
-                    _ (: Nil) (mlirOperationDump mod-op)
-                    jit-res (: I32) (jit-run-function-i32 builder (c-str "fib") 10)]
+              (let [jit-res (: I32) (jit-run-function-i32 builder (c-str "fib") 10)]
                 (mlir-builder-destroy builder)
-                (printf (c-str "\nDone!\n"))
+                (printf (c-str "fib(10) = %d\n") jit-res)
                 (if (= jit-res (cast I32 -1))
                   (cast I32 1)
                   0))

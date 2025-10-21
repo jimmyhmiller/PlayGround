@@ -2078,11 +2078,19 @@ pub const SimpleCCompiler = struct {
             try output.appendSlice(self.allocator.*, namespace_init.items);
         }
 
+        // Add global variables for argc and argv (before main function)
+        try output.appendSlice(self.allocator.*, "\n// Built-in argc/argv globals\n");
+        try output.appendSlice(self.allocator.*, "int lisp_argc;\n");
+        try output.appendSlice(self.allocator.*, "char** lisp_argv;\n");
+        try output.appendSlice(self.allocator.*, "\n");
+
         switch (target) {
             .executable => {
                 // Only generate wrapper if user hasn't defined main
                 if (!has_user_main) {
-                    try output.appendSlice(self.allocator.*, "int main() {\n");
+                    try output.appendSlice(self.allocator.*, "int main(int argc, char** argv) {\n");
+                    try output.appendSlice(self.allocator.*, "    lisp_argc = argc;\n");
+                    try output.appendSlice(self.allocator.*, "    lisp_argv = argv;\n");
 
                     // NOTE: For executables, all namespace code is compiled in, so we need
                     // to initialize all namespaces. For bundles, required namespaces are
@@ -3742,6 +3750,18 @@ pub const SimpleCCompiler = struct {
                 // Check if this is pointer-null
                 if (std.mem.eql(u8, sym.name, "pointer-null")) {
                     try writer.print("NULL", .{});
+                    return;
+                }
+
+                // Check if this is argc builtin
+                if (std.mem.eql(u8, sym.name, "*argc*")) {
+                    try writer.print("lisp_argc", .{});
+                    return;
+                }
+
+                // Check if this is argv builtin
+                if (std.mem.eql(u8, sym.name, "*argv*")) {
+                    try writer.print("lisp_argv", .{});
                     return;
                 }
 
