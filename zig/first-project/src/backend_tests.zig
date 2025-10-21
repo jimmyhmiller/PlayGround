@@ -5,7 +5,6 @@ const Value = @import("value.zig").Value;
 
 const BidirectionalTypeChecker = TypeChecker.BidirectionalTypeChecker;
 const Type = TypeChecker.Type;
-const TypedExpression = TypeChecker.TypedExpression;
 
 test "bidirectional type checker - basic types" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -19,29 +18,29 @@ test "bidirectional type checker - basic types" {
     // Test integer synthesis
     {
         const expr = try reader.readString("42");
-        const typed = try checker.synthesize(expr);
-        try std.testing.expect(typed.type == .int);
+        const typed = try checker.synthesizeTyped(expr);
+        try std.testing.expect(typed.getType() == .int);
     }
 
     // Test string synthesis
     {
         const expr = try reader.readString("\"hello\"");
-        const typed = try checker.synthesize(expr);
-        try std.testing.expect(typed.type == .string);
+        const typed = try checker.synthesizeTyped(expr);
+        try std.testing.expect(typed.getType() == .string);
     }
 
     // Test float synthesis
     {
         const expr = try reader.readString("3.14");
-        const typed = try checker.synthesize(expr);
-        try std.testing.expect(typed.type == .float);
+        const typed = try checker.synthesizeTyped(expr);
+        try std.testing.expect(typed.getType() == .float);
     }
 
     // Test nil synthesis
     {
         const expr = try reader.readString("nil");
-        const typed = try checker.synthesize(expr);
-        try std.testing.expect(typed.type == .nil);
+        const typed = try checker.synthesizeTyped(expr);
+        try std.testing.expect(typed.getType() == .nil);
     }
 }
 
@@ -84,15 +83,15 @@ test "bidirectional type checker - simple arithmetic" {
     // Test arithmetic: (+ 1 2)
     {
         const expr = try reader.readString("(+ 1 2)");
-        const typed = try checker.synthesize(expr);
-        try std.testing.expect(typed.type == .int);
+        const typed = try checker.synthesizeTyped(expr);
+        try std.testing.expect(typed.getType() == .int);
     }
 
     // Test nested arithmetic: (+ 1 (+ 2 3))
     {
         const expr = try reader.readString("(+ 1 (+ 2 3))");
-        const typed = try checker.synthesize(expr);
-        try std.testing.expect(typed.type == .int);
+        const typed = try checker.synthesizeTyped(expr);
+        try std.testing.expect(typed.getType() == .int);
     }
 }
 
@@ -107,8 +106,8 @@ test "bidirectional type checker - vectors" {
 
     // Test homogeneous vector
     const expr = try reader.readString("[1 2 3]");
-    const typed = try checker.synthesize(expr);
-    try std.testing.expect(typed.type == .vector);
+    const typed = try checker.synthesizeTyped(expr);
+    try std.testing.expect(typed.getType() == .vector);
 }
 
 test "bidirectional type checker - if expression" {
