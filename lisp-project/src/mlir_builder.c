@@ -182,8 +182,15 @@ extern Namespace_parser g_parser;
 void init_namespace_parser(Namespace_parser* ns);
 
 // Local type definitions
+typedef struct ValueMapEntry ValueMapEntry;
 typedef struct MLIRBuilderContext MLIRBuilderContext;
 typedef struct ValueTracker ValueTracker;
+struct ValueMapEntry {
+    uint8_t* name;
+    MlirValue value;
+    ValueMapEntry* next;
+};
+
 struct MLIRBuilderContext {
     MlirContext ctx;
     MlirLocation loc;
@@ -193,8 +200,7 @@ struct MLIRBuilderContext {
 };
 
 struct ValueTracker {
-    MlirValue values[256];
-    int32_t count;
+    ValueMapEntry* head;
 };
 
 
@@ -202,10 +208,9 @@ typedef struct {
     void (*die)(uint8_t*);
     MLIRBuilderContext* (*mlir_builder_init)();
     int32_t (*mlir_builder_destroy)(MLIRBuilderContext*);
-    int32_t MAX_VALUES;
     ValueTracker* (*value_tracker_create)();
-    int32_t (*value_tracker_register)(ValueTracker*, MlirValue);
-    MlirValue (*value_tracker_lookup)(ValueTracker*, int32_t);
+    int32_t (*value_tracker_register)(ValueTracker*, uint8_t*, MlirValue);
+    MlirValue (*value_tracker_lookup)(ValueTracker*, uint8_t*);
     MlirType (*parse_type_string_helper)(MLIRBuilderContext*, uint8_t*);
     MlirType (*parse_type_string)(MLIRBuilderContext*, uint8_t*);
     int64_t (*parse_int_attr_value)(uint8_t*);
@@ -214,6 +219,8 @@ typedef struct {
     MlirAttribute (*create_attribute_from_value)(MLIRBuilderContext*, uint8_t*, Value*);
     MlirNamedAttribute (*create_named_attribute_from_value)(MLIRBuilderContext*, uint8_t*, Value*);
     MlirRegion (*build_mlir_region)(MLIRBuilderContext*, Value*, ValueTracker*);
+    Value* (*vector_element)(Value*, int32_t);
+    MlirBlock (*create_block_with_args)(MLIRBuilderContext*, ValueTracker*, MlirLocation, Value*);
     MlirBlock (*build_mlir_block)(MLIRBuilderContext*, Value*, ValueTracker*);
     int32_t (*add_result_types_to_state)(MLIRBuilderContext*, MlirOperationState*, Value*);
     int32_t (*add_operands_to_state)(MLIRBuilderContext*, MlirOperationState*, Value*, ValueTracker*);
@@ -234,8 +241,8 @@ static void die(uint8_t*);
 static MLIRBuilderContext* mlir_builder_init();
 static int32_t mlir_builder_destroy(MLIRBuilderContext*);
 static ValueTracker* value_tracker_create();
-static int32_t value_tracker_register(ValueTracker*, MlirValue);
-static MlirValue value_tracker_lookup(ValueTracker*, int32_t);
+static int32_t value_tracker_register(ValueTracker*, uint8_t*, MlirValue);
+static MlirValue value_tracker_lookup(ValueTracker*, uint8_t*);
 static MlirType parse_type_string_helper(MLIRBuilderContext*, uint8_t*);
 static MlirType parse_type_string(MLIRBuilderContext*, uint8_t*);
 static int64_t parse_int_attr_value(uint8_t*);
@@ -244,6 +251,8 @@ static MlirAttribute parse_function_type_attr(MLIRBuilderContext*, Value*);
 static MlirAttribute create_attribute_from_value(MLIRBuilderContext*, uint8_t*, Value*);
 static MlirNamedAttribute create_named_attribute_from_value(MLIRBuilderContext*, uint8_t*, Value*);
 static MlirRegion build_mlir_region(MLIRBuilderContext*, Value*, ValueTracker*);
+static Value* vector_element(Value*, int32_t);
+static MlirBlock create_block_with_args(MLIRBuilderContext*, ValueTracker*, MlirLocation, Value*);
 static MlirBlock build_mlir_block(MLIRBuilderContext*, Value*, ValueTracker*);
 static int32_t add_result_types_to_state(MLIRBuilderContext*, MlirOperationState*, Value*);
 static int32_t add_operands_to_state(MLIRBuilderContext*, MlirOperationState*, Value*, ValueTracker*);
@@ -261,7 +270,6 @@ void init_namespace_mlir_builder(Namespace_mlir_builder* ns) {
     ns->die = &die;
     ns->mlir_builder_init = &mlir_builder_init;
     ns->mlir_builder_destroy = &mlir_builder_destroy;
-    ns->MAX_VALUES = 256;
     ns->value_tracker_create = &value_tracker_create;
     ns->value_tracker_register = &value_tracker_register;
     ns->value_tracker_lookup = &value_tracker_lookup;
@@ -273,6 +281,8 @@ void init_namespace_mlir_builder(Namespace_mlir_builder* ns) {
     ns->create_attribute_from_value = &create_attribute_from_value;
     ns->create_named_attribute_from_value = &create_named_attribute_from_value;
     ns->build_mlir_region = &build_mlir_region;
+    ns->vector_element = &vector_element;
+    ns->create_block_with_args = &create_block_with_args;
     ns->build_mlir_block = &build_mlir_block;
     ns->add_result_types_to_state = &add_result_types_to_state;
     ns->add_operands_to_state = &add_operands_to_state;
@@ -299,13 +309,13 @@ static int32_t mlir_builder_destroy(MLIRBuilderContext* builder) {
     return ({ MlirContext ctx = builder->ctx; mlirContextDestroy(ctx); 0; });
 }
 static ValueTracker* value_tracker_create() {
-    return ({ ValueTracker* tracker = (ValueTracker*)((ValueTracker*)malloc(2056)); tracker->count = 0; tracker; });
+    return ({ ValueTracker* tracker = (ValueTracker*)((ValueTracker*)malloc(8)); tracker->head = ((ValueMapEntry*)0); tracker; });
 }
-static int32_t value_tracker_register(ValueTracker* tracker, MlirValue value) {
-    return ({ int32_t count = tracker->count; ({ MlirValue* values_ptr = (MlirValue*)(&tracker->values[0]); ({ MlirValue* target_ptr = (MlirValue*)((MlirValue*)(((long long)values_ptr) + (((long long)count) * 8))); (*target_ptr = value); tracker->count = (count + 1); count; }); }); });
+static int32_t value_tracker_register(ValueTracker* tracker, uint8_t* name, MlirValue value) {
+    return ({ ValueMapEntry* current = (ValueMapEntry*)tracker->head; ValueMapEntry* found = (ValueMapEntry*)((ValueMapEntry*)0); ({ while ((((int64_t)current) != 0)) { ({ uint8_t* entry_name = (uint8_t*)current->name; int32_t cmp = strcmp(entry_name, name); ({ if ((cmp == 0)) { ({ found = current; current = ((ValueMapEntry*)0); }); } else { ({ ValueMapEntry* next_entry = (ValueMapEntry*)current->next; current = next_entry; }); } }); }); } }); ({ if ((((int64_t)found) != 0)) { found->value = value; } else { ({ ValueMapEntry* entry = (ValueMapEntry*)((ValueMapEntry*)malloc(32)); ValueMapEntry* head = (ValueMapEntry*)tracker->head; entry->name = name; entry->value = value; entry->next = head; tracker->head = entry; }); } }); ({ printf("REGISTER SSA: %s\n", name); int32_t __ = fflush(((void*)0)); 0; }); });
 }
-static MlirValue value_tracker_lookup(ValueTracker* tracker, int32_t idx) {
-    return ({ MlirValue* values_ptr = (MlirValue*)(&tracker->values[0]); MlirValue* target_ptr = (MlirValue*)((MlirValue*)(((long long)values_ptr) + (((long long)idx) * 8))); (*target_ptr); });
+static MlirValue value_tracker_lookup(ValueTracker* tracker, uint8_t* name) {
+    return ({ ValueMapEntry* current = (ValueMapEntry*)tracker->head; ValueMapEntry* found = (ValueMapEntry*)((ValueMapEntry*)0); printf("LOOKUP REQUEST: %s\n", name); fflush(((void*)0)); ({ while ((((int64_t)current) != 0)) { ({ uint8_t* entry_name = (uint8_t*)current->name; int32_t cmp = strcmp(entry_name, name); ({ if ((cmp == 0)) { ({ found = current; current = ((ValueMapEntry*)0); }); } else { ({ ValueMapEntry* next_entry = (ValueMapEntry*)current->next; current = next_entry; }); } }); }); } }); ({ ({ int32_t __if_result; if ((((int64_t)found) == 0)) { __if_result = ({ printf("ERROR: Unknown SSA value: %s\n", name); int32_t __ = fflush(((void*)0)); g_mlir_builder.die("SSA lookup failed"); 0; }); } else { __if_result = 0; } __if_result; }); ({ printf("LOOKUP SSA: %s\n", name); int32_t __ = fflush(((void*)0)); found->value; }); }); });
 }
 static MlirType parse_type_string_helper(MLIRBuilderContext* builder, uint8_t* type_str) {
     return ({ int32_t cmp_i64 = strcmp(type_str, "i64"); ({ MlirType __if_result; if ((cmp_i64 == 0)) { __if_result = builder->i64Type; } else { __if_result = ({ printf("Unknown type: %s, defaulting to i32\n", type_str); builder->i32Type; }); } __if_result; }); });
@@ -317,7 +327,8 @@ static int64_t parse_int_attr_value(uint8_t* value_str) {
     return ((int64_t)atoi(value_str));
 }
 static MlirAttribute parse_integer_value_attr(MLIRBuilderContext* builder, Value* value_list) {
-    return ({ Value* first_elem = (Value*)g_types.car(value_list); Value* rest = (Value*)g_types.cdr(value_list); ValueTag rest_tag = rest->tag; ({ MlirAttribute __if_result; if ((rest_tag == ValueTag_List)) { __if_result = ({ Value* second_elem = (Value*)g_types.car(rest); uint8_t* int_str = (uint8_t*)first_elem->str_val; int64_t int_val = ((int64_t)atoi(int_str)); uint8_t* type_str = (uint8_t*)second_elem->str_val; MlirType mlir_type = g_mlir_builder.parse_type_string(builder, type_str); printf("    Parsed integer attr: %lld : %s\n", int_val, type_str); mlirIntegerAttrGet(mlir_type, int_val); }); } else { __if_result = ({ MlirContext ctx = builder->ctx; printf("    ERROR: Invalid integer value format\n"); mlirStringAttrGet(ctx, mlirStringRefCreateFromCString("ERROR")); }); } __if_result; }); });
+    printf("    DEBUG: Entering parse-integer-value-attr\n");
+    return ({ Value* first_elem = (Value*)g_types.car(value_list); printf("    DEBUG: Got first elem: %p\n", ((uint8_t*)first_elem)); ({ Value* rest = (Value*)g_types.cdr(value_list); printf("    DEBUG: Got rest: %p\n", ((uint8_t*)rest)); ({ ValueTag rest_tag = rest->tag; printf("    DEBUG: rest tag = %d\n", ((int32_t)rest_tag)); ({ MlirAttribute __if_result; if ((rest_tag == ValueTag_List)) { __if_result = ({ Value* second_elem = (Value*)g_types.car(rest); int64_t int_val = first_elem->num_val; uint8_t* type_str = (uint8_t*)second_elem->str_val; MlirType mlir_type = g_mlir_builder.parse_type_string(builder, type_str); printf("    Parsed integer attr: %lld : %s\n", int_val, type_str); mlirIntegerAttrGet(mlir_type, int_val); }); } else { __if_result = ({ MlirContext ctx = builder->ctx; printf("    ERROR: Invalid integer value format, rest-tag=%d\n", ((int32_t)rest_tag)); mlirStringAttrGet(ctx, mlirStringRefCreateFromCString("ERROR")); }); } __if_result; }); }); }); });
 }
 static MlirAttribute parse_function_type_attr(MLIRBuilderContext* builder, Value* value_list) {
     return ({ MlirContext ctx = builder->ctx; printf("    WARNING: function_type parsing not fully implemented\n"); ({ MlirType i32_type = builder->i32Type; MlirType inputs[1]; MlirType results[1]; (inputs[0] = i32_type); (results[0] = i32_type); ({ MlirType fn_type = mlirFunctionTypeGet(ctx, 1, (&inputs[0]), 1, (&results[0])); mlirTypeAttrGet(fn_type); }); }); });
@@ -331,14 +342,20 @@ static MlirNamedAttribute create_named_attribute_from_value(MLIRBuilderContext* 
 static MlirRegion build_mlir_region(MLIRBuilderContext* builder, Value* region_vec, ValueTracker* tracker) {
     return ({ MlirRegion region = mlirRegionCreate(); ValueTag tag = region_vec->tag; ({ MlirRegion __if_result; if ((tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)region_vec->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t count = vector_struct->count; uint8_t* data = (uint8_t*)vector_struct->data; int32_t idx = 0; ({ while ((idx < count)) { ({ int64_t elem_offset = (((long long)idx) * 8); uint8_t* elem_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + elem_offset)); Value** elem_ptr_ptr = (Value**)((Value**)elem_ptr_loc); Value* block_form = (Value*)(*elem_ptr_ptr); MlirBlock mlir_block = g_mlir_builder.build_mlir_block(builder, block_form, tracker); mlirRegionAppendOwnedBlock(region, mlir_block); idx = (idx + 1); }); } }); region; }); } else { __if_result = region; } __if_result; }); });
 }
+static Value* vector_element(Value* vec_val, int32_t idx) {
+    return ({ uint8_t* vec_ptr = (uint8_t*)vec_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); uint8_t* data = (uint8_t*)vector_struct->data; int64_t elem_offset = (((long long)idx) * 8); uint8_t* elem_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + elem_offset)); Value** elem_ptr_ptr = (Value**)((Value**)elem_ptr_loc); (*elem_ptr_ptr); });
+}
+static MlirBlock create_block_with_args(MLIRBuilderContext* builder, ValueTracker* tracker, MlirLocation loc, Value* args_val) {
+    return ({ ValueTag tag = args_val->tag; ({ MlirBlock __if_result; if ((tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)args_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t count = vector_struct->count; ({ MlirBlock __if_result; if ((count > 0)) { __if_result = ({ MlirType arg_types[16]; MlirLocation arg_locs[16]; int32_t idx = 0; ({ while ((idx < count)) { ({ Value* pair = (Value*)g_mlir_builder.vector_element(args_val, idx); ValueTag pair_tag = pair->tag; MlirType type_val = ({ MlirType __if_result; if ((pair_tag == ValueTag_Vector)) { __if_result = ({ Value* type_elem = (Value*)g_mlir_builder.vector_element(pair, 1); uint8_t* type_str = (uint8_t*)type_elem->str_val; g_mlir_builder.parse_type_string(builder, type_str); }); } else { __if_result = builder->i32Type; } __if_result; }); (arg_types[idx] = type_val); (arg_locs[idx] = loc); idx = (idx + 1); }); } }); ({ MlirBlock block = mlirBlockCreate(((int64_t)count), (&arg_types[0]), (&arg_locs[0])); int32_t reg_idx = 0; ({ while ((reg_idx < count)) { ({ Value* pair = (Value*)g_mlir_builder.vector_element(args_val, reg_idx); ValueTag pair_tag = pair->tag; ({ long long __if_result; if ((pair_tag == ValueTag_Vector)) { __if_result = ({ Value* name_elem = (Value*)g_mlir_builder.vector_element(pair, 0); uint8_t* name_str = (uint8_t*)name_elem->str_val; MlirValue arg_val = mlirBlockGetArgument(block, ((int64_t)reg_idx)); g_mlir_builder.value_tracker_register(tracker, name_str, arg_val); }); } else { __if_result = 0; } __if_result; }); reg_idx = (reg_idx + 1); }); } }); block; }); }); } else { __if_result = mlirBlockCreate(0, ((MlirType*)0), ((MlirLocation*)0)); } __if_result; }); }); } else { __if_result = mlirBlockCreate(0, ((MlirType*)0), ((MlirLocation*)0)); } __if_result; }); });
+}
 static MlirBlock build_mlir_block(MLIRBuilderContext* builder, Value* block_form, ValueTracker* tracker) {
-    return ({ BlockNode* block_node = (BlockNode*)g_mlir_ast.parse_block(block_form); ({ MlirBlock __if_result; if ((((int64_t)block_node) != 0)) { __if_result = ({ MlirLocation loc = builder->loc; MlirBlock block = mlirBlockCreate(0, ((MlirType*)0), ((MlirLocation*)0)); Value* operations = (Value*)block_node->operations; ValueTag ops_tag = operations->tag; ({ MlirBlock __if_result; if ((ops_tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)operations->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t count = vector_struct->count; uint8_t* data = (uint8_t*)vector_struct->data; int32_t idx = 0; ({ while ((idx < count)) { ({ int64_t elem_offset = (((long long)idx) * 8); uint8_t* elem_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + elem_offset)); Value** elem_ptr_ptr = (Value**)((Value**)elem_ptr_loc); Value* op_form = (Value*)(*elem_ptr_ptr); OpNode* op_node = (OpNode*)g_mlir_ast.parse_op(op_form); ({ if ((((int64_t)op_node) != 0)) { ({ MlirOperation mlir_op = g_mlir_builder.build_mlir_operation(builder, op_node, tracker, block); idx = (idx + 1); }); } else { idx = (idx + 1); } }); }); } }); block; }); } else { __if_result = block; } __if_result; }); }); } else { __if_result = mlirBlockCreate(0, ((MlirType*)0), ((MlirLocation*)0)); } __if_result; }); });
+    return ({ BlockNode* block_node = (BlockNode*)g_mlir_ast.parse_block(block_form); ({ MlirBlock __if_result; if ((((int64_t)block_node) != 0)) { __if_result = ({ MlirLocation loc = builder->loc; Value* args_val = (Value*)block_node->args; MlirBlock block = g_mlir_builder.create_block_with_args(builder, tracker, loc, args_val); Value* operations = (Value*)block_node->operations; ValueTag ops_tag = operations->tag; ({ long long __if_result; if ((ops_tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)operations->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t count = vector_struct->count; uint8_t* data = (uint8_t*)vector_struct->data; int32_t idx = 0; ({ while ((idx < count)) { ({ int64_t elem_offset = (((long long)idx) * 8); uint8_t* elem_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + elem_offset)); Value** elem_ptr_ptr = (Value**)((Value**)elem_ptr_loc); Value* op_form = (Value*)(*elem_ptr_ptr); OpNode* op_node = (OpNode*)g_mlir_ast.parse_op(op_form); ({ long long __if_result; if ((((int64_t)op_node) != 0)) { __if_result = ({ uint8_t* op_name = (uint8_t*)op_node->name; printf("  Block op %d -> %s\n", idx, op_name); int32_t __ = fflush(((void*)0)); g_mlir_builder.build_mlir_operation(builder, op_node, tracker, block); 0; }); } else { __if_result = ({ printf("  Failed to parse op at idx %d\n", idx); int32_t __ = fflush(((void*)0)); 0; }); } __if_result; }); idx = (idx + 1); }); } }); 0; }); } else { __if_result = 0; } __if_result; }); block; }); } else { __if_result = mlirBlockCreate(0, ((MlirType*)0), ((MlirLocation*)0)); } __if_result; }); });
 }
 static int32_t add_result_types_to_state(MLIRBuilderContext* builder, MlirOperationState* state_ptr, Value* result_types_val) {
-    return ({ ValueTag tag = result_types_val->tag; ({ long long __if_result; if ((tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)result_types_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t count = vector_struct->count; ({ long long __if_result; if ((count > 0)) { __if_result = ({ uint8_t* data = (uint8_t*)vector_struct->data; MlirType result_types_array[8]; int32_t idx = 0; ({ while ((idx < count)) { ({ int64_t elem_offset = (((long long)idx) * 8); uint8_t* elem_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + elem_offset)); Value** elem_ptr_ptr = (Value**)((Value**)elem_ptr_loc); Value* elem = (Value*)(*elem_ptr_ptr); ValueTag elem_tag = elem->tag; ({ if ((elem_tag == ValueTag_String)) { ({ uint8_t* type_str = (uint8_t*)elem->str_val; MlirType mlir_type = g_mlir_builder.parse_type_string(builder, type_str); (result_types_array[idx] = mlir_type); idx = (idx + 1); }); } else { idx = (idx + 1); } }); }); } }); mlirOperationStateAddResults(state_ptr, ((int64_t)count), (&result_types_array[0])); count; }); } else { __if_result = 0; } __if_result; }); }); } else { __if_result = 0; } __if_result; }); });
+    return ({ ValueTag tag = result_types_val->tag; ({ long long __if_result; if ((tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)result_types_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t count = vector_struct->count; ({ long long __if_result; if ((count > 0)) { __if_result = ({ MlirType result_types_array[8]; int32_t idx = 0; ({ while ((idx < count)) { ({ Value* elem = (Value*)g_mlir_builder.vector_element(result_types_val, idx); ValueTag elem_tag = elem->tag; MlirType mlir_type = ({ MlirType __if_result; if ((elem_tag == ValueTag_Vector)) { __if_result = ({ Value* type_elem = (Value*)g_mlir_builder.vector_element(elem, 1); uint8_t* type_str = (uint8_t*)type_elem->str_val; g_mlir_builder.parse_type_string(builder, type_str); }); } else { __if_result = ({ MlirType __if_result; if ((elem_tag == ValueTag_String)) { __if_result = ({ uint8_t* type_str = (uint8_t*)elem->str_val; g_mlir_builder.parse_type_string(builder, type_str); }); } else { __if_result = builder->i32Type; } __if_result; }); } __if_result; }); (result_types_array[idx] = mlir_type); idx = (idx + 1); }); } }); mlirOperationStateAddResults(state_ptr, ((int64_t)count), (&result_types_array[0])); count; }); } else { __if_result = 0; } __if_result; }); }); } else { __if_result = 0; } __if_result; }); });
 }
 static int32_t add_operands_to_state(MLIRBuilderContext* builder, MlirOperationState* state_ptr, Value* operands_val, ValueTracker* tracker) {
-    return ({ ValueTag tag = operands_val->tag; ({ long long __if_result; if ((tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)operands_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t count = vector_struct->count; ({ long long __if_result; if ((count > 0)) { __if_result = ({ uint8_t* data = (uint8_t*)vector_struct->data; MlirValue operands_array[8]; int32_t idx = 0; ({ while ((idx < count)) { ({ int64_t elem_offset = (((long long)idx) * 8); uint8_t* elem_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + elem_offset)); Value** elem_ptr_ptr = (Value**)((Value**)elem_ptr_loc); Value* elem = (Value*)(*elem_ptr_ptr); ValueTag elem_tag = elem->tag; ({ if ((elem_tag == ValueTag_String)) { ({ uint8_t* operand_str = (uint8_t*)elem->str_val; int32_t operand_idx = atoi(operand_str); MlirValue operand_val = g_mlir_builder.value_tracker_lookup(tracker, operand_idx); (operands_array[idx] = operand_val); idx = (idx + 1); }); } else { idx = (idx + 1); } }); }); } }); mlirOperationStateAddOperands(state_ptr, ((int64_t)count), (&operands_array[0])); count; }); } else { __if_result = 0; } __if_result; }); }); } else { __if_result = 0; } __if_result; }); });
+    return ({ ValueTag tag = operands_val->tag; ({ long long __if_result; if ((tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)operands_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t count = vector_struct->count; ({ long long __if_result; if ((count > 0)) { __if_result = ({ MlirValue operands_array[8]; int32_t idx = 0; ({ while ((idx < count)) { ({ Value* elem = (Value*)g_mlir_builder.vector_element(operands_val, idx); ValueTag elem_tag = elem->tag; ({ long long __if_result; if ((elem_tag == ValueTag_String)) { __if_result = ({ uint8_t* operand_name = (uint8_t*)elem->str_val; MlirValue operand_val = g_mlir_builder.value_tracker_lookup(tracker, operand_name); (operands_array[idx] = operand_val); 0; }); } else { __if_result = ({ printf("WARNING: Operand not a string, skipping\n"); 0; }); } __if_result; }); idx = (idx + 1); }); } }); mlirOperationStateAddOperands(state_ptr, ((int64_t)count), (&operands_array[0])); count; }); } else { __if_result = 0; } __if_result; }); }); } else { __if_result = 0; } __if_result; }); });
 }
 static int32_t add_attributes_to_state(MLIRBuilderContext* builder, MlirOperationState* state_ptr, Value* attributes_val) {
     return ({ ValueTag tag = attributes_val->tag; ({ long long __if_result; if ((tag == ValueTag_Map)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)attributes_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t vec_count = vector_struct->count; int32_t attr_count = ((int32_t)(((double)vec_count) / 2)); ({ long long __if_result; if ((attr_count > 0)) { __if_result = ({ uint8_t* data = (uint8_t*)vector_struct->data; MlirNamedAttribute attrs_array[16]; int32_t idx = 0; ({ while ((idx < attr_count)) { ({ int32_t key_idx = (idx * 2); int32_t val_idx = ((idx * 2) + 1); int64_t key_offset = (((long long)key_idx) * 8); uint8_t* key_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + key_offset)); Value** key_ptr_ptr = (Value**)((Value**)key_ptr_loc); Value* key_val = (Value*)(*key_ptr_ptr); int64_t val_offset = (((long long)val_idx) * 8); uint8_t* val_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + val_offset)); Value** val_ptr_ptr = (Value**)((Value**)val_ptr_loc); Value* val_val = (Value*)(*val_ptr_ptr); ({ uint8_t* key_str = (uint8_t*)key_val->str_val; MlirNamedAttribute named_attr = g_mlir_builder.create_named_attribute_from_value(builder, key_str, val_val); (attrs_array[idx] = named_attr); idx = (idx + 1); }); }); } }); mlirOperationStateAddAttributes(state_ptr, ((int64_t)attr_count), (&attrs_array[0])); attr_count; }); } else { __if_result = 0; } __if_result; }); }); } else { __if_result = 0; } __if_result; }); });
@@ -347,7 +364,7 @@ static int32_t add_regions_to_state(MLIRBuilderContext* builder, MlirOperationSt
     return ({ ValueTag tag = regions_val->tag; ({ long long __if_result; if ((tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)regions_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t count = vector_struct->count; ({ long long __if_result; if ((count > 0)) { __if_result = ({ uint8_t* data = (uint8_t*)vector_struct->data; MlirRegion regions_array[4]; int32_t idx = 0; ({ while ((idx < count)) { ({ int64_t elem_offset = (((long long)idx) * 8); uint8_t* elem_ptr_loc = (uint8_t*)((uint8_t*)(((int64_t)data) + elem_offset)); Value** elem_ptr_ptr = (Value**)((Value**)elem_ptr_loc); Value* region_vec = (Value*)(*elem_ptr_ptr); MlirRegion mlir_region = g_mlir_builder.build_mlir_region(builder, region_vec, tracker); (regions_array[idx] = mlir_region); idx = (idx + 1); }); } }); mlirOperationStateAddOwnedRegions(state_ptr, ((int64_t)count), (&regions_array[0])); count; }); } else { __if_result = 0; } __if_result; }); }); } else { __if_result = 0; } __if_result; }); });
 }
 static MlirOperation build_mlir_operation(MLIRBuilderContext* builder, OpNode* op_node, ValueTracker* tracker, MlirBlock parent_block) {
-    return ({ MlirContext ctx = builder->ctx; MlirLocation loc = builder->loc; uint8_t* name_str = (uint8_t*)op_node->name; MlirStringRef name_ref = mlirStringRefCreateFromCString(name_str); MlirOperationState state = mlirOperationStateGet(name_ref, loc); MlirOperationState* state_ptr = (MlirOperationState*)({ MlirOperationState* __tmp_ptr = malloc(sizeof(MlirOperationState)); *__tmp_ptr = state; __tmp_ptr; }); printf("Building operation: %s\n", name_str); ({ Value* result_types = (Value*)op_node->result_types; g_mlir_builder.add_result_types_to_state(builder, state_ptr, result_types); ({ Value* operands = (Value*)op_node->operands; g_mlir_builder.add_operands_to_state(builder, state_ptr, operands, tracker); ({ Value* attributes = (Value*)op_node->attributes; g_mlir_builder.add_attributes_to_state(builder, state_ptr, attributes); ({ Value* regions = (Value*)op_node->regions; g_mlir_builder.add_regions_to_state(builder, state_ptr, regions, tracker); ({ MlirOperation op = mlirOperationCreate(state_ptr); mlirBlockAppendOwnedOperation(parent_block, op); ({ Value* result_types_val = (Value*)op_node->result_types; ValueTag result_tag = result_types_val->tag; ({ MlirOperation __if_result; if ((result_tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)result_types_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t result_count = vector_struct->count; int32_t idx = 0; ({ while ((idx < result_count)) { ({ MlirValue result_val = mlirOperationGetResult(op, ((int64_t)idx)); g_mlir_builder.value_tracker_register(tracker, result_val); idx = (idx + 1); }); } }); op; }); } else { __if_result = op; } __if_result; }); }); }); }); }); }); }); });
+    return ({ MlirContext ctx = builder->ctx; MlirLocation loc = builder->loc; uint8_t* name_str = (uint8_t*)op_node->name; MlirStringRef name_ref = mlirStringRefCreateFromCString(name_str); MlirOperationState state = mlirOperationStateGet(name_ref, loc); MlirOperationState* state_ptr = (MlirOperationState*)({ MlirOperationState* __tmp_ptr = malloc(sizeof(MlirOperationState)); *__tmp_ptr = state; __tmp_ptr; }); printf("Building operation: %s\n", name_str); ({ Value* result_types = (Value*)op_node->result_types; g_mlir_builder.add_result_types_to_state(builder, state_ptr, result_types); ({ Value* operands = (Value*)op_node->operands; g_mlir_builder.add_operands_to_state(builder, state_ptr, operands, tracker); ({ Value* attributes = (Value*)op_node->attributes; g_mlir_builder.add_attributes_to_state(builder, state_ptr, attributes); ({ Value* regions = (Value*)op_node->regions; g_mlir_builder.add_regions_to_state(builder, state_ptr, regions, tracker); ({ MlirOperation op = mlirOperationCreate(state_ptr); mlirBlockAppendOwnedOperation(parent_block, op); ({ Value* result_types_val = (Value*)op_node->result_types; ValueTag result_tag = result_types_val->tag; ({ MlirOperation __if_result; if ((result_tag == ValueTag_Vector)) { __if_result = ({ uint8_t* vec_ptr = (uint8_t*)result_types_val->vec_val; Vector* vector_struct = (Vector*)((Vector*)vec_ptr); int32_t result_count = vector_struct->count; int32_t idx = 0; ({ while ((idx < result_count)) { ({ MlirValue result_val = mlirOperationGetResult(op, ((int64_t)idx)); Value* elem = (Value*)g_mlir_builder.vector_element(result_types_val, idx); ValueTag elem_tag = elem->tag; ({ int32_t __if_result; if ((elem_tag == ValueTag_Vector)) { __if_result = ({ Value* name_elem = (Value*)g_mlir_builder.vector_element(elem, 0); uint8_t* name_str = (uint8_t*)name_elem->str_val; g_mlir_builder.value_tracker_register(tracker, name_str, result_val); }); } else { __if_result = printf("WARNING: Result missing name, skipping registration\n"); } __if_result; }); idx = (idx + 1); }); } }); op; }); } else { __if_result = op; } __if_result; }); }); }); }); }); }); }); });
 }
 static int32_t compile_op_to_mlir(MLIRBuilderContext* builder, Value* op_form) {
     printf("=== Starting MLIR Compilation ===\n");

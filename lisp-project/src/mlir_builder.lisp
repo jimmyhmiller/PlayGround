@@ -148,6 +148,71 @@
     (fflush stderr)
     (exit 1)))
 
+;; Linked list entry for SSA value tracking (name -> MlirValue)
+(def ValueMapEntry (: Type)
+  (Struct
+    [name (Pointer U8)]
+    [value MlirValue]
+    [next (Pointer ValueMapEntry)]))
+
+;; Tracker holding the head of the linked list
+(def ValueTracker (: Type)
+  (Struct
+    [head (Pointer ValueMapEntry)]))
+
+;; Allocate and initialize an empty tracker
+(def value-tracker-create (: (-> [] (Pointer ValueTracker)))
+  (fn []
+    (let [tracker-bytes (: (Pointer U8)) (malloc 8)
+          tracker (: (Pointer ValueTracker)) (cast (Pointer ValueTracker) tracker-bytes)]
+      (pointer-field-write! tracker head (cast (Pointer ValueMapEntry) 0))
+      tracker)))
+
+;; Internal helper to find an entry by SSA name
+(def value-tracker-find-entry (: (-> [(Pointer ValueMapEntry) (Pointer U8)] (Pointer ValueMapEntry)))
+  (fn [entry name]
+    (if (= (cast I64 entry) 0)
+      (cast (Pointer ValueMapEntry) 0)
+      (let [entry-name (: (Pointer U8)) (pointer-field-read entry name)
+            cmp (: I32) (strcmp entry-name name)]
+        (if (= cmp 0)
+          entry
+          (value-tracker-find-entry (pointer-field-read entry next) name))))))
+
+;; Register (or update) an SSA value by name
+(def value-tracker-register (: (-> [(Pointer ValueTracker) (Pointer U8) MlirValue] I32))
+  (fn [tracker name value]
+    (let [head (: (Pointer ValueMapEntry)) (pointer-field-read tracker head)
+          existing (: (Pointer ValueMapEntry)) (value-tracker-find-entry head name)]
+      (if (!= (cast I64 existing) 0)
+        (do
+          (pointer-field-write! existing value value)
+          0)
+        (let [entry-bytes (: (Pointer U8)) (malloc 32)
+              new-entry (: (Pointer ValueMapEntry)) (cast (Pointer ValueMapEntry) entry-bytes)]
+          (pointer-field-write! new-entry name name)
+          (pointer-field-write! new-entry value value)
+          (pointer-field-write! new-entry next head)
+          (pointer-field-write! tracker head new-entry)
+          0)))))
+
+;; Helper used when lookups fail; prints message and exits while satisfying type checker
+(def value-tracker-missing (: (-> [(Pointer U8)] MlirValue))
+  (fn [name]
+    (let [_ (: I32) (printf (c-str "ERROR: Unknown SSA value '%s'\n") name)]
+      (die (c-str "SSA lookup failed"))
+      (let [tmp (: (Pointer MlirValue)) (cast (Pointer MlirValue) (malloc 16))]
+        (dereference tmp)))))
+
+;; Look up an SSA value by name, exiting if the name is unknown
+(def value-tracker-lookup (: (-> [(Pointer ValueTracker) (Pointer U8)] MlirValue))
+  (fn [tracker name]
+    (let [head (: (Pointer ValueMapEntry)) (pointer-field-read tracker head)
+          entry (: (Pointer ValueMapEntry)) (value-tracker-find-entry head name)]
+      (if (= (cast I64 entry) 0)
+        (value-tracker-missing name)
+        (pointer-field-read entry value)))))
+
 ;; Initialize MLIR builder context
 (def mlir-builder-init (: (-> [] (Pointer MLIRBuilderContext)))
   (fn []
@@ -179,40 +244,6 @@
       (mlirContextDestroy ctx)
       0)))
 
-;; SSA Value Tracker - maps SSA indices to MlirValue handles
-;; Using fixed-size array for simplicity
-(def MAX_VALUES (: I32) 256)
-
-(def ValueTracker (: Type)
-  (Struct
-    [values (Array MlirValue 256)]  ; Fixed array of values
-    [count I32]))                    ; Number of values
-
-;; Create a new value tracker
-(def value-tracker-create (: (-> [] (Pointer ValueTracker)))
-  (fn []
-    (let [tracker (: (Pointer ValueTracker)) (cast (Pointer ValueTracker) (malloc 2056))]
-      (pointer-field-write! tracker count 0)
-      tracker)))
-
-;; Register a value in the tracker, returns its index
-(def value-tracker-register (: (-> [(Pointer ValueTracker) MlirValue] I32))
-  (fn [tracker value]
-    (let [count (: I32) (pointer-field-read tracker count)]
-      ;; Get pointer to the array field
-      (let [values-ptr (: (Pointer MlirValue)) (array-ptr (pointer-field-read tracker values) 0)]
-        ;; Write value at current count index
-        (let [target-ptr (: (Pointer MlirValue)) (cast (Pointer MlirValue) (+ (cast I64 values-ptr) (* (cast I64 count) 8)))]
-          (pointer-write! target-ptr value)
-          (pointer-field-write! tracker count (+ count 1))
-          count)))))
-
-;; Lookup a value by index
-(def value-tracker-lookup (: (-> [(Pointer ValueTracker) I32] MlirValue))
-  (fn [tracker idx]
-    (let [values-ptr (: (Pointer MlirValue)) (array-ptr (pointer-field-read tracker values) 0)
-          target-ptr (: (Pointer MlirValue)) (cast (Pointer MlirValue) (+ (cast I64 values-ptr) (* (cast I64 idx) 8)))]
-      (dereference target-ptr))))
 
 ;; Parse type string to MlirType (e.g., "i32" -> integer type)
 ;; NOTE: Workaround for compiler bug with nested if in return position
@@ -252,8 +283,9 @@
           (printf (c-str "    DEBUG: rest tag = %d\n") (cast I32 rest-tag))
           (if (= rest-tag types/ValueTag/List)
             (let [second-elem (: (Pointer types/Value)) (types/car rest)
-                  int-str (: (Pointer U8)) (pointer-field-read first-elem str_val)
-                  int-val (: I64) (cast I64 (atoi int-str))
+                  ;; First element should be a Number - read num_val directly
+                  int-val (: I64) (pointer-field-read first-elem num_val)
+                  ;; Second element should be a Symbol - read str_val
                   type-str (: (Pointer U8)) (pointer-field-read second-elem str_val)
                   mlir-type (: MlirType) (parse-type-string builder type-str)]
               (printf (c-str "    Parsed integer attr: %lld : %s\n") int-val type-str)
@@ -349,36 +381,95 @@
               data (: (Pointer U8)) (pointer-field-read vector-struct data)
               idx (: I32) 0]
           ;; Iterate through blocks in this region
-          (while (< idx count)
-            (let [elem-offset (: I64) (* (cast I64 idx) 8)
-                  elem-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) elem-offset))
-                  elem-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) elem-ptr-loc)
-                  block-form (: (Pointer types/Value)) (dereference elem-ptr-ptr)
-                  mlir-block (: MlirBlock) (build-mlir-block builder block-form tracker)]
-              (mlirRegionAppendOwnedBlock region mlir-block)
-              (set! idx (+ idx 1))))
+      (while (< idx count)
+        (let [elem-offset (: I64) (* (cast I64 idx) 8)
+              elem-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) elem-offset))
+              elem-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) elem-ptr-loc)
+              block-form (: (Pointer types/Value)) (dereference elem-ptr-ptr)
+              mlir-block (: MlirBlock) (build-mlir-block builder block-form tracker)]
+          (mlirRegionAppendOwnedBlock region mlir-block)
+          (set! idx (+ idx 1))))
           region)
         region))))
+
+;; Helper to fetch an element from a vector Value
+(def vector-element (: (-> [(Pointer types/Value) I32] (Pointer types/Value)))
+  (fn [vec-val idx]
+    (let [vec-ptr (: (Pointer U8)) (pointer-field-read vec-val vec_val)
+          vector-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) vec-ptr)
+          data (: (Pointer U8)) (pointer-field-read vector-struct data)
+          elem-offset (: I64) (* (cast I64 idx) 8)
+          elem-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) elem-offset))
+          elem-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) elem-ptr-loc)]
+      (dereference elem-ptr-ptr))))
+
+;; Helper: create block with arguments and register them
+(def create-block-with-args (: (-> [(Pointer MLIRBuilderContext) (Pointer ValueTracker) MlirLocation (Pointer types/Value)] MlirBlock))
+  (fn [builder tracker loc args-val]
+    (let [tag (: types/ValueTag) (pointer-field-read args-val tag)]
+      (if (= tag types/ValueTag/Vector)
+        (let [vec-ptr (: (Pointer U8)) (pointer-field-read args-val vec_val)
+              vector-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) vec-ptr)
+              count (: I32) (pointer-field-read vector-struct count)]
+          (if (> count 0)
+            (let [arg-types (: (Array MlirType 16)) (array MlirType 16)
+                  arg-locs (: (Array MlirLocation 16)) (array MlirLocation 16)
+                  idx (: I32) 0]
+              (while (< idx count)
+                (let [pair (: (Pointer types/Value)) (vector-element args-val idx)
+                      pair-tag (: types/ValueTag) (pointer-field-read pair tag)
+                      mlir-type (: MlirType)
+                      (if (= pair-tag types/ValueTag/Vector)
+                        (let [type-elem (: (Pointer types/Value)) (vector-element pair 1)
+                              type-str (: (Pointer U8)) (pointer-field-read type-elem str_val)]
+                          (parse-type-string builder type-str))
+                        (pointer-field-read builder i32Type))]
+                  (array-set! arg-types idx mlir-type)
+                  (array-set! arg-locs idx loc)
+                  (set! idx (+ idx 1))))
+              (let [block (: MlirBlock) (mlirBlockCreate (cast I64 count) (array-ptr arg-types 0) (array-ptr arg-locs 0))
+                    reg-idx (: I32) 0]
+                (while (< reg-idx count)
+                  (let [pair (: (Pointer types/Value)) (vector-element args-val reg-idx)
+                        pair-tag (: types/ValueTag) (pointer-field-read pair tag)]
+                    (if (= pair-tag types/ValueTag/Vector)
+                      (let [name-elem (: (Pointer types/Value)) (vector-element pair 0)
+                            name-str (: (Pointer U8)) (pointer-field-read name-elem str_val)
+                            arg-val (: MlirValue) (mlirBlockGetArgument block (cast I64 reg-idx))]
+                        (value-tracker-register tracker name-str arg-val))
+                      0)
+                    (set! reg-idx (+ reg-idx 1))))
+                block))
+            (mlirBlockCreate 0 (cast (Pointer MlirType) 0) (cast (Pointer MlirLocation) 0))))
+        (mlirBlockCreate 0 (cast (Pointer MlirType) 0) (cast (Pointer MlirLocation) 0))))))
+
+;; Helper to fetch an element from a vector Value
+(def vector-element (: (-> [(Pointer types/Value) I32] (Pointer types/Value)))
+  (fn [vec-val idx]
+    (let [vec-ptr (: (Pointer U8)) (pointer-field-read vec-val vec_val)
+          vector-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) vec-ptr)
+          data (: (Pointer U8)) (pointer-field-read vector-struct data)
+          elem-offset (: I64) (* (cast I64 idx) 8)
+          elem-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) elem-offset))
+          elem-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) elem-ptr-loc)]
+      (dereference elem-ptr-ptr))))
 
 ;; Build an MLIR block from a block form
 (def build-mlir-block (: (-> [(Pointer MLIRBuilderContext) (Pointer types/Value) (Pointer ValueTracker)] MlirBlock))
   (fn [builder block-form tracker]
     (let [block-node (: (Pointer ast/BlockNode)) (ast/parse-block block-form)]
       (if (!= (cast I64 block-node) 0)
-        ;; Parse block args - for now, just create empty block
-        ;; TODO: Handle block arguments properly
         (let [loc (: MlirLocation) (pointer-field-read builder loc)
-              block (: MlirBlock) (mlirBlockCreate 0 (cast (Pointer MlirType) 0) (cast (Pointer MlirLocation) 0))
+              args-val (: (Pointer types/Value)) (pointer-field-read block-node args)
+              block (: MlirBlock) (create-block-with-args builder tracker loc args-val)
               operations (: (Pointer types/Value)) (pointer-field-read block-node operations)
               ops-tag (: types/ValueTag) (pointer-field-read operations tag)]
-          ;; operations should be a vector
           (if (= ops-tag types/ValueTag/Vector)
             (let [vec-ptr (: (Pointer U8)) (pointer-field-read operations vec_val)
                   vector-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) vec-ptr)
                   count (: I32) (pointer-field-read vector-struct count)
                   data (: (Pointer U8)) (pointer-field-read vector-struct data)
                   idx (: I32) 0]
-              ;; Iterate through operations in this block
               (while (< idx count)
                 (let [elem-offset (: I64) (* (cast I64 idx) 8)
                       elem-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) elem-offset))
@@ -386,11 +477,11 @@
                       op-form (: (Pointer types/Value)) (dereference elem-ptr-ptr)
                       op-node (: (Pointer ast/OpNode)) (ast/parse-op op-form)]
                   (if (!= (cast I64 op-node) 0)
-                    (let [mlir-op (: MlirOperation) (build-mlir-operation builder op-node tracker block)]
-                      (set! idx (+ idx 1)))
-                    (set! idx (+ idx 1)))))
-              block)
-            block))
+                    (build-mlir-operation builder op-node tracker block)
+                    0)
+                  (set! idx (+ idx 1)))))
+            0)
+          block)
         (mlirBlockCreate 0 (cast (Pointer MlirType) 0) (cast (Pointer MlirLocation) 0))))))
 
 ;; Helper: Process result types vector and add to operation state
@@ -402,23 +493,23 @@
               vector-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) vec-ptr)
               count (: I32) (pointer-field-read vector-struct count)]
           (if (> count 0)
-            (let [data (: (Pointer U8)) (pointer-field-read vector-struct data)
-                  result-types-array (: (Array MlirType 8)) (array MlirType 8)
+            (let [result-types-array (: (Array MlirType 8)) (array MlirType 8)
                   idx (: I32) 0]
-              ;; Iterate through result types and parse them
               (while (< idx count)
-                (let [elem-offset (: I64) (* (cast I64 idx) 8)
-                      elem-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) elem-offset))
-                      elem-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) elem-ptr-loc)
-                      elem (: (Pointer types/Value)) (dereference elem-ptr-ptr)
-                      elem-tag (: types/ValueTag) (pointer-field-read elem tag)]
-                  (if (= elem-tag types/ValueTag/String)
-                    (let [type-str (: (Pointer U8)) (pointer-field-read elem str_val)
-                          mlir-type (: MlirType) (parse-type-string builder type-str)]
-                      (array-set! result-types-array idx mlir-type)
-                      (set! idx (+ idx 1)))
-                    (set! idx (+ idx 1)))))
-              ;; Add result types to state
+                (let [elem (: (Pointer types/Value)) (vector-element result-types-val idx)
+                      elem-tag (: types/ValueTag) (pointer-field-read elem tag)
+                      mlir-type (: MlirType) (pointer-field-read builder i32Type)]
+                  (if (= elem-tag types/ValueTag/Vector)
+                    (let [type-elem (: (Pointer types/Value)) (vector-element elem 1)
+                          type-str (: (Pointer U8)) (pointer-field-read type-elem str_val)
+                          parsed-type (: MlirType) (parse-type-string builder type-str)]
+                      (set! mlir-type parsed-type))
+                    (if (= elem-tag types/ValueTag/String)
+                      (let [type-str (: (Pointer U8)) (pointer-field-read elem str_val)
+                            parsed-type (: MlirType) (parse-type-string builder type-str)]
+                        (set! mlir-type parsed-type))))
+                  (array-set! result-types-array idx mlir-type)
+                  (set! idx (+ idx 1))))
               (mlirOperationStateAddResults state-ptr (cast I64 count) (array-ptr result-types-array 0))
               count)
             0))
@@ -434,24 +525,23 @@
               count (: I32) (pointer-field-read vector-struct count)]
           (if (> count 0)
             (let [data (: (Pointer U8)) (pointer-field-read vector-struct data)
-                  operands-array (: (Array MlirValue 8)) (array MlirValue 8)
-                  idx (: I32) 0]
-              ;; Iterate through operands (which are SSA value indices as strings)
-              (while (< idx count)
-                (let [elem-offset (: I64) (* (cast I64 idx) 8)
+              operands-array (: (Array MlirValue 8)) (array MlirValue 8)
+              idx (: I32) 0]
+          ;; Iterate through operands (which are SSA value indices as strings)
+          (while (< idx count)
+            (let [elem-offset (: I64) (* (cast I64 idx) 8)
                       elem-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) elem-offset))
                       elem-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) elem-ptr-loc)
-                      elem (: (Pointer types/Value)) (dereference elem-ptr-ptr)
-                      elem-tag (: types/ValueTag) (pointer-field-read elem tag)]
-                  (if (= elem-tag types/ValueTag/String)
-                    (let [operand-str (: (Pointer U8)) (pointer-field-read elem str_val)
-                          operand-idx (: I32) (atoi operand-str)
-                          operand-val (: MlirValue) (value-tracker-lookup tracker operand-idx)]
-                      (array-set! operands-array idx operand-val)
-                      (set! idx (+ idx 1)))
-                    (set! idx (+ idx 1)))))
-              ;; Add operands to state
-              (mlirOperationStateAddOperands state-ptr (cast I64 count) (array-ptr operands-array 0))
+                  elem (: (Pointer types/Value)) (dereference elem-ptr-ptr)
+                  elem-tag (: types/ValueTag) (pointer-field-read elem tag)]
+              (if (= elem-tag types/ValueTag/String)
+                (let [operand-str (: (Pointer U8)) (pointer-field-read elem str_val)
+                      operand-val (: MlirValue) (value-tracker-lookup tracker operand-str)]
+                  (array-set! operands-array idx operand-val)
+                  (set! idx (+ idx 1)))
+                (set! idx (+ idx 1)))))
+          ;; Add operands to state
+          (mlirOperationStateAddOperands state-ptr (cast I64 count) (array-ptr operands-array 0))
               count)
             0))
         0))))
@@ -465,34 +555,34 @@
         (let [vec-ptr (: (Pointer U8)) (pointer-field-read attributes-val vec_val)
               vector-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) vec-ptr)
               vec-count (: I32) (pointer-field-read vector-struct count)
-              attr-count (: I32) (cast I32 (/ (cast F64 vec-count) 2.0))  ; Each attribute is 2 elements
-              (if (> attr-count 0)
-                (let [data (: (Pointer U8)) (pointer-field-read vector-struct data)
-                      attrs-array (: (Array MlirNamedAttribute 16)) (array MlirNamedAttribute 16)
-                      idx (: I32) 0]
-                  ;; Iterate through map entries (key-value pairs)
-                  (while (< idx attr-count)
-                    (let [key-idx (: I32) (* idx 2)
-                          val-idx (: I32) (+ (* idx 2) 1)
+              attr-count (: I32) (cast I32 (/ (cast F64 vec-count) 2.0))]  ; Each attribute is 2 elements
+          (if (> attr-count 0)
+            (let [data (: (Pointer U8)) (pointer-field-read vector-struct data)
+                  attrs-array (: (Array MlirNamedAttribute 16)) (array MlirNamedAttribute 16)
+                  idx (: I32) 0]
+              ;; Iterate through map entries (key-value pairs)
+              (while (< idx attr-count)
+                (let [key-idx (: I32) (* idx 2)
+                      val-idx (: I32) (+ (* idx 2) 1)
 
-                          key-offset (: I64) (* (cast I64 key-idx) 8)
-                          key-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) key-offset))
-                          key-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) key-ptr-loc)
-                          key-val (: (Pointer types/Value)) (dereference key-ptr-ptr)
+                      key-offset (: I64) (* (cast I64 key-idx) 8)
+                      key-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) key-offset))
+                      key-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) key-ptr-loc)
+                      key-val (: (Pointer types/Value)) (dereference key-ptr-ptr)
 
-                          val-offset (: I64) (* (cast I64 val-idx) 8)
-                          val-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) val-offset))
-                          val-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) val-ptr-loc)
-                          val-val (: (Pointer types/Value)) (dereference val-ptr-ptr)]
+                      val-offset (: I64) (* (cast I64 val-idx) 8)
+                      val-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) val-offset))
+                      val-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) val-ptr-loc)
+                      val-val (: (Pointer types/Value)) (dereference val-ptr-ptr)]
 
-                      (let [key-str (: (Pointer U8)) (pointer-field-read key-val str_val)
-                            named-attr (: MlirNamedAttribute) (create-named-attribute-from-value builder key-str val-val)]
-                        (array-set! attrs-array idx named-attr)
-                        (set! idx (+ idx 1)))))
-                  ;; Add attributes to state
-                  (mlirOperationStateAddAttributes state-ptr (cast I64 attr-count) (array-ptr attrs-array 0))
-                  attr-count)
-                0)])
+                  (let [key-str (: (Pointer U8)) (pointer-field-read key-val str_val)
+                        named-attr (: MlirNamedAttribute) (create-named-attribute-from-value builder key-str val-val)]
+                    (array-set! attrs-array idx named-attr)
+                    (set! idx (+ idx 1)))))
+              ;; Add attributes to state
+              (mlirOperationStateAddAttributes state-ptr (cast I64 attr-count) (array-ptr attrs-array 0))
+              attr-count)
+            0))
         0))))
 
 ;; Helper: Process regions vector and add to operation state
@@ -564,7 +654,14 @@
                           idx (: I32) 0]
                       (while (< idx result-count)
                         (let [result-val (: MlirValue) (mlirOperationGetResult op (cast I64 idx))
-                              _ (: I32) (value-tracker-register tracker result-val)]
+                              elem (: (Pointer types/Value)) (vector-element result-types-val idx)
+                              elem-tag (: types/ValueTag) (pointer-field-read elem tag)]
+                          (if (= elem-tag types/ValueTag/Vector)
+                            (let [name-elem (: (Pointer types/Value)) (vector-element elem 0)
+                                  name-str (: (Pointer U8)) (pointer-field-read name-elem str_val)
+                                  _ (: I32) (value-tracker-register tracker name-str result-val)]
+                              0)
+                            0)
                           (set! idx (+ idx 1))))
                       op)
                     op))))))))))
