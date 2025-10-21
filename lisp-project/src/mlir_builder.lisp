@@ -115,6 +115,7 @@
 (declare-fn mlirIdentifierGet [ctx MlirContext str MlirStringRef] -> MlirIdentifier)
 (declare-fn mlirNamedAttributeGet [name MlirIdentifier attr MlirAttribute] -> MlirNamedAttribute)
 (declare-fn mlirStringAttrGet [ctx MlirContext str MlirStringRef] -> MlirAttribute)
+(declare-fn mlirFlatSymbolRefAttrGet [ctx MlirContext symbol MlirStringRef] -> MlirAttribute)
 (declare-fn mlirTypeAttrGet [type MlirType] -> MlirAttribute)
 (declare-fn mlirIntegerAttrGet [type MlirType value I64] -> MlirAttribute)
 
@@ -253,8 +254,12 @@
     (let [cmp-i64 (: I32) (strcmp type-str (c-str "i64"))]
       (if (== cmp-i64 0)
         (pointer-field-read builder i64Type)
-        (let [_ (: I32) (printf (c-str "Unknown type: %s, defaulting to i32\n") type-str)]
-          (pointer-field-read builder i32Type))))))
+        (let [cmp-i1 (: I32) (strcmp type-str (c-str "i1"))]
+          (if (== cmp-i1 0)
+            (let [ctx (: MlirContext) (pointer-field-read builder ctx)]
+              (mlirIntegerTypeGet ctx 1))
+            (let [_ (: I32) (printf (c-str "Unknown type: %s, defaulting to i32\n") type-str)]
+              (pointer-field-read builder i32Type))))))))
 
 (def parse-type-string (: (-> [(Pointer MLIRBuilderContext) (Pointer U8)] MlirType))
   (fn [builder type-str]
@@ -297,17 +302,82 @@
 ;; Parse function type attribute like (-> [i32] [i32])
 (def parse-function-type-attr (: (-> [(Pointer MLIRBuilderContext) (Pointer types/Value)] MlirAttribute))
   (fn [builder value-list]
-    (let [ctx (: MlirContext) (pointer-field-read builder ctx)]
-      ;; TODO: Properly parse function type - for now create placeholder TypeAttr
-      (printf (c-str "    WARNING: function_type parsing not fully implemented\n"))
-      ;; For now, create a simple function type with i32 -> i32
-      (let [i32-type (: MlirType) (pointer-field-read builder i32Type)
-            inputs (: (Array MlirType 1)) (array MlirType 1)
-            results (: (Array MlirType 1)) (array MlirType 1)]
-        (array-set! inputs 0 i32-type)
-        (array-set! results 0 i32-type)
-        (let [fn-type (: MlirType) (mlirFunctionTypeGet ctx 1 (array-ptr inputs 0) 1 (array-ptr results 0))]
-          (mlirTypeAttrGet fn-type))))))
+    (let [ctx (: MlirContext) (pointer-field-read builder ctx)
+          input-types (: (Array MlirType 8)) (array MlirType 8)
+          result-types (: (Array MlirType 8)) (array MlirType 8)
+          input-count (: I32) 0
+          result-count (: I32) 0
+          args-list (: (Pointer types/Value)) (types/cdr value-list)
+          inputs-val (: (Pointer types/Value)) (if (= (cast I64 args-list) 0)
+                                                (cast (Pointer types/Value) 0)
+                                                (types/car args-list))
+          outputs-list (: (Pointer types/Value)) (if (= (cast I64 args-list) 0)
+                                                  (cast (Pointer types/Value) 0)
+                                                  (types/cdr args-list))
+          outputs-val (: (Pointer types/Value)) (if (= (cast I64 outputs-list) 0)
+                                                 (cast (Pointer types/Value) 0)
+                                                 (types/car outputs-list))]
+
+      ;; Parse input types vector
+      (if (!= (cast I64 inputs-val) 0)
+        (let [inputs-tag (: types/ValueTag) (pointer-field-read inputs-val tag)]
+          (if (= inputs-tag types/ValueTag/Vector)
+            (let [vec-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) (pointer-field-read inputs-val vec_val))
+                  vec-count (: I32) (pointer-field-read vec-struct count)
+                  limit (: I32) (if (> vec-count 8) 8 vec-count)
+                  idx (: I32) 0]
+              (set! input-count limit)
+              (while (< idx limit)
+                (let [elem (: (Pointer types/Value)) (vector-element inputs-val idx)
+                      elem-tag (: types/ValueTag) (pointer-field-read elem tag)
+                      type-str (: (Pointer U8))
+                        (if (= elem-tag types/ValueTag/Symbol)
+                          (pointer-field-read elem str_val)
+                          (if (= elem-tag types/ValueTag/String)
+                            (pointer-field-read elem str_val)
+                            (c-str "i32")))
+                      mlir-type (: MlirType) (parse-type-string builder type-str)]
+                  (array-set! input-types idx mlir-type)
+                  (set! idx (+ idx 1))
+                  0))
+              0)
+            0))
+        0)
+
+      ;; Parse result types vector
+      (if (!= (cast I64 outputs-val) 0)
+        (let [outputs-tag (: types/ValueTag) (pointer-field-read outputs-val tag)]
+          (if (= outputs-tag types/ValueTag/Vector)
+            (let [vec-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) (pointer-field-read outputs-val vec_val))
+                  vec-count (: I32) (pointer-field-read vec-struct count)
+                  limit (: I32) (if (> vec-count 8) 8 vec-count)
+                  idx (: I32) 0]
+              (set! result-count limit)
+              (while (< idx limit)
+                (let [elem (: (Pointer types/Value)) (vector-element outputs-val idx)
+                      elem-tag (: types/ValueTag) (pointer-field-read elem tag)
+                      type-str (: (Pointer U8))
+                        (if (= elem-tag types/ValueTag/Symbol)
+                          (pointer-field-read elem str_val)
+                          (if (= elem-tag types/ValueTag/String)
+                            (pointer-field-read elem str_val)
+                            (c-str "i32")))
+                      mlir-type (: MlirType) (parse-type-string builder type-str)]
+                  (array-set! result-types idx mlir-type)
+                  (set! idx (+ idx 1))
+                  0))
+              0)
+            0))
+        0)
+
+      (let [input-ptr (: (Pointer MlirType)) (if (> input-count 0)
+                                               (array-ptr input-types 0)
+                                               (cast (Pointer MlirType) 0))
+            result-ptr (: (Pointer MlirType)) (if (> result-count 0)
+                                                (array-ptr result-types 0)
+                                                (cast (Pointer MlirType) 0))
+            fn-type (: MlirType) (mlirFunctionTypeGet ctx (cast I64 input-count) input-ptr (cast I64 result-count) result-ptr)]
+        (mlirTypeAttrGet fn-type)))))
 
 ;; Create attribute from key-value pair where value is a Value (can be string or list)
 (def create-attribute-from-value (: (-> [(Pointer MLIRBuilderContext) (Pointer U8) (Pointer types/Value)] MlirAttribute))
@@ -320,23 +390,30 @@
       (if (= value-tag types/ValueTag/String)
         ;; String attribute
         (let [value-str (: (Pointer U8)) (pointer-field-read value-val str_val)]
-          (if (== (strcmp key (c-str "predicate")) 0)
-            ;; Predicate attribute for arith.cmpi - convert string to integer enum
-            (let [pred-val (: I64)
-                  (if (== (strcmp value-str (c-str "sle")) 0) 3
-                    (if (== (strcmp value-str (c-str "eq")) 0) 0
-                      (if (== (strcmp value-str (c-str "ne")) 0) 1
-                        (if (== (strcmp value-str (c-str "slt")) 0) 2
-                          (if (== (strcmp value-str (c-str "sgt")) 0) 4
-                            (if (== (strcmp value-str (c-str "sge")) 0) 5
-                              (if (== (strcmp value-str (c-str "ult")) 0) 6
-                                (if (== (strcmp value-str (c-str "ule")) 0) 7
-                                  (if (== (strcmp value-str (c-str "ugt")) 0) 8
-                                    (if (== (strcmp value-str (c-str "uge")) 0) 9 0))))))))))
-                  i64-type (: MlirType) (pointer-field-read builder i64Type)]
-              (mlirIntegerAttrGet i64-type pred-val))
-            ;; For all other string attributes
-            (mlirStringAttrGet ctx (mlirStringRefCreateFromCString value-str))))
+          (if (== (strcmp key (c-str "callee")) 0)
+            (let [first-char (: U8) (dereference value-str)
+                  symbol-name (: (Pointer U8)) (if (= first-char (cast U8 64))
+                                                 (cast (Pointer U8) (+ (cast I64 value-str) 1))
+                                                 value-str)
+                  sym-ref (: MlirStringRef) (mlirStringRefCreateFromCString symbol-name)]
+              (mlirFlatSymbolRefAttrGet ctx sym-ref))
+            (if (== (strcmp key (c-str "predicate")) 0)
+              ;; Predicate attribute for arith.cmpi - convert string to integer enum
+              (let [pred-val (: I64)
+                    (if (== (strcmp value-str (c-str "sle")) 0) 3
+                      (if (== (strcmp value-str (c-str "eq")) 0) 0
+                        (if (== (strcmp value-str (c-str "ne")) 0) 1
+                          (if (== (strcmp value-str (c-str "slt")) 0) 2
+                            (if (== (strcmp value-str (c-str "sgt")) 0) 4
+                              (if (== (strcmp value-str (c-str "sge")) 0) 5
+                                (if (== (strcmp value-str (c-str "ult")) 0) 6
+                                  (if (== (strcmp value-str (c-str "ule")) 0) 7
+                                    (if (== (strcmp value-str (c-str "ugt")) 0) 8
+                                      (if (== (strcmp value-str (c-str "uge")) 0) 9 0))))))))))
+                    i64-type (: MlirType) (pointer-field-read builder i64Type)]
+                (mlirIntegerAttrGet i64-type pred-val))
+              ;; For all other string attributes
+              (mlirStringAttrGet ctx (mlirStringRefCreateFromCString value-str)))))
 
         ;; Check for List (cons cell structure from parenthesized expressions)
         (if (= value-tag types/ValueTag/List)
@@ -443,17 +520,6 @@
             (mlirBlockCreate 0 (cast (Pointer MlirType) 0) (cast (Pointer MlirLocation) 0))))
         (mlirBlockCreate 0 (cast (Pointer MlirType) 0) (cast (Pointer MlirLocation) 0))))))
 
-;; Helper to fetch an element from a vector Value
-(def vector-element (: (-> [(Pointer types/Value) I32] (Pointer types/Value)))
-  (fn [vec-val idx]
-    (let [vec-ptr (: (Pointer U8)) (pointer-field-read vec-val vec_val)
-          vector-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) vec-ptr)
-          data (: (Pointer U8)) (pointer-field-read vector-struct data)
-          elem-offset (: I64) (* (cast I64 idx) 8)
-          elem-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) elem-offset))
-          elem-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) elem-ptr-loc)]
-      (dereference elem-ptr-ptr))))
-
 ;; Build an MLIR block from a block form
 (def build-mlir-block (: (-> [(Pointer MLIRBuilderContext) (Pointer types/Value) (Pointer ValueTracker)] MlirBlock))
   (fn [builder block-form tracker]
@@ -468,21 +534,33 @@
             (let [vec-ptr (: (Pointer U8)) (pointer-field-read operations vec_val)
                   vector-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) vec-ptr)
                   count (: I32) (pointer-field-read vector-struct count)
-                  data (: (Pointer U8)) (pointer-field-read vector-struct data)
                   idx (: I32) 0]
               (while (< idx count)
-                (let [elem-offset (: I64) (* (cast I64 idx) 8)
-                      elem-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) elem-offset))
-                      elem-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) elem-ptr-loc)
-                      op-form (: (Pointer types/Value)) (dereference elem-ptr-ptr)
+                (let [op-form (: (Pointer types/Value)) (vector-element operations idx)
                       op-node (: (Pointer ast/OpNode)) (ast/parse-op op-form)]
                   (if (!= (cast I64 op-node) 0)
-                    (build-mlir-operation builder op-node tracker block)
+                    (let [_ (: MlirOperation) (build-mlir-operation builder op-node tracker block)]
+                      0)
                     0)
-                  (set! idx (+ idx 1)))))
+                  (set! idx (+ idx 1))
+                  0))
+              0)
             0)
           block)
         (mlirBlockCreate 0 (cast (Pointer MlirType) 0) (cast (Pointer MlirLocation) 0))))))
+
+;; Extract the MLIR type string from a result entry
+(def result-type-string (: (-> [(Pointer types/Value)] (Pointer U8)))
+  (fn [elem]
+    (let [elem-tag (: types/ValueTag) (pointer-field-read elem tag)]
+      (if (= elem-tag types/ValueTag/Vector)
+        (let [type-elem (: (Pointer types/Value)) (vector-element elem 1)]
+          (pointer-field-read type-elem str_val))
+        (if (= elem-tag types/ValueTag/String)
+          (pointer-field-read elem str_val)
+          (if (= elem-tag types/ValueTag/Symbol)
+            (pointer-field-read elem str_val)
+            (cast (Pointer U8) 0)))))))
 
 ;; Helper: Process result types vector and add to operation state
 (def add-result-types-to-state (: (-> [(Pointer MLIRBuilderContext) (Pointer MlirOperationState) (Pointer types/Value)] I32))
@@ -491,27 +569,32 @@
       (if (= tag types/ValueTag/Vector)
         (let [vec-ptr (: (Pointer U8)) (pointer-field-read result-types-val vec_val)
               vector-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) vec-ptr)
-              count (: I32) (pointer-field-read vector-struct count)]
-          (if (> count 0)
-            (let [result-types-array (: (Array MlirType 8)) (array MlirType 8)
-                  idx (: I32) 0]
-              (while (< idx count)
-                (let [elem (: (Pointer types/Value)) (vector-element result-types-val idx)
-                      elem-tag (: types/ValueTag) (pointer-field-read elem tag)
-                      mlir-type (: MlirType) (pointer-field-read builder i32Type)]
-                  (if (= elem-tag types/ValueTag/Vector)
-                    (let [type-elem (: (Pointer types/Value)) (vector-element elem 1)
-                          type-str (: (Pointer U8)) (pointer-field-read type-elem str_val)
-                          parsed-type (: MlirType) (parse-type-string builder type-str)]
-                      (set! mlir-type parsed-type))
-                    (if (= elem-tag types/ValueTag/String)
-                      (let [type-str (: (Pointer U8)) (pointer-field-read elem str_val)
-                            parsed-type (: MlirType) (parse-type-string builder type-str)]
-                        (set! mlir-type parsed-type))))
-                  (array-set! result-types-array idx mlir-type)
-                  (set! idx (+ idx 1))))
-              (mlirOperationStateAddResults state-ptr (cast I64 count) (array-ptr result-types-array 0))
-              count)
+              raw-count (: I32) (pointer-field-read vector-struct count)]
+          (if (> raw-count 0)
+            (let [first-elem (: (Pointer types/Value)) (vector-element result-types-val 0)
+                  first-tag (: types/ValueTag) (pointer-field-read first-elem tag)
+                  result-count (: I32) (if (= first-tag types/ValueTag/Vector)
+                                         raw-count
+                                         (cast I32 (/ (cast F64 raw-count) 2.0)))]
+              (if (> result-count 0)
+                (let [result-types-array (: (Array MlirType 8)) (array MlirType 8)
+                      idx (: I32) 0]
+                  (while (< idx result-count)
+                    (let [type-val (: (Pointer types/Value))
+                                (if (= first-tag types/ValueTag/Vector)
+                                  (let [elem (: (Pointer types/Value)) (vector-element result-types-val idx)]
+                                    (vector-element elem 1))
+                                  (let [type-idx (: I32) (+ (* idx 2) 1)]
+                                    (vector-element result-types-val type-idx)))
+                          type-str (: (Pointer U8)) (result-type-string type-val)
+                          mlir-type (: MlirType) (if (!= (cast I64 type-str) 0)
+                                                   (parse-type-string builder type-str)
+                                                   (pointer-field-read builder i32Type))]
+                      (array-set! result-types-array idx mlir-type)
+                      (set! idx (+ idx 1))))
+                  (mlirOperationStateAddResults state-ptr (cast I64 result-count) (array-ptr result-types-array 0))
+                  result-count)
+                0))
             0))
         0))))
 
@@ -524,24 +607,24 @@
               vector-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) vec-ptr)
               count (: I32) (pointer-field-read vector-struct count)]
           (if (> count 0)
-            (let [data (: (Pointer U8)) (pointer-field-read vector-struct data)
-              operands-array (: (Array MlirValue 8)) (array MlirValue 8)
-              idx (: I32) 0]
-          ;; Iterate through operands (which are SSA value indices as strings)
-          (while (< idx count)
-            (let [elem-offset (: I64) (* (cast I64 idx) 8)
-                      elem-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) elem-offset))
-                      elem-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) elem-ptr-loc)
-                  elem (: (Pointer types/Value)) (dereference elem-ptr-ptr)
-                  elem-tag (: types/ValueTag) (pointer-field-read elem tag)]
-              (if (= elem-tag types/ValueTag/String)
-                (let [operand-str (: (Pointer U8)) (pointer-field-read elem str_val)
-                      operand-val (: MlirValue) (value-tracker-lookup tracker operand-str)]
-                  (array-set! operands-array idx operand-val)
-                  (set! idx (+ idx 1)))
-                (set! idx (+ idx 1)))))
-          ;; Add operands to state
-          (mlirOperationStateAddOperands state-ptr (cast I64 count) (array-ptr operands-array 0))
+            (let [operands-array (: (Array MlirValue 8)) (array MlirValue 8)
+                  idx (: I32) 0]
+              (while (< idx count)
+                (let [elem (: (Pointer types/Value)) (vector-element operands-val idx)
+                      elem-tag (: types/ValueTag) (pointer-field-read elem tag)
+                      operand-name (: (Pointer U8))
+                        (if (= elem-tag types/ValueTag/String)
+                          (pointer-field-read elem str_val)
+                          (if (= elem-tag types/ValueTag/Symbol)
+                            (pointer-field-read elem str_val)
+                            (cast (Pointer U8) 0)))]
+                  (if (!= (cast I64 operand-name) 0)
+                    (let [operand-val (: MlirValue) (value-tracker-lookup tracker operand-name)]
+                      (array-set! operands-array idx operand-val)
+                      0)
+                    0)
+                  (set! idx (+ idx 1))))
+              (mlirOperationStateAddOperands state-ptr (cast I64 count) (array-ptr operands-array 0))
               count)
             0))
         0))))
@@ -597,6 +680,7 @@
             (let [data (: (Pointer U8)) (pointer-field-read vector-struct data)
                   regions-array (: (Array MlirRegion 4)) (array MlirRegion 4)
                   idx (: I32) 0]
+              (printf (c-str "DEBUG: adding %d regions\n") count)
               ;; Iterate through regions (each is a vector of blocks)
               (while (< idx count)
                 (let [elem-offset (: I64) (* (cast I64 idx) 8)
@@ -611,6 +695,74 @@
               count)
             0))
         0))))
+
+;; Lower the current module to the LLVM dialect using a fixed pass pipeline
+(def run-lowering-passes (: (-> [(Pointer MLIRBuilderContext)] I32))
+  (fn [builder]
+    (let [ctx (: MlirContext) (pointer-field-read builder ctx)
+          mod (: MlirModule) (pointer-field-read builder mod)
+          first-pipeline (: (Pointer U8))
+            (c-str "builtin.module(func.func(convert-scf-to-cf))")
+          second-pipeline (: (Pointer U8))
+            (c-str "builtin.module(func.func(convert-arith-to-llvm),convert-cf-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)")]
+
+      ;; First run: convert structured control flow to cf
+      (let [pm1 (: MlirPassManager) (mlirPassManagerCreate ctx)
+            opm1 (: MlirOpPassManager) (mlirPassManagerGetAsOpPassManager pm1)
+            parse1 (: MlirLogicalResult)
+              (mlirParsePassPipeline opm1 (mlirStringRefCreateFromCString first-pipeline)
+                                     (cast (Pointer Nil) 0) (cast (Pointer Nil) 0))]
+        (if (= (mlirLogicalResultIsFailure parse1) 1)
+          (do
+            (printf (c-str "ERROR: Failed to parse SCF lowering pipeline\n"))
+            (mlirPassManagerDestroy pm1)
+            1)
+          (let [run1 (: MlirLogicalResult) (mlirPassManagerRunOnOp pm1 (mlirModuleGetOperation mod))]
+            (mlirPassManagerDestroy pm1)
+            (if (= (mlirLogicalResultIsFailure run1) 1)
+              (do
+                (printf (c-str "ERROR: SCF lowering pipeline failed\n"))
+                1)
+              ;; Second run: lower remaining dialects to LLVM
+              (let [pm2 (: MlirPassManager) (mlirPassManagerCreate ctx)
+                    opm2 (: MlirOpPassManager) (mlirPassManagerGetAsOpPassManager pm2)
+                    parse2 (: MlirLogicalResult)
+                      (mlirParsePassPipeline opm2 (mlirStringRefCreateFromCString second-pipeline)
+                                              (cast (Pointer Nil) 0) (cast (Pointer Nil) 0))]
+                (if (= (mlirLogicalResultIsFailure parse2) 1)
+                  (do
+                    (printf (c-str "ERROR: Failed to parse LLVM lowering pipeline\n"))
+                    (mlirPassManagerDestroy pm2)
+                    1)
+                  (let [run2 (: MlirLogicalResult) (mlirPassManagerRunOnOp pm2 (mlirModuleGetOperation mod))]
+                    (mlirPassManagerDestroy pm2)
+                    (if (= (mlirLogicalResultIsFailure run2) 1)
+                      (do
+                        (printf (c-str "ERROR: LLVM lowering pipeline failed\n"))
+                        1)
+                      0)))))))))))
+
+;; JIT compile and run a single i32 -> i32 function from the current module
+(def jit-run-function-i32 (: (-> [(Pointer MLIRBuilderContext) (Pointer U8) I32] I32))
+  (fn [builder fn-name arg0]
+    (let [mod (: MlirModule) (pointer-field-read builder mod)
+          engine (: MlirExecutionEngine) (mlirExecutionEngineCreate mod 3 0 (cast (Pointer Nil) 0) 0)]
+      (if (= (mlirExecutionEngineIsNull engine) 1)
+        (do
+          (printf (c-str "ERROR: Failed to create execution engine\n"))
+          (cast I32 -1))
+        (let [fn-ptr (: (Pointer Nil))
+              (mlirExecutionEngineLookup engine (mlirStringRefCreateFromCString fn-name))]
+          (if (= (cast I64 fn-ptr) 0)
+            (do
+              (printf (c-str "ERROR: Failed to lookup function %s\n") fn-name)
+              (mlirExecutionEngineDestroy engine)
+              (cast I32 -1))
+            (let [callable (: (Pointer (-> [I32] I32))) (cast (Pointer (-> [I32] I32)) fn-ptr)
+                  result (: I32) (callable arg0)]
+              (printf (c-str "JIT result %s(%d) = %d\n") fn-name arg0 result)
+              (mlirExecutionEngineDestroy engine)
+              result)))))))
 
 ;; Build an MLIR operation from an OpNode
 (def build-mlir-operation (: (-> [(Pointer MLIRBuilderContext) (Pointer ast/OpNode) (Pointer ValueTracker) MlirBlock] MlirOperation))
@@ -650,20 +802,27 @@
                   (if (= result-tag types/ValueTag/Vector)
                     (let [vec-ptr (: (Pointer U8)) (pointer-field-read result-types-val vec_val)
                           vector-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) vec-ptr)
-                          result-count (: I32) (pointer-field-read vector-struct count)
-                          idx (: I32) 0]
-                      (while (< idx result-count)
-                        (let [result-val (: MlirValue) (mlirOperationGetResult op (cast I64 idx))
-                              elem (: (Pointer types/Value)) (vector-element result-types-val idx)
-                              elem-tag (: types/ValueTag) (pointer-field-read elem tag)]
-                          (if (= elem-tag types/ValueTag/Vector)
-                            (let [name-elem (: (Pointer types/Value)) (vector-element elem 0)
-                                  name-str (: (Pointer U8)) (pointer-field-read name-elem str_val)
+                          raw-count (: I32) (pointer-field-read vector-struct count)]
+                      (if (> raw-count 0)
+                        (let [first-elem (: (Pointer types/Value)) (vector-element result-types-val 0)
+                              first-tag (: types/ValueTag) (pointer-field-read first-elem tag)
+                              result-count (: I32) (if (= first-tag types/ValueTag/Vector)
+                                                     raw-count
+                                                     (cast I32 (/ (cast F64 raw-count) 2.0)))
+                              idx (: I32) 0]
+                          (while (< idx result-count)
+                            (let [result-val (: MlirValue) (mlirOperationGetResult op (cast I64 idx))
+                                  name-val (: (Pointer types/Value))
+                                    (if (= first-tag types/ValueTag/Vector)
+                                      (let [elem (: (Pointer types/Value)) (vector-element result-types-val idx)]
+                                        (vector-element elem 0))
+                                      (let [name-idx (: I32) (* idx 2)]
+                                        (vector-element result-types-val name-idx)))
+                                  name-str (: (Pointer U8)) (pointer-field-read name-val str_val)
                                   _ (: I32) (value-tracker-register tracker name-str result-val)]
-                              0)
-                            0)
-                          (set! idx (+ idx 1))))
-                      op)
+                              (set! idx (+ idx 1))))
+                          op)
+                        op))
                     op))))))))))
 
 ;; Compile a top-level OpNode to MLIR
@@ -792,9 +951,26 @@
       (printf (c-str "Builder initialized successfully\n\n"))
 
       ;; Compile the fib test file
-      (let [result (: I32) (compile-file builder (c-str "tests/fib.lisp"))]
-        (mlir-builder-destroy builder)
-        (printf (c-str "\nDone!\n"))
-        result))))
+      (let [compile-res (: I32) (compile-file builder (c-str "tests/fib.lisp"))]
+        (if (= compile-res 0)
+          (let [_ (: I32) (printf (c-str "Running lowering pipeline...\n"))
+                lower-res (: I32) (run-lowering-passes builder)]
+            (if (= lower-res 0)
+              (let [_ (: I32) (printf (c-str "=== Lowered MLIR Module ===\n"))
+                    mod (: MlirModule) (pointer-field-read builder mod)
+                    mod-op (: MlirOperation) (mlirModuleGetOperation mod)
+                    _ (: Nil) (mlirOperationDump mod-op)
+                    jit-res (: I32) (jit-run-function-i32 builder (c-str "fib") 10)]
+                (mlir-builder-destroy builder)
+                (printf (c-str "\nDone!\n"))
+                (if (= jit-res (cast I32 -1))
+                  (cast I32 1)
+                  0))
+              (do
+                (mlir-builder-destroy builder)
+                lower-res)))
+          (do
+            (mlir-builder-destroy builder)
+            compile-res))))))
 
 (main-fn)
