@@ -218,14 +218,212 @@ pub const SimpleCCompiler = struct {
         InvalidIfForm,
         UnsupportedType,
         TypeCheckFailed,
+
+        // Variable/namespace errors
         UnboundVariable,
+        UnboundNamespace,
+        NamespaceLoadFailed,
+        DefinitionNotInNamespace,
+
+        // Type errors
         TypeMismatch,
+        NonNumericOperand,
+        NonBooleanCondition,
+        NonIntegerModulo,
+        InvalidBranchTypes,
+
+        // Synthesis errors
         CannotSynthesize,
+        CannotSynthesizeBuiltin,
+        CannotSynthesizeFunction,
+
+        // Application errors
         CannotApplyNonFunction,
         ArgumentCountMismatch,
+        StructArgumentCountMismatch,
+        FunctionArgumentCountMismatch,
+
+        // Annotation errors
         InvalidTypeAnnotation,
+        MissingNextValue,
+        InvalidOperator,
+        InvalidOperandCount,
+        MissingRequireVector,
+        InvalidRequireFormat,
+        InvalidNamespaceKeyword,
+        MissingDefName,
+        MissingDefType,
+        MissingDefBody,
+        MissingExternFnName,
+        MissingExternFnParams,
+        MissingExternFnArrow,
+        MissingExternFnReturn,
+        InvalidExternFnParamCount,
+        MissingExternTypeName,
+        InvalidStructField,
+        MissingExternVarName,
+        MissingExternVarType,
+        MissingFunctionParams,
+        InvalidFunctionParamList,
+        InvalidFunctionBody,
+        MissingIfCondition,
+        MissingIfThen,
+        MissingIfElse,
+        ExtraIfArguments,
+        MissingWhileCondition,
+        MissingCForInit,
+        MissingCForTest,
+        MissingCForStep,
+        MissingSetTarget,
+        MissingSetValue,
+        MissingLetBindings,
+        InvalidLetBinding,
+        MissingDoBody,
+        InvalidCBinaryOp,
+        InvalidCUnaryOp,
+        InvalidCFoldOp,
+        MissingPointerOperand,
+        MissingArrayOperands,
+        InvalidArraySize,
+        MissingFieldAccess,
+        InvalidFieldName,
+        FieldNotFound,
+        MissingPointerType,
+        MissingArrayElementType,
+        MissingArraySize,
+
+        // Type parsing errors
+        InvalidTypeFormat,
+        MissingTypeColon,
+        MissingTypeExpression,
+        InvalidFunctionType,
+        MissingFunctionParamList,
+        MissingFunctionReturnType,
+        InvalidStructDefinition,
+        MissingStructFields,
+        InvalidEnumDefinition,
+        MissingEnumVariants,
+        InvalidEnumVariant,
+        InvalidVectorType,
+        UnknownTypeConstructor,
+
+        // Macro errors
+        UnexpandedMacro,
+        UnexpectedMacroDef,
+
+        // Operand errors
+        TooManyOperands,
+        NoOperands,
+        InvalidUnaryOperator,
+
+        // C operation errors
+        MissingCBinaryOpOperator,
+        InvalidCBinaryOpOperator,
+        MissingCBinaryOpLeft,
+        MissingCBinaryOpRight,
+        MissingCUnaryOpOperator,
+        InvalidCUnaryOpOperator,
+        MissingCUnaryOpOperand,
+        MissingCFoldBinaryOpOperator,
+        InvalidCFoldBinaryOpOperator,
+
+        // Def form errors
+        MissingDefVarName,
+        InvalidDefVarName,
+        MissingDefSecondArg,
+        MissingDefBodyWithTypeAnnotation,
+
+        // Allocate errors
+        MissingAllocateArgs,
+        MissingAllocateType,
+        MissingAllocateValue,
+
+        // Uninitialized errors
+        MissingUninitializedArgs,
+        MissingUninitializedType,
+
+        // Cast errors
+        MissingCastArgs,
+        MissingCastType,
+        MissingCastValue,
+
+        // Dereference errors
+        MissingDereferenceArgs,
+        MissingDereferencePointer,
+
+        // Pointer write errors
+        MissingPointerWriteArgs,
+        MissingPointerWritePointer,
+        MissingPointerWriteValue,
+
+        // Deallocate errors
+        MissingDeallocateArgs,
+        MissingDeallocatePointer,
+
+        // Address-of errors
+        MissingAddressOfArgs,
+        MissingAddressOfValue,
+        InvalidAddressOfValue,
+
+        // Pointer-equal errors
+        MissingPointerEqualArgs,
+        MissingPointerEqualFirstPointer,
+        MissingPointerEqualSecondPointer,
+
+        // Pointer-field-read errors
+        MissingPointerFieldReadArgs,
+        MissingPointerFieldReadPointer,
+        InvalidPointerFieldReadField,
+
+        // Pointer-field-write errors
+        MissingPointerFieldWriteArgs,
+        MissingPointerFieldWritePointer,
+        InvalidPointerFieldWriteField,
+        MissingPointerFieldWriteValue,
+
+        // Pointer-index-read errors
+        MissingPointerIndexReadArgs,
+        MissingPointerIndexReadPointer,
+
+        // Pointer-index-write errors
+        MissingPointerIndexWriteArgs,
+        MissingPointerIndexWritePointer,
+
+        // Allocate-array errors
+        MissingAllocateArrayArgs,
+        MissingAllocateArrayType,
+        MissingAllocateArraySize,
+
+        // Deallocate-array errors
+        MissingDeallocateArrayArgs,
+        MissingDeallocateArrayPointer,
+
+        // Array creation errors
+        MissingArrayCreationArgs,
+        MissingArrayCreationType,
+        MissingArrayCreationSize,
+
+        // Array-ref errors
+        MissingArrayRefArgs,
+        MissingArrayRefArray,
+
+        // Array-set errors
+        MissingArraySetArgs,
+        MissingArraySetArray,
+
+        // Array-length errors
+        MissingArrayLengthArgs,
+        MissingArrayLengthArray,
+
+        // Array-ptr errors
+        MissingArrayPtrArgs,
+        MissingArrayPtrArray,
+
+        // Legacy/other
         TypeAliasNotSupported,
         MissingLetTypeAnnotation,
+
+        // Reader/parsing errors
         UnexpectedToken,
         UnterminatedString,
         UnterminatedList,
@@ -2532,21 +2730,21 @@ pub const SimpleCCompiler = struct {
         // Type annotation is (: Type)
         if (!annotation.isList()) {
             std.debug.print("ERROR: Type annotation is not a list: {s}\n", .{@tagName(annotation.*)});
-            return Error.InvalidTypeAnnotation;
+            return Error.InvalidTypeFormat;
         }
         var iter = annotation.list.iterator();
         const first = iter.next() orelse {
             std.debug.print("ERROR: Empty type annotation list\n", .{});
-            return Error.InvalidTypeAnnotation;
+            return Error.MissingTypeExpression;
         };
         if (!first.isKeyword() or first.keyword.len != 0) {
             std.debug.print("ERROR: Type annotation doesn't start with ':' keyword, got: {s}\n", .{@tagName(first.*)});
-            return Error.InvalidTypeAnnotation;
+            return Error.MissingTypeColon;
         }
 
         const type_expr = iter.next() orelse {
             std.debug.print("ERROR: Type annotation missing type expression after ':'\n", .{});
-            return Error.InvalidTypeAnnotation;
+            return Error.MissingTypeExpression;
         };
 
         // Parse basic types
@@ -2588,7 +2786,7 @@ pub const SimpleCCompiler = struct {
                     if (std.mem.eql(u8, type_constructor, "Pointer")) {
                         const pointee_expr = type_iter.next() orelse {
                             std.debug.print("ERROR: Pointer type missing pointee type\n", .{});
-                            return Error.InvalidTypeAnnotation;
+                            return Error.MissingPointerType;
                         };
                         const pointee_type = try self.parseTypeFromAnnotation_Simple(pointee_expr);
                         const pointee_ptr = try self.allocator.*.create(Type);
@@ -2597,13 +2795,13 @@ pub const SimpleCCompiler = struct {
                     }
 
                     std.debug.print("ERROR: Unsupported type constructor: {s}\n", .{type_constructor});
-                    return Error.InvalidTypeAnnotation;
+                    return Error.UnknownTypeConstructor;
                 }
             }
         }
 
         std.debug.print("ERROR: Complex type annotation not supported yet: {s}\n", .{@tagName(type_expr.*)});
-        return Error.InvalidTypeAnnotation;
+        return Error.UnsupportedType;
     }
 
     // Simplified type parser for pointee types (no type annotation wrapper)
@@ -2652,7 +2850,7 @@ pub const SimpleCCompiler = struct {
                     if (std.mem.eql(u8, type_constructor, "Pointer")) {
                         const pointee_expr = type_iter.next() orelse {
                             std.debug.print("ERROR: Pointer type missing pointee type\n", .{});
-                            return Error.InvalidTypeAnnotation;
+                            return Error.MissingPointerType;
                         };
                         const pointee_type = try self.parseTypeFromAnnotation_Simple(pointee_expr);
                         const pointee_ptr = try self.allocator.*.create(Type);
@@ -2664,17 +2862,17 @@ pub const SimpleCCompiler = struct {
                     if (std.mem.eql(u8, type_constructor, "->")) {
                         const params_expr = type_iter.next() orelse {
                             std.debug.print("ERROR: Function type missing parameter list\n", .{});
-                            return Error.InvalidTypeAnnotation;
+                            return Error.MissingFunctionParamList;
                         };
                         const return_expr = type_iter.next() orelse {
                             std.debug.print("ERROR: Function type missing return type\n", .{});
-                            return Error.InvalidTypeAnnotation;
+                            return Error.MissingFunctionReturnType;
                         };
 
                         // Parse parameter types
                         if (!params_expr.isVector()) {
                             std.debug.print("ERROR: Function parameter list must be a vector\n", .{});
-                            return Error.InvalidTypeAnnotation;
+                            return Error.InvalidFunctionParamList;
                         }
                         const params_vec = params_expr.vector;
                         const param_types = try self.allocator.*.alloc(Type, params_vec.len());
@@ -2695,13 +2893,13 @@ pub const SimpleCCompiler = struct {
                     }
 
                     std.debug.print("ERROR: Unsupported type constructor in simple parser: {s}\n", .{type_constructor});
-                    return Error.InvalidTypeAnnotation;
+                    return Error.UnknownTypeConstructor;
                 }
             }
         }
 
         std.debug.print("ERROR: Unsupported simple type: {s}\n", .{@tagName(type_expr.*)});
-        return Error.InvalidTypeAnnotation;
+        return Error.UnsupportedType;
     }
 
     fn sanitizeIdentifier(self: *SimpleCCompiler, name: []const u8) ![]u8 {
