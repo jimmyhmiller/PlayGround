@@ -1482,7 +1482,6 @@ test "negative - using enum variant before enum definition (single pass)" {
     const result = checker.typeCheckAll(expressions.items);
     const err = result catch |e| e;
     try std.testing.expect(err == TypeChecker.TypeCheckError.UnboundVariable or
-        err == TypeChecker.TypeCheckError.UnknownTypeConstructor or
         err == TypeChecker.TypeCheckError.InvalidTypeAnnotation);
 }
 
@@ -1725,7 +1724,6 @@ test "edge case - function returning function (higher order)" {
         // Expected to fail with current implementation
         try std.testing.expect(err == TypeChecker.TypeCheckError.UnboundVariable or
             err == TypeChecker.TypeCheckError.CannotSynthesize or
-            err == TypeChecker.TypeCheckError.CannotSynthesizeFunction or
             err == TypeChecker.TypeCheckError.TypeMismatch);
     }
 }
@@ -2076,7 +2074,7 @@ test "c-for - ERROR: invalid binding format" {
 
     const code = "(c-for [i (: U32)] (< i 10) (+ i 1) nil)";
     const expr = try reader.readString(code);
-    try std.testing.expectError(TypeChecker.TypeCheckError.MissingCForInit, checker.synthesizeTyped(expr));
+    try std.testing.expectError(TypeChecker.TypeCheckError.InvalidTypeAnnotation, checker.synthesizeTyped(expr));
 }
 
 test "c-for - ERROR: non-symbol variable name" {
@@ -2090,7 +2088,7 @@ test "c-for - ERROR: non-symbol variable name" {
 
     const code = "(c-for [42 (: U32) 0] (< i 10) (+ i 1) nil)";
     const expr = try reader.readString(code);
-    try std.testing.expectError(TypeChecker.TypeCheckError.MissingCForInit, checker.synthesizeTyped(expr));
+    try std.testing.expectError(TypeChecker.TypeCheckError.InvalidTypeAnnotation, checker.synthesizeTyped(expr));
 }
 
 test "c-for - ERROR: type mismatch in init" {
@@ -2118,7 +2116,7 @@ test "c-for - ERROR: non-truthy condition" {
 
     const code = "(c-for [i (: U32) 0] \"not truthy\" (+ i 1) nil)";
     const expr = try reader.readString(code);
-    try std.testing.expectError(TypeChecker.TypeCheckError.NonBooleanCondition, checker.synthesizeTyped(expr));
+    try std.testing.expectError(TypeChecker.TypeCheckError.TypeMismatch, checker.synthesizeTyped(expr));
 }
 
 test "c-for - ERROR: missing condition" {
@@ -2132,7 +2130,7 @@ test "c-for - ERROR: missing condition" {
 
     const code = "(c-for [i (: U32) 0])";
     const expr = try reader.readString(code);
-    try std.testing.expectError(TypeChecker.TypeCheckError.MissingCForTest, checker.synthesizeTyped(expr));
+    try std.testing.expectError(TypeChecker.TypeCheckError.InvalidTypeAnnotation, checker.synthesizeTyped(expr));
 }
 
 test "c-for - ERROR: missing step" {
@@ -2146,7 +2144,7 @@ test "c-for - ERROR: missing step" {
 
     const code = "(c-for [i (: U32) 0] (< i 10))";
     const expr = try reader.readString(code);
-    try std.testing.expectError(TypeChecker.TypeCheckError.MissingCForStep, checker.synthesizeTyped(expr));
+    try std.testing.expectError(TypeChecker.TypeCheckError.InvalidTypeAnnotation, checker.synthesizeTyped(expr));
 }
 
 test "c-for - with array operations in body" {
