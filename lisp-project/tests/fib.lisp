@@ -9,7 +9,7 @@
     (op "arith.cmpi" [%1 i1] [%arg0 %0] {predicate "sle"} [])
     (op "scf.if" [%2 i32] [%1] {} [
       [(block [] [
-        (op "scf.yield" [] [%0] {} [])
+        (op "scf.yield" [] [%arg0] {} [])
       ])]
       [(block [] [
         (op "arith.constant" [%3 i32] [] {value (1 i32)} [])

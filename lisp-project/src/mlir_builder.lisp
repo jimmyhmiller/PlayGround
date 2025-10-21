@@ -278,14 +278,10 @@
 ;; value-list is a List (cons cell) of the form (int-value type-symbol)
 (def parse-integer-value-attr (: (-> [(Pointer MLIRBuilderContext) (Pointer types/Value)] MlirAttribute))
   (fn [builder value-list]
-    (printf (c-str "    DEBUG: Entering parse-integer-value-attr\n"))
     ;; Use car/cdr to access list elements
     (let [first-elem (: (Pointer types/Value)) (types/car value-list)]
-      (printf (c-str "    DEBUG: Got first elem: %p\n") (cast (Pointer U8) first-elem))
       (let [rest (: (Pointer types/Value)) (types/cdr value-list)]
-        (printf (c-str "    DEBUG: Got rest: %p\n") (cast (Pointer U8) rest))
         (let [rest-tag (: types/ValueTag) (pointer-field-read rest tag)]
-          (printf (c-str "    DEBUG: rest tag = %d\n") (cast I32 rest-tag))
           (if (= rest-tag types/ValueTag/List)
             (let [second-elem (: (Pointer types/Value)) (types/car rest)
                   ;; First element should be a Number - read num_val directly
@@ -293,7 +289,6 @@
                   ;; Second element should be a Symbol - read str_val
                   type-str (: (Pointer U8)) (pointer-field-read second-elem str_val)
                   mlir-type (: MlirType) (parse-type-string builder type-str)]
-              (printf (c-str "    Parsed integer attr: %lld : %s\n") int-val type-str)
               (mlirIntegerAttrGet mlir-type int-val))
             (let [ctx (: MlirContext) (pointer-field-read builder ctx)]
               (printf (c-str "    ERROR: Invalid integer value format, rest-tag=%d\n") (cast I32 rest-tag))
@@ -679,20 +674,28 @@
           (if (> count 0)
             (let [data (: (Pointer U8)) (pointer-field-read vector-struct data)
                   regions-array (: (Array MlirRegion 4)) (array MlirRegion 4)
-                  idx (: I32) 0]
-              (printf (c-str "DEBUG: adding %d regions\n") count)
+                  idx (: I32) 0
+                  out-count (: I32) 0]
               ;; Iterate through regions (each is a vector of blocks)
               (while (< idx count)
                 (let [elem-offset (: I64) (* (cast I64 idx) 8)
                       elem-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) elem-offset))
                       elem-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) elem-ptr-loc)
                       region-vec (: (Pointer types/Value)) (dereference elem-ptr-ptr)
-                      mlir-region (: MlirRegion) (build-mlir-region builder region-vec tracker)]
-                  (array-set! regions-array idx mlir-region)
+                      region-tag (: types/ValueTag) (pointer-field-read region-vec tag)]
+                  (if (= region-tag types/ValueTag/Vector)
+                    (let [mlir-region (: MlirRegion) (build-mlir-region builder region-vec tracker)]
+                      (array-set! regions-array out-count mlir-region)
+                      (set! out-count (+ out-count 1))
+                      0)
+                    0)
                   (set! idx (+ idx 1))))
-              ;; Add regions to state
-              (mlirOperationStateAddOwnedRegions state-ptr (cast I64 count) (array-ptr regions-array 0))
-              count)
+              ;; Add regions to state (only the ones we actually created)
+              (if (> out-count 0)
+                (let [_ (: Nil) (mlirOperationStateAddOwnedRegions state-ptr (cast I64 out-count) (array-ptr regions-array 0))]
+                  0)
+                0)
+              out-count)
             0))
         0))))
 
