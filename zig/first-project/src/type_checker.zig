@@ -2070,6 +2070,24 @@ pub const BidirectionalTypeChecker = struct {
                     return result;
                 }
 
+                // Handle builtin *argc*
+                if (std.mem.eql(u8, name, "*argc*")) {
+                    result.* = TypedValue{ .symbol = .{ .name = name, .type = Type.i32 } };
+                    return result;
+                }
+
+                // Handle builtin *argv*
+                if (std.mem.eql(u8, name, "*argv*")) {
+                    const char_ptr = try self.allocator.create(Type);
+                    char_ptr.* = Type.u8;
+                    const argv_type = try self.allocator.create(Type);
+                    argv_type.* = Type{ .pointer = char_ptr };
+                    const argv_ptr = try self.allocator.create(Type);
+                    argv_ptr.* = Type{ .pointer = argv_type };
+                    result.* = TypedValue{ .symbol = .{ .name = name, .type = Type{ .pointer = argv_ptr } } };
+                    return result;
+                }
+
                 // Check if this is a qualified symbol (contains `/`)
                 if (std.mem.indexOf(u8, name, "/")) |slash_pos| {
                     const alias = name[0..slash_pos];
