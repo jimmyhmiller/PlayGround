@@ -1,4 +1,19 @@
 
+## Building and Running
+
+**IMPORTANT:** To compile and run Lisp programs in this project, use:
+
+```bash
+build0/bin/lisp0 <source-file.lisp> --run
+```
+
+This single command:
+1. Compiles the Lisp source to C
+2. Compiles the C to a binary
+3. Executes the binary
+
+**DO NOT** try to use `make` or manually compile the C files. The `lisp0` compiler handles the entire build pipeline.
+
 ## Bug Tracker
 
 Use this tool to record bugs discovered during development. This helps track issues that need to be addressed later. Each bug gets a unique ID (goofy animal name like "curious-elephant") for easy reference and closing.

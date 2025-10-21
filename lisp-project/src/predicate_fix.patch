@@ -1,0 +1,34 @@
+--- a/src/mlir_builder.lisp
++++ b/src/mlir_builder.lisp
+@@ -240,10 +240,36 @@
+
+ ;; Create attribute from key-value pair
+ ;; TODO: This is simplified - need to handle different attribute types
++(def parse-cmpi-predicate (: (-> [(Pointer U8)] I64))
++  (fn [pred-str]
++    (if (== (strcmp pred-str (c-str "eq")) 0) 0
++      (if (== (strcmp pred-str (c-str "ne")) 0) 1
++        (if (== (strcmp pred-str (c-str "slt")) 0) 2
++          (if (== (strcmp pred-str (c-str "sle")) 0) 3
++            (if (== (strcmp pred-str (c-str "sgt")) 0) 4
++              (if (== (strcmp pred-str (c-str "sge")) 0) 5
++                (if (== (strcmp pred-str (c-str "ult")) 0) 6
++                  (if (== (strcmp pred-str (c-str "ule")) 0) 7
++                    (if (== (strcmp pred-str (c-str "ugt")) 0) 8
++                      (if (== (strcmp pred-str (c-str "uge")) 0) 9
++                        0))))))))))))  ; Default to eq
++
+ (def create-attribute (: (-> [(Pointer MLIRBuilderContext) (Pointer U8) (Pointer U8)] MlirAttribute))
+   (fn [builder key value]
+     (let [ctx (: MlirContext) (pointer-field-read builder ctx)]
+-      ;; For now, treat everything as string attributes
+-      ;; TODO: Parse "42 : i32" style values properly
+-      (mlirStringAttrGet ctx (mlirStringRefCreateFromCString value)))))
++      (if (== (strcmp key (c-str "predicate")) 0)
++        ;; Predicate attribute for arith.cmpi - convert string to integer enum
++        (let [pred-val (: I64) (parse-cmpi-predicate value)
++              i64-type (: MlirType) (pointer-field-read builder i64Type)]
++          (mlirIntegerAttrGet i64-type pred-val))
++        ;; For all other attributes, treat as string
++        (mlirStringAttrGet ctx (mlirStringRefCreateFromCString value))))))
++

@@ -238,21 +238,100 @@
     ;; For now, simple atoi - will need more complex parsing later
     (cast I64 (atoi value-str))))
 
-;; Create attribute from key-value pair
-;; TODO: This is simplified - need to handle different attribute types
-(def create-attribute (: (-> [(Pointer MLIRBuilderContext) (Pointer U8) (Pointer U8)] MlirAttribute))
-  (fn [builder key value]
-    (let [ctx (: MlirContext) (pointer-field-read builder ctx)]
-      ;; For now, treat everything as string attributes
-      ;; TODO: Parse "42 : i32" style values properly
-      (mlirStringAttrGet ctx (mlirStringRefCreateFromCString value)))))
+;; Parse integer value attribute like (1 i32) or (42 i64)
+;; value-list is a List (cons cell) of the form (int-value type-symbol)
+(def parse-integer-value-attr (: (-> [(Pointer MLIRBuilderContext) (Pointer types/Value)] MlirAttribute))
+  (fn [builder value-list]
+    (printf (c-str "    DEBUG: Entering parse-integer-value-attr\n"))
+    ;; Use car/cdr to access list elements
+    (let [first-elem (: (Pointer types/Value)) (types/car value-list)]
+      (printf (c-str "    DEBUG: Got first elem: %p\n") (cast (Pointer U8) first-elem))
+      (let [rest (: (Pointer types/Value)) (types/cdr value-list)]
+        (printf (c-str "    DEBUG: Got rest: %p\n") (cast (Pointer U8) rest))
+        (let [rest-tag (: types/ValueTag) (pointer-field-read rest tag)]
+          (printf (c-str "    DEBUG: rest tag = %d\n") (cast I32 rest-tag))
+          (if (= rest-tag types/ValueTag/List)
+            (let [second-elem (: (Pointer types/Value)) (types/car rest)
+                  int-str (: (Pointer U8)) (pointer-field-read first-elem str_val)
+                  int-val (: I64) (cast I64 (atoi int-str))
+                  type-str (: (Pointer U8)) (pointer-field-read second-elem str_val)
+                  mlir-type (: MlirType) (parse-type-string builder type-str)]
+              (printf (c-str "    Parsed integer attr: %lld : %s\n") int-val type-str)
+              (mlirIntegerAttrGet mlir-type int-val))
+            (let [ctx (: MlirContext) (pointer-field-read builder ctx)]
+              (printf (c-str "    ERROR: Invalid integer value format, rest-tag=%d\n") (cast I32 rest-tag))
+              (mlirStringAttrGet ctx (mlirStringRefCreateFromCString (c-str "ERROR"))))))))))
 
-;; Create named attribute
-(def create-named-attribute (: (-> [(Pointer MLIRBuilderContext) (Pointer U8) (Pointer U8)] MlirNamedAttribute))
-  (fn [builder key value]
+;; Parse function type attribute like (-> [i32] [i32])
+(def parse-function-type-attr (: (-> [(Pointer MLIRBuilderContext) (Pointer types/Value)] MlirAttribute))
+  (fn [builder value-list]
+    (let [ctx (: MlirContext) (pointer-field-read builder ctx)]
+      ;; TODO: Properly parse function type - for now create placeholder TypeAttr
+      (printf (c-str "    WARNING: function_type parsing not fully implemented\n"))
+      ;; For now, create a simple function type with i32 -> i32
+      (let [i32-type (: MlirType) (pointer-field-read builder i32Type)
+            inputs (: (Array MlirType 1)) (array MlirType 1)
+            results (: (Array MlirType 1)) (array MlirType 1)]
+        (array-set! inputs 0 i32-type)
+        (array-set! results 0 i32-type)
+        (let [fn-type (: MlirType) (mlirFunctionTypeGet ctx 1 (array-ptr inputs 0) 1 (array-ptr results 0))]
+          (mlirTypeAttrGet fn-type))))))
+
+;; Create attribute from key-value pair where value is a Value (can be string or list)
+(def create-attribute-from-value (: (-> [(Pointer MLIRBuilderContext) (Pointer U8) (Pointer types/Value)] MlirAttribute))
+  (fn [builder key value-val]
+    (let [ctx (: MlirContext) (pointer-field-read builder ctx)
+          value-tag (: types/ValueTag) (pointer-field-read value-val tag)]
+      (printf (c-str "  Creating attribute: %s (tag=%d)\n") key (cast I32 value-tag))
+
+      ;; Check if value is a string or a list
+      (if (= value-tag types/ValueTag/String)
+        ;; String attribute
+        (let [value-str (: (Pointer U8)) (pointer-field-read value-val str_val)]
+          (if (== (strcmp key (c-str "predicate")) 0)
+            ;; Predicate attribute for arith.cmpi - convert string to integer enum
+            (let [pred-val (: I64)
+                  (if (== (strcmp value-str (c-str "sle")) 0) 3
+                    (if (== (strcmp value-str (c-str "eq")) 0) 0
+                      (if (== (strcmp value-str (c-str "ne")) 0) 1
+                        (if (== (strcmp value-str (c-str "slt")) 0) 2
+                          (if (== (strcmp value-str (c-str "sgt")) 0) 4
+                            (if (== (strcmp value-str (c-str "sge")) 0) 5
+                              (if (== (strcmp value-str (c-str "ult")) 0) 6
+                                (if (== (strcmp value-str (c-str "ule")) 0) 7
+                                  (if (== (strcmp value-str (c-str "ugt")) 0) 8
+                                    (if (== (strcmp value-str (c-str "uge")) 0) 9 0))))))))))
+                  i64-type (: MlirType) (pointer-field-read builder i64Type)]
+              (mlirIntegerAttrGet i64-type pred-val))
+            ;; For all other string attributes
+            (mlirStringAttrGet ctx (mlirStringRefCreateFromCString value-str))))
+
+        ;; Check for List (cons cell structure from parenthesized expressions)
+        (if (= value-tag types/ValueTag/List)
+          ;; List attribute - check what kind
+          (if (== (strcmp key (c-str "function_type")) 0)
+            (parse-function-type-attr builder value-val)
+            (if (== (strcmp key (c-str "value")) 0)
+              (parse-integer-value-attr builder value-val)
+              (if (== (strcmp key (c-str "callee")) 0)
+                ;; callee is a symbol reference - extract first element from list using car
+                (let [first-elem (: (Pointer types/Value)) (types/car value-val)
+                      str-val (: (Pointer U8)) (pointer-field-read first-elem str_val)]
+                  (mlirStringAttrGet ctx (mlirStringRefCreateFromCString str-val)))
+                ;; Unknown list attribute
+                (let [_ (: I32) (printf (c-str "    WARNING: Unknown list attribute type\n"))]
+                  (mlirStringAttrGet ctx (mlirStringRefCreateFromCString (c-str "TODO")))))))
+
+          ;; Unknown value type
+          (let [_ (: I32) (printf (c-str "    ERROR: Unknown attribute value type\n"))]
+            (mlirStringAttrGet ctx (mlirStringRefCreateFromCString (c-str "ERROR")))))))))
+
+;; Create named attribute from a Value
+(def create-named-attribute-from-value (: (-> [(Pointer MLIRBuilderContext) (Pointer U8) (Pointer types/Value)] MlirNamedAttribute))
+  (fn [builder key value-val]
     (let [ctx (: MlirContext) (pointer-field-read builder ctx)
           name-id (: MlirIdentifier) (mlirIdentifierGet ctx (mlirStringRefCreateFromCString key))
-          attr (: MlirAttribute) (create-attribute builder key value)]
+          attr (: MlirAttribute) (create-attribute-from-value builder key value-val)]
       (mlirNamedAttributeGet name-id attr))))
 
 ;; Note: Forward declarations not needed - two-pass type checking handles mutual recursion automatically
@@ -386,35 +465,34 @@
         (let [vec-ptr (: (Pointer U8)) (pointer-field-read attributes-val vec_val)
               vector-struct (: (Pointer types/Vector)) (cast (Pointer types/Vector) vec-ptr)
               vec-count (: I32) (pointer-field-read vector-struct count)
-              attr-count (: I32) (cast I32 (/ (cast F64 vec-count) 2.0))]  ; Each attribute is 2 elements
-          (if (> attr-count 0)
-            (let [data (: (Pointer U8)) (pointer-field-read vector-struct data)
-                  attrs-array (: (Array MlirNamedAttribute 16)) (array MlirNamedAttribute 16)
-                  idx (: I32) 0]
-              ;; Iterate through map entries (key-value pairs)
-              (while (< idx attr-count)
-                (let [key-idx (: I32) (* idx 2)
-                      val-idx (: I32) (+ (* idx 2) 1)
+              attr-count (: I32) (cast I32 (/ (cast F64 vec-count) 2.0))  ; Each attribute is 2 elements
+              (if (> attr-count 0)
+                (let [data (: (Pointer U8)) (pointer-field-read vector-struct data)
+                      attrs-array (: (Array MlirNamedAttribute 16)) (array MlirNamedAttribute 16)
+                      idx (: I32) 0]
+                  ;; Iterate through map entries (key-value pairs)
+                  (while (< idx attr-count)
+                    (let [key-idx (: I32) (* idx 2)
+                          val-idx (: I32) (+ (* idx 2) 1)
 
-                      key-offset (: I64) (* (cast I64 key-idx) 8)
-                      key-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) key-offset))
-                      key-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) key-ptr-loc)
-                      key-val (: (Pointer types/Value)) (dereference key-ptr-ptr)
+                          key-offset (: I64) (* (cast I64 key-idx) 8)
+                          key-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) key-offset))
+                          key-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) key-ptr-loc)
+                          key-val (: (Pointer types/Value)) (dereference key-ptr-ptr)
 
-                      val-offset (: I64) (* (cast I64 val-idx) 8)
-                      val-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) val-offset))
-                      val-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) val-ptr-loc)
-                      val-val (: (Pointer types/Value)) (dereference val-ptr-ptr)]
+                          val-offset (: I64) (* (cast I64 val-idx) 8)
+                          val-ptr-loc (: (Pointer U8)) (cast (Pointer U8) (+ (cast I64 data) val-offset))
+                          val-ptr-ptr (: (Pointer (Pointer types/Value))) (cast (Pointer (Pointer types/Value)) val-ptr-loc)
+                          val-val (: (Pointer types/Value)) (dereference val-ptr-ptr)]
 
-                  (let [key-str (: (Pointer U8)) (pointer-field-read key-val str_val)
-                        val-str (: (Pointer U8)) (pointer-field-read val-val str_val)
-                        named-attr (: MlirNamedAttribute) (create-named-attribute builder key-str val-str)]
-                    (array-set! attrs-array idx named-attr)
-                    (set! idx (+ idx 1)))))
-              ;; Add attributes to state
-              (mlirOperationStateAddAttributes state-ptr (cast I64 attr-count) (array-ptr attrs-array 0))
-              attr-count)
-            0))
+                      (let [key-str (: (Pointer U8)) (pointer-field-read key-val str_val)
+                            named-attr (: MlirNamedAttribute) (create-named-attribute-from-value builder key-str val-val)]
+                        (array-set! attrs-array idx named-attr)
+                        (set! idx (+ idx 1)))))
+                  ;; Add attributes to state
+                  (mlirOperationStateAddAttributes state-ptr (cast I64 attr-count) (array-ptr attrs-array 0))
+                  attr-count)
+                0)])
         0))))
 
 ;; Helper: Process regions vector and add to operation state
@@ -616,8 +694,8 @@
     (let [builder (: (Pointer MLIRBuilderContext)) (mlir-builder-init)]
       (printf (c-str "Builder initialized successfully\n\n"))
 
-      ;; Compile the simple test file
-      (let [result (: I32) (compile-file builder (c-str "tests/simple.lisp"))]
+      ;; Compile the fib test file
+      (let [result (: I32) (compile-file builder (c-str "tests/fib.lisp"))]
         (mlir-builder-destroy builder)
         (printf (c-str "\nDone!\n"))
         result))))
