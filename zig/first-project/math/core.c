@@ -44,6 +44,11 @@ void init_namespace_math_core(Namespace_math_core* ns) {
 static long long add_two(long long x) {
     return g_math_utils.add_one(g_math_utils.add_one(x));
 }
+
+// Built-in argc/argv globals
+int lisp_argc;
+char** lisp_argv;
+
 void lisp_main(void) {
     init_namespace_math_utils(&g_math_utils);
     init_namespace_math_core(&g_math_core);

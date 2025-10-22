@@ -324,6 +324,34 @@ pub const BidirectionalTypeChecker = struct {
         self.loader_fn = loader_fn;
     }
 
+    /// Inherit ambient declarations (declare-fn, declare-type, etc.) from parent checker
+    /// This allows required namespaces to use C functions/types declared in the parent file
+    pub fn inheritDeclarations(self: *BidirectionalTypeChecker, parent: *const BidirectionalTypeChecker) !void {
+        // Copy function and variable declarations from parent's env
+        var parent_env_iter = parent.env.iterator();
+        while (parent_env_iter.next()) |entry| {
+            const name = entry.key_ptr.*;
+            const type_info = entry.value_ptr.*;
+
+            // Only copy if not already defined (child's own declarations take precedence)
+            if (self.env.get(name) == null) {
+                try self.env.put(name, type_info);
+            }
+        }
+
+        // Copy type definitions from parent's type_defs
+        var parent_typedef_iter = parent.type_defs.iterator();
+        while (parent_typedef_iter.next()) |entry| {
+            const name = entry.key_ptr.*;
+            const type_def = entry.value_ptr.*;
+
+            // Only copy if not already defined
+            if (self.type_defs.get(name) == null) {
+                try self.type_defs.put(name, type_def);
+            }
+        }
+    }
+
     fn recordTypeMismatch(self: *BidirectionalTypeChecker, expr: *Value, expected: Type, actual: Type) TypeCheckError {
         self.errors.append(self.allocator, .{
             .index = self.index,
@@ -1467,24 +1495,24 @@ pub const BidirectionalTypeChecker = struct {
                 const alias = type_name[0..slash_pos];
                 const def_name = type_name[slash_pos + 1 ..];
 
-                std.debug.print("DEBUG: Parsing qualified type '{s}' - alias='{s}' def='{s}'\n", .{ type_name, alias, def_name });
+                // // std.debug.print("DEBUG: Parsing qualified type '{s}' - alias='{s}' def='{s}'\n", .{ type_name, alias, def_name });
 
                 // Check if the alias was required (namespace access)
                 if (self.requires.get(alias)) |namespace_name| {
-                    std.debug.print("DEBUG: Found namespace '{s}' for alias '{s}'\n", .{ namespace_name, alias });
+                    // // std.debug.print("DEBUG: Found namespace '{s}' for alias '{s}'\n", .{ namespace_name, alias });
                     // Look up the namespace exports
                     if (self.namespace_exports.get(namespace_name)) |exports| {
-                        std.debug.print("DEBUG: Found exports for namespace '{s}'\n", .{namespace_name});
+                        // std.debug.print("DEBUG: Found exports for namespace '{s}'\n", .{namespace_name});
                         // Look up the definition in the exports
                         if (exports.get(def_name)) |def_type| {
-                            std.debug.print("DEBUG: Found '{s}' in exports, type: {any}\n", .{ def_name, def_type });
+                            // std.debug.print("DEBUG: Found '{s}' in exports, type: {any}\n", .{ def_name, def_type });
                             // If this is a type definition (: Type), look up the actual type in namespace_type_defs
                             if (def_type == .type_type) {
-                                std.debug.print("DEBUG: '{s}' is a type_type, looking in namespace_type_defs['{s}']\n", .{ def_name, namespace_name });
+                                // std.debug.print("DEBUG: '{s}' is a type_type, looking in namespace_type_defs['{s}']\n", .{ def_name, namespace_name });
                                 if (self.namespace_type_defs.get(namespace_name)) |type_defs| {
-                                    std.debug.print("DEBUG: Found type_defs for namespace '{s}'\n", .{namespace_name});
+                                    // std.debug.print("DEBUG: Found type_defs for namespace '{s}'\n", .{namespace_name});
                                     if (type_defs.get(def_name)) |actual_type| {
-                                        std.debug.print("DEBUG: Successfully found actual type for '{s}'\n", .{def_name});
+                                        // std.debug.print("DEBUG: Successfully found actual type for '{s}'\n", .{def_name});
                                         return actual_type;
                                     }
                                     std.debug.print("ERROR: Type '{s}' not found in namespace_type_defs for namespace '{s}'\n", .{ def_name, namespace_name });
@@ -2519,21 +2547,130 @@ pub const BidirectionalTypeChecker = struct {
                             const typed_value = try self.synthesizeTyped(second_val);
                             try self.env.put(var_name, typed_value.getType());
                             return typed_value;
-                        } else if (std.mem.eql(u8, first.symbol, "extern-fn") or
-                            std.mem.eql(u8, first.symbol, "extern-type") or
-                            std.mem.eql(u8, first.symbol, "extern-union") or
+                        } else if (std.mem.eql(u8, first.symbol, "declare-fn") or std.mem.eql(u8, first.symbol, "extern-fn")) {
+                            // Parse and register function declaration
+                            // Syntax: (declare-fn name [params...] -> return-type)
+                            var node_iter = list.next; // Skip 'declare-fn'
+
+                            // Get function name
+                            const name_node = node_iter orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const fn_name = if (name_node.value) |v|
+                                if (v.isSymbol()) v.symbol else return TypeCheckError.InvalidTypeAnnotation
+                            else return TypeCheckError.InvalidTypeAnnotation;
+
+                            node_iter = name_node.next;
+
+                            // Get parameter list
+                            const param_list_node = node_iter orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const param_list = param_list_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+                            if (!param_list.isVector()) return TypeCheckError.InvalidTypeAnnotation;
+
+                            node_iter = param_list_node.next;
+
+                            // Skip '->' arrow
+                            const arrow_node = node_iter orelse return TypeCheckError.InvalidTypeAnnotation;
+                            if (arrow_node.value) |v| {
+                                if (!v.isSymbol() or !std.mem.eql(u8, v.symbol, "->")) {
+                                    return TypeCheckError.InvalidTypeAnnotation;
+                                }
+                            }
+
+                            node_iter = arrow_node.next;
+
+                            // Get return type
+                            const return_type_node = node_iter orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const return_type_expr = return_type_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+                            // Parse parameter types
+                            // Parameter list format: [name1 Type1 name2 Type2 ...]
+                            const param_list_len = param_list.vector.len();
+                            if (param_list_len % 2 != 0) return TypeCheckError.InvalidTypeAnnotation;
+                            const param_count = param_list_len / 2;
+                            const param_types = try self.allocator.alloc(Type, param_count);
+                            var i: usize = 0;
+                            while (i < param_count) {
+                                // Skip parameter name (at index i*2), parse type (at index i*2+1)
+                                param_types[i] = try self.parseType(param_list.vector.at(i * 2 + 1));
+                                i += 1;
+                            }
+
+                            // Parse return type
+                            const return_type = try self.parseType(return_type_expr);
+
+                            // Create function type
+                            const func_type = try self.allocator.create(FunctionType);
+                            func_type.* = FunctionType{
+                                .param_types = param_types,
+                                .return_type = return_type,
+                            };
+
+                            // Register in environment
+                            try self.env.put(fn_name, Type{ .function = func_type });
+                            // // std.debug.print("DEBUG: Registered function '{s}' in environment\n", .{fn_name});
+
+                            result.* = TypedValue{
+                                .list = .{
+                                    .elements = typed_elements[0..0],
+                                    .type = Type.nil,
+                                },
+                            };
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "declare-type") or std.mem.eql(u8, first.symbol, "extern-type")) {
+                            // Parse and register opaque type declaration
+                            // Syntax: (declare-type TypeName)
+                            const name_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const type_name = if (name_node.value) |v|
+                                if (v.isSymbol()) v.symbol else return TypeCheckError.InvalidTypeAnnotation
+                            else return TypeCheckError.InvalidTypeAnnotation;
+
+                            // Create an opaque extern type
+                            const extern_type = try self.allocator.create(ExternType);
+                            extern_type.* = ExternType{ .name = type_name, .is_opaque = true };
+
+                            // Register in type_defs
+                            try self.type_defs.put(type_name, Type{ .extern_type = extern_type });
+                            // // std.debug.print("DEBUG: Registered opaque type '{s}' in type_defs\n", .{type_name});
+
+                            result.* = TypedValue{
+                                .list = .{
+                                    .elements = typed_elements[0..0],
+                                    .type = Type.nil,
+                                },
+                            };
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "declare-var") or std.mem.eql(u8, first.symbol, "extern-var")) {
+                            // Parse and register variable declaration
+                            // Syntax: (declare-var name Type)
+                            const name_node = list.next orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const var_name = if (name_node.value) |v|
+                                if (v.isSymbol()) v.symbol else return TypeCheckError.InvalidTypeAnnotation
+                            else return TypeCheckError.InvalidTypeAnnotation;
+
+                            const type_node = name_node.next orelse return TypeCheckError.InvalidTypeAnnotation;
+                            const type_expr = type_node.value orelse return TypeCheckError.InvalidTypeAnnotation;
+
+                            // Parse the type
+                            const var_type = try self.parseType(type_expr);
+
+                            // Register in environment
+                            try self.env.put(var_name, var_type);
+
+                            result.* = TypedValue{
+                                .list = .{
+                                    .elements = typed_elements[0..0],
+                                    .type = Type.nil,
+                                },
+                            };
+                            return result;
+                        } else if (std.mem.eql(u8, first.symbol, "extern-union") or
                             std.mem.eql(u8, first.symbol, "extern-struct") or
-                            std.mem.eql(u8, first.symbol, "extern-var") or
-                            std.mem.eql(u8, first.symbol, "declare-fn") or
-                            std.mem.eql(u8, first.symbol, "declare-type") or
                             std.mem.eql(u8, first.symbol, "declare-union") or
                             std.mem.eql(u8, first.symbol, "declare-struct") or
-                            std.mem.eql(u8, first.symbol, "declare-var") or
                             std.mem.eql(u8, first.symbol, "include-header") or
                             std.mem.eql(u8, first.symbol, "link-library") or
                             std.mem.eql(u8, first.symbol, "compiler-flag"))
                         {
-                            // Extern/declare forms: These are handled elsewhere and return nil
+                            // Other extern/declare forms: handled elsewhere and return nil
                             result.* = TypedValue{
                                 .list = .{
                                     .elements = typed_elements[0..0], // Empty for now
@@ -3626,20 +3763,12 @@ pub const BidirectionalTypeChecker = struct {
 
     // Two-pass type checking for forward references (fully typed)
     pub fn typeCheckAllTwoPass(self: *BidirectionalTypeChecker, expressions: []const *Value) !TypeCheckReport {
-        // Pass 1: Collect all top-level definitions and their type signatures
+        // Pass 1: Register ALL signatures - types, functions, variables, def signatures, require
+        // Just process everything in order, silently skipping any errors
         for (expressions, 0..) |expr, idx| {
-            // Handle namespace and require values directly (they may come from parser as special types)
-            if (expr.isNamespace()) {
-                _ = self.synthesizeTyped(expr) catch |err| {
-                    std.debug.print("Pass 1: Failed to process namespace: {}\n", .{err});
-                };
-                continue;
-            }
-
-            if (expr.isRequire()) {
-                _ = self.synthesizeTyped(expr) catch |err| {
-                    std.debug.print("Pass 1: Failed to process require: {}\n", .{err});
-                };
+            // Handle namespace and require forms
+            if (expr.isNamespace() or expr.isRequire()) {
+                _ = self.synthesizeTyped(expr) catch continue;
                 continue;
             }
 
@@ -3647,8 +3776,10 @@ pub const BidirectionalTypeChecker = struct {
                 var current: ?*const @TypeOf(expr.list.*) = expr.list;
                 if (current) |node| {
                     if (node.value) |first| {
-                        // Handle extern and declare declarations in pass 1
-                        if (first.isSymbol() and (std.mem.eql(u8, first.symbol, "extern-fn") or
+                        // Process ALL declarations in Pass 1 - silently skip errors
+                        if (first.isSymbol() and (std.mem.eql(u8, first.symbol, "ns") or
+                            std.mem.eql(u8, first.symbol, "require") or
+                            std.mem.eql(u8, first.symbol, "extern-fn") or
                             std.mem.eql(u8, first.symbol, "extern-type") or
                             std.mem.eql(u8, first.symbol, "extern-union") or
                             std.mem.eql(u8, first.symbol, "extern-struct") or
@@ -3662,32 +3793,14 @@ pub const BidirectionalTypeChecker = struct {
                             std.mem.eql(u8, first.symbol, "link-library") or
                             std.mem.eql(u8, first.symbol, "compiler-flag")))
                         {
-                            _ = self.synthesizeTyped(expr) catch |err| {
-                                std.debug.print("Pass 1: Failed to synthesize {s}: {}\n", .{ first.symbol, err });
-                                continue;
-                            };
+                            _ = self.synthesizeTyped(expr) catch continue;
                             continue;
                         }
 
-                        // Handle ns and require in pass 1 (they need to be processed before defs)
-                        if (first.isSymbol() and std.mem.eql(u8, first.symbol, "ns")) {
-                            _ = self.synthesizeTyped(expr) catch |err| {
-                                std.debug.print("Pass 1: Failed to process ns: {}\n", .{err});
-                                continue;
-                            };
-                            continue;
-                        }
-
-                        if (first.isSymbol() and std.mem.eql(u8, first.symbol, "require")) {
-                            _ = self.synthesizeTyped(expr) catch |err| {
-                                std.debug.print("Pass 1: Failed to process require: {}\n", .{err});
-                                continue;
-                            };
-                            continue;
-                        }
-
+                        // Process def signatures (register in env, but don't check bodies yet)
                         if (first.isSymbol() and std.mem.eql(u8, first.symbol, "def")) {
                             // Extract name and type annotation without checking body
+                            // Silently skip errors - they'll be caught in Pass 2
                             current = node.next;
 
                             // Get variable name
@@ -3754,7 +3867,11 @@ pub const BidirectionalTypeChecker = struct {
                                         }
 
                                         // Try to parse the body as a type (Struct or Enum)
-                                        actual_type = self.parseType(body_val) catch annotated_type;
+                                        // Silently skip if it fails (e.g., references types not yet loaded)
+                                        actual_type = self.parseType(body_val) catch {
+                                            // Couldn't parse - skip this def, will retry in next iteration
+                                            continue;
+                                        };
 
                                         // If we added a placeholder, update it with the actual parsed type
                                         if (is_struct_or_enum) {
@@ -3777,10 +3894,13 @@ pub const BidirectionalTypeChecker = struct {
 
                             // Add to environment for forward references
                             // For type definitions, store Type in env, actual type in type_defs
-                            try self.env.put(var_name, annotated_type);
+                            self.env.put(var_name, annotated_type) catch continue;
                             // Add to type_defs if this is a struct/enum type definition
+                            // Skip if already registered to avoid duplicates
                             if (is_struct_type_def or is_enum_type_def) {
-                                try self.type_defs.put(var_name, actual_type);
+                                if (self.type_defs.get(var_name) == null) {
+                                    self.type_defs.put(var_name, actual_type) catch continue;
+                                }
                             }
                         }
                     }
@@ -3829,17 +3949,10 @@ pub const BidirectionalTypeChecker = struct {
                             std.mem.eql(u8, first.symbol, "link-library") or
                             std.mem.eql(u8, first.symbol, "compiler-flag")))
                         {
-                            // Synthesize again to get the typed value for the results
-                            const typed = self.synthesizeTyped(expr) catch |err| {
-                                if (err == TypeCheckError.OutOfMemory) return err;
-                                try self.errors.append(self.allocator, .{
-                                    .index = index,
-                                    .expr = expr,
-                                    .err = err,
-                                    .info = null,
-                                });
-                                continue;
-                            };
+                            // These were already processed in Pass 1a - just create a nil result
+                            // Don't re-synthesize as they may fail if types weren't registered
+                            const typed = try self.allocator.create(TypedValue);
+                            typed.* = TypedValue{ .nil = .{ .type = Type.nil } };
                             try results.append(self.allocator, typed);
                             continue;
                         }
@@ -3888,6 +4001,15 @@ pub const BidirectionalTypeChecker = struct {
                                 continue;
                             };
                             current = second_node.next;
+
+                            // Skip type definitions in Pass 2 - they were already registered in Pass 1
+                            // This prevents duplicate struct/enum definitions in generated C code
+                            if (annotated_type == .type_type) {
+                                const typed = try self.allocator.create(TypedValue);
+                                typed.* = TypedValue{ .nil = .{ .type = Type.nil } };
+                                try results.append(self.allocator, typed);
+                                continue;
+                            }
 
                             const is_struct_type_def = annotated_type == .struct_type and annotated_type.struct_type.name.len == 0;
                             const is_enum_type_def = annotated_type == .enum_type and annotated_type.enum_type.name.len == 0;
