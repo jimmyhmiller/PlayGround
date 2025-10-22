@@ -51,6 +51,11 @@ static Point make_point(long long x, long long y) {
 static long long get_red_value() {
     return 255;
 }
+
+// Built-in argc/argv globals
+int lisp_argc;
+char** lisp_argv;
+
 void lisp_main(void) {
     init_namespace_math_utils(&g_math_utils);
 }

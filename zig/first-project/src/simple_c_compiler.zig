@@ -656,6 +656,20 @@ pub const SimpleCCompiler = struct {
         // Set up namespace loader for nested requires
         checker.setNamespaceLoader(self, namespaceLoaderCallback);
 
+        // Take a snapshot of type_defs before inheriting, so we can identify locally-defined types
+        var inherited_types = std.StringHashMap(void).init(self.allocator.*);
+        defer inherited_types.deinit();
+
+        // Record all types from parent as inherited (before inheritDeclarations)
+        var parent_typedef_iter = parent_checker.type_defs.iterator();
+        while (parent_typedef_iter.next()) |entry| {
+            try inherited_types.put(entry.key_ptr.*, {});
+        }
+
+        // Inherit declarations from parent checker (declare-fn, declare-type, etc.)
+        // This allows the required namespace to use C functions/types declared in the parent
+        try checker.inheritDeclarations(parent_checker);
+
         // Use two-pass type checking to properly handle requires and forward references
         _ = checker.typeCheckAllTwoPass(expanded_expressions.items) catch {
             std.debug.print("ERROR: Type checking failed for required namespace {s}\n", .{namespace_name});
@@ -704,10 +718,15 @@ pub const SimpleCCompiler = struct {
             try exports.put(entry.key_ptr.*, entry.value_ptr.*);
         }
 
-        // Copy all type definitions
+        // Copy only locally-defined type definitions (not inherited ones)
+        // This prevents types from parent namespaces being re-exported
         var typedef_iter = checker.type_defs.iterator();
         while (typedef_iter.next()) |entry| {
-            try type_defs.put(entry.key_ptr.*, entry.value_ptr.*);
+            const type_name = entry.key_ptr.*;
+            // Skip if this type was inherited from parent
+            if (inherited_types.get(type_name) == null) {
+                try type_defs.put(type_name, entry.value_ptr.*);
+            }
         }
 
         // 7. Register exports with parent checker
@@ -4119,7 +4138,7 @@ test "simple c compiler basic program" {
     const output = try compiler.compileString(source, .executable);
 
     const expected =
-        "#include <stdio.h>\n\n" ++ "typedef struct {\n" ++ "    long long answer;\n" ++ "} Namespace_my_app;\n\n" ++ "Namespace_my_app g_my_app;\n\n\n" ++ "void init_namespace_my_app(Namespace_my_app* ns) {\n" ++ "    ns->answer = 41;\n" ++ "}\n\n" ++ "int main() {\n" ++ "    init_namespace_my_app(&g_my_app);\n" ++ "    // namespace my.app\n" ++ "    (g_my_app.answer + 1);\n" ++ "    return 0;\n" ++ "}\n";
+        "#include <stdio.h>\n\n" ++ "typedef struct {\n" ++ "    long long answer;\n" ++ "} Namespace_my_app;\n\n" ++ "Namespace_my_app g_my_app;\n\n\n" ++ "void init_namespace_my_app(Namespace_my_app* ns) {\n" ++ "    ns->answer = 41;\n" ++ "}\n\n\n" ++ "// Built-in argc/argv globals\n" ++ "int lisp_argc;\n" ++ "char** lisp_argv;\n\n" ++ "int main(int argc, char** argv) {\n" ++ "    lisp_argc = argc;\n" ++ "    lisp_argv = argv;\n" ++ "    init_namespace_my_app(&g_my_app);\n" ++ "    // namespace my.app\n" ++ "    (g_my_app.answer + 1);\n" ++ "    return 0;\n" ++ "}\n";
 
     try std.testing.expectEqualStrings(expected, output);
 }
@@ -4473,7 +4492,7 @@ pub fn main() !void {
     const exe_name = if (builtin.os.tag == .windows)
         try std.fmt.allocPrint(allocator, "{s}.exe", .{stem})
     else
-        try allocator.dupe(u8, stem);
+        try std.fmt.allocPrint(allocator, "{s}.out", .{stem});
     defer allocator.free(exe_name);
 
     const exe_path = if (dir_opt) |dir_path|
