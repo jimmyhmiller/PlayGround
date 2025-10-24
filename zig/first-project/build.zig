@@ -41,6 +41,146 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    // Create modules for source files in dependency order
+    // 1. Collections (no dependencies)
+    const vector_mod = b.createModule(.{
+        .root_source_file = b.path("src/collections/vector.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const linked_list_mod = b.createModule(.{
+        .root_source_file = b.path("src/collections/linked_list.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const map_mod = b.createModule(.{
+        .root_source_file = b.path("src/collections/map.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "vector.zig", .module = vector_mod },
+        },
+    });
+
+    const collections_tests_mod = b.createModule(.{
+        .root_source_file = b.path("src/collections/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "vector.zig", .module = vector_mod },
+            .{ .name = "linked_list.zig", .module = linked_list_mod },
+            .{ .name = "map.zig", .module = map_mod },
+        },
+    });
+
+    // 2. Value (depends on collections)
+    const value_mod = b.createModule(.{
+        .root_source_file = b.path("src/value.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "collections/vector.zig", .module = vector_mod },
+            .{ .name = "collections/linked_list.zig", .module = linked_list_mod },
+            .{ .name = "collections/map.zig", .module = map_mod },
+        },
+    });
+
+    // 3. Type checker (depends on value)
+    const type_checker_mod = b.createModule(.{
+        .root_source_file = b.path("src/type_checker.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "value.zig", .module = value_mod },
+        },
+    });
+
+    // 4. Macro expander (depends on value and collections)
+    const macro_expander_mod = b.createModule(.{
+        .root_source_file = b.path("src/macro_expander.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "value.zig", .module = value_mod },
+            .{ .name = "collections/linked_list.zig", .module = linked_list_mod },
+            .{ .name = "collections/vector.zig", .module = vector_mod },
+        },
+    });
+
+    // 5. Lexer (no dependencies)
+    const lexer_mod = b.createModule(.{
+        .root_source_file = b.path("src/lexer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // 6. Parser (depends on lexer, value, collections)
+    const parser_mod = b.createModule(.{
+        .root_source_file = b.path("src/parser.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "lexer.zig", .module = lexer_mod },
+            .{ .name = "value.zig", .module = value_mod },
+            .{ .name = "collections/vector.zig", .module = vector_mod },
+            .{ .name = "collections/linked_list.zig", .module = linked_list_mod },
+            .{ .name = "collections/map.zig", .module = map_mod },
+        },
+    });
+
+    // 7. Reader (depends on parser and value)
+    const reader_mod = b.createModule(.{
+        .root_source_file = b.path("src/reader.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "parser.zig", .module = parser_mod },
+            .{ .name = "value.zig", .module = value_mod },
+        },
+    });
+
+    // 8. Namespace manager (depends on value and type_checker)
+    const namespace_manager_mod = b.createModule(.{
+        .root_source_file = b.path("src/namespace_manager.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "value.zig", .module = value_mod },
+            .{ .name = "type_checker.zig", .module = type_checker_mod },
+        },
+    });
+
+    // 9. C API (depends on value, reader, collections)
+    const c_api_mod = b.createModule(.{
+        .root_source_file = b.path("src/c_api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "value.zig", .module = value_mod },
+            .{ .name = "reader.zig", .module = reader_mod },
+            .{ .name = "collections/linked_list.zig", .module = linked_list_mod },
+            .{ .name = "collections/vector.zig", .module = vector_mod },
+            .{ .name = "collections/map.zig", .module = map_mod },
+        },
+    });
+
+    // 7. Compiler (depends on everything)
+    const compiler_mod = b.createModule(.{
+        .root_source_file = b.path("src/simple_c_compiler.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zig", .module = mod },
+            .{ .name = "reader.zig", .module = reader_mod },
+            .{ .name = "value.zig", .module = value_mod },
+            .{ .name = "type_checker.zig", .module = type_checker_mod },
+            .{ .name = "macro_expander.zig", .module = macro_expander_mod },
+            .{ .name = "namespace_manager.zig", .module = namespace_manager_mod },
+        },
+    });
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -138,12 +278,39 @@ pub fn build(b: *std.Build) void {
     // Add comprehensive test executable for all tests
     const all_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/test_all.zig"),
+            .root_source_file = b.path("test/test_all.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "simple_c_compiler.zig", .module = compiler_mod },
+                .{ .name = "reader.zig", .module = reader_mod },
+                .{ .name = "parser.zig", .module = parser_mod },
+                .{ .name = "lexer.zig", .module = lexer_mod },
+                .{ .name = "type_checker.zig", .module = type_checker_mod },
+                .{ .name = "value.zig", .module = value_mod },
+                .{ .name = "macro_expander.zig", .module = macro_expander_mod },
+                .{ .name = "c_api.zig", .module = c_api_mod },
+                .{ .name = "collections/tests.zig", .module = collections_tests_mod },
+                .{ .name = "collections/vector.zig", .module = vector_mod },
+                .{ .name = "collections/linked_list.zig", .module = linked_list_mod },
+                .{ .name = "collections/map.zig", .module = map_mod },
+            },
         }),
     });
     const run_all_tests = b.addRunArtifact(all_tests);
+
+    // Create test executable for test/compiler_test.zig with access to the compiler module
+    const compiler_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/compiler_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "compiler", .module = compiler_mod },
+            },
+        }),
+    });
+    const run_compiler_tests = b.addRunArtifact(compiler_tests);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
@@ -152,6 +319,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_all_tests.step);
+    test_step.dependOn(&run_compiler_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
