@@ -1764,16 +1764,21 @@ pub const SimpleCCompiler = struct {
                         return err;
                     };
                     try ns_writer.print("    {s} (*{s})(", .{ return_type_str, sanitized_field });
-                    for (fn_type.param_types, 0..) |param_type, i| {
-                        if (i > 0) try ns_writer.print(", ", .{});
-                        const param_type_str = self.cTypeFor(param_type, &includes) catch |err| {
-                            if (err == Error.UnsupportedType) {
-                                try ns_writer.print("/* unsupported */", .{});
-                                continue;
-                            }
-                            return err;
-                        };
-                        try ns_writer.print("{s}", .{param_type_str});
+                    // Use "void" for empty parameter list to avoid -Wstrict-prototypes
+                    if (fn_type.param_types.len == 0) {
+                        try ns_writer.print("void", .{});
+                    } else {
+                        for (fn_type.param_types, 0..) |param_type, i| {
+                            if (i > 0) try ns_writer.print(", ", .{});
+                            const param_type_str = self.cTypeFor(param_type, &includes) catch |err| {
+                                if (err == Error.UnsupportedType) {
+                                    try ns_writer.print("/* unsupported */", .{});
+                                    continue;
+                                }
+                                return err;
+                            };
+                            try ns_writer.print("{s}", .{param_type_str});
+                        }
                     }
                     try ns_writer.print(");\n", .{});
                 } else {
@@ -1804,10 +1809,15 @@ pub const SimpleCCompiler = struct {
                     const return_type_str = self.cTypeFor(fn_type.return_type, &includes) catch continue;
 
                     try ns_writer.print("static {s} {s}(", .{ return_type_str, sanitized_field });
-                    for (fn_type.param_types, 0..) |param_type, i| {
-                        if (i > 0) try ns_writer.print(", ", .{});
-                        const param_type_str = self.cTypeFor(param_type, &includes) catch continue;
-                        try ns_writer.print("{s}", .{param_type_str});
+                    // Use "void" for empty parameter list to avoid -Wstrict-prototypes
+                    if (fn_type.param_types.len == 0) {
+                        try ns_writer.print("void", .{});
+                    } else {
+                        for (fn_type.param_types, 0..) |param_type, i| {
+                            if (i > 0) try ns_writer.print(", ", .{});
+                            const param_type_str = self.cTypeFor(param_type, &includes) catch continue;
+                            try ns_writer.print("{s}", .{param_type_str});
+                        }
                     }
                     try ns_writer.print(");\n", .{});
                 }
@@ -2627,25 +2637,31 @@ pub const SimpleCCompiler = struct {
         } else {
             try def_writer.print("static {s} {s}(", .{ return_type_str, sanitized_name });
         }
-        var index: usize = 0;
-        while (index < params_vec.len()) : (index += 1) {
-            const param_val = params_vec.at(index);
-            if (!param_val.isSymbol()) return Error.InvalidFunction;
-            if (index > 0) {
-                try def_writer.print(", ", .{});
-            }
-            const sanitized_param = try self.sanitizeIdentifier(param_val.symbol);
-            defer self.allocator.*.free(sanitized_param);
-            // Use emitArrayDecl which handles function pointers correctly
-            self.emitArrayDecl(def_writer, sanitized_param, param_types[index], includes) catch |err| {
-                if (err == Error.UnsupportedType) {
-                    const repr = try self.formatValue(fn_expr);
-                    defer self.allocator.*.free(repr);
-                    try def_writer.print("/* unsupported */", .{});
-                } else {
-                    return err;
+
+        // Use "void" for empty parameter list to avoid -Wstrict-prototypes
+        if (params_vec.len() == 0) {
+            try def_writer.writeAll("void");
+        } else {
+            var index: usize = 0;
+            while (index < params_vec.len()) : (index += 1) {
+                const param_val = params_vec.at(index);
+                if (!param_val.isSymbol()) return Error.InvalidFunction;
+                if (index > 0) {
+                    try def_writer.print(", ", .{});
                 }
-            };
+                const sanitized_param = try self.sanitizeIdentifier(param_val.symbol);
+                defer self.allocator.*.free(sanitized_param);
+                // Use emitArrayDecl which handles function pointers correctly
+                self.emitArrayDecl(def_writer, sanitized_param, param_types[index], includes) catch |err| {
+                    if (err == Error.UnsupportedType) {
+                        const repr = try self.formatValue(fn_expr);
+                        defer self.allocator.*.free(repr);
+                        try def_writer.print("/* unsupported */", .{});
+                    } else {
+                        return err;
+                    }
+                };
+            }
         }
         try def_writer.writeAll(") {\n");
 
@@ -3728,11 +3744,12 @@ pub const SimpleCCompiler = struct {
                 }
 
                 // Check if this is a function or function pointer application
-                // Function application has type .function or .pointer(.function) for the first element
+                // Function application has type .function, .extern_function, or .pointer(.function) for the first element
                 if (l.elements.len > 0) {
                     const first_elem = l.elements[0];
                     const first_type = first_elem.getType();
                     const is_function = first_type == .function or
+                        first_type == .extern_function or
                         (first_type == .pointer and first_type.pointer.* == .function);
 
                     if (is_function) {
@@ -3749,11 +3766,35 @@ pub const SimpleCCompiler = struct {
                             try writer.print(")", .{});
                         }
 
+                        // Get function parameter types for casting
+                        const param_types = if (is_fn_ptr)
+                            first_type.pointer.*.function.param_types
+                        else if (first_type == .extern_function)
+                            first_type.extern_function.param_types
+                        else
+                            first_type.function.param_types;
+
                         try writer.print("(", .{});
                         var i: usize = 1;
                         while (i < l.elements.len) : (i += 1) {
                             if (i > 1) try writer.print(", ", .{});
-                            try self.writeExpressionTyped(writer, l.elements[i], ns_ctx, includes);
+
+                            // Check if we need to cast c_string to Pointer U8
+                            const arg_elem = l.elements[i];
+                            const arg_type = arg_elem.getType();
+                            const param_idx = i - 1;
+
+                            const needs_cast = param_idx < param_types.len and
+                                arg_type == .c_string and
+                                param_types[param_idx] == .pointer and
+                                param_types[param_idx].pointer.* == .u8;
+
+                            if (needs_cast) {
+                                try writer.print("(uint8_t*)", .{});
+                                includes.need_stdint = true;
+                            }
+
+                            try self.writeExpressionTyped(writer, arg_elem, ns_ctx, includes);
                         }
                         try writer.print(")", .{});
                         return;
@@ -4018,8 +4059,11 @@ pub const SimpleCCompiler = struct {
                 const params = try std.mem.join(self.allocator.*, ", ", params_list.items);
                 defer self.allocator.free(params);
 
+                // Use "void" for empty parameter list to avoid -Wstrict-prototypes
+                const params_or_void = if (params.len == 0) "void" else params;
+
                 // Format final string
-                return try std.fmt.allocPrint(self.allocator.*, "{s} (*)({s})", .{ ret_c_type, params });
+                return try std.fmt.allocPrint(self.allocator.*, "{s} (*)({s})", .{ ret_c_type, params_or_void });
             },
             .pointer => |pointee| {
                 // Special handling for pointer to function type
@@ -4041,8 +4085,11 @@ pub const SimpleCCompiler = struct {
                     const params = try std.mem.join(self.allocator.*, ", ", params_list.items);
                     defer self.allocator.free(params);
 
+                    // Use "void" for empty parameter list to avoid -Wstrict-prototypes
+                    const params_or_void = if (params.len == 0) "void" else params;
+
                     // Function pointer: ReturnType (*)(Params)
-                    return try std.fmt.allocPrint(self.allocator.*, "{s} (*)({s})", .{ ret_c_type, params });
+                    return try std.fmt.allocPrint(self.allocator.*, "{s} (*)({s})", .{ ret_c_type, params_or_void });
                 } else {
                     const pointee_c_type = try self.cTypeFor(pointee.*, includes);
                     // Allocate string for "pointee_type*"
