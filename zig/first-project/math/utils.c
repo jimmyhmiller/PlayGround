@@ -19,7 +19,7 @@ typedef struct {
     long long (*add_one)(long long);
     long long (*add)(long long, long long);
     Point (*make_point)(long long, long long);
-    long long (*get_red_value)();
+    long long (*get_red_value)(void);
     long long magic_number;
 } Namespace_math_utils;
 
@@ -28,7 +28,7 @@ Namespace_math_utils g_math_utils;
 static long long add_one(long long);
 static long long add(long long, long long);
 static Point make_point(long long, long long);
-static long long get_red_value();
+static long long get_red_value(void);
 
 void init_namespace_math_utils(Namespace_math_utils* ns) {
     ns->value = 42;
@@ -48,7 +48,7 @@ static long long add(long long a, long long b) {
 static Point make_point(long long x, long long y) {
     return (Point){x, y};
 }
-static long long get_red_value() {
+static long long get_red_value(void) {
     return 255;
 }
 
