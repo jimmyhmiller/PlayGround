@@ -1,0 +1,309 @@
+{
+  "schema_version": "1.0",
+  "types": {
+    "type_definitions": [
+      {
+        "id": "string",
+        "name": "String",
+        "kind": "primitive",
+        "description": "UTF-8 string type",
+        "metadata": {
+          "color": "#4A90E2",
+          "position": {"x": 0, "y": 0},
+          "collapsed": false
+        }
+      },
+      {
+        "id": "int",
+        "name": "Int",
+        "kind": "primitive",
+        "description": "Signed integer",
+        "metadata": {
+          "color": "#7B68EE",
+          "position": {"x": 0, "y": 0},
+          "collapsed": false
+        }
+      },
+      {
+        "id": "bool",
+        "name": "Bool",
+        "kind": "primitive",
+        "description": "Boolean true/false",
+        "metadata": {
+          "color": "#50C878",
+          "position": {"x": 0, "y": 0},
+          "collapsed": false
+        }
+      },
+      {
+        "id": "user",
+        "name": "User",
+        "kind": "struct",
+        "description": "Represents a user in the system",
+        "metadata": {
+          "color": "#FF6B6B",
+          "position": {"x": 100, "y": 100},
+          "collapsed": false
+        },
+        "definition": {
+          "struct": {
+            "fields": [
+              {
+                "name": "id",
+                "type_ref": "int",
+                "description": "Unique user identifier"
+              },
+              {
+                "name": "username",
+                "type_ref": "string",
+                "description": "User's chosen username"
+              },
+              {
+                "name": "email",
+                "type_ref": "string",
+                "description": "User's email address"
+              },
+              {
+                "name": "is_active",
+                "type_ref": "bool",
+                "description": "Whether the user account is active"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "result",
+        "name": "Result",
+        "kind": "enum",
+        "description": "Represents success or failure",
+        "metadata": {
+          "color": "#F39C12",
+          "position": {"x": 400, "y": 100},
+          "collapsed": false
+        },
+        "definition": {
+          "enum": {
+            "variants": [
+              {
+                "name": "Ok",
+                "payload": "user",
+                "description": "Operation succeeded with a value"
+              },
+              {
+                "name": "Error",
+                "payload": "string",
+                "description": "Operation failed with an error message"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "optional_string",
+        "name": "OptionalString",
+        "kind": "optional",
+        "description": "String that might not exist",
+        "metadata": {
+          "color": "#95A5A6",
+          "position": {"x": 400, "y": 300},
+          "collapsed": false
+        },
+        "definition": {
+          "optional": {
+            "inner_type": "string"
+          }
+        }
+      },
+      {
+        "id": "point",
+        "name": "Point",
+        "kind": "tuple",
+        "description": "2D coordinate",
+        "metadata": {
+          "color": "#E74C3C",
+          "position": {"x": 100, "y": 300},
+          "collapsed": false
+        },
+        "definition": {
+          "tuple": {
+            "elements": [
+              {"index": 0, "type_ref": "int", "description": "x coordinate"},
+              {"index": 1, "type_ref": "int", "description": "y coordinate"}
+            ]
+          }
+        }
+      },
+      {
+        "id": "validate_user",
+        "name": "validateUser",
+        "kind": "function",
+        "description": "Validates user data and returns result",
+        "metadata": {
+          "color": "#9B59B6",
+          "position": {"x": 700, "y": 100},
+          "collapsed": false
+        },
+        "definition": {
+          "function": {
+            "parameters": [
+              {"name": "user", "type_ref": "user"}
+            ],
+            "return_type": "result",
+            "effects": []
+          }
+        }
+      },
+      {
+        "id": "tree_node",
+        "name": "TreeNode",
+        "kind": "struct",
+        "description": "Node in a binary tree (recursive structure)",
+        "metadata": {
+          "color": "#16A085",
+          "position": {"x": 100, "y": 500},
+          "collapsed": false
+        },
+        "definition": {
+          "struct": {
+            "fields": [
+              {
+                "name": "value",
+                "type_ref": "int",
+                "description": "Value stored in this node"
+              },
+              {
+                "name": "left",
+                "type_ref": "optional_tree_node",
+                "description": "Left child node"
+              },
+              {
+                "name": "right",
+                "type_ref": "optional_tree_node",
+                "description": "Right child node"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "optional_tree_node",
+        "name": "OptionalTreeNode",
+        "kind": "optional",
+        "description": "Optional tree node for recursive structure",
+        "metadata": {
+          "color": "#1ABC9C",
+          "position": {"x": 400, "y": 500},
+          "collapsed": false
+        },
+        "definition": {
+          "optional": {
+            "inner_type": "tree_node"
+          }
+        }
+      }
+    ],
+    "instances": [
+      {
+        "type_ref": "user",
+        "name": "alice",
+        "description": "Example user Alice",
+        "value": {
+          "id": 1,
+          "username": "alice",
+          "email": "alice@example.com",
+          "is_active": true
+        }
+      },
+      {
+        "type_ref": "result",
+        "name": "success_result",
+        "description": "Successful result with Alice",
+        "value": {
+          "variant": "Ok",
+          "payload": {
+            "id": 1,
+            "username": "alice",
+            "email": "alice@example.com",
+            "is_active": true
+          }
+        }
+      },
+      {
+        "type_ref": "result",
+        "name": "error_result",
+        "description": "Failed validation result",
+        "value": {
+          "variant": "Error",
+          "payload": "Invalid email format"
+        }
+      },
+      {
+        "type_ref": "point",
+        "name": "origin",
+        "description": "Point at origin",
+        "value": [0, 0]
+      },
+      {
+        "type_ref": "point",
+        "name": "screen_center",
+        "description": "Center of screen",
+        "value": [600, 400]
+      },
+      {
+        "type_ref": "optional_string",
+        "name": "some_string",
+        "description": "String with value",
+        "value": {
+          "has_value": true,
+          "value": "Hello, World!"
+        }
+      },
+      {
+        "type_ref": "optional_string",
+        "name": "no_string",
+        "description": "Empty optional string",
+        "value": {
+          "has_value": false
+        }
+      },
+      {
+        "type_ref": "tree_node",
+        "name": "simple_tree",
+        "description": "Simple binary tree",
+        "value": {
+          "value": 5,
+          "left": {
+            "has_value": true,
+            "value": {
+              "value": 3,
+              "left": {"has_value": false},
+              "right": {"has_value": false}
+            }
+          },
+          "right": {
+            "has_value": true,
+            "value": {
+              "value": 7,
+              "left": {"has_value": false},
+              "right": {"has_value": false}
+            }
+          }
+        }
+      }
+    ],
+    "visualizations": [
+      {
+        "name": "default_view",
+        "layout": "grid",
+        "root_types": ["user", "result", "point", "validate_user", "tree_node"],
+        "show_instances": true,
+        "animation_speed": 1.0,
+        "camera": {
+          "zoom": 1.0,
+          "center": {"x": 400, "y": 300}
+        }
+      }
+    ]
+  }
+}

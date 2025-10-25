@@ -1,4 +1,4 @@
-use claude_auth::{ClaudeClient, MessageContent, Tool, json};
+use claude_auth::{ClaudeClient, MessageContent};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

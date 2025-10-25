@@ -5,12 +5,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create client using environment token
     let mut client = ClaudeClient::from_env_token()?;
     
-    // Define tools
+    // Define tools (cached by default)
     let tools = vec![
-        Tool {
-            name: "get_weather".to_string(),
-            description: "Get weather information for a city".to_string(),
-            input_schema: json!({
+        Tool::new(
+            "get_weather",
+            "Get weather information for a city",
+            json!({
                 "type": "object",
                 "properties": {
                     "city": {
@@ -19,8 +19,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 },
                 "required": ["city"]
-            }),
-        }
+            })
+        )
     ];
     
     // Start conversation

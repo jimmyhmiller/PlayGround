@@ -21,6 +21,56 @@ pub fn build(b: *std.Build) void {
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
 
+    // MLIR library path configuration - auto-detect or use override
+    const mlir_path = b.option([]const u8, "mlir-path", "Path to MLIR installation (optional override)") orelse blk: {
+        // Try common installation locations
+        const possible_paths = [_][]const u8{
+            "/opt/homebrew/opt/llvm", // Homebrew Apple Silicon
+            "/usr/local/opt/llvm", // Homebrew Intel Mac
+            "/usr/local", // Standard Linux install
+            "/usr", // System install
+        };
+
+        for (possible_paths) |path| {
+            const include_path = b.fmt("{s}/include/mlir-c/IR.h", .{path});
+            const file = std.fs.openFileAbsolute(include_path, .{}) catch continue;
+            file.close();
+            break :blk path;
+        }
+
+        // Default fallback
+        break :blk "/usr/local";
+    };
+
+    const mlir_include_path = b.fmt("{s}/include", .{mlir_path});
+    const mlir_lib_path = b.fmt("{s}/lib", .{mlir_path});
+
+    // Helper function to link MLIR to a compile step
+    const linkMLIR = struct {
+        fn link(step: *std.Build.Step.Compile, include_path: []const u8, lib_path: []const u8) void {
+            step.addIncludePath(.{ .cwd_relative = include_path });
+            step.addLibraryPath(.{ .cwd_relative = lib_path });
+
+            // MLIR C API libraries
+            step.linkSystemLibrary("MLIRCAPIIR");
+            step.linkSystemLibrary("MLIRCAPIExecutionEngine");
+            step.linkSystemLibrary("MLIRCAPIRegisterEverything");
+            step.linkSystemLibrary("MLIRCAPIConversion");
+            step.linkSystemLibrary("MLIRCAPITransforms");
+
+            // MLIR libraries
+            step.linkSystemLibrary("MLIRExecutionEngine");
+            step.linkSystemLibrary("MLIRExecutionEngineUtils");
+            step.linkSystemLibrary("MLIR");
+
+            // Monolithic LLVM library (contains all LLVM components)
+            step.linkSystemLibrary("LLVM");
+
+            step.linkLibCpp();
+            step.linkLibC();
+        }
+    }.link;
+
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Zig modules are the preferred way of making Zig code available to consumers.
@@ -40,6 +90,8 @@ pub fn build(b: *std.Build) void {
         // which requires us to specify a target.
         .target = target,
     });
+    // Add MLIR include path to the module so ZLS can find headers
+    mod.addIncludePath(.{ .cwd_relative = mlir_include_path });
 
     // Create a module for main.zig so it can be imported in tests
     const main_mod = b.createModule(.{
@@ -93,6 +145,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Link MLIR C library
+    linkMLIR(exe, mlir_include_path, mlir_lib_path);
+
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
@@ -131,6 +186,7 @@ pub fn build(b: *std.Build) void {
     const mod_tests = b.addTest(.{
         .root_module = mod,
     });
+    linkMLIR(mod_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the test executable.
     const run_mod_tests = b.addRunArtifact(mod_tests);
@@ -141,6 +197,7 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
+    linkMLIR(exe_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
@@ -160,6 +217,244 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the main test executable.
     const run_main_tests = b.addRunArtifact(main_tests);
 
+    // Creates a test executable for grammar examples
+    const grammar_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/grammar_examples_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+
+    // A run step that will run the grammar test executable.
+    const run_grammar_tests = b.addRunArtifact(grammar_tests);
+
+    // Creates a test executable for MLIR integration
+    const mlir_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/mlir_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(mlir_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the MLIR test executable.
+    const run_mlir_tests = b.addRunArtifact(mlir_tests);
+
+    // Creates a test executable for parser
+    const parser_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/parser_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(parser_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the parser test executable.
+    const run_parser_tests = b.addRunArtifact(parser_tests);
+
+    // Creates a test executable for builder
+    const builder_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/builder_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(builder_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the builder test executable.
+    const run_builder_tests = b.addRunArtifact(builder_tests);
+
+    // Creates a test executable for printer
+    const printer_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/printer_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(printer_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the printer test executable.
+    const run_printer_tests = b.addRunArtifact(printer_tests);
+
+    // Creates a test executable for printer validation
+    const printer_validation_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/printer_validation_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(printer_validation_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the printer validation test executable.
+    const run_printer_validation_tests = b.addRunArtifact(printer_validation_tests);
+
+    // Creates a test executable for executor
+    const executor_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/executor_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(executor_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the executor test executable.
+    const run_executor_tests = b.addRunArtifact(executor_tests);
+
+    // Creates a test executable for type builder
+    const type_builder_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/type_builder_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(type_builder_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the type builder test executable.
+    const run_type_builder_tests = b.addRunArtifact(type_builder_tests);
+
+    // Creates a test executable for REPL integration tests
+    const repl_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/integration/repl_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(repl_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the REPL test executable.
+    const run_repl_tests = b.addRunArtifact(repl_tests);
+
+    // Creates an executable to test the printer manually
+    const test_printer_exe = b.addExecutable(.{
+        .name = "test_printer",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/test_printer.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(test_printer_exe, mlir_include_path, mlir_lib_path);
+    b.installArtifact(test_printer_exe);
+
+    const run_test_printer = b.addRunArtifact(test_printer_exe);
+    const test_printer_step = b.step("test-printer", "Run printer demo");
+    test_printer_step.dependOn(&run_test_printer.step);
+
+    // Creates an executable to test the printer with complex examples
+    const test_complex_printer_exe = b.addExecutable(.{
+        .name = "test_complex_printer",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/test_complex_printer.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(test_complex_printer_exe, mlir_include_path, mlir_lib_path);
+    b.installArtifact(test_complex_printer_exe);
+
+    const run_test_complex_printer = b.addRunArtifact(test_complex_printer_exe);
+    const test_complex_printer_step = b.step("test-complex-printer", "Run complex printer demo");
+    test_complex_printer_step.dependOn(&run_test_complex_printer.step);
+
+    // Creates an executable to test JIT compilation
+    const jit_example_exe = b.addExecutable(.{
+        .name = "jit_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/jit_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(jit_example_exe, mlir_include_path, mlir_lib_path);
+    b.installArtifact(jit_example_exe);
+
+    const run_jit_example = b.addRunArtifact(jit_example_exe);
+    const jit_example_step = b.step("jit-example", "Run JIT compilation demo");
+    jit_example_step.dependOn(&run_jit_example.step);
+
+    // Creates an executable to test fibonacci JIT compilation with dynamic function calling
+    const fib_jit_example_exe = b.addExecutable(.{
+        .name = "fib_jit_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/fib_jit_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(fib_jit_example_exe, mlir_include_path, mlir_lib_path);
+    b.installArtifact(fib_jit_example_exe);
+
+    const run_fib_jit_example = b.addRunArtifact(fib_jit_example_exe);
+    const fib_jit_example_step = b.step("fib-jit-example", "Run fibonacci JIT compilation demo");
+    fib_jit_example_step.dependOn(&run_fib_jit_example.step);
+
+    // Creates an executable to test round-trip parsing/printing
+    const roundtrip_test_exe = b.addExecutable(.{
+        .name = "test_roundtrip_funccall",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test_roundtrip_funccall.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(roundtrip_test_exe, mlir_include_path, mlir_lib_path);
+    b.installArtifact(roundtrip_test_exe);
+
+    const run_roundtrip_test = b.addRunArtifact(roundtrip_test_exe);
+    const roundtrip_test_step = b.step("test-roundtrip", "Run round-trip test for func.call");
+    roundtrip_test_step.dependOn(&run_roundtrip_test.step);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -167,6 +462,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_main_tests.step);
+    test_step.dependOn(&run_grammar_tests.step);
+    test_step.dependOn(&run_mlir_tests.step);
+    test_step.dependOn(&run_parser_tests.step);
+    test_step.dependOn(&run_builder_tests.step);
+    test_step.dependOn(&run_printer_tests.step);
+    test_step.dependOn(&run_printer_validation_tests.step);
+    test_step.dependOn(&run_executor_tests.step);
+    test_step.dependOn(&run_type_builder_tests.step);
+    test_step.dependOn(&run_repl_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

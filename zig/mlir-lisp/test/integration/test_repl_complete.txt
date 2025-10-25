@@ -1,0 +1,30 @@
+(operation
+  (name arith.constant)
+  (result-bindings [%c1])
+  (result-types !i32)
+  (attributes { :value (: 100 !i32) }))
+(operation
+  (name func.func)
+  (attributes {
+    :sym_name @add_five
+    :function_type (!function (inputs !i32) (results !i32))
+  })
+  (regions
+    (region
+      (block
+        (arguments [%arg0 !i32])
+        (operation
+          (name arith.constant)
+          (result-bindings [%c5])
+          (result-types !i32)
+          (attributes { :value (: 5 !i32) }))
+        (operation
+          (name arith.addi)
+          (result-bindings [%sum])
+          (result-types !i32)
+          (operands %arg0 %c5))
+        (operation
+          (name func.return)
+          (operands %sum))))))
+:mlir
+:quit

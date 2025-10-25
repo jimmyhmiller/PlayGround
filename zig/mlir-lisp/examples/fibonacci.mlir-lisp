@@ -1,0 +1,157 @@
+;; Recursive Fibonacci Function in MLIR S-expression Syntax
+;;
+;; This example demonstrates:
+;; - Nested regions (scf.if regions inside func.func region)
+;; - Structured control flow with scf.if (then/else branches)
+;; - Recursive function calls
+;; - scf.yield for returning values from regions
+;; - Arithmetic and comparison operations
+;;
+;; Function signature: fibonacci(n: i32) -> i32
+;;
+;; Algorithm:
+;;   if n <= 1:
+;;     return n
+;;   else:
+;;     return fibonacci(n-1) + fibonacci(n-2)
+
+(mlir
+  (operation
+    (name func.func)
+    (attributes {
+      :sym_name @fibonacci
+      :function_type (!function (inputs !i32) (results !i32))
+    })
+    (regions
+      (region
+        (block [^entry]
+          (arguments [ [%n !i32] ])
+
+          ;; Check if n <= 1 (base case)
+          (operation
+            (name arith.constant)
+            (result-bindings [%c1])
+            (result-types !i32)
+            (attributes { :value (: 1 !i32) }))
+
+          (operation
+            (name arith.cmpi)
+            (result-bindings [%cond])
+            (result-types !i1)
+            (operands %n %c1)
+            (attributes { :predicate (: 3 !i64) }))
+
+          ;; scf.if with nested regions (then/else)
+          (operation
+            (name scf.if)
+            (result-bindings [%result])
+            (result-types !i32)
+            (operands %cond)
+            (regions
+              ;; Then region: base case, return n
+              (region
+                (block
+                  (arguments [])
+                  (operation
+                    (name scf.yield)
+                    (operands %n))))
+
+              ;; Else region: recursive case, return fib(n-1) + fib(n-2)
+              (region
+                (block
+                  (arguments [])
+
+                  ;; Compute fib(n-1)
+                  (operation
+                    (name arith.constant)
+                    (result-bindings [%c1_rec])
+                    (result-types !i32)
+                    (attributes { :value (: 1 !i32) }))
+
+                  (operation
+                    (name arith.subi)
+                    (result-bindings [%n_minus_1])
+                    (result-types !i32)
+                    (operands %n %c1_rec))
+
+                  (operation
+                    (name func.call)
+                    (result-bindings [%fib_n_minus_1])
+                    (result-types !i32)
+                    (operands %n_minus_1)
+                    (attributes { :callee @fibonacci }))
+
+                  ;; Compute fib(n-2)
+                  (operation
+                    (name arith.constant)
+                    (result-bindings [%c2])
+                    (result-types !i32)
+                    (attributes { :value (: 2 !i32) }))
+
+                  (operation
+                    (name arith.subi)
+                    (result-bindings [%n_minus_2])
+                    (result-types !i32)
+                    (operands %n %c2))
+
+                  (operation
+                    (name func.call)
+                    (result-bindings [%fib_n_minus_2])
+                    (result-types !i32)
+                    (operands %n_minus_2)
+                    (attributes { :callee @fibonacci }))
+
+                  ;; Add fib(n-1) + fib(n-2) and yield
+                  (operation
+                    (name arith.addi)
+                    (result-bindings [%sum])
+                    (result-types !i32)
+                    (operands %fib_n_minus_1 %fib_n_minus_2))
+
+                  (operation
+                    (name scf.yield)
+                    (operands %sum))))))
+
+          ;; Return the result
+          (operation
+            (name func.return)
+            (operands %result))))))
+
+  ;; Main function that calls fibonacci(10) and returns the result as i64
+  (operation
+    (name func.func)
+    (attributes {
+      :sym_name @main
+      :function_type (!function (inputs) (results !i64))
+    })
+    (regions
+      (region
+        (block [^entry]
+          (arguments [])
+
+          ;; Create constant 10 for fibonacci input
+          (operation
+            (name arith.constant)
+            (result-bindings [%n])
+            (result-types !i32)
+            (attributes { :value (: 10 !i32) }))
+
+          ;; Call fibonacci(10)
+          (operation
+            (name func.call)
+            (result-bindings [%fib_result])
+            (result-types !i32)
+            (operands %n)
+            (attributes { :callee @fibonacci }))
+
+          ;; Convert i32 result to i64
+          (operation
+            (name arith.extsi)
+            (result-bindings [%result_i64])
+            (result-types !i64)
+            (operands %fib_result))
+
+          ;; Return the i64 result
+          (operation
+            (name func.return)
+            (operands %result_i64)))))))

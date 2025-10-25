@@ -4,8 +4,8 @@ use std::io::{self, Write};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Claude Auth REPL with Tools");
-    println!("===========================");
+    println!("Claude Auth REPL with Complete Tool Flow");
+    println!("=======================================");
     
     // Try to create client from environment variable first
     let mut client = match ClaudeClient::from_env_token() {
@@ -33,19 +33,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Define some example tools
     let tools = vec![
-        Tool {
-            name: "get_time".to_string(),
-            description: "Get the current time".to_string(),
-            input_schema: json!({
+        Tool::new(
+            "get_time",
+            "Get the current time",
+            json!({
                 "type": "object",
                 "properties": {},
                 "required": []
-            }),
-        },
-        Tool {
-            name: "calculate".to_string(),
-            description: "Perform a mathematical calculation".to_string(),
-            input_schema: json!({
+            })
+        ),
+        Tool::new(
+            "calculate",
+            "Perform a mathematical calculation",
+            json!({
                 "type": "object",
                 "properties": {
                     "expression": {
@@ -54,9 +54,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 },
                 "required": ["expression"]
-            }),
-        },
+            })
+        ),
     ];
+
+    let mut conversation: Vec<MessageContent> = Vec::new();
 
     println!();
     println!("Available tools: get_time, calculate");
@@ -76,11 +78,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
-        let messages = vec![MessageContent::user(message)];
+        // Add user message to conversation
+        conversation.push(MessageContent::user(message));
+        
+        println!("📤 Sending request:");
+        println!("Model: claude-sonnet-4-5-20250929");
+        println!("Messages: {:#?}", conversation);
+        println!("Tools: {:#?}", tools);
+        println!();
         
         match client.create_message_with_tools(
-            "claude-sonnet-4-20250514",
-            messages,
+            "claude-sonnet-4-5-20250929",
+            conversation.clone(),
             Some(1000),
             None,
             Some(tools.clone())
@@ -88,6 +97,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(response) => {
                 println!("Full response: {:#?}", response);
                 println!();
+                
+                let mut has_tool_calls = false;
+                let mut tool_results = Vec::new();
+                
+                // Add assistant response to conversation
+                conversation.push(MessageContent::assistant_with_tool_calls(response.content.clone()));
                 
                 for content_block in &response.content {
                     match content_block.r#type.as_str() {
@@ -97,17 +112,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         "tool_use" => {
-                            if let (Some(name), Some(input)) = (&content_block.name, &content_block.input) {
-                                println!("🔧 Tool Call: {} with input: {}", name, input);
+                            has_tool_calls = true;
+                            if let (Some(id), Some(name), Some(input)) = (&content_block.id, &content_block.name, &content_block.input) {
+                                println!("🔧 Tool Call: {} (id: {}) with input: {}", name, id, input);
                                 
-                                // Simple tool implementations
+                                // Execute tool
                                 let result = match name.as_str() {
                                     "get_time" => {
                                         format!("Current time: {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"))
                                     }
                                     "calculate" => {
                                         if let Some(expr) = input.get("expression").and_then(|v| v.as_str()) {
-                                            format!("Calculation result for '{}': [simulated result]", expr)
+                                            // Simple evaluation (just echo for demo)
+                                            format!("Calculation result for '{}': [simulated result - would need real evaluator]", expr)
                                         } else {
                                             "Invalid calculation input".to_string()
                                         }
@@ -116,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
                                 
                                 println!("🔧 Tool Result: {}", result);
+                                tool_results.push((id.clone(), result));
                             }
                         }
                         _ => {
@@ -123,6 +141,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                
+                // If there were tool calls, send results back to Claude
+                if has_tool_calls && !tool_results.is_empty() {
+                    println!();
+                    println!("📤 Sending tool results back to Claude...");
+                    
+                    for (tool_use_id, result) in tool_results {
+                        conversation.push(MessageContent::user_tool_result(&tool_use_id, &result));
+                    }
+                    
+                    println!("Updated conversation with tool results: {:#?}", conversation);
+                    println!();
+                    
+                    // Get Claude's final response
+                    match client.create_message_with_tools(
+                        "claude-sonnet-4-20250514",
+                        conversation.clone(),
+                        Some(1000),
+                        None,
+                        Some(tools.clone())
+                    ).await {
+                        Ok(final_response) => {
+                            println!("Final response after tools: {:#?}", final_response);
+                            println!();
+                            
+                            conversation.push(MessageContent::assistant_with_tool_calls(final_response.content.clone()));
+                            
+                            for content_block in &final_response.content {
+                                if let Some(text) = &content_block.text {
+                                    println!("Claude: {}", text);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("❌ Error getting final response: {}", e);
+                        }
+                    }
+                }
+                
                 println!();
             }
             Err(e) => {
