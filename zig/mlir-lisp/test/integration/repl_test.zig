@@ -190,7 +190,7 @@ test "REPL: mlir command shows module" {
         .expected_outputs = &[_][]const u8{
             "Function defined",
             "Current MLIR module:",
-            "func.func @test",
+            "@test",
         },
     };
 

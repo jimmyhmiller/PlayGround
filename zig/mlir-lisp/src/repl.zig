@@ -86,6 +86,10 @@ pub fn run(allocator: std.mem.Allocator) !void {
             const n = stdin_file.read(&buf) catch |err| {
                 if (err == error.EndOfStream) {
                     if (line_buffer.items.len == 0) {
+                        // Check if we have incomplete input buffered
+                        if (input_buffer.items.len > 0) {
+                            std.debug.print("Error: Incomplete input at end of file\n", .{});
+                        }
                         return;  // EOF with no input - exit REPL
                     }
                     break;  // EOF after some input - process what we have
@@ -94,6 +98,10 @@ pub fn run(allocator: std.mem.Allocator) !void {
             };
             if (n == 0) {  // EOF
                 if (line_buffer.items.len == 0) {
+                    // Check if we have incomplete input buffered
+                    if (input_buffer.items.len > 0) {
+                        std.debug.print("Error: Incomplete input at end of file\n", .{});
+                    }
                     return;
                 }
                 break;
@@ -127,7 +135,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
             } else if (std.mem.eql(u8, trimmed, ":clear")) {
                 // Reset module
                 for (operations_list.items) |*op| {
-                    op.deinit(allocator);
+                    op.deinit(arena_allocator);
                 }
                 operations_list.clearRetainingCapacity();
                 if (mlir_module) |*mod| mod.destroy();
@@ -202,34 +210,84 @@ fn createReplExecWrapper(temp_allocator: std.mem.Allocator, parse_allocator: std
     defer temp_allocator.free(op_string);
 
     // Determine what to return - use the operation's result if it has one, otherwise use a dummy
-    const return_operand = if (user_op.result_bindings.len > 0)
-        user_op.result_bindings[0]
-    else
-        "%__result";
+    // We need to cast to i64 if the result type is different
+    const has_result = user_op.result_bindings.len > 0;
+    const result_operand = if (has_result) user_op.result_bindings[0] else "";
+
+    // Determine if we need to cast the result to i64
+    const needs_cast = if (has_result and user_op.result_types.len > 0) blk: {
+        // Check if the result type is not already i64
+        const result_type = user_op.result_types[0];
+        if (result_type.value.type == .identifier) {
+            const type_str = result_type.value.data.atom;
+            break :blk !std.mem.eql(u8, type_str, "i64");
+        }
+        break :blk false;
+    } else false;
 
     // Build a wrapper function source with the operation embedded
     // Use parse_allocator so the source stays alive
-    const wrapper_source = try std.fmt.allocPrint(parse_allocator,
-        \\(operation
-        \\  (name func.func)
-        \\  (attributes {{
-        \\    :sym_name @__repl_exec
-        \\    :function_type (!function (inputs) (results i64))
-        \\  }})
-        \\  (regions
-        \\    (region
-        \\      (block
-        \\        (arguments [])
-        \\        {s}
-        \\        (operation
-        \\          (name arith.constant)
-        \\          (result-bindings [%__result])
-        \\          (result-types i64)
-        \\          (attributes {{ :value (: 0 i64) }}))
-        \\        (operation
-        \\          (name func.return)
-        \\          (operands {s}))))))
-    , .{op_string, return_operand});
+    const wrapper_source = if (needs_cast)
+        try std.fmt.allocPrint(parse_allocator,
+            \\(operation
+            \\  (name func.func)
+            \\  (attributes {{
+            \\    :sym_name @__repl_exec
+            \\    :function_type (!function (inputs) (results i64))
+            \\  }})
+            \\  (regions
+            \\    (region
+            \\      (block
+            \\        (arguments [])
+            \\        {s}
+            \\        (operation
+            \\          (name arith.extsi)
+            \\          (result-bindings [%__cast_result])
+            \\          (result-types i64)
+            \\          (operands {s}))
+            \\        (operation
+            \\          (name func.return)
+            \\          (operands %__cast_result))))))
+        , .{op_string, result_operand})
+    else if (has_result)
+        try std.fmt.allocPrint(parse_allocator,
+            \\(operation
+            \\  (name func.func)
+            \\  (attributes {{
+            \\    :sym_name @__repl_exec
+            \\    :function_type (!function (inputs) (results i64))
+            \\  }})
+            \\  (regions
+            \\    (region
+            \\      (block
+            \\        (arguments [])
+            \\        {s}
+            \\        (operation
+            \\          (name func.return)
+            \\          (operands {s}))))))
+        , .{op_string, result_operand})
+    else
+        try std.fmt.allocPrint(parse_allocator,
+            \\(operation
+            \\  (name func.func)
+            \\  (attributes {{
+            \\    :sym_name @__repl_exec
+            \\    :function_type (!function (inputs) (results i64))
+            \\  }})
+            \\  (regions
+            \\    (region
+            \\      (block
+            \\        (arguments [])
+            \\        {s}
+            \\        (operation
+            \\          (name arith.constant)
+            \\          (result-bindings [%__result])
+            \\          (result-types i64)
+            \\          (attributes {{ :value (: 0 i64) }}))
+            \\        (operation
+            \\          (name func.return)
+            \\          (operands %__result))))))
+        , .{op_string});
 
     // Parse the wrapper - all allocations use parse_allocator which is the arena
     var tok = Tokenizer.init(parse_allocator, wrapper_source);

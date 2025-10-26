@@ -1,0 +1,139 @@
+# MLIR Grammar (EBNF)
+# Extracted from https://mlir.llvm.org/docs/LangRef/
+
+## Core Lexical Productions
+
+digit     ::= [0-9]
+hex_digit ::= [0-9a-fA-F]
+letter    ::= [a-zA-Z]
+id-punct  ::= [$._-]
+
+integer-literal ::= decimal-literal | hexadecimal-literal
+decimal-literal ::= digit+
+hexadecimal-literal ::= `0x` hex_digit+
+float-literal ::= [-+]?[0-9]+[.][0-9]*([eE][-+]?[0-9]+)?
+string-literal  ::= `"` [^"\n\f\v\r]* `"`
+
+## Top-Level Structure
+
+toplevel := (operation | attribute-alias-def | type-alias-def)*
+
+## Identifiers and Keywords
+
+bare-id ::= (letter|[_]) (letter|digit|[_$.])*
+bare-id-list ::= bare-id (`,` bare-id)*
+value-id ::= `%` suffix-id
+alias-name :: = bare-id
+suffix-id ::= (digit+ | ((letter|id-punct) (letter|id-punct|digit)*))
+
+symbol-ref-id ::= `@` (suffix-id | string-literal) (`::` symbol-ref-id)?
+value-id-list ::= value-id (`,` value-id)*
+
+value-use ::= value-id (`#` decimal-literal)?
+value-use-list ::= value-use (`,` value-use)*
+
+## Operations
+
+operation             ::= op-result-list? (generic-operation | custom-operation)
+                          trailing-location?
+generic-operation     ::= string-literal `(` value-use-list? `)`  successor-list?
+                          dictionary-properties? region-list? dictionary-attribute?
+                          `:` function-type
+custom-operation      ::= bare-id custom-operation-format
+op-result-list        ::= op-result (`,` op-result)* `=`
+op-result             ::= value-id (`:` integer-literal)?
+successor-list        ::= `[` successor (`,` successor)* `]`
+successor             ::= caret-id (`:` block-arg-list)?
+dictionary-properties ::= `<` dictionary-attribute `>`
+region-list           ::= `(` region (`,` region)* `)`
+dictionary-attribute  ::= `{` (attribute-entry (`,` attribute-entry)*)? `}`
+trailing-location     ::= `loc` `(` location `)`
+
+## Blocks
+
+block           ::= block-label operation+
+block-label     ::= block-id block-arg-list? `:`
+block-id        ::= caret-id
+caret-id        ::= `^` suffix-id
+value-id-and-type ::= value-id `:` type
+
+value-id-and-type-list ::= value-id-and-type (`,` value-id-and-type)*
+
+block-arg-list ::= `(` value-id-and-type-list? `)`
+
+## Regions
+
+region      ::= `{` entry-block? block* `}`
+entry-block ::= operation+
+
+## Type System
+
+type ::= type-alias | dialect-type | builtin-type
+
+type-list-no-parens ::=  type (`,` type)*
+type-list-parens ::= `(` `)`
+                   | `(` type-list-no-parens `)`
+
+ssa-use-and-type ::= ssa-use `:` type
+ssa-use ::= value-use
+
+ssa-use-and-type-list ::= ssa-use-and-type (`,` ssa-use-and-type)*
+
+function-type ::= (type | type-list-parens) `->` (type | type-list-parens)
+
+## Type Aliases
+
+type-alias-def ::= `!` alias-name `=` type
+type-alias ::= `!` alias-name
+
+## Dialect Types
+
+dialect-namespace ::= bare-id
+
+dialect-type ::= `!` (opaque-dialect-type | pretty-dialect-type)
+opaque-dialect-type ::= dialect-namespace dialect-type-body
+pretty-dialect-type ::= dialect-namespace `.` pretty-dialect-type-lead-ident
+                                              dialect-type-body?
+pretty-dialect-type-lead-ident ::= `[A-Za-z][A-Za-z0-9._]*`
+
+dialect-type-body ::= `<` dialect-type-contents+ `>`
+dialect-type-contents ::= dialect-type-body
+                            | `(` dialect-type-contents+ `)`
+                            | `[` dialect-type-contents+ `]`
+                            | `{` dialect-type-contents+ `}`
+                            | [^\[<({\]>)}\0]+
+
+## Attributes
+
+attribute-entry ::= (bare-id | string-literal) `=` attribute-value
+attribute-value ::= attribute-alias | dialect-attribute | builtin-attribute
+
+## Attribute Value Aliases
+
+attribute-alias-def ::= `#` alias-name `=` attribute-value
+attribute-alias ::= `#` alias-name
+
+## Dialect Attributes
+
+dialect-attribute ::= `#` (opaque-dialect-attribute | pretty-dialect-attribute)
+opaque-dialect-attribute ::= dialect-namespace dialect-attribute-body
+pretty-dialect-attribute ::= dialect-namespace `.` pretty-dialect-attribute-lead-ident
+                                                  dialect-attribute-body?
+pretty-dialect-attribute-lead-ident ::= `[A-Za-z][A-Za-z0-9._]*`
+
+dialect-attribute-body ::= `<` dialect-attribute-contents+ `>`
+dialect-attribute-contents ::= dialect-attribute-body
+                            | `(` dialect-attribute-contents+ `)`
+                            | `[` dialect-attribute-contents+ `]`
+                            | `{` dialect-attribute-contents+ `}`
+                            | [^\[<({\]>)}\0]+
+
+## EBNF Notation Reference
+
+alternation ::= expr0 | expr1 | expr2
+sequence    ::= expr0 expr1 expr2
+repetition0 ::= expr*
+repetition1 ::= expr+
+optionality ::= expr?
+grouping    ::= (expr)
+literal     ::= `abcd`
