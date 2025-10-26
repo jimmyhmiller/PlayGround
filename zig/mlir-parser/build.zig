@@ -149,6 +149,7 @@ pub fn build(b: *std.Build) void {
 
     // A run step that will run the basic test executable.
     const run_basic_tests = b.addRunArtifact(basic_tests);
+    run_basic_tests.setCwd(b.path("."));
 
     // Creates a test executable for test/integration_test.zig with access to the module
     const integration_tests = b.addTest(.{
@@ -164,6 +165,7 @@ pub fn build(b: *std.Build) void {
 
     // A run step that will run the integration test executable.
     const run_integration_tests = b.addRunArtifact(integration_tests);
+    run_integration_tests.setCwd(b.path("."));
 
     // Creates a test executable for test/unsupported_features_test.zig
     const unsupported_tests = b.addTest(.{
@@ -179,6 +181,7 @@ pub fn build(b: *std.Build) void {
 
     // A run step that will run the unsupported features test executable.
     const run_unsupported_tests = b.addRunArtifact(unsupported_tests);
+    run_unsupported_tests.setCwd(b.path("."));
 
     // Creates a test executable for test/roundtrip_test.zig
     const roundtrip_tests = b.addTest(.{
@@ -194,6 +197,39 @@ pub fn build(b: *std.Build) void {
 
     // A run step that will run the roundtrip test executable.
     const run_roundtrip_tests = b.addRunArtifact(roundtrip_tests);
+    run_roundtrip_tests.setCwd(b.path("."));
+
+    // Creates a test executable for test/example_validation_test.zig
+    const example_validation_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/example_validation_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_parser", .module = mod },
+            },
+        }),
+    });
+
+    // A run step that will run the example validation test executable.
+    const run_example_validation_tests = b.addRunArtifact(example_validation_tests);
+    run_example_validation_tests.setCwd(b.path("."));
+
+    // Creates a test executable for test/no_inline_mlir_test.zig
+    const no_inline_mlir_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/no_inline_mlir_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_parser", .module = mod },
+            },
+        }),
+    });
+
+    // A run step that will run the no inline mlir test executable.
+    const run_no_inline_mlir_tests = b.addRunArtifact(no_inline_mlir_tests);
+    run_no_inline_mlir_tests.setCwd(b.path("."));
 
     // Debug printer executable
     const debug_printer = b.addExecutable(.{
@@ -223,6 +259,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_integration_tests.step);
     test_step.dependOn(&run_unsupported_tests.step);
     test_step.dependOn(&run_roundtrip_tests.step);
+    test_step.dependOn(&run_example_validation_tests.step);
+    test_step.dependOn(&run_no_inline_mlir_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

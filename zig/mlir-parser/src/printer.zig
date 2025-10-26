@@ -380,8 +380,15 @@ pub const Printer = struct {
 
         // Print output types
         if (func_type.outputs.len == 1) {
-            // Single output without parens
-            try self.printType(func_type.outputs[0]);
+            // Single output - check if it's a function type (needs parens for disambiguation)
+            const output = func_type.outputs[0];
+            const needs_parens = switch (output) {
+                .function => true,
+                else => false,
+            };
+            if (needs_parens) try self.writer.writeByte('(');
+            try self.printType(output);
+            if (needs_parens) try self.writer.writeByte(')');
         } else {
             // Multiple outputs or empty with parens
             try self.writer.writeByte('(');
