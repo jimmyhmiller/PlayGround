@@ -183,39 +183,66 @@ pub const Tokenizer = struct {
     }
 
     fn scanValueId(self: *Tokenizer) !Token {
-        // Already consumed '%', now scan the identifier
-        if (!self.isAlpha(self.peek()) and self.peek() != '_') {
-            return error.InvalidValueId;
-        }
+        // Already consumed '%', now scan the suffix-id
+        // MLIR allows: digit+ | (letter|punct)(letter|digit|punct)*
+        const first_char = self.peek();
 
-        while (self.isAlphaNumeric(self.peek()) or self.isIdentifierChar(self.peek())) {
-            _ = self.advance();
+        if (self.isDigit(first_char)) {
+            // Pure numeric: %0, %42, etc.
+            while (self.isDigit(self.peek())) {
+                _ = self.advance();
+            }
+        } else if (self.isAlpha(first_char) or first_char == '_') {
+            // Named identifier: %arg0, %batch_size, etc.
+            while (self.isAlphaNumeric(self.peek()) or self.isIdentifierChar(self.peek())) {
+                _ = self.advance();
+            }
+        } else {
+            return error.InvalidValueId;
         }
 
         return self.makeToken(.value_id);
     }
 
     fn scanBlockId(self: *Tokenizer) !Token {
-        // Already consumed '^', now scan the identifier
-        if (!self.isAlpha(self.peek()) and self.peek() != '_') {
-            return error.InvalidBlockId;
-        }
+        // Already consumed '^', now scan the suffix-id
+        // MLIR allows: digit+ | (letter|punct)(letter|digit|punct)*
+        const first_char = self.peek();
 
-        while (self.isAlphaNumeric(self.peek()) or self.isIdentifierChar(self.peek())) {
-            _ = self.advance();
+        if (self.isDigit(first_char)) {
+            // Pure numeric: ^0, ^42, etc.
+            while (self.isDigit(self.peek())) {
+                _ = self.advance();
+            }
+        } else if (self.isAlpha(first_char) or first_char == '_') {
+            // Named identifier: ^entry, ^bb0, etc.
+            while (self.isAlphaNumeric(self.peek()) or self.isIdentifierChar(self.peek())) {
+                _ = self.advance();
+            }
+        } else {
+            return error.InvalidBlockId;
         }
 
         return self.makeToken(.block_id);
     }
 
     fn scanSymbol(self: *Tokenizer) !Token {
-        // Already consumed '@', now scan the identifier
-        if (!self.isAlpha(self.peek()) and self.peek() != '_') {
-            return error.InvalidSymbol;
-        }
+        // Already consumed '@', now scan the suffix-id
+        // MLIR allows: digit+ | (letter|punct)(letter|digit|punct)*
+        const first_char = self.peek();
 
-        while (self.isAlphaNumeric(self.peek()) or self.isIdentifierChar(self.peek())) {
-            _ = self.advance();
+        if (self.isDigit(first_char)) {
+            // Pure numeric: @0, @42, etc. (uncommon but valid)
+            while (self.isDigit(self.peek())) {
+                _ = self.advance();
+            }
+        } else if (self.isAlpha(first_char) or first_char == '_') {
+            // Named identifier: @main, @test_func, etc.
+            while (self.isAlphaNumeric(self.peek()) or self.isIdentifierChar(self.peek())) {
+                _ = self.advance();
+            }
+        } else {
+            return error.InvalidSymbol;
         }
 
         return self.makeToken(.symbol);

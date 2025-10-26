@@ -16,8 +16,8 @@ echo "=== Testing simple constant auto-execution ==="
 echo "(operation
   (name arith.constant)
   (result-bindings [%x])
-  (result-types !i32)
-  (attributes { :value (: 42 !i32) }))
+  (result-types i32)
+  (attributes { :value (: 42 i32) }))
 :quit" | "$MLIR_LISP" --repl 2>&1 | grep -q "Result:" && echo "✓ PASS" || echo "✗ FAIL"
 
 echo ""
@@ -26,7 +26,7 @@ echo "(operation
   (name func.func)
   (attributes {
     :sym_name @test
-    :function_type (!function (inputs) (results !i64))
+    :function_type (!function (inputs) (results i64))
   })
   (regions
     (region
@@ -35,8 +35,8 @@ echo "(operation
         (operation
           (name arith.constant)
           (result-bindings [%c42])
-          (result-types !i64)
-          (attributes { :value (: 42 !i64) }))
+          (result-types i64)
+          (attributes { :value (: 42 i64) }))
         (operation
           (name func.return)
           (operands %c42))))))
@@ -44,7 +44,7 @@ echo "(operation
 
 echo ""
 echo "=== Testing :mlir command ==="
-echo "(operation (name func.func) (attributes { :sym_name @test :function_type (!function (inputs) (results !i64)) }) (regions (region (block [^entry] (arguments []) (operation (name arith.constant) (result-bindings [%c42]) (result-types !i64) (attributes { :value (: 42 !i64) })) (operation (name func.return) (operands %c42))))))
+echo "(operation (name func.func) (attributes { :sym_name @test :function_type (!function (inputs) (results i64)) }) (regions (region (block [^entry] (arguments []) (operation (name arith.constant) (result-bindings [%c42]) (result-types i64) (attributes { :value (: 42 i64) })) (operation (name func.return) (operands %c42))))))
 :mlir
 :quit" | "$MLIR_LISP" --repl 2>&1 | grep -q "@test" && echo "✓ PASS" || echo "✗ FAIL"
 
@@ -54,7 +54,7 @@ echo "(operation
   (name func.func)
   (attributes {
     :sym_name @test
-    :function_type (!function (inputs) (results !i64))
+    :function_type (!function (inputs) (results i64))
   })
   (regions
     (region
@@ -63,8 +63,8 @@ echo "(operation
         (operation
           (name arith.constant)
           (result-bindings [%c42])
-          (result-types !i64)
-          (attributes { :value (: 42 !i64) }))
+          (result-types i64)
+          (attributes { :value (: 42 i64) }))
         (operation
           (name func.return)
           (operands %c42))))))

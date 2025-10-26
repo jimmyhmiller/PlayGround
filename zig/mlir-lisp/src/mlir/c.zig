@@ -403,7 +403,7 @@ pub const PassManager = struct {
     pub fn addPipeline(self: *PassManager, pipeline: [:0]const u8) !void {
         const opm = c.mlirPassManagerGetAsOpPassManager(self.pm);
         const pipeline_ref = c.mlirStringRefCreateFromCString(pipeline.ptr);
-        const result = c.mlirParsePassPipeline(opm, pipeline_ref, null, null);
+        const result = c.mlirParsePassPipeline(opm, pipeline_ref, &errorCallback, null);
 
         if (mlirLogicalResultIsFailure(result)) {
             return error.PassPipelineAddFailed;

@@ -45,27 +45,22 @@ fn runReplTest(allocator: std.mem.Allocator, test_case: TestCase) !void {
         child.stdin = null;
     }
 
-    // Read output
-    var stdout_buf = std.ArrayList(u8){};
-    defer stdout_buf.deinit(allocator);
-    var stderr_buf = std.ArrayList(u8){};
-    defer stderr_buf.deinit(allocator);
-
-    // Use a buffer for reading
-    var read_buf: [4096]u8 = undefined;
-
+    // Read output - must read before wait() or it can deadlock
+    var stdout_bytes: []const u8 = "";
     if (child.stdout) |stdout| {
-        var reader = stdout.reader(&read_buf);
-        try reader.readAllArrayList(&stdout_buf, 1024 * 1024);
+        stdout_bytes = try stdout.readToEndAlloc(allocator, 1024 * 1024);
     }
+    defer if (stdout_bytes.len > 0) allocator.free(stdout_bytes);
+
+    var stderr_bytes: []const u8 = "";
     if (child.stderr) |stderr| {
-        var reader = stderr.reader(&read_buf);
-        try reader.readAllArrayList(&stderr_buf, 1024 * 1024);
+        stderr_bytes = try stderr.readToEndAlloc(allocator, 1024 * 1024);
     }
+    defer if (stderr_bytes.len > 0) allocator.free(stderr_bytes);
 
     const term = try child.wait();
 
-    const combined_output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ stdout_buf.items, stderr_buf.items });
+    const combined_output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ stdout_bytes, stderr_bytes });
     defer allocator.free(combined_output);
 
     std.debug.print("Output:\n{s}\n", .{combined_output});
@@ -120,8 +115,8 @@ test "REPL: simple constant auto-execution" {
         \\(operation
         \\  (name arith.constant)
         \\  (result-bindings [%x])
-        \\  (result-types !i32)
-        \\  (attributes { :value (: 42 !i32) }))
+        \\  (result-types i32)
+        \\  (attributes { :value (: 42 i32) }))
         \\:quit
         \\
         ,
@@ -141,7 +136,7 @@ test "REPL: function definition" {
         \\  (name func.func)
         \\  (attributes {
         \\    :sym_name @test
-        \\    :function_type (!function (inputs) (results !i64))
+        \\    :function_type (!function (inputs) (results i64))
         \\  })
         \\  (regions
         \\    (region
@@ -150,8 +145,8 @@ test "REPL: function definition" {
         \\        (operation
         \\          (name arith.constant)
         \\          (result-bindings [%c42])
-        \\          (result-types !i64)
-        \\          (attributes { :value (: 42 !i64) }))
+        \\          (result-types i64)
+        \\          (attributes { :value (: 42 i64) }))
         \\        (operation
         \\          (name func.return)
         \\          (operands %c42))))))
@@ -174,7 +169,7 @@ test "REPL: mlir command shows module" {
         \\  (name func.func)
         \\  (attributes {
         \\    :sym_name @test
-        \\    :function_type (!function (inputs) (results !i64))
+        \\    :function_type (!function (inputs) (results i64))
         \\  })
         \\  (regions
         \\    (region
@@ -183,8 +178,8 @@ test "REPL: mlir command shows module" {
         \\        (operation
         \\          (name arith.constant)
         \\          (result-bindings [%c42])
-        \\          (result-types !i64)
-        \\          (attributes { :value (: 42 !i64) }))
+        \\          (result-types i64)
+        \\          (attributes { :value (: 42 i64) }))
         \\        (operation
         \\          (name func.return)
         \\          (operands %c42))))))
@@ -210,7 +205,7 @@ test "REPL: clear command" {
         \\  (name func.func)
         \\  (attributes {
         \\    :sym_name @test
-        \\    :function_type (!function (inputs) (results !i64))
+        \\    :function_type (!function (inputs) (results i64))
         \\  })
         \\  (regions
         \\    (region
@@ -219,8 +214,8 @@ test "REPL: clear command" {
         \\        (operation
         \\          (name arith.constant)
         \\          (result-bindings [%c42])
-        \\          (result-types !i64)
-        \\          (attributes { :value (: 42 !i64) }))
+        \\          (result-types i64)
+        \\          (attributes { :value (: 42 i64) }))
         \\        (operation
         \\          (name func.return)
         \\          (operands %c42))))))
@@ -246,13 +241,13 @@ test "REPL: multiple operations accumulate" {
         \\(operation
         \\  (name arith.constant)
         \\  (result-bindings [%x])
-        \\  (result-types !i32)
-        \\  (attributes { :value (: 42 !i32) }))
+        \\  (result-types i32)
+        \\  (attributes { :value (: 42 i32) }))
         \\(operation
         \\  (name arith.constant)
         \\  (result-bindings [%y])
-        \\  (result-types !i64)
-        \\  (attributes { :value (: 999 !i64) }))
+        \\  (result-types i64)
+        \\  (attributes { :value (: 999 i64) }))
         \\:quit
         \\
         ,

@@ -28,16 +28,16 @@ pub fn main() !void {
         \\    (name func.func)
         \\    (attributes {
         \\      :sym_name @add
-        \\      :function_type (!function (inputs !i32 !i32) (results !i32))
+        \\      :function_type (!function (inputs i32 i32) (results i32))
         \\    })
         \\    (regions
         \\      (region
         \\        (block
-        \\          (arguments [[%arg0 !i32] [%arg1 !i32]])
+        \\          (arguments [[%arg0 i32] [%arg1 i32]])
         \\          (operation
         \\            (name arith.addi)
         \\            (result-bindings [%sum])
-        \\            (result-types !i32)
+        \\            (result-types i32)
         \\            (operands %arg0 %arg1))
         \\          (operation
         \\            (name func.return)

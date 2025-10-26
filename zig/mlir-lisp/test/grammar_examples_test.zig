@@ -11,21 +11,19 @@ const example1 =
     \\  (operation
     \\    (name arith.constant)
     \\    (result-bindings [%c0])
-    \\    (result-types !i32)
+    \\    (result-types i32)
     \\    (attributes { :value (#int 42) })
     \\    (location (#unknown))))
 ;
 
 test "grammar example 1 - simple constant" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var tok = Tokenizer.init(allocator, example1);
     var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try reader.read();
 
     // Should be a list starting with 'mlir'
     try std.testing.expect(value.type == .list);
@@ -68,8 +66,8 @@ test "grammar example 1 - simple constant" {
     try std.testing.expect(types_section.type == .list);
     try std.testing.expectEqualStrings("result-types", types_section.data.list.at(0).data.atom);
     const type_expr = types_section.data.list.at(1);
-    try std.testing.expect(type_expr.type == .type_expr);
-    try std.testing.expectEqualStrings("i32", type_expr.data.type_expr.data.atom);
+    try std.testing.expect(type_expr.type == .identifier); // Builtin types are plain identifiers
+    try std.testing.expectEqualStrings("i32", type_expr.data.atom);
 
     // Check attributes section
     const attrs_section = op_list.at(4);
@@ -97,33 +95,31 @@ const example2 =
     \\    (name func.func)
     \\    (attributes {
     \\      :sym  (#sym @add)
-    \\      :type (!function (inputs !i32 !i32) (results !i32))
+    \\      :type (!function (inputs i32 i32) (results i32))
     \\      :visibility :public
     \\    })
     \\    (regions
     \\      (region
     \\        (block [^entry]
-    \\          (arguments [ [%x !i32] [%y !i32] ])
+    \\          (arguments [ [%x i32] [%y i32] ])
     \\          (operation
     \\            (name arith.addi)
     \\            (result-bindings [%sum])
     \\            (operands %x %y)
-    \\            (result-types !i32))
+    \\            (result-types i32))
     \\          (operation
     \\            (name func.return)
     \\            (operands %sum)))))))
 ;
 
 test "grammar example 2 - add inside a function" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var tok = Tokenizer.init(allocator, example2);
     var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try reader.read();
 
     // Should be a list starting with 'mlir'
     try std.testing.expect(value.type == .list);
@@ -196,7 +192,7 @@ test "grammar example 2 - add inside a function" {
     try std.testing.expect(arg1.type == .vector);
     try std.testing.expect(arg1.data.vector.len() == 2);
     try std.testing.expectEqualStrings("%x", arg1.data.vector.at(0).data.atom);
-    try std.testing.expect(arg1.data.vector.at(1).type == .type_expr);
+    try std.testing.expect(arg1.data.vector.at(1).type == .identifier);
 }
 
 // Example 3 — function call with two constants
@@ -206,7 +202,7 @@ const example3 =
     \\    (name func.func)
     \\    (attributes {
     \\      :sym (#sym @main)
-    \\      :type (!function (inputs) (results !i32))
+    \\      :type (!function (inputs) (results i32))
     \\    })
     \\    (regions
     \\      (region
@@ -215,17 +211,17 @@ const example3 =
     \\          (operation
     \\            (name arith.constant)
     \\            (result-bindings [%a])
-    \\            (result-types !i32)
+    \\            (result-types i32)
     \\            (attributes { :value (#int 1) }))
     \\          (operation
     \\            (name arith.constant)
     \\            (result-bindings [%b])
-    \\            (result-types !i32)
+    \\            (result-types i32)
     \\            (attributes { :value (#int 2) }))
     \\          (operation
     \\            (name func.call)
     \\            (result-bindings [%r])
-    \\            (result-types !i32)
+    \\            (result-types i32)
     \\            (operands %a %b)
     \\            (attributes { :callee (#flat-symbol @add) }))
     \\          (operation
@@ -234,15 +230,13 @@ const example3 =
 ;
 
 test "grammar example 3 - function call with constants" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var tok = Tokenizer.init(allocator, example3);
     var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try reader.read();
 
     // Should be a list starting with 'mlir'
     try std.testing.expect(value.type == .list);
@@ -265,12 +259,12 @@ const example4 =
     \\    (name func.func)
     \\    (attributes {
     \\      :sym (#sym @branchy)
-    \\      :type (!function (inputs !i1 !i32 !i32) (results !i32))
+    \\      :type (!function (inputs i1 i32 i32) (results i32))
     \\    })
     \\    (regions
     \\      (region
     \\        (block [^entry]
-    \\          (arguments [ [%cond !i1] [%x !i32] [%y !i32] ])
+    \\          (arguments [ [%cond i1] [%x i32] [%y i32] ])
     \\          (operation
     \\            (name cf.cond_br)
     \\            (operands %cond)
@@ -278,23 +272,21 @@ const example4 =
     \\              (successor ^then (%x))
     \\              (successor ^else (%y)))))
     \\        (block [^then]
-    \\          (arguments [ [%t !i32] ])
+    \\          (arguments [ [%t i32] ])
     \\          (operation (name func.return) (operands %t)))
     \\        (block [^else]
-    \\          (arguments [ [%e !i32] ])
+    \\          (arguments [ [%e i32] ])
     \\          (operation (name func.return) (operands %e)))))))
 ;
 
 test "grammar example 4 - control flow with multiple blocks" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var tok = Tokenizer.init(allocator, example4);
     var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try reader.read();
 
     // Should be a list starting with 'mlir'
     try std.testing.expect(value.type == .list);
@@ -365,7 +357,9 @@ test "grammar example 4 - control flow with multiple blocks" {
 }
 
 test "all grammar examples parse successfully" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const examples = [_][]const u8{
         example1,
@@ -377,11 +371,7 @@ test "all grammar examples parse successfully" {
     for (examples, 0..) |example, i| {
         var tok = Tokenizer.init(allocator, example);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         // All examples should parse to a list starting with 'mlir'
         try std.testing.expect(value.type == .list);

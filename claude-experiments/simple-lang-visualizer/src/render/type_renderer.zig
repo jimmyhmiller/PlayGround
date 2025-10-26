@@ -58,7 +58,7 @@ fn renderPrimitive(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_the
 }
 
 /// Render a struct type
-fn renderStruct(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_theme: *const theme.Theme) void {
+fn renderStruct(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_theme: *const theme.Theme, type_system: *ts.TypeSystem) void {
     const struct_def = typ.definition.@"struct";
     const anim = typ.metadata.animation;
     const width = RenderConstants.box_width * anim.scale;
@@ -107,6 +107,14 @@ fn renderStruct(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_theme:
         font,
     );
 
+    // Draw struct indicator badge (small filled circle in top-right)
+    const badge_radius = 6.0 * anim.scale;
+    const badge_pos = ts.Vec2.init(
+        scaled_pos.x + width - 15 * anim.scale,
+        scaled_pos.y + 15 * anim.scale,
+    );
+    prim.drawCircle(badge_pos, badge_radius, colors.primary, colors.text_header);
+
     // Draw fields
     var i: usize = 0;
     while (i < struct_def.fields.len) : (i += 1) {
@@ -119,21 +127,48 @@ fn renderStruct(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_theme:
         if (field_anim.opacity > 0.0) {
             const field_alpha = @as(u8, @intFromFloat(255.0 * field_anim.opacity * anim.opacity));
 
-            // Draw field name and type
-            const field_text = util.allocPrintZ(
+            // Draw field name in regular color
+            const field_name_text = util.allocPrintZ(
                 std.heap.page_allocator,
-                "{s}: {s}",
-                .{ field.name, field.type_ref },
+                "{s}: ",
+                .{field.name},
             ) catch return;
-            defer std.heap.page_allocator.free(field_text);
+            defer std.heap.page_allocator.free(field_name_text);
 
             const field_text_color = colors.text.withAlpha(field_alpha);
+            const font_size = 16 * anim.scale * field_anim.scale;
             prim.drawText(
-                field_text,
+                field_name_text,
                 field_pos.x,
                 field_pos.y,
-                16 * anim.scale * field_anim.scale,
+                font_size,
                 field_text_color,
+                font,
+            );
+
+            // Calculate width of field name to position the type
+            const name_width = rl.measureTextEx(font, field_name_text, font_size, 0.5).x;
+
+            // Draw type in color-coded color (use referenced type's color if it exists)
+            const field_type_text = util.allocPrintZ(
+                std.heap.page_allocator,
+                "{s}",
+                .{field.type_ref},
+            ) catch return;
+            defer std.heap.page_allocator.free(field_type_text);
+
+            // Try to find the referenced type to get its color
+            const type_color = if (type_system.getType(field.type_ref)) |referenced_type|
+                referenced_type.metadata.color.withAlpha(field_alpha)
+            else
+                colors.text.withAlpha(field_alpha);
+
+            prim.drawText(
+                field_type_text,
+                field_pos.x + name_width,
+                field_pos.y,
+                font_size,
+                type_color,
                 font,
             );
         }
@@ -151,43 +186,54 @@ fn renderStruct(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_theme:
     }
 }
 
-/// Render an enum type - like a struct with variant rows
-fn renderEnum(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_theme: *const theme.Theme) void {
+/// Render an enum type - each variant looks like a mini-struct
+fn renderEnum(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_theme: *const theme.Theme, type_system: *ts.TypeSystem) void {
     const enum_def = typ.definition.@"enum";
     const anim = typ.metadata.animation;
 
-    const width = RenderConstants.box_width * 1.5; // Wider for variants
+    const width = RenderConstants.box_width * 1.5;
     const header_height = RenderConstants.box_height * anim.scale;
-    const variant_height = RenderConstants.field_height * anim.scale;
-    const total_height = header_height + @as(f32, @floatFromInt(enum_def.variants.len)) * variant_height;
+    const variant_padding = 8.0 * anim.scale;
 
-    // Center the scaled box
-    const base_width = RenderConstants.box_width * 1.5;
-    const base_height = RenderConstants.box_height + @as(f32, @floatFromInt(enum_def.variants.len)) * RenderConstants.field_height;
-    const scaled_pos = ts.Vec2.init(
-        pos.x + (base_width - width) / 2.0,
-        pos.y + (base_height - total_height) / 2.0,
-    );
+    // Each variant is like a mini-struct: header + field area
+    const variant_header_height = 35.0 * anim.scale;
+    const variant_field_height = 25.0 * anim.scale;
+
+    // Calculate total height
+    var total_variant_height: f32 = 0;
+    var i: usize = 0;
+    while (i < enum_def.variants.len) : (i += 1) {
+        const variant = enum_def.variants.at(i);
+        const has_payload = variant.payload != null;
+        const this_variant_height = variant_header_height + (if (has_payload) variant_field_height else 0.0);
+        total_variant_height += this_variant_height + variant_padding;
+    }
+
+    const total_height = header_height + total_variant_height + variant_padding;
+
+    // Apply animation scaling from the center
+    const scaled_pos = pos;
 
     const colors = current_theme.colorsForType(.@"enum");
     const alpha = @as(u8, @intFromFloat(255.0 * anim.opacity));
+    const bg_color = colors.secondary.withAlpha(@min(alpha, colors.secondary.a));
+    const outline_color = colors.primary.withAlpha(alpha);
+    const enum_roundness = 0.1;
 
-    // Draw subtle shadow
+    // Draw shadow
     if (anim.opacity > 0.5) {
         prim.drawShadow(scaled_pos, width, total_height, 2.0, @intFromFloat(15.0 * anim.opacity));
     }
 
-    // Draw main container
-    const bg_color = colors.secondary.withAlpha(@min(alpha, colors.secondary.a));
-    const outline_color = colors.primary.withAlpha(alpha);
-    prim.drawRoundedBox(scaled_pos, width, total_height, bg_color, outline_color, RenderConstants.roundness);
+    // Draw main container with double border
+    prim.drawDoubleBorderedBox(scaled_pos, width, total_height, bg_color, outline_color, enum_roundness);
 
     // Draw header
     const header_top = colors.primary.withAlpha(alpha);
     const header_bottom = colors.accent.withAlpha(alpha);
-    prim.drawGradientBox(scaled_pos, width, header_height, header_top, header_bottom, RenderConstants.roundness);
+    prim.drawGradientBox(scaled_pos, width, header_height, header_top, header_bottom, enum_roundness);
 
-    // Draw enum name in header
+    // Draw enum name
     const name_z = std.heap.page_allocator.dupeZ(u8, typ.name) catch return;
     defer std.heap.page_allocator.free(name_z);
 
@@ -202,60 +248,125 @@ fn renderEnum(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_theme: *
         font,
     );
 
-    // Draw variants as rows (like struct fields)
-    var i: usize = 0;
+    // Draw enum indicator badge (diamond)
+    const badge_size = 8.0 * anim.scale;
+    const badge_center = ts.Vec2.init(
+        scaled_pos.x + width - 15 * anim.scale,
+        scaled_pos.y + 15 * anim.scale,
+    );
+    const diamond_points = [_]rl.Vector2{
+        rl.Vector2{ .x = badge_center.x, .y = badge_center.y - badge_size },
+        rl.Vector2{ .x = badge_center.x + badge_size, .y = badge_center.y },
+        rl.Vector2{ .x = badge_center.x, .y = badge_center.y + badge_size },
+        rl.Vector2{ .x = badge_center.x - badge_size, .y = badge_center.y },
+    };
+    const badge_color = prim.toRaylibColor(colors.primary);
+    rl.drawTriangle(diamond_points[0], diamond_points[1], rl.Vector2{ .x = badge_center.x, .y = badge_center.y }, badge_color);
+    rl.drawTriangle(diamond_points[1], diamond_points[2], rl.Vector2{ .x = badge_center.x, .y = badge_center.y }, badge_color);
+    rl.drawTriangle(diamond_points[2], diamond_points[3], rl.Vector2{ .x = badge_center.x, .y = badge_center.y }, badge_color);
+    rl.drawTriangle(diamond_points[3], diamond_points[0], rl.Vector2{ .x = badge_center.x, .y = badge_center.y }, badge_color);
+
+    // Draw each variant as a mini-struct
+    var current_y = scaled_pos.y + header_height + variant_padding;
+    i = 0;
     while (i < enum_def.variants.len) : (i += 1) {
         const variant = @constCast(enum_def.variants.at(i));
         const variant_anim = variant.animation;
-        const variant_y = scaled_pos.y + header_height + @as(f32, @floatFromInt(i)) * variant_height;
-        const variant_pos = ts.Vec2.init(scaled_pos.x + RenderConstants.padding * anim.scale, variant_y + RenderConstants.padding * anim.scale);
+        const has_payload = variant.payload != null;
+        const this_variant_height = variant_header_height + (if (has_payload) variant_field_height else 0.0);
 
         // Only draw if variant is visible
         if (variant_anim.opacity > 0.0) {
             const variant_alpha = @as(u8, @intFromFloat(255.0 * variant_anim.opacity * anim.opacity));
 
-            // Draw variant name with payload
-            const variant_text = if (variant.payload) |payload|
-                util.allocPrintZ(
-                    std.heap.page_allocator,
-                    "| {s}({s})",
-                    .{ variant.name, payload },
-                ) catch return
-            else
-                util.allocPrintZ(
-                    std.heap.page_allocator,
-                    "| {s}",
-                    .{variant.name},
-                ) catch return;
-            defer std.heap.page_allocator.free(variant_text);
+            const variant_box_width = width - 2 * variant_padding;
+            const scaled_variant_width = variant_box_width * variant_anim.scale;
+            const scaled_variant_height = this_variant_height * variant_anim.scale;
 
-            const variant_text_color = colors.text.withAlpha(variant_alpha);
-            prim.drawText(
-                variant_text,
-                variant_pos.x,
-                variant_pos.y,
-                16 * anim.scale * variant_anim.scale,
+            const variant_pos = ts.Vec2.init(
+                scaled_pos.x + variant_padding + (variant_box_width - scaled_variant_width) / 2.0,
+                current_y + (this_variant_height - scaled_variant_height) / 2.0,
+            );
+
+            // Draw variant mini-struct container
+            const variant_bg = colors.secondary.withAlpha(@as(u8, @intFromFloat(@as(f32, @floatFromInt(colors.secondary.a)) * 0.6 * variant_anim.opacity)));
+            const variant_outline = colors.accent.withAlpha(variant_alpha);
+            prim.drawRoundedBox(variant_pos, scaled_variant_width, scaled_variant_height, variant_bg, variant_outline, 0.2);
+
+            // Draw variant header (like a mini struct header)
+            const variant_header_bg = colors.accent.withAlpha(@as(u8, @intFromFloat(@as(f32, @floatFromInt(variant_alpha)) * 0.8)));
+            prim.drawGradientBox(variant_pos, scaled_variant_width, variant_header_height * variant_anim.scale, variant_header_bg, variant_bg, 0.2);
+
+            // Draw variant name
+            const variant_name_z = std.heap.page_allocator.dupeZ(u8, variant.name) catch return;
+            defer std.heap.page_allocator.free(variant_name_z);
+
+            const variant_text_color = colors.text_header.withAlpha(variant_alpha);
+            prim.drawCenteredText(
+                variant_name_z,
+                variant_pos,
+                scaled_variant_width,
+                variant_header_height * variant_anim.scale,
+                14 * anim.scale * variant_anim.scale,
                 variant_text_color,
                 font,
             );
+
+            // Draw payload as a field (if exists)
+            if (has_payload) {
+                const field_y = variant_pos.y + variant_header_height * variant_anim.scale;
+                const field_x = variant_pos.x + 10 * anim.scale * variant_anim.scale;
+                const field_font_size = 12 * anim.scale * variant_anim.scale;
+
+                // Draw "value: " label in regular color
+                const field_label = "value: ";
+                const field_label_z = std.heap.page_allocator.dupeZ(u8, field_label) catch return;
+                defer std.heap.page_allocator.free(field_label_z);
+
+                const field_text_color = colors.text.withAlpha(variant_alpha);
+                prim.drawText(
+                    field_label_z,
+                    field_x,
+                    field_y + 5 * anim.scale * variant_anim.scale,
+                    field_font_size,
+                    field_text_color,
+                    font,
+                );
+
+                // Calculate width of label to position the type
+                const label_width = rl.measureTextEx(font, field_label_z, field_font_size, 0.5).x;
+
+                // Draw type in color-coded color (use referenced type's color if it exists)
+                const payload_type = variant.payload.?;
+                const payload_type_z = std.heap.page_allocator.dupeZ(u8, payload_type) catch return;
+                defer std.heap.page_allocator.free(payload_type_z);
+
+                // Try to find the referenced type to get its color
+                const type_color = if (type_system.getType(payload_type)) |referenced_type|
+                    referenced_type.metadata.color.withAlpha(variant_alpha)
+                else
+                    colors.text.withAlpha(variant_alpha);
+
+                prim.drawText(
+                    payload_type_z,
+                    field_x + label_width,
+                    field_y + 5 * anim.scale * variant_anim.scale,
+                    field_font_size,
+                    type_color,
+                    font,
+                );
+            }
         }
 
-        // Draw separator line
-        if (i < enum_def.variants.len - 1) {
-            const sep_alpha = @as(u8, @intFromFloat(@as(f32, @floatFromInt(outline_color.a)) * 0.4 * anim.opacity));
-            rl.drawLineEx(
-                rl.Vector2{ .x = scaled_pos.x + 10, .y = variant_y + variant_height },
-                rl.Vector2{ .x = scaled_pos.x + width - 10, .y = variant_y + variant_height },
-                1,
-                prim.toRaylibColor(outline_color.withAlpha(sep_alpha)),
-            );
-        }
+        // Always increment current_y (even if not visible, to maintain spacing)
+        current_y += this_variant_height + variant_padding;
     }
 }
 
 /// Render a function type
-fn renderFunction(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_theme: *const theme.Theme) void {
+fn renderFunction(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_theme: *const theme.Theme, type_system: *ts.TypeSystem) void {
     _ = current_theme; // TODO: Use theme colors
+    _ = type_system; // Will be used for color-coded type references
     const func_def = typ.definition.function;
 
     const param_width: f32 = 100;
@@ -359,8 +470,9 @@ fn renderFunction(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_them
 }
 
 /// Render a tuple type
-fn renderTuple(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_theme: *const theme.Theme) void {
+fn renderTuple(typ: *const ts.Type, pos: ts.Vec2, font: rl.Font, current_theme: *const theme.Theme, type_system: *ts.TypeSystem) void {
     _ = current_theme; // TODO: Use theme colors
+    _ = type_system; // Will be used for color-coded type references
     const tuple_def = typ.definition.tuple;
     const element_size: f32 = 60;
     const spacing: f32 = 20;
@@ -484,17 +596,26 @@ pub fn getTypeBounds(typ: *const ts.Type) Bounds {
             };
         },
         .@"enum" => |e| blk: {
-            const trunk_height: f32 = 60;
-            const branch_length = RenderConstants.branch_length;
-            const variant_height: f32 = 40;
-            const total_height = trunk_height + branch_length + variant_height;
-            const variant_count = @as(f32, @floatFromInt(e.variants.len));
-            const spread = branch_length * 2; // Approximate horizontal spread
-            _ = variant_count;
+            const width = RenderConstants.box_width * 1.5;
+            const header_height = RenderConstants.box_height;
+            const variant_header_height: f32 = 35.0;
+            const variant_field_height: f32 = 25.0;
+            const variant_padding: f32 = 8.0;
+
+            var total_variant_height: f32 = 0;
+            var i: usize = 0;
+            while (i < e.variants.len) : (i += 1) {
+                const variant = e.variants.at(i);
+                const has_payload = variant.payload != null;
+                const this_variant_height = variant_header_height + (if (has_payload) variant_field_height else 0.0);
+                total_variant_height += this_variant_height + variant_padding;
+            }
+
+            const total_height = header_height + total_variant_height + variant_padding;
             break :blk Bounds{
-                .x = pos.x - spread / 2,
+                .x = pos.x,
                 .y = pos.y,
-                .width = 80 + spread,
+                .width = width,
                 .height = total_height,
             };
         },
@@ -535,17 +656,17 @@ pub fn getTypeBounds(typ: *const ts.Type) Bounds {
 }
 
 /// Main render function that dispatches to specific type renderers
-pub fn renderType(typ: *const ts.Type, font: rl.Font) void {
+pub fn renderType(typ: *const ts.Type, font: rl.Font, type_system: *ts.TypeSystem) void {
     const pos = typ.metadata.position;
     const current_theme = theme.getCurrentTheme() catch return;
 
     switch (typ.definition) {
         .primitive => renderPrimitive(typ, pos, font, current_theme),
-        .@"struct" => renderStruct(typ, pos, font, current_theme),
-        .@"enum" => renderEnum(typ, pos, font, current_theme),
-        .function => renderFunction(typ, pos, font, current_theme),
-        .tuple => renderTuple(typ, pos, font, current_theme),
+        .@"struct" => renderStruct(typ, pos, font, current_theme, type_system),
+        .@"enum" => renderEnum(typ, pos, font, current_theme, type_system),
+        .function => renderFunction(typ, pos, font, current_theme, type_system),
+        .tuple => renderTuple(typ, pos, font, current_theme, type_system),
         .optional => renderOptional(typ, pos, font, current_theme),
-        .recursive => renderStruct(typ, pos, font, current_theme), // Render like struct for now
+        .recursive => renderStruct(typ, pos, font, current_theme, type_system), // Render like struct for now
     }
 }

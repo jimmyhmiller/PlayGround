@@ -29,6 +29,9 @@ pub const PersistentLinkedList = @import("collections/linked_list.zig").Persiste
 pub const PersistentMap = @import("collections/map.zig").PersistentMap;
 pub const PersistentMapWithEq = @import("collections/map.zig").PersistentMapWithEq;
 
+// Export the C API for collections
+pub const c_api = @import("collections/c_api.zig");
+
 // Export the MLIR module
 pub const mlir = @import("mlir/c.zig");
 

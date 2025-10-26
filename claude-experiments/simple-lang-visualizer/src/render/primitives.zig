@@ -33,6 +33,32 @@ pub fn drawRoundedBox(pos: ts.Vec2, width: f32, height: f32, color: ts.Color, ou
     rl.drawRectangleRoundedLines(rect, roundness, 10, toRaylibColor(outline_color));
 }
 
+/// Draw a rounded rectangle with double border (for enums/sum types)
+pub fn drawDoubleBorderedBox(pos: ts.Vec2, width: f32, height: f32, color: ts.Color, outline_color: ts.Color, roundness: f32) void {
+    const rect = rl.Rectangle{
+        .x = pos.x,
+        .y = pos.y,
+        .width = width,
+        .height = height,
+    };
+
+    // Draw filled box
+    rl.drawRectangleRounded(rect, roundness, 10, toRaylibColor(color));
+
+    // Draw outer border
+    rl.drawRectangleRoundedLines(rect, roundness, 10, toRaylibColor(outline_color));
+
+    // Draw inner border (2px inset)
+    const inner_rect = rl.Rectangle{
+        .x = pos.x + 3,
+        .y = pos.y + 3,
+        .width = width - 6,
+        .height = height - 6,
+    };
+    const inner_outline = outline_color.withAlpha(@as(u8, @intFromFloat(@as(f32, @floatFromInt(outline_color.a)) * 0.5)));
+    rl.drawRectangleRoundedLines(inner_rect, roundness, 10, toRaylibColor(inner_outline));
+}
+
 /// Draw text centered in a box with custom font
 pub fn drawCenteredText(text: [:0]const u8, pos: ts.Vec2, width: f32, height: f32, font_size: f32, color: ts.Color, font: rl.Font) void {
     const text_vec = rl.measureTextEx(font, text, font_size, 0.5);
@@ -49,22 +75,34 @@ pub fn drawText(text: [:0]const u8, x: f32, y: f32, font_size: f32, color: ts.Co
 
 /// Draw a connecting line with bezier curve
 pub fn drawConnection(start: ts.Vec2, end: ts.Vec2, color: ts.Color, thickness: f32) void {
-    _ = start;
-    _ = end;
-    _ = color;
-    _ = thickness;
-    // TODO: Implement bezier curve drawing
-    // For now, just draw a simple line
-    // const mid_x = (start.x + end.x) / 2.0;
-    // const control1 = rl.Vector2{ .x = mid_x, .y = start.y };
-    // const control2 = rl.Vector2{ .x = mid_x, .y = end.y };
+    // Draw bezier curve
+    rl.drawLineBezier(
+        toRaylibVec2(start),
+        toRaylibVec2(end),
+        thickness,
+        toRaylibColor(color),
+    );
 
-    // rl.drawLineBezier(
-    //     toRaylibVec2(start),
-    //     toRaylibVec2(end),
-    //     thickness,
-    //     toRaylibColor(color),
-    // );
+    // Draw arrowhead at end
+    const arrow_size = 8.0;
+    const angle = std.math.atan2(end.y - start.y, end.x - start.x);
+    const arrow_angle = 0.4; // radians
+
+    const p1 = ts.Vec2.init(
+        end.x - arrow_size * @cos(angle - arrow_angle),
+        end.y - arrow_size * @sin(angle - arrow_angle),
+    );
+    const p2 = ts.Vec2.init(
+        end.x - arrow_size * @cos(angle + arrow_angle),
+        end.y - arrow_size * @sin(angle + arrow_angle),
+    );
+
+    rl.drawTriangle(
+        toRaylibVec2(end),
+        toRaylibVec2(p1),
+        toRaylibVec2(p2),
+        toRaylibColor(color),
+    );
 }
 
 /// Draw a circle (for tuple elements, connection points)

@@ -1,11 +1,11 @@
 (operation
   (name arith.constant)
   (result-bindings [%x])
-  (result-types !i32)
-  (attributes { :value (: 42 !i32) }))
+  (result-types i32)
+  (attributes { :value (: 42 i32) }))
 (operation
   (name arith.constant)
   (result-bindings [%y])
-  (result-types !i64)
-  (attributes { :value (: 999 !i64) }))
+  (result-types i64)
+  (attributes { :value (: 999 i64) }))
 :quit

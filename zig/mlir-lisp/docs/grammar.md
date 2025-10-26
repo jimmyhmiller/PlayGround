@@ -9,11 +9,12 @@
 ; 0) Lexical tokens (opaque, dialect-agnostic)
 ;----------------------------------------
 IDENT      ::= /[A-Za-z_][A-Za-z0-9_.$:-]*/
+SUFFIX_ID  ::= /[0-9]+/ | IDENT      ; pure digits OR named identifier
 NUMBER     ::= integer | float | hex | binary
 STRING     ::= "…"
-VALUE_ID   ::= "%" IDENT             ; SSA value id (binding/ref)
-BLOCK_ID   ::= "^" IDENT             ; block label (binding/ref)
-SYMBOL     ::= "@" IDENT             ; symbol-table name
+VALUE_ID   ::= "%" SUFFIX_ID         ; SSA value id (binding/ref), e.g. %0, %arg0
+BLOCK_ID   ::= "^" SUFFIX_ID         ; block label (binding/ref), e.g. ^bb0, ^entry
+SYMBOL     ::= "@" SUFFIX_ID         ; symbol-table name, e.g. @main, @42
 OP_NAME    ::= IDENT "." IDENT ( "." IDENT )*   ; dialect/op name
 KEYWORD    ::= ":" IDENT ( "." IDENT )*         ; attr keys
 
@@ -21,7 +22,10 @@ KEYWORD    ::= ":" IDENT ( "." IDENT )*         ; attr keys
 ; 1) Core S-expressions
 ;----------------------------------------
 ATOM       ::= IDENT | NUMBER | STRING | VALUE_ID | BLOCK_ID | SYMBOL
-TYPE       ::= "!" SEXPR
+TYPE       ::= "!" IDENT | IDENT
+               ; Builtin types (i32, f64, vector<4xf32>, etc.) are written as plain identifiers
+               ; Dialect types (llvm.ptr, transform.any_op, etc.) require the ! prefix
+               ; Function types use special syntax: (!function (inputs TYPE*) (results TYPE*))
 ATTR       ::= NUMBER | STRING | true | false | "#" SEXPR
 SEXPR      ::= ATOM | "(" SEXPR* ")" | "[" SEXPR* "]" | "{" (SEXPR SEXPR)* "}"
 
@@ -91,7 +95,7 @@ operand-bundle ::= ( VALUE_ID* )
   (operation
     (name arith.constant)
     (result-bindings [%c0])
-    (result-types !i32)
+    (result-types i32)
     (attributes { :value (#int 42) })
     (location (#unknown))))
 
@@ -103,18 +107,18 @@ operand-bundle ::= ( VALUE_ID* )
     (name func.func)
     (attributes {
       :sym  (#sym @add)
-      :type (!function (inputs !i32 !i32) (results !i32))
+      :type (!function (inputs i32 i32) (results i32))
       :visibility :public
     })
     (regions
       (region
         (block [^entry]
-          (arguments [ [%x !i32] [%y !i32] ])
+          (arguments [ [%x i32] [%y i32] ])
           (operation
             (name arith.addi)
             (result-bindings [%sum])
             (operands %x %y)
-            (result-types !i32))
+            (result-types i32))
           (operation
             (name func.return)
             (operands %sum)))))))
@@ -127,7 +131,7 @@ operand-bundle ::= ( VALUE_ID* )
     (name func.func)
     (attributes {
       :sym (#sym @main)
-      :type (!function (inputs) (results !i32))
+      :type (!function (inputs) (results i32))
     })
     (regions
       (region
@@ -136,17 +140,17 @@ operand-bundle ::= ( VALUE_ID* )
           (operation
             (name arith.constant)
             (result-bindings [%a])
-            (result-types !i32)
+            (result-types i32)
             (attributes { :value (#int 1) }))
           (operation
             (name arith.constant)
             (result-bindings [%b])
-            (result-types !i32)
+            (result-types i32)
             (attributes { :value (#int 2) }))
           (operation
             (name func.call)
             (result-bindings [%r])
-            (result-types !i32)
+            (result-types i32)
             (operands %a %b)
             (attributes { :callee (#flat-symbol @add) }))
           (operation
@@ -161,12 +165,12 @@ operand-bundle ::= ( VALUE_ID* )
     (name func.func)
     (attributes {
       :sym (#sym @branchy)
-      :type (!function (inputs !i1 !i32 !i32) (results !i32))
+      :type (!function (inputs i1 i32 i32) (results i32))
     })
     (regions
       (region
         (block [^entry]
-          (arguments [ [%cond !i1] [%x !i32] [%y !i32] ])
+          (arguments [ [%cond i1] [%x i32] [%y i32] ])
           (operation
             (name cf.cond_br)
             (operands %cond)
@@ -174,10 +178,10 @@ operand-bundle ::= ( VALUE_ID* )
               (successor ^then (%x))
               (successor ^else (%y)))))
         (block [^then]
-          (arguments [ [%t !i32] ])
+          (arguments [ [%t i32] ])
           (operation (name func.return) (operands %t)))
         (block [^else]
-          (arguments [ [%e !i32] ])
+          (arguments [ [%e i32] ])
           (operation (name func.return) (operands %e)))))))
 
 ;----------------------------------------
@@ -188,25 +192,25 @@ operand-bundle ::= ( VALUE_ID* )
     (name func.func)
     (attributes {
       :sym (#sym @fibonacci)
-      :type (!function (inputs !i32) (results !i32))
+      :type (!function (inputs i32) (results i32))
       :visibility :public
     })
     (regions
       (region
         (block [^entry]
-          (arguments [ [%n !i32] ])
+          (arguments [ [%n i32] ])
 
           ;; Check if n <= 1 (base case)
           (operation
             (name arith.constant)
             (result-bindings [%c1])
-            (result-types !i32)
+            (result-types i32)
             (attributes { :value (#int 1) }))
 
           (operation
             (name arith.cmpi)
             (result-bindings [%cond])
-            (result-types !i1)
+            (result-types i1)
             (operands %n %c1)
             (attributes { :predicate (#string "sle") }))
 
@@ -214,7 +218,7 @@ operand-bundle ::= ( VALUE_ID* )
           (operation
             (name scf.if)
             (result-bindings [%result])
-            (result-types !i32)
+            (result-types i32)
             (operands %cond)
             (regions
               ;; Then region: base case, return n
@@ -234,19 +238,19 @@ operand-bundle ::= ( VALUE_ID* )
                   (operation
                     (name arith.constant)
                     (result-bindings [%c1_rec])
-                    (result-types !i32)
+                    (result-types i32)
                     (attributes { :value (#int 1) }))
 
                   (operation
                     (name arith.subi)
                     (result-bindings [%n_minus_1])
-                    (result-types !i32)
+                    (result-types i32)
                     (operands %n %c1_rec))
 
                   (operation
                     (name func.call)
                     (result-bindings [%fib_n_minus_1])
-                    (result-types !i32)
+                    (result-types i32)
                     (operands %n_minus_1)
                     (attributes { :callee (#flat-symbol @fibonacci) }))
 
@@ -254,19 +258,19 @@ operand-bundle ::= ( VALUE_ID* )
                   (operation
                     (name arith.constant)
                     (result-bindings [%c2])
-                    (result-types !i32)
+                    (result-types i32)
                     (attributes { :value (#int 2) }))
 
                   (operation
                     (name arith.subi)
                     (result-bindings [%n_minus_2])
-                    (result-types !i32)
+                    (result-types i32)
                     (operands %n %c2))
 
                   (operation
                     (name func.call)
                     (result-bindings [%fib_n_minus_2])
-                    (result-types !i32)
+                    (result-types i32)
                     (operands %n_minus_2)
                     (attributes { :callee (#flat-symbol @fibonacci) }))
 
@@ -274,7 +278,7 @@ operand-bundle ::= ( VALUE_ID* )
                   (operation
                     (name arith.addi)
                     (result-bindings [%sum])
-                    (result-types !i32)
+                    (result-types i32)
                     (operands %fib_n_minus_1 %fib_n_minus_2))
 
                   (operation

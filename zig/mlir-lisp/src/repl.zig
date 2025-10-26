@@ -27,35 +27,22 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try ctx.getOrLoadDialect("scf");
     try ctx.getOrLoadDialect("cf");
 
+    // Create arena allocator for all parsing operations during REPL session
+    // This keeps all parsed data structures valid for the entire session
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
     // Create initial empty module
     var operations_list = std.ArrayList(Operation){};
     defer {
         for (operations_list.items) |*op| {
-            op.deinit(allocator);
+            op.deinit(arena_allocator);
         }
         operations_list.deinit(allocator);
     }
 
-    // Keep track of Values that need to stay alive (for auto-exec wrappers)
-    var alive_values = std.ArrayList(*Value){};
-    defer {
-        for (alive_values.items) |val| {
-            val.deinit(allocator);
-            allocator.destroy(val);
-        }
-        alive_values.deinit(allocator);
-    }
-
-    // Keep track of source strings that need to stay alive (for auto-exec wrappers)
-    var alive_sources = std.ArrayList([]const u8){};
-    defer {
-        for (alive_sources.items) |source| {
-            allocator.free(source);
-        }
-        alive_sources.deinit(allocator);
-    }
-
-    // Create builder and executor (persistent)
+    // Create builder and executor (persistent) - use main allocator
     var builder = Builder.init(allocator, &ctx);
     defer builder.deinit();
 
@@ -179,14 +166,13 @@ pub fn run(allocator: std.mem.Allocator) !void {
         if (paren_depth == 0 and brace_depth == 0 and bracket_depth == 0) {
             processInput(
                 allocator,
+                arena_allocator,
                 input_buffer.items,
                 &ctx,
                 &operations_list,
                 &builder,
                 &executor,
                 &mlir_module,
-                &alive_values,
-                &alive_sources,
             ) catch |err| {
                 std.debug.print("Error: {}\n\n", .{err});
             };
@@ -194,7 +180,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
             // Clear input buffer
             input_buffer.clearRetainingCapacity();
         } else if (paren_depth < 0 or brace_depth < 0 or bracket_depth < 0) {
-            std.debug.print("Error: Unbalanced brackets\n\n", .{});
+            std.debug.print("Error: Unbalanced parentheses\n\n", .{});
             input_buffer.clearRetainingCapacity();
             paren_depth = 0;
             brace_depth = 0;
@@ -205,26 +191,30 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
 // Helper function to create a wrapper function that executes a single operation and returns 0
 // TODO: Properly return operation results
-fn createReplExecWrapper(allocator: std.mem.Allocator, user_op: Operation, parser: *Parser, alive_values: *std.ArrayList(*Value), alive_sources: *std.ArrayList([]const u8)) !Operation {
+fn createReplExecWrapper(temp_allocator: std.mem.Allocator, parse_allocator: std.mem.Allocator, user_op: Operation, parser: *Parser) !Operation {
     // Use Printer to convert the operation to a string
     const Printer = mlir_lisp.Printer;
-    var printer = Printer.init(allocator);
+    var printer = Printer.init(temp_allocator);
     defer printer.deinit();
 
     try printer.printOperation(&user_op);
-    const op_string = try allocator.dupe(u8, printer.getOutput());
-    defer allocator.free(op_string);
+    const op_string = try temp_allocator.dupe(u8, printer.getOutput());
+    defer temp_allocator.free(op_string);
 
-    // Debug: print the serialized operation
-    std.debug.print("\n=== Serialized operation ===\n{s}\n============================\n", .{op_string});
+    // Determine what to return - use the operation's result if it has one, otherwise use a dummy
+    const return_operand = if (user_op.result_bindings.len > 0)
+        user_op.result_bindings[0]
+    else
+        "%__result";
 
     // Build a wrapper function source with the operation embedded
-    const wrapper_source = try std.fmt.allocPrint(allocator,
+    // Use parse_allocator so the source stays alive
+    const wrapper_source = try std.fmt.allocPrint(parse_allocator,
         \\(operation
         \\  (name func.func)
         \\  (attributes {{
         \\    :sym_name @__repl_exec
-        \\    :function_type (!function (inputs) (results !i64))
+        \\    :function_type (!function (inputs) (results i64))
         \\  }})
         \\  (regions
         \\    (region
@@ -234,70 +224,44 @@ fn createReplExecWrapper(allocator: std.mem.Allocator, user_op: Operation, parse
         \\        (operation
         \\          (name arith.constant)
         \\          (result-bindings [%__result])
-        \\          (result-types !i64)
-        \\          (attributes {{ :value (: 0 !i64) }}))
+        \\          (result-types i64)
+        \\          (attributes {{ :value (: 0 i64) }}))
         \\        (operation
         \\          (name func.return)
-        \\          (operands %__result))))))
-    , .{op_string});
+        \\          (operands {s}))))))
+    , .{op_string, return_operand});
 
-    // Debug: print the wrapper source
-    std.debug.print("\n=== Wrapper source ===\n{s}\n======================\n", .{wrapper_source});
-
-    // Parse the wrapper
-    std.debug.print("DEBUG: About to tokenize wrapper_source (len={})\n", .{wrapper_source.len});
-    var tok = Tokenizer.init(allocator, wrapper_source);
-    var reader = try Reader.init(allocator, &tok);
-    std.debug.print("DEBUG: About to read wrapper value\n", .{});
+    // Parse the wrapper - all allocations use parse_allocator which is the arena
+    var tok = Tokenizer.init(parse_allocator, wrapper_source);
+    var reader = try Reader.init(parse_allocator, &tok);
     const value = try reader.read();
-    std.debug.print("DEBUG: Wrapper value read successfully, type={s}\n", .{@tagName(value.type)});
 
-    // Keep the value and source alive - don't deinit them
-    try alive_values.append(allocator, value);
-    try alive_sources.append(allocator, wrapper_source);
-
-    std.debug.print("DEBUG: About to parse wrapper operation\n", .{});
     const result = try parser.parseOperation(value);
-    std.debug.print("DEBUG: Wrapper operation parsed successfully, name={s}\n", .{result.name});
-    std.debug.print("DEBUG: Wrapper has {} regions\n", .{result.regions.len});
-    if (result.regions.len > 0) {
-        std.debug.print("DEBUG: First region has {} blocks\n", .{result.regions[0].blocks.len});
-        if (result.regions[0].blocks.len > 0) {
-            std.debug.print("DEBUG: First block has {} operations\n", .{result.regions[0].blocks[0].operations.len});
-            for (result.regions[0].blocks[0].operations, 0..) |*nested_op, op_idx| {
-                std.debug.print("DEBUG: Operation[{}] name={s}, attributes={}\n", .{op_idx, nested_op.name, nested_op.attributes.len});
-                for (nested_op.attributes, 0..) |attr, attr_idx| {
-                    std.debug.print("DEBUG:   attr[{}] key=\"{s}\"\n", .{attr_idx, attr.key});
-                }
-            }
-        }
-    }
     return result;
 }
 
 fn processInput(
     allocator: std.mem.Allocator,
+    parse_allocator: std.mem.Allocator,
     input: []const u8,
     _: *mlir.Context,
     operations_list: *std.ArrayList(Operation),
     builder: *Builder,
     executor: *Executor,
     mlir_module: *?mlir.Module,
-    alive_values: *std.ArrayList(*Value),
-    alive_sources: *std.ArrayList([]const u8),
 ) !void {
 
-    // Parse the input
-    var tok = Tokenizer.init(allocator, input);
-    var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    // Use parse_allocator (arena) for all parsing operations
+    // This ensures all parsed data stays valid for the REPL session
+    const input_copy = try parse_allocator.dupe(u8, input);
 
-    // Parse to AST
-    var parser = Parser.init(allocator);
+    // Parse the input using arena allocator
+    var tok = Tokenizer.init(parse_allocator, input_copy);
+    var reader = try Reader.init(parse_allocator, &tok);
+    const value = try reader.read();
+
+    // Parse to AST using arena allocator
+    var parser = Parser.init(parse_allocator);
 
     // Check if this is a module definition or a single operation
     if (value.type != .list) {
@@ -328,7 +292,7 @@ fn processInput(
 
         // Clear old operations
         for (operations_list.items) |*op| {
-            op.deinit(allocator);
+            op.deinit(parse_allocator);
         }
         operations_list.clearRetainingCapacity();
 
@@ -336,7 +300,7 @@ fn processInput(
         try operations_list.appendSlice(allocator, new_module_ast.operations);
 
         // Don't deinit new_module_ast operations since we copied them
-        allocator.free(new_module_ast.operations);
+        parse_allocator.free(new_module_ast.operations);
 
         std.debug.print("Module updated.\n", .{});
 
@@ -345,7 +309,7 @@ fn processInput(
 
         var module_ast = MlirModule{
             .operations = operations_list.items,
-            .allocator = allocator,
+            .allocator = parse_allocator,
         };
 
         var new_mlir_module = try builder.buildModule(&module_ast);
@@ -376,7 +340,7 @@ fn processInput(
 
             var module_ast = MlirModule{
                 .operations = operations_list.items,
-                .allocator = allocator,
+                .allocator = parse_allocator,
             };
 
             var new_mlir_module = try builder.buildModule(&module_ast);
@@ -388,7 +352,7 @@ fn processInput(
                 // Remove the operation before returning
                 if (operations_list.pop()) |removed_op| {
                     var op_copy = removed_op;
-                    op_copy.deinit(allocator);
+                    op_copy.deinit(parse_allocator);
                 }
                 return err;
             };
@@ -397,11 +361,11 @@ fn processInput(
             std.debug.print("Function defined\n\n", .{});
         } else {
             // Other operations: wrap in function, execute, show result
-            const wrapper = try createReplExecWrapper(allocator, op, &parser, alive_values, alive_sources);
+            const wrapper = try createReplExecWrapper(allocator, parse_allocator, op, &parser);
 
-            // DEBUGGING: Don't free the original operation yet - testing if this causes corruption
-            // var op_copy = op;
-            // op_copy.deinit(allocator);
+            // Free the original operation since we've serialized it into the wrapper
+            var op_copy = op;
+            op_copy.deinit(parse_allocator);
 
             try operations_list.append(allocator, wrapper);
 
@@ -410,7 +374,7 @@ fn processInput(
 
             var module_ast = MlirModule{
                 .operations = operations_list.items,
-                .allocator = allocator,
+                .allocator = parse_allocator,
             };
 
             var new_mlir_module = try builder.buildModule(&module_ast);
@@ -422,7 +386,7 @@ fn processInput(
                 // Remove the wrapper before returning
                 if (operations_list.pop()) |removed_wrapper| {
                     var wrapper_copy = removed_wrapper;
-                    wrapper_copy.deinit(allocator);
+                    wrapper_copy.deinit(parse_allocator);
                 }
                 return err;
             };
@@ -433,7 +397,7 @@ fn processInput(
                 std.debug.print("Error: Failed to find __repl_exec function\n\n", .{});
                 if (operations_list.pop()) |removed_wrapper| {
                     var wrapper_copy = removed_wrapper;
-                    wrapper_copy.deinit(allocator);
+                    wrapper_copy.deinit(parse_allocator);
                 }
                 return error.FunctionNotFound;
             };
@@ -445,7 +409,7 @@ fn processInput(
             // Remove the temporary wrapper function from the operations list
             if (operations_list.pop()) |removed_wrapper| {
                 var wrapper_copy = removed_wrapper;
-                wrapper_copy.deinit(allocator);
+                wrapper_copy.deinit(parse_allocator);
             }
 
             // Rebuild module without the wrapper to keep clean state
@@ -453,7 +417,7 @@ fn processInput(
 
             var clean_module_ast = MlirModule{
                 .operations = operations_list.items,
-                .allocator = allocator,
+                .allocator = parse_allocator,
             };
 
             var clean_mlir_module = try builder.buildModule(&clean_module_ast);
@@ -494,8 +458,8 @@ fn printHelp() !void {
         \\    mlir-lisp> (operation
         \\            ...   (name arith.constant)
         \\            ...   (result-bindings [%x])
-        \\            ...   (result-types !i32)
-        \\            ...   (attributes {{ :value (: 42 !i32) }}))
+        \\            ...   (result-types i32)
+        \\            ...   (attributes {{ :value (: 42 i32) }}))
         \\    Result: 42
         \\
         \\  Define a function then call it:
