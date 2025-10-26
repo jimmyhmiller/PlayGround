@@ -1,6 +1,17 @@
 const std = @import("std");
 const mlir_parser = @import("mlir_parser");
 
+/// Helper to load test file from test_data/examples/
+fn loadTestFile(allocator: std.mem.Allocator, filename: []const u8) ![]u8 {
+    const dir = std.fs.cwd();
+    const path = try std.fmt.allocPrint(allocator, "test_data/examples/{s}", .{filename});
+    defer allocator.free(path);
+    const file = try dir.openFile(path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+    return content;
+}
+
 test "integration - lex and parse types" {
     const source = "f64";
     var lex = mlir_parser.Lexer.init(source);
@@ -36,7 +47,9 @@ test "integration - multiple token types" {
 }
 
 test "integration - parse generic operation with properties" {
-    const source = "%0 = \"arith.constant\"() <{value = 42 : i32}> : () -> i32";
+    const source = try loadTestFile(std.testing.allocator, "integration_generic_operation.mlir");
+    defer std.testing.allocator.free(source);
+
     var lex = mlir_parser.Lexer.init(source);
     var parser = try mlir_parser.Parser.init(std.testing.allocator, &lex);
     defer parser.deinit();

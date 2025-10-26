@@ -337,11 +337,15 @@ pub const Parser = struct {
     }
 
     // Grammar: successor ::= caret-id (`:` block-arg-list)?
+    // NOTE: In practice, block-arg-list can appear with or without the `:` separator
     fn parseSuccessor(self: *Parser) !ast.Successor {
         const caret_id = try self.expect(.caret_id);
 
         var args: ?ast.BlockArgList = null;
-        if (self.match(&.{.colon})) {
+        // Check for optional colon (may be omitted)
+        _ = self.match(&.{.colon});
+        // Check for block arg list
+        if (self.check(.lparen)) {
             args = try self.parseBlockArgList();
         }
 
@@ -611,24 +615,41 @@ pub const Parser = struct {
         };
     }
 
-    // Grammar: type ::= type-alias | dialect-type | builtin-type | function-type
+    // Grammar: type ::= type-alias | dialect-type | builtin-type
+    // NOTE: function-type is parsed separately in operation contexts
     pub fn parseType(self: *Parser) ParseError!ast.Type {
         // Check for type-alias or dialect-type starting with '!'
         if (self.check(.type_alias_id)) {
             const token = self.peek();
-            // Check if this is a pretty dialect type (contains a dot) or type alias
-            // Pretty dialect types: !llvm.ptr, !dialect.type
-            // Type aliases: !my_alias, !MyType
-            if (std.mem.indexOfScalar(u8, token.lexeme, '.')) |_| {
-                // This is a pretty dialect type
-                _ = self.advance(); // consume the type_alias_id token
+            _ = self.advance(); // consume the type_alias_id token
+
+            // Check what follows to determine type
+            if (self.check(.langle)) {
+                // Opaque dialect type with body: !llvm<...>
+                const start = self.current;
+                _ = self.advance(); // consume '<'
+
+                // Capture everything until matching '>'
+                var depth: usize = 1;
+                while (depth > 0 and !self.isAtEnd()) {
+                    if (self.check(.langle)) depth += 1;
+                    if (self.check(.rangle)) depth -= 1;
+                    _ = self.advance();
+                }
+
+                const body = self.lexer.source[start.lexeme.ptr - self.lexer.source.ptr..self.previous.lexeme.ptr - self.lexer.source.ptr + self.previous.lexeme.len];
+                return ast.Type{ .dialect = ast.DialectType{
+                    .namespace = token.lexeme[1..], // Skip '!'
+                    .body = body,
+                }};
+            } else if (std.mem.indexOfScalar(u8, token.lexeme, '.')) |_| {
+                // Pretty dialect type: !llvm.ptr
                 return ast.Type{ .dialect = ast.DialectType{
                     .namespace = token.lexeme[1..], // Skip '!'
                     .body = null,
                 }};
             } else {
-                // This is a type alias
-                _ = self.advance();
+                // Type alias: !my_alias
                 return ast.Type{ .type_alias = token.lexeme[1..] }; // Skip '!'
             }
         }
