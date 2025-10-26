@@ -20,32 +20,32 @@
     (name func.func)
     (attributes {
       :sym_name @fibonacci
-      :function_type (!function (inputs !i32) (results !i32))
+      :function_type (!function (inputs i32) (results i32))
     })
     (regions
       (region
         (block [^entry]
-          (arguments [ [%n !i32] ])
+          (arguments [ [%n i32] ])
 
           ;; Check if n <= 1 (base case)
           (operation
             (name arith.constant)
             (result-bindings [%c1])
-            (result-types !i32)
-            (attributes { :value (: 1 !i32) }))
+            (result-types i32)
+            (attributes { :value (: 1 i32) }))
 
           (operation
             (name arith.cmpi)
             (result-bindings [%cond])
-            (result-types !i1)
+            (result-types i1)
             (operands %n %c1)
-            (attributes { :predicate (: 3 !i64) }))
+            (attributes { :predicate (: 3 i64) }))
 
           ;; scf.if with nested regions (then/else)
           (operation
             (name scf.if)
             (result-bindings [%result])
-            (result-types !i32)
+            (result-types i32)
             (operands %cond)
             (regions
               ;; Then region: base case, return n
@@ -65,19 +65,19 @@
                   (operation
                     (name arith.constant)
                     (result-bindings [%c1_rec])
-                    (result-types !i32)
-                    (attributes { :value (: 1 !i32) }))
+                    (result-types i32)
+                    (attributes { :value (: 1 i32) }))
 
                   (operation
                     (name arith.subi)
                     (result-bindings [%n_minus_1])
-                    (result-types !i32)
+                    (result-types i32)
                     (operands %n %c1_rec))
 
                   (operation
                     (name func.call)
                     (result-bindings [%fib_n_minus_1])
-                    (result-types !i32)
+                    (result-types i32)
                     (operands %n_minus_1)
                     (attributes { :callee @fibonacci }))
 
@@ -85,19 +85,19 @@
                   (operation
                     (name arith.constant)
                     (result-bindings [%c2])
-                    (result-types !i32)
-                    (attributes { :value (: 2 !i32) }))
+                    (result-types i32)
+                    (attributes { :value (: 2 i32) }))
 
                   (operation
                     (name arith.subi)
                     (result-bindings [%n_minus_2])
-                    (result-types !i32)
+                    (result-types i32)
                     (operands %n %c2))
 
                   (operation
                     (name func.call)
                     (result-bindings [%fib_n_minus_2])
-                    (result-types !i32)
+                    (result-types i32)
                     (operands %n_minus_2)
                     (attributes { :callee @fibonacci }))
 
@@ -105,7 +105,7 @@
                   (operation
                     (name arith.addi)
                     (result-bindings [%sum])
-                    (result-types !i32)
+                    (result-types i32)
                     (operands %fib_n_minus_1 %fib_n_minus_2))
 
                   (operation
@@ -122,7 +122,7 @@
     (name func.func)
     (attributes {
       :sym_name @main
-      :function_type (!function (inputs) (results !i64))
+      :function_type (!function (inputs) (results i64))
     })
     (regions
       (region
@@ -133,14 +133,14 @@
           (operation
             (name arith.constant)
             (result-bindings [%n])
-            (result-types !i32)
-            (attributes { :value (: 10 !i32) }))
+            (result-types i32)
+            (attributes { :value (: 10 i32) }))
 
           ;; Call fibonacci(10)
           (operation
             (name func.call)
             (result-bindings [%fib_result])
-            (result-types !i32)
+            (result-types i32)
             (operands %n)
             (attributes { :callee @fibonacci }))
 
@@ -148,7 +148,7 @@
           (operation
             (name arith.extsi)
             (result-bindings [%result_i64])
-            (result-types !i64)
+            (result-types i64)
             (operands %fib_result))
 
           ;; Return the i64 result

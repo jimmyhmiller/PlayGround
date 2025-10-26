@@ -306,8 +306,10 @@ pub const Parser = struct {
         var i: usize = 1;
         while (i < list.len()) : (i += 1) {
             const type_value = list.at(i);
-            // Type should be a type_expr
-            if (type_value.type != .type_expr) return error.UnexpectedStructure;
+            // Type should be a type, function_type, or identifier (for plain builtin types like i32)
+            if (type_value.type != .type and type_value.type != .function_type and type_value.type != .identifier) {
+                return error.UnexpectedStructure;
+            }
 
             // Use the value directly - parser doesn't own it
             try types.append(self.allocator, TypeExpr{ .value = type_value });
@@ -596,7 +598,9 @@ pub const Parser = struct {
             const type_expr = pair.at(1);
 
             if (value_id.type != .value_id) return error.ExpectedValueId;
-            if (type_expr.type != .type_expr) return error.UnexpectedStructure;
+            if (type_expr.type != .type and type_expr.type != .function_type and type_expr.type != .identifier) {
+                return error.UnexpectedStructure;
+            }
 
             // Use the value directly - parser doesn't own it
             try arguments.append(self.allocator, Argument{

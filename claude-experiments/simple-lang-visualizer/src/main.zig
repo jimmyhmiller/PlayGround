@@ -194,7 +194,7 @@ pub fn main() !void {
         var render_it = type_system.types.iterator();
         while (render_it.next()) |entry| {
             const typ = entry.value_ptr.*;
-            type_renderer.renderType(typ, font);
+            type_renderer.renderType(typ, font, &type_system);
         }
 
         // Draw UI overlay

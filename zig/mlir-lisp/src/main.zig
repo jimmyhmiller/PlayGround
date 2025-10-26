@@ -40,12 +40,16 @@ pub fn main() !void {
     try runFile(allocator, file_path);
 }
 
-fn runFile(allocator: std.mem.Allocator, file_path: []const u8) !void {
+fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8) !void {
     std.debug.print("Loading file: {s}\n", .{file_path});
+
+    // Create an arena for the entire compilation process
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Read the file
     const source = try std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024);
-    defer allocator.free(source);
 
     std.debug.print("File loaded ({} bytes)\n\n", .{source.len});
 
@@ -65,11 +69,8 @@ fn runFile(allocator: std.mem.Allocator, file_path: []const u8) !void {
     std.debug.print("Parsing...\n", .{});
     var tok = mlir_lisp.Tokenizer.init(allocator, source);
     var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try reader.read();
+    // No need to manually free - arena handles it
 
     // Parse to AST
     var parser = Parser.init(allocator);

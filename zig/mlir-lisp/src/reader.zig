@@ -25,7 +25,8 @@ pub const ValueType = enum {
     map, // { ... }
 
     // Special markers
-    type_expr, // ! ...
+    type, // i32, !llvm.ptr - any type with ! prefix (stored as string)
+    function_type, // (!function (inputs ...) (results ...)) - structured function type
     attr_expr, // # ...
     has_type, // (: value type) - typed literal
 };
@@ -38,7 +39,11 @@ pub const Value = struct {
         list: vector.PersistentVector(*Value), // For lists ( ... )
         vector: vector.PersistentVector(*Value), // For vectors [ ... ]
         map: vector.PersistentVector(*Value), // For maps { ... } - stored as flat list of k,v pairs
-        type_expr: *Value, // For type expressions ! ...
+        type: []const u8, // For type expressions - stores full type string like "i32", "!llvm.ptr"
+        function_type: struct {
+            inputs: vector.PersistentVector(*Value),
+            results: vector.PersistentVector(*Value),
+        }, // For function types (!function (inputs ...) (results ...))
         attr_expr: *Value, // For attribute expressions # ...
         has_type: struct { value: *Value, type_expr: *Value }, // For typed literals (: value type)
     },
@@ -61,9 +66,28 @@ pub const Value = struct {
                 var mut_vec = vec;
                 mut_vec.deinit();
             },
-            .type_expr => {
-                self.data.type_expr.deinit(allocator);
-                allocator.destroy(self.data.type_expr);
+            .type => {
+                // type is just a string, no cleanup needed
+            },
+            .function_type => {
+                // Clean up input and result type vectors
+                var mut_inputs = self.data.function_type.inputs;
+                var mut_results = self.data.function_type.results;
+
+                const inputs_slice = mut_inputs.slice();
+                for (inputs_slice) |input| {
+                    input.deinit(allocator);
+                    allocator.destroy(input);
+                }
+
+                const results_slice = mut_results.slice();
+                for (results_slice) |result| {
+                    result.deinit(allocator);
+                    allocator.destroy(result);
+                }
+
+                mut_inputs.deinit();
+                mut_results.deinit();
             },
             .attr_expr => {
                 self.data.attr_expr.deinit(allocator);
@@ -95,6 +119,8 @@ pub const ReaderError = error{
     UnexpectedClosingDelimiter,
     UnexpectedDot,
     UnterminatedList,
+    ExpectedFunctionType,
+    ExpectedTypeIdentifier,
     // Tokenizer errors
     UnexpectedCharacter,
     UnterminatedString,
@@ -238,14 +264,92 @@ pub const Reader = struct {
 
             // Special markers
             .type_marker => {
+                // Read the type expression
+                // For simple types like i32, !llvm.ptr, store "i32" as a string
+                // For function types like (!function ...), parse as structured function_type
                 try self.advance(); // consume '!'
-                const inner = try self.read();
-                const value = try self.allocator.create(Value);
-                value.* = Value{
-                    .type = .type_expr,
-                    .data = .{ .type_expr = inner },
-                };
-                return value;
+
+                // Check if this is a simple identifier or a function type
+                const type_tok = self.current orelse return error.UnexpectedEOF;
+                if (type_tok.type == .identifier) {
+                    // Dialect type with ! prefix: !llvm.ptr, !transform.any_op, etc.
+                    // Store with the ! prefix
+                    const type_name = type_tok.lexeme;
+                    const full_type = try std.fmt.allocPrint(self.allocator, "!{s}", .{type_name});
+
+                    const value = try self.allocator.create(Value);
+                    value.* = Value{
+                        .type = .type,
+                        .data = .{ .type = full_type },
+                    };
+                    try self.advance(); // consume the type identifier
+                    return value;
+                } else if (type_tok.type == .left_paren) {
+                    // Function type: (!function (inputs ...) (results ...))
+                    // Parse the list to check if it's a function type
+                    const list_value = try self.readList(.right_paren, .list);
+                    const list = list_value.data.list;
+
+                    // Check if first element is "function"
+                    if (list.len() == 0) return error.ExpectedFunctionType;
+                    const first = list.at(0);
+                    if (first.type != .identifier or !std.mem.eql(u8, first.data.atom, "function")) {
+                        return error.ExpectedFunctionType;
+                    }
+
+                    // Parse (inputs ...) and (results ...)
+                    if (list.len() < 3) return error.ExpectedFunctionType;
+
+                    const inputs_list_value = list.at(1);
+                    const results_list_value = list.at(2);
+
+                    if (inputs_list_value.type != .list or results_list_value.type != .list) {
+                        return error.ExpectedFunctionType;
+                    }
+
+                    const inputs_list = inputs_list_value.data.list;
+                    const results_list = results_list_value.data.list;
+
+                    // Check that first element is "inputs" and "results"
+                    if (inputs_list.len() == 0 or results_list.len() == 0) return error.ExpectedFunctionType;
+
+                    const inputs_kw = inputs_list.at(0);
+                    const results_kw = results_list.at(0);
+
+                    if (inputs_kw.type != .identifier or !std.mem.eql(u8, inputs_kw.data.atom, "inputs")) {
+                        return error.ExpectedFunctionType;
+                    }
+                    if (results_kw.type != .identifier or !std.mem.eql(u8, results_kw.data.atom, "results")) {
+                        return error.ExpectedFunctionType;
+                    }
+
+                    // Extract input and result types (skip the "inputs" and "results" keywords)
+                    var input_types = vector.PersistentVector(*Value).init(self.allocator, null);
+                    for (1..inputs_list.len()) |i| {
+                        input_types = try input_types.push(inputs_list.at(i));
+                    }
+
+                    var result_types = vector.PersistentVector(*Value).init(self.allocator, null);
+                    for (1..results_list.len()) |i| {
+                        result_types = try result_types.push(results_list.at(i));
+                    }
+
+                    // Clean up the temporary list structure
+                    list_value.deinit(self.allocator);
+                    self.allocator.destroy(list_value);
+
+                    const value = try self.allocator.create(Value);
+                    value.* = Value{
+                        .type = .function_type,
+                        .data = .{ .function_type = .{
+                            .inputs = input_types,
+                            .results = result_types,
+                        } },
+                    };
+                    return value;
+                } else {
+                    return error.ExpectedTypeIdentifier;
+                }
             },
             .attr_marker => {
                 try self.advance(); // consume '#'
@@ -275,9 +379,8 @@ pub const Reader = struct {
 
         while (self.current != null and !self.isAtEnd() and self.current.?.type != closing) {
             const elem = try self.read();
-            const new_vec = try vec.push(elem);
-            vec.deinit();
-            vec = new_vec;
+            vec = try vec.push(elem);
+            // Note: intermediate vectors are leaked, but this is fine when using an ArenaAllocator
         }
 
         if (self.current == null or self.isAtEnd()) {
@@ -294,6 +397,72 @@ pub const Reader = struct {
         // Consume the closing delimiter
         try self.advance();
 
+        // Check for (!function ...) pattern - convert to function_type
+        if (value_type == .list and vec.len() >= 3) {
+            const slice = vec.slice();
+            const first = slice[0];
+
+            // Check if first element is !function type
+            if (first.type == .type and std.mem.eql(u8, first.data.type, "!function")) {
+                // This is a function type: (!function (inputs ...) (results ...))
+                if (vec.len() != 3) return error.ExpectedFunctionType;
+
+                const inputs_list_value = slice[1];
+                const results_list_value = slice[2];
+
+                if (inputs_list_value.type != .list or results_list_value.type != .list) {
+                    return error.ExpectedFunctionType;
+                }
+
+                const inputs_list = inputs_list_value.data.list;
+                const results_list = results_list_value.data.list;
+
+                // Check that first element is "inputs" and "results"
+                if (inputs_list.len() == 0 or results_list.len() == 0) return error.ExpectedFunctionType;
+
+                const inputs_kw = inputs_list.at(0);
+                const results_kw = results_list.at(0);
+
+                if (inputs_kw.type != .identifier or !std.mem.eql(u8, inputs_kw.data.atom, "inputs")) {
+                    return error.ExpectedFunctionType;
+                }
+                if (results_kw.type != .identifier or !std.mem.eql(u8, results_kw.data.atom, "results")) {
+                    return error.ExpectedFunctionType;
+                }
+
+                // Extract input and result types (skip the "inputs" and "results" keywords)
+                var input_types = vector.PersistentVector(*Value).init(self.allocator, null);
+                for (1..inputs_list.len()) |i| {
+                    input_types = try input_types.push(inputs_list.at(i));
+                }
+
+                var result_types = vector.PersistentVector(*Value).init(self.allocator, null);
+                for (1..results_list.len()) |i| {
+                    result_types = try result_types.push(results_list.at(i));
+                }
+
+                // Clean up the temporary structures
+                first.deinit(self.allocator);
+                self.allocator.destroy(first);
+                inputs_list_value.deinit(self.allocator);
+                self.allocator.destroy(inputs_list_value);
+                results_list_value.deinit(self.allocator);
+                self.allocator.destroy(results_list_value);
+                var mut_vec = vec;
+                mut_vec.deinit();
+
+                const value = try self.allocator.create(Value);
+                value.* = Value{
+                    .type = .function_type,
+                    .data = .{ .function_type = .{
+                        .inputs = input_types,
+                        .results = result_types,
+                    } },
+                };
+                return value;
+            }
+        }
+
         // Check for (: value type) pattern - only for lists
         if (value_type == .list and vec.len() == 3) {
             const slice = vec.slice();
@@ -303,7 +472,20 @@ pub const Reader = struct {
             if (first.type == .identifier and std.mem.eql(u8, first.data.atom, ":")) {
                 // This is a typed literal: (: value type)
                 const val = slice[1];
-                const type_val = slice[2];
+                var type_val = slice[2];
+
+                // Convert identifier types to .type (e.g., i32 -> .type with data "i32")
+                if (type_val.type == .identifier) {
+                    const converted_type = try self.allocator.create(Value);
+                    converted_type.* = Value{
+                        .type = .type,
+                        .data = .{ .type = type_val.data.atom },
+                    };
+                    // Free the old identifier value
+                    type_val.deinit(self.allocator);
+                    self.allocator.destroy(type_val);
+                    type_val = converted_type;
+                }
 
                 // Create has_type value
                 const typed_value = try self.allocator.create(Value);
@@ -345,9 +527,8 @@ pub const Reader = struct {
 
         while (!self.isAtEnd()) {
             const value = try self.read();
-            const new_vec = try vec.push(value);
-            vec.deinit();
-            vec = new_vec;
+            vec = try vec.push(value);
+            // Note: intermediate vectors are leaked, but this is fine when using an ArenaAllocator
         }
 
         return vec;
@@ -355,18 +536,16 @@ pub const Reader = struct {
 };
 
 test "reader - simple atoms" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Test identifier
     {
         const source = "hello";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .identifier);
         try std.testing.expectEqualStrings("hello", value.data.atom);
@@ -377,11 +556,7 @@ test "reader - simple atoms" {
         const source = "42";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .number);
         try std.testing.expectEqualStrings("42", value.data.atom);
@@ -392,11 +567,7 @@ test "reader - simple atoms" {
         const source = "\"hello world\"";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .string);
         try std.testing.expectEqualStrings("\"hello world\"", value.data.atom);
@@ -407,11 +578,7 @@ test "reader - simple atoms" {
         const source = "%x";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .value_id);
         try std.testing.expectEqualStrings("%x", value.data.atom);
@@ -422,11 +589,7 @@ test "reader - simple atoms" {
         const source = "^entry";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .block_id);
         try std.testing.expectEqualStrings("^entry", value.data.atom);
@@ -437,11 +600,7 @@ test "reader - simple atoms" {
         const source = "@main";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .symbol);
         try std.testing.expectEqualStrings("@main", value.data.atom);
@@ -452,11 +611,7 @@ test "reader - simple atoms" {
         const source = ":value";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .keyword);
         try std.testing.expectEqualStrings(":value", value.data.atom);
@@ -467,11 +622,7 @@ test "reader - simple atoms" {
         const source = "true";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .true_lit);
     }
@@ -480,29 +631,23 @@ test "reader - simple atoms" {
         const source = "false";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .false_lit);
     }
 }
 
 test "reader - lists" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Test empty list
     {
         const source = "()";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .list);
         try std.testing.expect(value.data.list.len() == 0);
@@ -513,11 +658,7 @@ test "reader - lists" {
         const source = "(1 2 3)";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .list);
         try std.testing.expect(value.data.list.len() == 3);
@@ -530,11 +671,7 @@ test "reader - lists" {
         const source = "(1 (2 3) 4)";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .list);
         try std.testing.expect(value.data.list.len() == 3);
@@ -544,18 +681,16 @@ test "reader - lists" {
 }
 
 test "reader - vectors" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Test empty vector
     {
         const source = "[]";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .vector);
         try std.testing.expect(value.data.vector.len() == 0);
@@ -566,11 +701,7 @@ test "reader - vectors" {
         const source = "[%x %y]";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .vector);
         try std.testing.expect(value.data.vector.len() == 2);
@@ -580,18 +711,16 @@ test "reader - vectors" {
 }
 
 test "reader - maps" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Test empty map
     {
         const source = "{}";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .map);
         try std.testing.expect(value.data.map.len() == 0);
@@ -602,11 +731,7 @@ test "reader - maps" {
         const source = "{ :value 42 :name \"test\" }";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .map);
         try std.testing.expect(value.data.map.len() == 4); // Flat list of k,v,k,v
@@ -617,18 +742,16 @@ test "reader - maps" {
 }
 
 test "reader - type and attr expressions" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Test type expression
     {
-        const source = "!i32";
+        const source = "i32";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .type_expr);
         try std.testing.expect(value.data.type_expr.type == .identifier);
@@ -640,11 +763,7 @@ test "reader - type and attr expressions" {
         const source = "#(int 42)";
         var tok = Tokenizer.init(allocator, source);
         var reader = try Reader.init(allocator, &tok);
-        var value = try reader.read();
-        defer {
-            value.deinit(allocator);
-            allocator.destroy(value);
-        }
+        const value = try reader.read();
 
         try std.testing.expect(value.type == .attr_expr);
         try std.testing.expect(value.data.attr_expr.type == .list);
@@ -653,23 +772,21 @@ test "reader - type and attr expressions" {
 }
 
 test "reader - complex expression" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const source =
         \\(operation
         \\  (name arith.constant)
         \\  (result-bindings [%c0])
-        \\  (result-types !i32)
+        \\  (result-types i32)
         \\  (attributes { :value #(int 42) }))
     ;
 
     var tok = Tokenizer.init(allocator, source);
     var reader = try Reader.init(allocator, &tok);
     var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
 
     try std.testing.expect(value.type == .list);
     try std.testing.expect(value.data.list.len() == 5);
@@ -678,20 +795,14 @@ test "reader - complex expression" {
 }
 
 test "reader - read all" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const source = "1 2 (3 4) 5";
     var tok = Tokenizer.init(allocator, source);
     var reader = try Reader.init(allocator, &tok);
     var values = try reader.readAll();
-    defer {
-        const slice = values.slice();
-        for (slice) |v| {
-            v.deinit(allocator);
-            allocator.destroy(v);
-        }
-        values.deinit();
-    }
 
     try std.testing.expect(values.len() == 4);
     try std.testing.expect(values.at(0).type == .number);

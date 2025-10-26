@@ -13,26 +13,23 @@ const example1 =
     \\  (operation
     \\    (name arith.constant)
     \\    (result-bindings [%c0])
-    \\    (result-types !i32)
-    \\    (attributes { :value 42 })
+    \\    (result-types i32)
+    \\    (attributes { :value (: 42 i32) })
     \\    (location (#unknown))))
 ;
 
 test "builder - example 1 simple constant" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Parse the source
     var tok = Tokenizer.init(allocator, example1);
     var rd = try Reader.init(allocator, &tok);
-    var value = try rd.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try rd.read();
 
     var parser = Parser.init(allocator);
     var parsed_module = try parser.parseModule(value);
-    defer parsed_module.deinit();
 
     // Create MLIR context
     var ctx = try mlir.Context.create();
@@ -43,7 +40,6 @@ test "builder - example 1 simple constant" {
 
     // Build MLIR IR
     var builder = Builder.init(allocator, &ctx);
-    defer builder.deinit();
 
     var mlir_module = try builder.buildModule(&parsed_module);
     defer mlir_module.destroy();
@@ -54,5 +50,5 @@ test "builder - example 1 simple constant" {
     std.debug.print("\n", .{});
 
     // Validate with mlir-opt
-    try test_utils.validateMLIRWithOpt(allocator, mlir_module);
+    try test_utils.validateMLIRWithOpt(std.testing.allocator, mlir_module);
 }

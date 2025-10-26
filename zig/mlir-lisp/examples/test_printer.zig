@@ -11,7 +11,7 @@ pub fn main() !void {
         \\  (operation
         \\    (name arith.constant)
         \\    (result-bindings [%c0])
-        \\    (result-types !i32)
+        \\    (result-types i32)
         \\    (attributes { :value (#int 42) })))
     ;
 

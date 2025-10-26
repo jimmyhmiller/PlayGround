@@ -2,7 +2,7 @@
   (name func.func)
   (attributes {
     :sym_name @test
-    :function_type (!function (inputs) (results !i64))
+    :function_type (!function (inputs) (results i64))
   })
   (regions
     (region
@@ -11,14 +11,14 @@
         (operation
           (name arith.constant)
           (result-bindings [%c42])
-          (result-types !i64)
-          (attributes { :value (: 42 !i64) }))
+          (result-types i64)
+          (attributes { :value (: 42 i64) }))
         (operation
           (name func.return)
           (operands %c42))))))
 (operation
   (name func.call)
   (result-bindings [%result])
-  (result-types !i64)
+  (result-types i64)
   (attributes { :callee (#flat-symbol @test) }))
 :quit

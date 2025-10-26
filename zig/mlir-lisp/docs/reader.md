@@ -52,7 +52,7 @@ The reader produces `Value` structures with the following types:
 - `map` - Curly braces `{...}` - stored as flat key-value pairs
 
 ### Special Markers
-- `type_expr` - Type expressions `!type` (e.g., `!i32`)
+- `type_expr` - Type expressions `!type` (e.g., `i32`)
 - `attr_expr` - Attribute expressions `#attr` (e.g., `#(int 42)`)
 
 ## Value Structure
@@ -124,7 +124,7 @@ Results in a `list` value containing three `number` values.
 (operation
   (name arith.constant)
   (result-bindings [%c0])
-  (result-types !i32)
+  (result-types i32)
   (attributes { :value #(int 42) }))
 ```
 Results in a nested structure:

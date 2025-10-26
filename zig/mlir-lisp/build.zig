@@ -437,23 +437,24 @@ pub fn build(b: *std.Build) void {
     fib_jit_example_step.dependOn(&run_fib_jit_example.step);
 
     // Creates an executable to test round-trip parsing/printing
-    const roundtrip_test_exe = b.addExecutable(.{
-        .name = "test_roundtrip_funccall",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test_roundtrip_funccall.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "mlir_lisp", .module = mod },
-            },
-        }),
-    });
-    linkMLIR(roundtrip_test_exe, mlir_include_path, mlir_lib_path);
-    b.installArtifact(roundtrip_test_exe);
+    // NOTE: Commented out because test_roundtrip_funccall.zig was removed
+    // const roundtrip_test_exe = b.addExecutable(.{
+    //     .name = "test_roundtrip_funccall",
+    //     .root_module = b.createModule(.{
+    //         .root_source_file = b.path("test_roundtrip_funccall.zig"),
+    //         .target = target,
+    //         .optimize = optimize,
+    //         .imports = &.{
+    //             .{ .name = "mlir_lisp", .module = mod },
+    //         },
+    //     }),
+    // });
+    // linkMLIR(roundtrip_test_exe, mlir_include_path, mlir_lib_path);
+    // b.installArtifact(roundtrip_test_exe);
 
-    const run_roundtrip_test = b.addRunArtifact(roundtrip_test_exe);
-    const roundtrip_test_step = b.step("test-roundtrip", "Run round-trip test for func.call");
-    roundtrip_test_step.dependOn(&run_roundtrip_test.step);
+    // const run_roundtrip_test = b.addRunArtifact(roundtrip_test_exe);
+    // const roundtrip_test_step = b.step("test-roundtrip", "Run round-trip test for func.call");
+    // roundtrip_test_step.dependOn(&run_roundtrip_test.step);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will

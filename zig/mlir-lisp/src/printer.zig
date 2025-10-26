@@ -246,9 +246,25 @@ pub const Printer = struct {
             .number => try self.buffer.writer(self.allocator).writeAll(value.data.atom),
             .true_lit => try self.buffer.writer(self.allocator).writeAll("true"),
             .false_lit => try self.buffer.writer(self.allocator).writeAll("false"),
-            .type_expr => {
-                try self.buffer.writer(self.allocator).writeAll("!");
-                try self.printValue(value.data.type_expr);
+            .type => {
+                // type stores the full type string including '!'
+                try self.buffer.writer(self.allocator).writeAll(value.data.type);
+            },
+            .function_type => {
+                // Print function type as (!function (inputs ...) (results ...))
+                try self.buffer.writer(self.allocator).writeAll("(!function (inputs");
+                const inputs = value.data.function_type.inputs;
+                for (0..inputs.len()) |i| {
+                    try self.buffer.writer(self.allocator).writeAll(" ");
+                    try self.printValue(inputs.at(i));
+                }
+                try self.buffer.writer(self.allocator).writeAll(") (results");
+                const results = value.data.function_type.results;
+                for (0..results.len()) |i| {
+                    try self.buffer.writer(self.allocator).writeAll(" ");
+                    try self.printValue(results.at(i));
+                }
+                try self.buffer.writer(self.allocator).writeAll("))");
             },
             .attr_expr => {
                 try self.buffer.writer(self.allocator).writeAll("#");

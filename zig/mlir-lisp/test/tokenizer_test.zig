@@ -5,6 +5,8 @@ const Token = tokenizer.Token;
 const TokenType = tokenizer.TokenType;
 
 test "tokenize delimiters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = "( ) [ ] { }";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -25,6 +27,8 @@ test "tokenize delimiters" {
 }
 
 test "tokenize identifiers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = "hello world foo_bar test123";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -38,6 +42,8 @@ test "tokenize identifiers" {
 }
 
 test "tokenize numbers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = "42 -10 3.14 0x1A 0b1010 2.5e10";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -51,6 +57,8 @@ test "tokenize numbers" {
 }
 
 test "tokenize strings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = "\"hello\" \"world with spaces\" \"escaped\\\"quote\"";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -68,6 +76,8 @@ test "tokenize strings" {
 }
 
 test "tokenize value IDs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = "%c0 %x %result";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -81,6 +91,8 @@ test "tokenize value IDs" {
 }
 
 test "tokenize block IDs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = "^entry ^then ^else";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -94,6 +106,8 @@ test "tokenize block IDs" {
 }
 
 test "tokenize symbols" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = "@add @main @branchy";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -107,6 +121,8 @@ test "tokenize symbols" {
 }
 
 test "tokenize keywords" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = ":value :sym :type :visibility";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -120,7 +136,9 @@ test "tokenize keywords" {
 }
 
 test "tokenize type and attr markers" {
-    const source = "!i32 #int";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "i32 #int";
     var t = Tokenizer.init(std.testing.allocator, source);
 
     var token = try t.next();
@@ -139,6 +157,8 @@ test "tokenize type and attr markers" {
 }
 
 test "tokenize booleans" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = "true false";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -150,6 +170,8 @@ test "tokenize booleans" {
 }
 
 test "tokenize operation names with dots" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = "arith.constant func.func cf.cond_br";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -163,6 +185,8 @@ test "tokenize operation names with dots" {
 }
 
 test "skip whitespace and comments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source =
         \\; This is a comment
         \\(hello
@@ -191,11 +215,13 @@ test "skip whitespace and comments" {
 }
 
 test "tokenize simple operation from grammar" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source =
         \\(operation
         \\  (name arith.constant)
         \\  (result-bindings [%c0])
-        \\  (result-types !i32)
+        \\  (result-types i32)
         \\  (attributes { :value (#int 42) }))
     ;
     var t = Tokenizer.init(std.testing.allocator, source);
@@ -243,9 +269,11 @@ test "tokenize simple operation from grammar" {
 }
 
 test "tokenize block example from grammar" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source =
         \\(block [^entry]
-        \\  (arguments [ [%x !i32] [%y !i32] ]))
+        \\  (arguments [ [%x i32] [%y i32] ]))
     ;
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -268,6 +296,8 @@ test "tokenize block example from grammar" {
 }
 
 test "line and column tracking" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source =
         \\(hello
         \\  world)
@@ -285,6 +315,8 @@ test "line and column tracking" {
 }
 
 test "error on unterminated string" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = "\"hello";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -293,6 +325,8 @@ test "error on unterminated string" {
 }
 
 test "error on invalid value ID" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = "% ";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -301,6 +335,8 @@ test "error on invalid value ID" {
 }
 
 test "error on invalid block ID" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = "^ ";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -309,6 +345,8 @@ test "error on invalid block ID" {
 }
 
 test "error on invalid symbol" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = "@ ";
     var t = Tokenizer.init(std.testing.allocator, source);
 
@@ -317,6 +355,8 @@ test "error on invalid symbol" {
 }
 
 test "error on invalid keyword" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const source = ": ";
     var t = Tokenizer.init(std.testing.allocator, source);
 

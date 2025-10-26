@@ -7,14 +7,16 @@ const Printer = mlir_lisp.Printer;
 const testing = std.testing;
 
 test "printer - simple constant round-trip" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
         \\  (operation
         \\    (name arith.constant)
         \\    (result-bindings [%c0])
-        \\    (result-types !i32)
+        \\    (result-types i32)
         \\    (attributes { :value (#int 42) })
         \\    (location (#unknown))))
     ;
@@ -22,11 +24,7 @@ test "printer - simple constant round-trip" {
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -44,13 +42,15 @@ test "printer - simple constant round-trip" {
     try testing.expect(std.mem.indexOf(u8, output, "(operation") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(name arith.constant)") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(result-bindings [%c0])") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "(result-types !i32)") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "(result-types i32)") != null);
     try testing.expect(std.mem.indexOf(u8, output, ":value") != null);
     try testing.expect(std.mem.indexOf(u8, output, "#int") != null);
 }
 
 test "printer - function with operations round-trip" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
@@ -58,17 +58,17 @@ test "printer - function with operations round-trip" {
         \\    (name func.func)
         \\    (attributes {
         \\      :sym (#sym @add)
-        \\      :type (!function (inputs !i32 !i32) (results !i32))
+        \\      :type (!function (inputs i32 i32) (results i32))
         \\    })
         \\    (regions
         \\      (region
         \\        (block [^entry]
-        \\          (arguments [ [%x !i32] [%y !i32] ])
+        \\          (arguments [ [%x i32] [%y i32] ])
         \\          (operation
         \\            (name arith.addi)
         \\            (result-bindings [%sum])
         \\            (operands %x %y)
-        \\            (result-types !i32))
+        \\            (result-types i32))
         \\          (operation
         \\            (name func.return)
         \\            (operands %sum)))))))
@@ -77,11 +77,7 @@ test "printer - function with operations round-trip" {
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -103,14 +99,16 @@ test "printer - function with operations round-trip" {
     try testing.expect(std.mem.indexOf(u8, output, "(region") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(block") != null);
     try testing.expect(std.mem.indexOf(u8, output, "[^entry]") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "(arguments [[%x !i32] [%y !i32]])") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "(arguments [[%x i32] [%y i32]])") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(name arith.addi)") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(result-bindings [%sum])") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(operands %x %y)") != null);
 }
 
 test "printer - control flow with successors" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
@@ -119,7 +117,7 @@ test "printer - control flow with successors" {
         \\    (regions
         \\      (region
         \\        (block [^entry]
-        \\          (arguments [ [%cond !i1] [%x !i32] [%y !i32] ])
+        \\          (arguments [ [%cond i1] [%x i32] [%y i32] ])
         \\          (operation
         \\            (name cf.cond_br)
         \\            (operands %cond)
@@ -127,21 +125,17 @@ test "printer - control flow with successors" {
         \\              (successor ^then (%x))
         \\              (successor ^else (%y)))))
         \\        (block [^then]
-        \\          (arguments [ [%t !i32] ])
+        \\          (arguments [ [%t i32] ])
         \\          (operation (name func.return) (operands %t)))
         \\        (block [^else]
-        \\          (arguments [ [%e !i32] ])
+        \\          (arguments [ [%e i32] ])
         \\          (operation (name func.return) (operands %e)))))))
     ;
 
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -163,7 +157,9 @@ test "printer - control flow with successors" {
 }
 
 test "printer - empty block arguments" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
@@ -179,11 +175,7 @@ test "printer - empty block arguments" {
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -202,25 +194,23 @@ test "printer - empty block arguments" {
 }
 
 test "printer - preserve semantic round-trip" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
         \\  (operation
         \\    (name arith.constant)
         \\    (result-bindings [%c0])
-        \\    (result-types !i32)
+        \\    (result-types i32)
         \\    (attributes { :value (#int 42) })))
     ;
 
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -236,11 +226,7 @@ test "printer - preserve semantic round-trip" {
     // Parse the output again
     var tok2 = Tokenizer.init(allocator, output);
     var r2 = try Reader.init(allocator, &tok2);
-    var value2 = try r2.read();
-    defer {
-        value2.deinit(allocator);
-        allocator.destroy(value2);
-    }
+    const value2 = try r2.read();
 
     var p2 = Parser.init(allocator);
     var module2 = try p2.parseModule(value2);

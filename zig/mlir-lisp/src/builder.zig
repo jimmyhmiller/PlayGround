@@ -38,19 +38,13 @@ pub const Builder = struct {
 
     /// Build a complete MLIR module from our parsed AST
     pub fn buildModule(self: *Builder, parsed_module: *parser.MlirModule) BuildError!mlir.Module {
-        std.debug.print("DEBUG buildModule: building {} top-level operations\n", .{parsed_module.operations.len});
-        for (parsed_module.operations, 0..) |*op, i| {
-            std.debug.print("DEBUG buildModule:   op[{}] name={s}, ptr={*}\n", .{i, op.name, op});
-        }
-
         var mod = try mlir.Module.create(self.location);
 
         // Get the module's body block
         const body = mod.getBody();
 
         // Build each top-level operation
-        for (parsed_module.operations, 0..) |*operation, idx| {
-            std.debug.print("DEBUG buildModule: about to build top-level op[{}]\n", .{idx});
+        for (parsed_module.operations) |*operation| {
             const mlir_op = try self.buildOperation(operation);
             mlir.Block.appendOperation(body, mlir_op);
         }
@@ -60,10 +54,6 @@ pub const Builder = struct {
 
     /// Build a single operation
     fn buildOperation(self: *Builder, operation: *const parser.Operation) BuildError!mlir.MlirOperation {
-        std.debug.print("DEBUG buildOperation: name={s}, {} attributes\n", .{operation.name, operation.attributes.len});
-        for (operation.attributes, 0..) |attr, i| {
-            std.debug.print("DEBUG buildOperation:   attr[{}].key=\"{s}\" (len={})\n", .{i, attr.key, attr.key.len});
-        }
         // Parse result types
         var result_types = std.ArrayList(mlir.MlirType){};
         defer result_types.deinit(self.allocator);
@@ -95,9 +85,7 @@ pub const Builder = struct {
         var regions = std.ArrayList(mlir.MlirRegion){};
         defer regions.deinit(self.allocator);
 
-        std.debug.print("DEBUG buildOperation: iterating over {} regions\n", .{operation.regions.len});
-        for (operation.regions, 0..) |*region, region_idx| {
-            std.debug.print("DEBUG buildOperation: building region[{}], blocks={}\n", .{region_idx, region.blocks.len});
+        for (operation.regions) |*region| {
             const mlir_region = try self.buildRegion(region);
             try regions.append(self.allocator, mlir_region);
         }
@@ -150,9 +138,25 @@ pub const Builder = struct {
             .number => try writer.writeAll(value.data.atom),
             .true_lit => try writer.writeAll("true"),
             .false_lit => try writer.writeAll("false"),
-            .type_expr => {
-                try writer.writeAll("!");
-                try self.serializeValueToMLIRImpl(value.data.type_expr, buffer);
+            .type => {
+                // type stores the full type string including '!'
+                try writer.writeAll(value.data.type);
+            },
+            .function_type => {
+                // Serialize function type as (!function (inputs ...) (results ...))
+                try writer.writeAll("(!function (inputs");
+                const inputs = value.data.function_type.inputs;
+                for (0..inputs.len()) |i| {
+                    try writer.writeAll(" ");
+                    try self.serializeValueToMLIRImpl(inputs.at(i), buffer);
+                }
+                try writer.writeAll(") (results");
+                const results = value.data.function_type.results;
+                for (0..results.len()) |i| {
+                    try writer.writeAll(" ");
+                    try self.serializeValueToMLIRImpl(results.at(i), buffer);
+                }
+                try writer.writeAll("))");
             },
             .attr_expr => {
                 try writer.writeAll("#");
@@ -203,97 +207,97 @@ pub const Builder = struct {
     fn buildType(self: *Builder, type_expr: *const parser.TypeExpr) BuildError!mlir.MlirType {
         const value = type_expr.value;
 
-        // Type is wrapped with type_expr marker
-        if (value.type != .type_expr) return error.InvalidType;
-
-        // Build the type from the value recursively
-        return self.buildTypeFromValue(value.data.type_expr);
+        // Handle different type forms
+        switch (value.type) {
+            .type => {
+                // Simple type - pass string directly to MLIR parser
+                const type_str = value.data.type;
+                std.debug.print("buildType: value.type = .type, type_str = {s}\n", .{type_str});
+                return mlir.Type.parse(self.ctx, type_str) catch error.InvalidType;
+            },
+            .identifier => {
+                // Plain identifier (builtin type like i32, f64, etc.)
+                const type_str = value.data.atom;
+                std.debug.print("buildType: value.type = .identifier, type_str = {s}\n", .{type_str});
+                return mlir.Type.parse(self.ctx, type_str) catch error.InvalidType;
+            },
+            .function_type => {
+                // Function type - build from inputs/results
+                std.debug.print("buildType: value.type = .function_type\n", .{});
+                return self.buildFunctionTypeFromValue(value);
+            },
+            else => return error.InvalidType,
+        }
     }
 
-    /// Build an MLIR type from a reader Value (recursive)
-    /// Handles both simple types (!i32) and function types (!function (inputs ...) (results ...))
+    /// Build an MLIR function type from a function_type Value
+    fn buildFunctionTypeFromValue(self: *Builder, value: *const reader.Value) BuildError!mlir.MlirType {
+        if (value.type != .function_type) return error.InvalidType;
+
+        const func_type = value.data.function_type;
+        const inputs = func_type.inputs;
+        const results = func_type.results;
+
+        // Build input types
+        const num_inputs = inputs.len();
+        var input_types = try self.allocator.alloc(mlir.MlirType, num_inputs);
+        defer self.allocator.free(input_types);
+
+        for (0..num_inputs) |i| {
+            const input_value = inputs.at(i);
+            input_types[i] = try self.buildTypeFromValue(input_value);
+        }
+
+        // Build result types
+        const num_results = results.len();
+        var result_types = try self.allocator.alloc(mlir.MlirType, num_results);
+        defer self.allocator.free(result_types);
+
+        for (0..num_results) |i| {
+            const result_value = results.at(i);
+            result_types[i] = try self.buildTypeFromValue(result_value);
+        }
+
+        // Create function type using MLIR C API
+        return mlir.c.mlirFunctionTypeGet(
+            self.ctx.ctx,
+            @intCast(num_inputs),
+            input_types.ptr,
+            @intCast(num_results),
+            result_types.ptr,
+        );
+    }
+
+    /// Build an MLIR type from a reader Value (used recursively)
     pub fn buildTypeFromValue(self: *Builder, value: *const reader.Value) BuildError!mlir.MlirType {
+        std.debug.print("buildTypeFromValue: value.type = {}\n", .{value.type});
         switch (value.type) {
-            .identifier => {
-                // Simple type like "i32", "f64", etc.
-                // The identifier is the type name
-                const type_name = value.data.atom;
-                return mlir.Type.parse(self.ctx, type_name) catch error.InvalidType;
+            .type => {
+                // Simple type - pass string directly to MLIR parser
+                const type_str = value.data.type;
+                std.debug.print("  -> .type, type_str = {s}\n", .{type_str});
+                return mlir.Type.parse(self.ctx, type_str) catch error.InvalidType;
             },
-            .list => {
-                // This is a composite type like (!function (inputs ...) (results ...))
-                // We need to recursively handle it based on the first element
-                const list = value.data.list;
-                if (list.len() == 0) return error.InvalidType;
-
-                // First element tells us what kind of type this is
-                const first = list.at(0);
-
-                // For function types: (!function (inputs ...) (results ...))
-                if (first.type == .type_expr) {
-                    const type_name = first.data.type_expr;
-                    if (type_name.type == .identifier and std.mem.eql(u8, type_name.data.atom, "function")) {
-                        // This is a function type
-                        if (list.len() < 3) return error.InvalidType;
-
-                        // Second element should be (inputs ...)
-                        const inputs_expr = list.at(1);
-                        if (inputs_expr.type != .list) return error.InvalidType;
-                        const inputs_list = inputs_expr.data.list;
-                        if (inputs_list.len() < 1) return error.InvalidType;
-
-                        const inputs_kw = inputs_list.at(0);
-                        if (inputs_kw.type != .identifier or !std.mem.eql(u8, inputs_kw.data.atom, "inputs")) {
-                            return error.InvalidType;
-                        }
-
-                        // Third element should be (results ...)
-                        const results_expr = list.at(2);
-                        if (results_expr.type != .list) return error.InvalidType;
-                        const results_list = results_expr.data.list;
-                        if (results_list.len() < 1) return error.InvalidType;
-
-                        const results_kw = results_list.at(0);
-                        if (results_kw.type != .identifier or !std.mem.eql(u8, results_kw.data.atom, "results")) {
-                            return error.InvalidType;
-                        }
-
-                        // Build input types recursively
-                        const num_inputs = inputs_list.len() - 1; // Skip the "inputs" keyword
-                        var input_types = try self.allocator.alloc(mlir.MlirType, num_inputs);
-                        defer self.allocator.free(input_types);
-
-                        for (0..num_inputs) |i| {
-                            const input_value = inputs_list.at(i + 1);
-                            if (input_value.type != .type_expr) return error.InvalidType;
-                            // Recursively build each input type
-                            input_types[i] = try self.buildTypeFromValue(input_value.data.type_expr);
-                        }
-
-                        // Build result types recursively
-                        const num_results = results_list.len() - 1; // Skip the "results" keyword
-                        var result_types = try self.allocator.alloc(mlir.MlirType, num_results);
-                        defer self.allocator.free(result_types);
-
-                        for (0..num_results) |i| {
-                            const result_value = results_list.at(i + 1);
-                            if (result_value.type != .type_expr) return error.InvalidType;
-                            // Recursively build each result type
-                            result_types[i] = try self.buildTypeFromValue(result_value.data.type_expr);
-                        }
-
-                        // Create function type using MLIR C API
-                        return mlir.c.mlirFunctionTypeGet(
-                            self.ctx.ctx,
-                            @intCast(num_inputs),
-                            input_types.ptr,
-                            @intCast(num_results),
-                            result_types.ptr,
-                        );
-                    }
+            .identifier => {
+                // Plain identifier (builtin type like i32, f64, etc.)
+                const type_str = value.data.atom;
+                std.debug.print("  -> .identifier, type_str = {s}\n", .{type_str});
+                return mlir.Type.parse(self.ctx, type_str) catch error.InvalidType;
+            },
+            .function_type => {
+                // Function type - build from inputs/results
+                return self.buildFunctionTypeFromValue(value);
+            },
+            .string => {
+                // String literal containing complex dialect type (e.g., "!llvm.func<...>")
+                // This is allowed for complex types that can't be represented in S-expr
+                const type_str = value.data.atom;
+                // Strip quotes
+                if (type_str.len < 2 or type_str[0] != '"' or type_str[type_str.len - 1] != '"') {
+                    return error.InvalidType;
                 }
-
-                return error.InvalidType;
+                const type_name = type_str[1 .. type_str.len - 1];
+                return mlir.Type.parse(self.ctx, type_name) catch error.InvalidType;
             },
             else => return error.InvalidType,
         }
@@ -309,16 +313,11 @@ pub const Builder = struct {
 
         // Special handling for symbol attributes - might be StringAttr or FlatSymbolRefAttr
         if (std.mem.eql(u8, attr.key, "sym") or std.mem.eql(u8, attr.key, "sym_name") or std.mem.eql(u8, attr.key, "callee")) {
-            std.debug.print("DEBUG: Building symbol attribute for key: {s}\n", .{attr.key});
             const attr_value = try self.buildSymbolAttribute(&attr.value, attr.key);
             return mlir.namedAttribute(self.ctx, attr.key, attr_value);
         }
 
-        std.debug.print("DEBUG: Building generic attribute for key: {s}\n", .{attr.key});
-        const attr_value = self.buildAttributeValue(&attr.value) catch |err| {
-            std.debug.print("ERROR: buildAttributeValue failed for key=\"{s}\", error={}\n", .{attr.key, err});
-            return err;
-        };
+        const attr_value = try self.buildAttributeValue(&attr.value);
         return mlir.namedAttribute(self.ctx, attr.key, attr_value);
     }
 
@@ -326,9 +325,66 @@ pub const Builder = struct {
     pub fn buildTypeAttribute(self: *Builder, attr_expr: *const parser.AttrExpr) BuildError!mlir.MlirAttribute {
         const value = attr_expr.value;
 
-        // The attribute value is already unwrapped from the !type marker
-        // So we can build directly from the value (which could be identifier or list for function type)
-        const mlir_type = try self.buildTypeFromValue(value);
+        // Handle different formats:
+        // 1. Direct type or function_type Value
+        // 2. List starting with a type (!function ...) - need to unwrap
+        const type_value = if (value.type == .list) blk: {
+            // Check if this is a function type list: (!function ...)
+            const list = value.data.list;
+            if (list.len() > 0) {
+                const first = list.at(0);
+                // First element should be a type marker for "function"
+                if (first.type == .type and std.mem.eql(u8, first.data.type, "!function")) {
+                    // This is a function type - convert the list to a function_type
+                    // Parse it manually here
+                    if (list.len() < 3) return error.InvalidType;
+
+                    const inputs_list_value = list.at(1);
+                    const results_list_value = list.at(2);
+
+                    if (inputs_list_value.type != .list or results_list_value.type != .list) {
+                        return error.InvalidType;
+                    }
+
+                    const inputs_list = inputs_list_value.data.list;
+                    const results_list = results_list_value.data.list;
+
+                    // Skip "inputs" and "results" keywords and build types
+                    const num_inputs = if (inputs_list.len() > 0) inputs_list.len() - 1 else 0;
+                    const num_results = if (results_list.len() > 0) results_list.len() - 1 else 0;
+
+                    var input_types = try self.allocator.alloc(mlir.MlirType, num_inputs);
+                    defer self.allocator.free(input_types);
+
+                    for (0..num_inputs) |i| {
+                        const input_value = inputs_list.at(i + 1);
+                        input_types[i] = try self.buildTypeFromValue(input_value);
+                    }
+
+                    var result_types = try self.allocator.alloc(mlir.MlirType, num_results);
+                    defer self.allocator.free(result_types);
+
+                    for (0..num_results) |i| {
+                        const result_value = results_list.at(i + 1);
+                        result_types[i] = try self.buildTypeFromValue(result_value);
+                    }
+
+                    // Create function type directly
+                    const mlir_type = mlir.c.mlirFunctionTypeGet(
+                        self.ctx.ctx,
+                        @intCast(num_inputs),
+                        input_types.ptr,
+                        @intCast(num_results),
+                        result_types.ptr,
+                    );
+
+                    return mlir.c.mlirTypeAttrGet(mlir_type);
+                }
+            }
+            break :blk value;
+        } else value;
+
+        const mlir_type = try self.buildTypeFromValue(type_value);
 
         // Wrap it in a TypeAttr
         return mlir.c.mlirTypeAttrGet(mlir_type);
@@ -368,13 +424,13 @@ pub const Builder = struct {
             const val = value.data.has_type.value;
             const type_val = value.data.has_type.type_expr;
 
-            // The type should be a type_expr wrapper - unwrap it
-            if (type_val.type != .type_expr) {
+            // The type should be a type or function_type wrapper
+            if (type_val.type != .type and type_val.type != .function_type) {
                 return error.InvalidAttribute;
             }
 
-            // Build the type from the wrapped type expression
-            const mlir_type = try self.buildTypeFromValue(type_val.data.type_expr);
+            // Build the type from the type Value
+            const mlir_type = try self.buildTypeFromValue(type_val);
 
             // Extract the integer value
             if (val.type != .number) {
@@ -399,9 +455,7 @@ pub const Builder = struct {
     fn buildRegion(self: *Builder, region: *const parser.Region) BuildError!mlir.MlirRegion {
         const mlir_region = mlir.Region.create();
 
-        std.debug.print("DEBUG buildRegion: iterating over {} blocks\n", .{region.blocks.len});
-        for (region.blocks, 0..) |*block, block_idx| {
-            std.debug.print("DEBUG buildRegion: building block[{}], operations={}\n", .{block_idx, block.operations.len});
+        for (region.blocks) |*block| {
             const mlir_block = try self.buildBlock(block);
             mlir.Region.appendBlock(mlir_region, mlir_block);
         }
@@ -434,9 +488,7 @@ pub const Builder = struct {
         }
 
         // Build operations in the block
-        std.debug.print("DEBUG: Building {} operations in block\n", .{block.operations.len});
-        for (block.operations, 0..) |*operation, idx| {
-            std.debug.print("DEBUG: About to build operation[{}] at address {*}, name.ptr={*}, name.len={}\n", .{idx, operation, operation.name.ptr, operation.name.len});
+        for (block.operations) |*operation| {
             const mlir_op = try self.buildOperation(operation);
             mlir.Block.appendOperation(mlir_block, mlir_op);
         }

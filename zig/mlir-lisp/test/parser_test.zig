@@ -10,21 +10,19 @@ const example1 =
     \\  (operation
     \\    (name arith.constant)
     \\    (result-bindings [%c0])
-    \\    (result-types !i32)
+    \\    (result-types i32)
     \\    (attributes { :value (#int 42) })
     \\    (location (#unknown))))
 ;
 
 test "parser - example 1 simple constant" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var tok = Tokenizer.init(allocator, example1);
     var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try reader.read();
 
     var parser = Parser.init(allocator);
     var module = try parser.parseModule(value);
@@ -50,33 +48,31 @@ const example2 =
     \\    (name func.func)
     \\    (attributes {
     \\      :sym  (#sym @add)
-    \\      :type (!function (inputs !i32 !i32) (results !i32))
+    \\      :type (!function (inputs i32 i32) (results i32))
     \\      :visibility :public
     \\    })
     \\    (regions
     \\      (region
     \\        (block [^entry]
-    \\          (arguments [ [%x !i32] [%y !i32] ])
+    \\          (arguments [ [%x i32] [%y i32] ])
     \\          (operation
     \\            (name arith.addi)
     \\            (result-bindings [%sum])
     \\            (operands %x %y)
-    \\            (result-types !i32))
+    \\            (result-types i32))
     \\          (operation
     \\            (name func.return)
     \\            (operands %sum)))))))
 ;
 
 test "parser - example 2 function with regions" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var tok = Tokenizer.init(allocator, example2);
     var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try reader.read();
 
     var parser = Parser.init(allocator);
     var module = try parser.parseModule(value);
@@ -123,7 +119,7 @@ const example3 =
     \\    (name func.func)
     \\    (attributes {
     \\      :sym (#sym @main)
-    \\      :type (!function (inputs) (results !i32))
+    \\      :type (!function (inputs) (results i32))
     \\    })
     \\    (regions
     \\      (region
@@ -132,17 +128,17 @@ const example3 =
     \\          (operation
     \\            (name arith.constant)
     \\            (result-bindings [%a])
-    \\            (result-types !i32)
+    \\            (result-types i32)
     \\            (attributes { :value (#int 1) }))
     \\          (operation
     \\            (name arith.constant)
     \\            (result-bindings [%b])
-    \\            (result-types !i32)
+    \\            (result-types i32)
     \\            (attributes { :value (#int 2) }))
     \\          (operation
     \\            (name func.call)
     \\            (result-bindings [%r])
-    \\            (result-types !i32)
+    \\            (result-types i32)
     \\            (operands %a %b)
     \\            (attributes { :callee (#flat-symbol @add) }))
     \\          (operation
@@ -151,15 +147,13 @@ const example3 =
 ;
 
 test "parser - example 3 multiple operations" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var tok = Tokenizer.init(allocator, example3);
     var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try reader.read();
 
     var parser = Parser.init(allocator);
     var module = try parser.parseModule(value);
@@ -197,12 +191,12 @@ const example4 =
     \\    (name func.func)
     \\    (attributes {
     \\      :sym (#sym @branchy)
-    \\      :type (!function (inputs !i1 !i32 !i32) (results !i32))
+    \\      :type (!function (inputs i1 i32 i32) (results i32))
     \\    })
     \\    (regions
     \\      (region
     \\        (block [^entry]
-    \\          (arguments [ [%cond !i1] [%x !i32] [%y !i32] ])
+    \\          (arguments [ [%cond i1] [%x i32] [%y i32] ])
     \\          (operation
     \\            (name cf.cond_br)
     \\            (operands %cond)
@@ -210,23 +204,21 @@ const example4 =
     \\              (successor ^then (%x))
     \\              (successor ^else (%y)))))
     \\        (block [^then]
-    \\          (arguments [ [%t !i32] ])
+    \\          (arguments [ [%t i32] ])
     \\          (operation (name func.return) (operands %t)))
     \\        (block [^else]
-    \\          (arguments [ [%e !i32] ])
+    \\          (arguments [ [%e i32] ])
     \\          (operation (name func.return) (operands %e)))))))
 ;
 
 test "parser - example 4 control flow" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var tok = Tokenizer.init(allocator, example4);
     var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try reader.read();
 
     var parser = Parser.init(allocator);
     var module = try parser.parseModule(value);
@@ -280,28 +272,28 @@ const example5 =
     \\    (name func.func)
     \\    (attributes {
     \\      :sym (#sym @fibonacci)
-    \\      :type (!function (inputs !i32) (results !i32))
+    \\      :type (!function (inputs i32) (results i32))
     \\      :visibility :public
     \\    })
     \\    (regions
     \\      (region
     \\        (block [^entry]
-    \\          (arguments [ [%n !i32] ])
+    \\          (arguments [ [%n i32] ])
     \\          (operation
     \\            (name arith.constant)
     \\            (result-bindings [%c1])
-    \\            (result-types !i32)
+    \\            (result-types i32)
     \\            (attributes { :value (#int 1) }))
     \\          (operation
     \\            (name arith.cmpi)
     \\            (result-bindings [%cond])
-    \\            (result-types !i1)
+    \\            (result-types i1)
     \\            (operands %n %c1)
     \\            (attributes { :predicate (#string "sle") }))
     \\          (operation
     \\            (name scf.if)
     \\            (result-bindings [%result])
-    \\            (result-types !i32)
+    \\            (result-types i32)
     \\            (operands %cond)
     \\            (regions
     \\              (region
@@ -316,39 +308,39 @@ const example5 =
     \\                  (operation
     \\                    (name arith.constant)
     \\                    (result-bindings [%c1_rec])
-    \\                    (result-types !i32)
+    \\                    (result-types i32)
     \\                    (attributes { :value (#int 1) }))
     \\                  (operation
     \\                    (name arith.subi)
     \\                    (result-bindings [%n_minus_1])
-    \\                    (result-types !i32)
+    \\                    (result-types i32)
     \\                    (operands %n %c1_rec))
     \\                  (operation
     \\                    (name func.call)
     \\                    (result-bindings [%fib_n_minus_1])
-    \\                    (result-types !i32)
+    \\                    (result-types i32)
     \\                    (operands %n_minus_1)
     \\                    (attributes { :callee (#flat-symbol @fibonacci) }))
     \\                  (operation
     \\                    (name arith.constant)
     \\                    (result-bindings [%c2])
-    \\                    (result-types !i32)
+    \\                    (result-types i32)
     \\                    (attributes { :value (#int 2) }))
     \\                  (operation
     \\                    (name arith.subi)
     \\                    (result-bindings [%n_minus_2])
-    \\                    (result-types !i32)
+    \\                    (result-types i32)
     \\                    (operands %n %c2))
     \\                  (operation
     \\                    (name func.call)
     \\                    (result-bindings [%fib_n_minus_2])
-    \\                    (result-types !i32)
+    \\                    (result-types i32)
     \\                    (operands %n_minus_2)
     \\                    (attributes { :callee (#flat-symbol @fibonacci) }))
     \\                  (operation
     \\                    (name arith.addi)
     \\                    (result-bindings [%sum])
-    \\                    (result-types !i32)
+    \\                    (result-types i32)
     \\                    (operands %fib_n_minus_1 %fib_n_minus_2))
     \\                  (operation
     \\                    (name scf.yield)
@@ -359,15 +351,13 @@ const example5 =
 ;
 
 test "parser - example 5 recursive fibonacci" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var tok = Tokenizer.init(allocator, example5);
     var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try reader.read();
 
     var parser = Parser.init(allocator);
     var module = try parser.parseModule(value);
@@ -422,17 +412,15 @@ test "parser - example 5 recursive fibonacci" {
 }
 
 test "parser - error on invalid structure" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Not a list
     const bad_source = "42";
     var tok = Tokenizer.init(allocator, bad_source);
     var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try reader.read();
 
     var parser = Parser.init(allocator);
     const result = parser.parseModule(value);
@@ -440,17 +428,15 @@ test "parser - error on invalid structure" {
 }
 
 test "parser - error on missing name" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Operation without name
     const bad_source = "(mlir (operation (result-bindings [%x])))";
     var tok = Tokenizer.init(allocator, bad_source);
     var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try reader.read();
 
     var parser = Parser.init(allocator);
     const result = parser.parseModule(value);

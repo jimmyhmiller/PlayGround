@@ -12,7 +12,7 @@ All four examples from `docs/grammar.md` have been tested:
   (operation
     (name arith.constant)
     (result-bindings [%c0])
-    (result-types !i32)
+    (result-types i32)
     (attributes { :value (#int 42) })
     (location (#unknown))))
 ```
@@ -21,7 +21,7 @@ All four examples from `docs/grammar.md` have been tested:
 - Parses correctly as nested list structure
 - Identifies `mlir` as the root
 - Correctly handles `result-bindings` with vector containing `%c0`
-- Properly parses type expression `!i32`
+- Properly parses type expression `i32`
 - Successfully handles map with keyword `:value` and attribute expression `#int`
 
 ### ✅ Example 2: Function with Addition
@@ -31,18 +31,18 @@ All four examples from `docs/grammar.md` have been tested:
     (name func.func)
     (attributes {
       :sym  (#sym @add)
-      :type (!function (inputs !i32 !i32) (results !i32))
+      :type (!function (inputs i32 i32) (results i32))
       :visibility :public
     })
     (regions
       (region
         (block [^entry]
-          (arguments [ [%x !i32] [%y !i32] ])
+          (arguments [ [%x i32] [%y i32] ])
           (operation
             (name arith.addi)
             (result-bindings [%sum])
             (operands %x %y)
-            (result-types !i32))
+            (result-types i32))
           (operation
             (name func.return)
             (operands %sum)))))))
@@ -63,7 +63,7 @@ All four examples from `docs/grammar.md` have been tested:
     (name func.func)
     (attributes {
       :sym (#sym @main)
-      :type (!function (inputs) (results !i32))
+      :type (!function (inputs) (results i32))
     })
     (regions
       (region
@@ -72,17 +72,17 @@ All four examples from `docs/grammar.md` have been tested:
           (operation
             (name arith.constant)
             (result-bindings [%a])
-            (result-types !i32)
+            (result-types i32)
             (attributes { :value (#int 1) }))
           (operation
             (name arith.constant)
             (result-bindings [%b])
-            (result-types !i32)
+            (result-types i32)
             (attributes { :value (#int 2) }))
           (operation
             (name func.call)
             (result-bindings [%r])
-            (result-types !i32)
+            (result-types i32)
             (operands %a %b)
             (attributes { :callee (#flat-symbol @add) }))
           (operation
@@ -103,12 +103,12 @@ All four examples from `docs/grammar.md` have been tested:
     (name func.func)
     (attributes {
       :sym (#sym @branchy)
-      :type (!function (inputs !i1 !i32 !i32) (results !i32))
+      :type (!function (inputs i1 i32 i32) (results i32))
     })
     (regions
       (region
         (block [^entry]
-          (arguments [ [%cond !i1] [%x !i32] [%y !i32] ])
+          (arguments [ [%cond i1] [%x i32] [%y i32] ])
           (operation
             (name cf.cond_br)
             (operands %cond)
@@ -116,10 +116,10 @@ All four examples from `docs/grammar.md` have been tested:
               (successor ^then (%x))
               (successor ^else (%y)))))
         (block [^then]
-          (arguments [ [%t !i32] ])
+          (arguments [ [%t i32] ])
           (operation (name func.return) (operands %t)))
         (block [^else]
-          (arguments [ [%e !i32] ])
+          (arguments [ [%e i32] ])
           (operation (name func.return) (operands %e)))))))
 ```
 

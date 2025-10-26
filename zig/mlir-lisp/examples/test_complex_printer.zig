@@ -12,17 +12,17 @@ pub fn main() !void {
         \\    (name func.func)
         \\    (attributes {
         \\      :sym (#sym @add)
-        \\      :type (!function (inputs !i32 !i32) (results !i32))
+        \\      :type (!function (inputs i32 i32) (results i32))
         \\    })
         \\    (regions
         \\      (region
         \\        (block [^entry]
-        \\          (arguments [ [%x !i32] [%y !i32] ])
+        \\          (arguments [ [%x i32] [%y i32] ])
         \\          (operation
         \\            (name arith.addi)
         \\            (result-bindings [%sum])
         \\            (operands %x %y)
-        \\            (result-types !i32))
+        \\            (result-types i32))
         \\          (operation
         \\            (name func.return)
         \\            (operands %sum)))))))

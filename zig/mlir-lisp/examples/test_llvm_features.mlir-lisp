@@ -1,0 +1,179 @@
+;; Test file for LLVM dialect features in MLIR S-expression syntax
+;; Tests: basic blocks, block arguments, conditional branches, pointer types with attrs
+
+(mlir
+  ;; Simple function that tests pointer equality and branches
+  (operation
+    (name llvm.func)
+    (attributes {
+      :sym_name @test_ptr_eq
+      :function_type (!function (inputs !llvm.ptr !llvm.ptr) (results i1))
+    })
+    (regions
+      (region
+        (block [^entry]
+          (arguments [ [%arg0 !llvm.ptr] [%arg1 !llvm.ptr] ])
+
+          (operation
+            (name llvm.icmp)
+            (result-bindings [%0])
+            (result-types i1)
+            (operands %arg0 %arg1)
+            (attributes { :predicate "eq" }))
+
+          (operation
+            (name llvm.return)
+            (operands %0))))))
+
+  ;; Function with multiple blocks, block arguments, and conditional branches
+  (operation
+    (name llvm.func)
+    (attributes {
+      :sym_name @test_control_flow
+      :function_type (!function (inputs i1 i32) (results i32))
+    })
+    (regions
+      (region
+        (block [^entry]
+          (arguments [ [%cond i1] [%val i32] ])
+
+          ;; Conditional branch to ^bb1 or ^bb2
+          (operation
+            (name llvm.cond_br)
+            (operands %cond)
+            (successors
+              (successor ^bb1 (%val))
+              (successor ^bb2))))
+
+        ;; Block with argument
+        (block [^bb1]
+          (arguments [ [%arg i32] ])
+
+          (operation
+            (name llvm.mlir.constant)
+            (result-bindings [%c10])
+            (result-types i32)
+            (attributes { :value (: 10 i32) }))
+
+          (operation
+            (name llvm.add)
+            (result-bindings [%sum])
+            (result-types i32)
+            (operands %arg %c10))
+
+          (operation
+            (name llvm.br)
+            (successors
+              (successor ^bb3 (%sum)))))
+
+        ;; Block without arguments
+        (block [^bb2]
+          (arguments [])
+
+          (operation
+            (name llvm.mlir.constant)
+            (result-bindings [%c20])
+            (result-types i32)
+            (attributes { :value (: 20 i32) }))
+
+          (operation
+            (name llvm.br)
+            (successors
+              (successor ^bb3 (%c20)))))
+
+        ;; Common successor with block argument
+        (block [^bb3]
+          (arguments [ [%result i32] ])
+
+          (operation
+            (name llvm.return)
+            (operands %result))))))
+
+  ;; Function demonstrating pointer attributes
+  ;; Note: Type attributes like {llvm.readonly} on function arguments
+  ;; are function-level attributes in MLIR, not part of the type syntax
+  (operation
+    (name llvm.func)
+    (attributes {
+      :sym_name @test_ptr_attrs
+      :function_type (!function (inputs !llvm.ptr) (results i32))
+      ;; Argument attributes would go here if supported
+      :arg_attrs [ { :llvm.readonly true } ]
+    })
+    (regions
+      (region
+        (block [^entry]
+          (arguments [ [%ptr !llvm.ptr] ])
+
+          (operation
+            (name llvm.load)
+            (result-bindings [%0])
+            (result-types i32)
+            (operands %ptr))
+
+          (operation
+            (name llvm.mlir.constant)
+            (result-bindings [%1])
+            (result-types i32)
+            (attributes { :value (: 5 i32) }))
+
+          (operation
+            (name llvm.add)
+            (result-bindings [%2])
+            (result-types i32)
+            (operands %0 %1))
+
+          (operation
+            (name llvm.return)
+            (operands %2))))))
+
+  ;; Function that calls another function
+  (operation
+    (name llvm.func)
+    (attributes {
+      :sym_name @test_call
+      :function_type (!function (inputs i32) (results i32))
+    })
+    (regions
+      (region
+        (block [^entry]
+          (arguments [ [%x i32] ])
+
+          (operation
+            (name llvm.mlir.zero)
+            (result-bindings [%ptr])
+            (result-types !llvm.ptr))
+
+          (operation
+            (name llvm.mlir.constant)
+            (result-bindings [%val])
+            (result-types i32)
+            (attributes { :value (: 42 i32) }))
+
+          (operation
+            (name llvm.call)
+            (result-bindings [%eq])
+            (result-types i1)
+            (operands %ptr %ptr)
+            (attributes { :callee @test_ptr_eq }))
+
+          (operation
+            (name llvm.cond_br)
+            (operands %eq)
+            (successors
+              (successor ^bb1)
+              (successor ^bb2))))
+
+        (block [^bb1]
+          (arguments [])
+
+          (operation
+            (name llvm.return)
+            (operands %val)))
+
+        (block [^bb2]
+          (arguments [])
+
+          (operation
+            (name llvm.return)
+            (operands %x)))))))

@@ -9,35 +9,33 @@ const testing = std.testing;
 // VALIDATION TESTS - Testing edge cases and scenarios not covered in original tests
 
 test "printer validation - multiple operations in module" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
         \\  (operation
         \\    (name arith.constant)
         \\    (result-bindings [%c1])
-        \\    (result-types !i32)
+        \\    (result-types i32)
         \\    (attributes { :value (#int 10) }))
         \\  (operation
         \\    (name arith.constant)
         \\    (result-bindings [%c2])
-        \\    (result-types !i32)
+        \\    (result-types i32)
         \\    (attributes { :value (#int 20) }))
         \\  (operation
         \\    (name arith.addi)
         \\    (result-bindings [%sum])
         \\    (operands %c1 %c2)
-        \\    (result-types !i32)))
+        \\    (result-types i32)))
     ;
 
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -53,11 +51,7 @@ test "printer validation - multiple operations in module" {
     // Parse again for round-trip validation
     var tok2 = Tokenizer.init(allocator, output);
     var r2 = try Reader.init(allocator, &tok2);
-    var value2 = try r2.read();
-    defer {
-        value2.deinit(allocator);
-        allocator.destroy(value2);
-    }
+    const value2 = try r2.read();
 
     var p2 = Parser.init(allocator);
     var module2 = try p2.parseModule(value2);
@@ -72,7 +66,9 @@ test "printer validation - multiple operations in module" {
 }
 
 test "printer validation - nested regions and blocks" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
@@ -96,11 +92,7 @@ test "printer validation - nested regions and blocks" {
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -116,11 +108,7 @@ test "printer validation - nested regions and blocks" {
     // Parse again
     var tok2 = Tokenizer.init(allocator, output);
     var r2 = try Reader.init(allocator, &tok2);
-    var value2 = try r2.read();
-    defer {
-        value2.deinit(allocator);
-        allocator.destroy(value2);
-    }
+    const value2 = try r2.read();
 
     var p2 = Parser.init(allocator);
     var module2 = try p2.parseModule(value2);
@@ -133,25 +121,23 @@ test "printer validation - nested regions and blocks" {
 }
 
 test "printer validation - multiple result bindings and types" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
         \\  (operation
         \\    (name custom.multi_result)
         \\    (result-bindings [%r1 %r2 %r3])
-        \\    (result-types !i32 !i64 !f32)
+        \\    (result-types i32 i64 f32)
         \\    (operands %x %y %z)))
     ;
 
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -167,11 +153,7 @@ test "printer validation - multiple result bindings and types" {
     // Parse again
     var tok2 = Tokenizer.init(allocator, output);
     var r2 = try Reader.init(allocator, &tok2);
-    var value2 = try r2.read();
-    defer {
-        value2.deinit(allocator);
-        allocator.destroy(value2);
-    }
+    const value2 = try r2.read();
 
     var p2 = Parser.init(allocator);
     var module2 = try p2.parseModule(value2);
@@ -186,7 +168,9 @@ test "printer validation - multiple result bindings and types" {
 }
 
 test "printer validation - complex attribute types" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
@@ -206,11 +190,7 @@ test "printer validation - complex attribute types" {
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -235,11 +215,7 @@ test "printer validation - complex attribute types" {
     // Parse again for full validation
     var tok2 = Tokenizer.init(allocator, output);
     var r2 = try Reader.init(allocator, &tok2);
-    var value2 = try r2.read();
-    defer {
-        value2.deinit(allocator);
-        allocator.destroy(value2);
-    }
+    const value2 = try r2.read();
 
     var p2 = Parser.init(allocator);
     var module2 = try p2.parseModule(value2);
@@ -249,7 +225,9 @@ test "printer validation - complex attribute types" {
 }
 
 test "printer validation - multiple blocks in region" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
@@ -258,17 +236,17 @@ test "printer validation - multiple blocks in region" {
         \\    (regions
         \\      (region
         \\        (block [^bb0]
-        \\          (arguments [[%arg0 !i32]])
+        \\          (arguments [[%arg0 i32]])
         \\          (operation
         \\            (name cf.br)
         \\            (successors (successor ^bb1 (%arg0)))))
         \\        (block [^bb1]
-        \\          (arguments [[%arg1 !i32]])
+        \\          (arguments [[%arg1 i32]])
         \\          (operation
         \\            (name cf.br)
         \\            (successors (successor ^bb2 (%arg1)))))
         \\        (block [^bb2]
-        \\          (arguments [[%arg2 !i32]])
+        \\          (arguments [[%arg2 i32]])
         \\          (operation
         \\            (name func.return)
         \\            (operands %arg2)))))))
@@ -277,11 +255,7 @@ test "printer validation - multiple blocks in region" {
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -297,11 +271,7 @@ test "printer validation - multiple blocks in region" {
     // Parse again
     var tok2 = Tokenizer.init(allocator, output);
     var r2 = try Reader.init(allocator, &tok2);
-    var value2 = try r2.read();
-    defer {
-        value2.deinit(allocator);
-        allocator.destroy(value2);
-    }
+    const value2 = try r2.read();
 
     var p2 = Parser.init(allocator);
     var module2 = try p2.parseModule(value2);
@@ -315,7 +285,9 @@ test "printer validation - multiple blocks in region" {
 }
 
 test "printer validation - complex type expressions" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
@@ -323,17 +295,14 @@ test "printer validation - complex type expressions" {
         \\    (name test.op)
         \\    (result-types
         \\      !tensor
-        \\      !(custom !i32 !i64))))
+        \\      !llvm.ptr
+        \\      i32)))
     ;
 
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -348,26 +317,25 @@ test "printer validation - complex type expressions" {
 
     // Verify type expressions preserved - just check basics
     try testing.expect(std.mem.indexOf(u8, output, "!tensor") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "!llvm.ptr") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(result-types") != null);
 
     // Parse again
     var tok2 = Tokenizer.init(allocator, output);
     var r2 = try Reader.init(allocator, &tok2);
-    var value2 = try r2.read();
-    defer {
-        value2.deinit(allocator);
-        allocator.destroy(value2);
-    }
+    const value2 = try r2.read();
 
     var p2 = Parser.init(allocator);
     var module2 = try p2.parseModule(value2);
     defer module2.deinit();
 
-    try testing.expectEqual(@as(usize, 2), module2.operations[0].result_types.len);
+    try testing.expectEqual(@as(usize, 3), module2.operations[0].result_types.len);
 }
 
 test "printer validation - successor with multiple operands" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
@@ -380,11 +348,7 @@ test "printer validation - successor with multiple operands" {
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -400,11 +364,7 @@ test "printer validation - successor with multiple operands" {
     // Parse again
     var tok2 = Tokenizer.init(allocator, output);
     var r2 = try Reader.init(allocator, &tok2);
-    var value2 = try r2.read();
-    defer {
-        value2.deinit(allocator);
-        allocator.destroy(value2);
-    }
+    const value2 = try r2.read();
 
     var p2 = Parser.init(allocator);
     var module2 = try p2.parseModule(value2);
@@ -420,7 +380,9 @@ test "printer validation - successor with multiple operands" {
 }
 
 test "printer validation - string literals" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
@@ -435,11 +397,7 @@ test "printer validation - string literals" {
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -459,11 +417,7 @@ test "printer validation - string literals" {
     // Parse again
     var tok2 = Tokenizer.init(allocator, output);
     var r2 = try Reader.init(allocator, &tok2);
-    var value2 = try r2.read();
-    defer {
-        value2.deinit(allocator);
-        allocator.destroy(value2);
-    }
+    const value2 = try r2.read();
 
     var p2 = Parser.init(allocator);
     var module2 = try p2.parseModule(value2);
@@ -473,25 +427,23 @@ test "printer validation - string literals" {
 }
 
 test "printer validation - operation with location metadata" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
         \\  (operation
         \\    (name arith.constant)
         \\    (result-bindings [%c0])
-        \\    (result-types !i32)
+        \\    (result-types i32)
         \\    (location (#fused (#file "test.mlir" 10 5) (#callsite "main")))))
     ;
 
     // Parse
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -511,11 +463,7 @@ test "printer validation - operation with location metadata" {
     // Parse again
     var tok2 = Tokenizer.init(allocator, output);
     var r2 = try Reader.init(allocator, &tok2);
-    var value2 = try r2.read();
-    defer {
-        value2.deinit(allocator);
-        allocator.destroy(value2);
-    }
+    const value2 = try r2.read();
 
     var p2 = Parser.init(allocator);
     var module2 = try p2.parseModule(value2);
@@ -525,7 +473,9 @@ test "printer validation - operation with location metadata" {
 }
 
 test "printer validation - full round-trip with complex nested structure" {
-    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const input =
         \\(mlir
@@ -539,7 +489,7 @@ test "printer validation - full round-trip with complex nested structure" {
         \\            (name func.func)
         \\            (attributes {
         \\              :sym (#sym @main)
-        \\              :type (!(function (inputs) (results !i32)))
+        \\              :type (!function (inputs) (results i32))
         \\            })
         \\            (regions
         \\              (region
@@ -548,43 +498,43 @@ test "printer validation - full round-trip with complex nested structure" {
         \\                  (operation
         \\                    (name arith.constant)
         \\                    (result-bindings [%c0])
-        \\                    (result-types !i32)
+        \\                    (result-types i32)
         \\                    (attributes { :value (#int 0) }))
         \\                  (operation
         \\                    (name scf.while)
         \\                    (operands %c0)
-        \\                    (result-types !i32)
+        \\                    (result-types i32)
         \\                    (regions
         \\                      (region
         \\                        (block []
-        \\                          (arguments [[%iter !i32]])
+        \\                          (arguments [[%iter i32]])
         \\                          (operation
         \\                            (name arith.constant)
         \\                            (result-bindings [%limit])
-        \\                            (result-types !i32)
+        \\                            (result-types i32)
         \\                            (attributes { :value (#int 10) }))
         \\                          (operation
         \\                            (name arith.cmpi)
         \\                            (result-bindings [%cond])
         \\                            (operands %iter %limit)
-        \\                            (result-types !i1)
+        \\                            (result-types i1)
         \\                            (attributes { :predicate (#str "slt") }))
         \\                          (operation
         \\                            (name scf.condition)
         \\                            (operands %cond %iter))))
         \\                      (region
         \\                        (block []
-        \\                          (arguments [[%arg !i32]])
+        \\                          (arguments [[%arg i32]])
         \\                          (operation
         \\                            (name arith.constant)
         \\                            (result-bindings [%c1])
-        \\                            (result-types !i32)
+        \\                            (result-types i32)
         \\                            (attributes { :value (#int 1) }))
         \\                          (operation
         \\                            (name arith.addi)
         \\                            (result-bindings [%next])
         \\                            (operands %arg %c1)
-        \\                            (result-types !i32))
+        \\                            (result-types i32))
         \\                          (operation
         \\                            (name scf.yield)
         \\                            (operands %next))))))
@@ -596,11 +546,7 @@ test "printer validation - full round-trip with complex nested structure" {
     // Parse original
     var tok = Tokenizer.init(allocator, input);
     var r = try Reader.init(allocator, &tok);
-    var value = try r.read();
-    defer {
-        value.deinit(allocator);
-        allocator.destroy(value);
-    }
+    const value = try r.read();
 
     var p = Parser.init(allocator);
     var module = try p.parseModule(value);
@@ -616,11 +562,7 @@ test "printer validation - full round-trip with complex nested structure" {
     // Parse printed output
     var tok2 = Tokenizer.init(allocator, output);
     var r2 = try Reader.init(allocator, &tok2);
-    var value2 = try r2.read();
-    defer {
-        value2.deinit(allocator);
-        allocator.destroy(value2);
-    }
+    const value2 = try r2.read();
 
     var p2 = Parser.init(allocator);
     var module2 = try p2.parseModule(value2);
@@ -636,11 +578,7 @@ test "printer validation - full round-trip with complex nested structure" {
     // Parse third time
     var tok3 = Tokenizer.init(allocator, output3);
     var r3 = try Reader.init(allocator, &tok3);
-    var value3 = try r3.read();
-    defer {
-        value3.deinit(allocator);
-        allocator.destroy(value3);
-    }
+    const value3 = try r3.read();
 
     var p3 = Parser.init(allocator);
     var module3 = try p3.parseModule(value3);
