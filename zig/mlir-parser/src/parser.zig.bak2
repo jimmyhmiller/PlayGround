@@ -1,0 +1,772 @@
+//! MLIR Parser
+//! Implements a recursive descent parser following the grammar in grammar.ebnf
+//! Each parsing function is annotated with the corresponding grammar rule
+
+const std = @import("std");
+const lexer = @import("lexer.zig");
+const ast = @import("ast.zig");
+
+const Lexer = lexer.Lexer;
+const Token = lexer.Token;
+const TokenType = lexer.TokenType;
+
+pub const ParseError = error{
+    UnexpectedToken,
+    ExpectedToken,
+    OutOfMemory,
+    InvalidType,
+    InvalidOperation,
+    InvalidAttribute,
+    Overflow,
+    InvalidCharacter,
+};
+
+pub const Parser = struct {
+    lexer: *Lexer,
+    allocator: std.mem.Allocator,
+    current: Token,
+    previous: Token,
+
+    pub fn init(allocator: std.mem.Allocator, lex: *Lexer) !Parser {
+        var parser = Parser{
+            .lexer = lex,
+            .allocator = allocator,
+            .current = undefined,
+            .previous = undefined,
+        };
+        // Prime the parser with the first token
+        parser.current = lex.nextToken();
+        parser.previous = parser.current;
+        return parser;
+    }
+
+    pub fn deinit(self: *Parser) void {
+        _ = self;
+    }
+
+    // Helper methods for parser navigation
+
+    /// Returns the current token without advancing
+    fn peek(self: *Parser) Token {
+        return self.current;
+    }
+
+    /// Returns the previous token
+    fn peekPrevious(self: *Parser) Token {
+        return self.previous;
+    }
+
+    /// Advances to the next token and returns the previous one
+    fn advance(self: *Parser) Token {
+        self.previous = self.current;
+        self.current = self.lexer.nextToken();
+        return self.previous;
+    }
+
+    /// Checks if current token is of given type without consuming
+    fn check(self: *Parser, token_type: TokenType) bool {
+        return self.current.type == token_type;
+    }
+
+    /// Consumes current token if it matches the given type
+    fn match(self: *Parser, token_types: []const TokenType) bool {
+        for (token_types) |token_type| {
+            if (self.check(token_type)) {
+                _ = self.advance();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Consumes current token if it matches, otherwise returns error
+    fn expect(self: *Parser, token_type: TokenType) !Token {
+        if (self.check(token_type)) {
+            return self.advance();
+        }
+        std.debug.print("Expected {s}, but got {s} at line {}, column {}\n", .{
+            @tagName(token_type),
+            @tagName(self.current.type),
+            self.current.line,
+            self.current.column,
+        });
+        return ParseError.ExpectedToken;
+    }
+
+    /// Checks if we're at the end of input
+    fn isAtEnd(self: *Parser) bool {
+        return self.current.type == .eof;
+    }
+
+    /// Reports an error at the current token
+    fn reportError(self: *Parser, message: []const u8) void {
+        std.debug.print("Parse error at line {}, column {}: {s}\n", .{
+            self.current.line,
+            self.current.column,
+            message,
+        });
+    }
+
+    // Grammar: toplevel ::= (operation | attribute-alias-def | type-alias-def)*
+    pub fn parseModule(self: *Parser) !ast.Module {
+        var operations: std.ArrayList(ast.Operation) = .empty;
+        errdefer operations.deinit(self.allocator);
+
+        var type_aliases: std.ArrayList(ast.TypeAliasDef) = .empty;
+        errdefer type_aliases.deinit(self.allocator);
+
+        var attribute_aliases: std.ArrayList(ast.AttributeAliasDef) = .empty;
+        errdefer attribute_aliases.deinit(self.allocator);
+
+        while (!self.isAtEnd()) {
+            // Check for type alias definition
+            if (self.check(.type_alias_id) and self.peekNext().type == .equal) {
+                try type_aliases.append(self.allocator, try self.parseTypeAliasDef());
+            }
+            // Check for attribute alias definition
+            else if (self.check(.attribute_alias_id) and self.peekNext().type == .equal) {
+                try attribute_aliases.append(self.allocator, try self.parseAttributeAliasDef());
+            }
+            // Otherwise, parse as operation
+            else {
+                try operations.append(self.allocator, try self.parseOperation());
+            }
+        }
+
+        return ast.Module{
+            .operations = try operations.toOwnedSlice(self.allocator),
+            .type_aliases = try type_aliases.toOwnedSlice(self.allocator),
+            .attribute_aliases = try attribute_aliases.toOwnedSlice(self.allocator),
+            .allocator = self.allocator,
+        };
+    }
+
+    fn peekNext(self: *Parser) Token {
+        // Simplified - in a real implementation, we'd need to save lexer state
+        // For now, we'll just return current (not perfect but works for simple cases)
+        return self.current;
+    }
+
+    // Grammar: operation ::= op-result-list? (generic-operation | custom-operation) trailing-location?
+    fn parseOperation(self: *Parser) !ast.Operation {
+        // Check for op-result-list (value-id followed by = or :)
+        var results: ?ast.OpResultList = null;
+        if (self.check(.value_id)) {
+            // Look ahead to see if this is a result list (has '=' after value-id or ':')
+            // For now, we'll assume value-id followed by '=' means it's a result
+            const saved_current = self.current;
+            const saved_previous = self.previous;
+            _ = self.advance(); // consume value-id
+
+            const has_equals = self.check(.equal) or self.check(.colon);
+
+            // Restore position
+            self.current = saved_current;
+            self.previous = saved_previous;
+
+            if (has_equals and self.check(.colon)) {
+                // It's %0:2 = ...style result
+                results = try self.parseOpResultList();
+            } else if (has_equals and self.check(.equal)) {
+                // Simple %0 = ... style
+                results = try self.parseOpResultList();
+            }
+        }
+
+        // Parse the operation itself (custom operations use bare-id, generic use string)
+        var kind: ast.OperationKind = undefined;
+        if (self.check(.bare_id)) {
+            // Custom operation (like arith.constant, func.return)
+            kind = .{ .custom = try self.parseCustomOperation() };
+        } else if (self.check(.string_literal)) {
+            // Generic operation
+            kind = .{ .generic = try self.parseGenericOperation() };
+        } else {
+            self.reportError("Expected operation name");
+            return ParseError.InvalidOperation;
+        }
+
+        // Check for trailing location
+        var location: ?ast.Location = null;
+        if (self.match(&.{.kw_loc})) {
+            location = try self.parseLocation();
+        }
+
+        return ast.Operation{
+            .results = results,
+            .kind = kind,
+            .location = location,
+        };
+    }
+
+    // Grammar: op-result-list ::= op-result (`,` op-result)* `=`
+    fn parseOpResultList(self: *Parser) !ast.OpResultList {
+        var results: std.ArrayList(ast.OpResult) = .empty;
+        errdefer results.deinit();
+
+        while (true) {
+            try results.append(try self.parseOpResult());
+            if (!self.match(&.{.comma})) break;
+        }
+
+        _ = try self.expect(.equal);
+
+        return ast.OpResultList{
+            .results = try results.toOwnedSlice(),
+        };
+    }
+
+    // Grammar: op-result ::= value-id (`:` integer-literal)?
+    fn parseOpResult(self: *Parser) !ast.OpResult {
+        const value_id = try self.expect(.value_id);
+
+        var num_results: ?u64 = null;
+        if (self.match(&.{.colon})) {
+            const num_token = try self.expect(.integer_literal);
+            num_results = try std.fmt.parseInt(u64, num_token.lexeme, 10);
+        }
+
+        return ast.OpResult{
+            .value_id = value_id.lexeme,
+            .num_results = num_results,
+        };
+    }
+
+    // Grammar: generic-operation ::= string-literal `(` value-use-list? `)` successor-list?
+    //                                 dictionary-properties? region-list? dictionary-attribute?
+    //                                 `:` function-type
+    fn parseGenericOperation(self: *Parser) !ast.GenericOperation {
+        const name_token = try self.expect(.string_literal);
+        const name = name_token.lexeme[1..name_token.lexeme.len-1]; // Strip quotes
+
+        _ = try self.expect(.lparen);
+
+        // Parse value-use-list
+        var operands: std.ArrayList(ast.ValueUse) = .empty;
+        errdefer operands.deinit();
+
+        if (!self.check(.rparen)) {
+            try operands.append(try self.parseValueUse());
+            while (self.match(&.{.comma})) {
+                try operands.append(try self.parseValueUse());
+            }
+        }
+
+        _ = try self.expect(.rparen);
+
+        // TODO: Parse successor-list, properties, regions
+        const successors = &[_]ast.Successor{};
+        const properties: ?ast.DictionaryAttribute = null;
+        const regions = &[_]ast.Region{};
+
+        // Parse dictionary-attribute (attributes in braces)
+        var attributes: ?ast.DictionaryAttribute = null;
+        if (self.check(.lbrace)) {
+            attributes = try self.parseDictionaryAttribute();
+        }
+
+        _ = try self.expect(.colon);
+
+        const function_type = try self.parseFunctionType();
+
+        return ast.GenericOperation{
+            .name = name,
+            .operands = try operands.toOwnedSlice(),
+            .successors = successors,
+            .properties = properties,
+            .regions = regions,
+            .attributes = attributes,
+            .function_type = function_type,
+        };
+    }
+
+    // Custom operations are dialect-specific (like arith.constant, func.return)
+    fn parseCustomOperation(self: *Parser) !ast.CustomOperation {
+        const name_token = try self.expect(.bare_id);
+
+        // For custom operations, we'll collect everything until we hit EOF or a value-id on a new "line"
+        // This is simplified - real implementation would need proper custom op parsing
+        const start_pos = self.current.lexeme.ptr - self.lexer.source.ptr;
+
+        // Skip tokens until we find a reasonable stopping point
+        while (!self.isAtEnd() and !self.check(.value_id)) {
+            _ = self.advance();
+        }
+
+        const end_pos = self.previous.lexeme.ptr - self.lexer.source.ptr + self.previous.lexeme.len;
+        const format = self.lexer.source[start_pos..end_pos];
+
+        return ast.CustomOperation{
+            .name = name_token.lexeme,
+            .format = format,
+        };
+    }
+
+    // Grammar: value-use ::= value-id (`#` decimal-literal)?
+    fn parseValueUse(self: *Parser) !ast.ValueUse {
+        const value_id = try self.expect(.value_id);
+
+        var result_number: ?u64 = null;
+        if (self.match(&.{.hash})) {
+            const num_token = try self.expect(.integer_literal);
+            result_number = try std.fmt.parseInt(u64, num_token.lexeme, 10);
+        }
+
+        return ast.ValueUse{
+            .value_id = value_id.lexeme,
+            .result_number = result_number,
+        };
+    }
+
+    // Grammar: dictionary-attribute ::= `{` (attribute-entry (`,` attribute-entry)*)? `}`
+    fn parseDictionaryAttribute(self: *Parser) !ast.DictionaryAttribute {
+        _ = try self.expect(.lbrace);
+
+        var entries: std.ArrayList(ast.AttributeEntry) = .empty;
+        errdefer entries.deinit();
+
+        if (!self.check(.rbrace)) {
+            try entries.append(try self.parseAttributeEntry());
+            while (self.match(&.{.comma})) {
+                try entries.append(try self.parseAttributeEntry());
+            }
+        }
+
+        _ = try self.expect(.rbrace);
+
+        return ast.DictionaryAttribute{
+            .entries = try entries.toOwnedSlice(),
+        };
+    }
+
+    // Grammar: attribute-entry ::= (bare-id | string-literal) `=` attribute-value
+    fn parseAttributeEntry(self: *Parser) !ast.AttributeEntry {
+        const name_token = if (self.check(.bare_id))
+            try self.expect(.bare_id)
+        else
+            try self.expect(.string_literal);
+
+        _ = try self.expect(.equal);
+
+        const value = try self.parseAttributeValue();
+
+        return ast.AttributeEntry{
+            .name = name_token.lexeme,
+            .value = value,
+        };
+    }
+
+    fn parseLocation(self: *Parser) !ast.Location {
+        _ = try self.expect(.lparen);
+
+        // Simplified: just capture the location string
+        const start = self.current;
+        var depth: usize = 1;
+        while (depth > 0 and !self.isAtEnd()) {
+            if (self.check(.lparen)) depth += 1;
+            if (self.check(.rparen)) depth -= 1;
+            _ = self.advance();
+        }
+
+        const source = self.lexer.source[start.lexeme.ptr - self.lexer.source.ptr..self.previous.lexeme.ptr - self.lexer.source.ptr];
+
+        return ast.Location{
+            .source = source,
+        };
+    }
+
+    // Grammar: type-alias-def ::= `!` alias-name `=` type
+    fn parseTypeAliasDef(self: *Parser) !ast.TypeAliasDef {
+        const alias_token = try self.expect(.type_alias_id);
+        _ = try self.expect(.equal);
+        const type_value = try self.parseType();
+
+        return ast.TypeAliasDef{
+            .alias_name = alias_token.lexeme[1..], // Skip the '!' prefix
+            .type = type_value,
+        };
+    }
+
+    // Grammar: attribute-alias-def ::= `#` alias-name `=` attribute-value
+    fn parseAttributeAliasDef(self: *Parser) !ast.AttributeAliasDef {
+        const alias_token = try self.expect(.attribute_alias_id);
+        _ = try self.expect(.equal);
+        const attr_value = try self.parseAttributeValue();
+
+        return ast.AttributeAliasDef{
+            .alias_name = alias_token.lexeme[1..], // Skip the '#' prefix
+            .value = attr_value,
+        };
+    }
+
+    // Grammar: type ::= type-alias | dialect-type | builtin-type | function-type
+    fn parseType(self: *Parser) ParseError!ast.Type {
+        // Check for type-alias: !alias-name
+        if (self.check(.type_alias_id)) {
+            const token = self.advance();
+            return ast.Type{ .type_alias = token.lexeme[1..] }; // Skip '!'
+        }
+
+        // Check for dialect-type: !namespace.type or !namespace<...>
+        if (self.check(.exclamation)) {
+            return ast.Type{ .dialect = try self.parseDialectType() };
+        }
+
+        // Otherwise, parse builtin type
+        return ast.Type{ .builtin = try self.parseBuiltinType() };
+    }
+
+    // Grammar: dialect-type ::= `!` (opaque-dialect-type | pretty-dialect-type)
+    fn parseDialectType(self: *Parser) !ast.DialectType {
+        _ = try self.expect(.exclamation);
+
+        const namespace_token = try self.expect(.bare_id);
+        var body: ?[]const u8 = null;
+
+        // Check for dialect-type-body: <...>
+        if (self.check(.langle)) {
+            const start = self.current;
+            _ = self.advance(); // consume '<'
+
+            // Simplified: just capture everything until matching '>'
+            var depth: usize = 1;
+            while (depth > 0 and !self.isAtEnd()) {
+                if (self.check(.langle)) depth += 1;
+                if (self.check(.rangle)) depth -= 1;
+                _ = self.advance();
+            }
+
+            body = self.lexer.source[start.lexeme.ptr - self.lexer.source.ptr..self.previous.lexeme.ptr - self.lexer.source.ptr + self.previous.lexeme.len];
+        }
+
+        return ast.DialectType{
+            .namespace = namespace_token.lexeme,
+            .body = body,
+        };
+    }
+
+    // Grammar: integer-type ::= `i` [1-9][0-9]*
+    // Grammar: float types, index, etc.
+    fn parseBuiltinType(self: *Parser) !ast.BuiltinType {
+        const token = self.peek();
+
+        if (token.type != .bare_id) {
+            self.reportError("Expected type identifier");
+            return ParseError.InvalidType;
+        }
+
+        const type_name = token.lexeme;
+
+        // Grammar: index-type ::= `index` (check this first before integer types)
+        if (std.mem.eql(u8, type_name, "index")) {
+            _ = self.advance();
+            return ast.BuiltinType.index;
+        }
+
+        // Grammar: signless-integer-type ::= `i` [1-9][0-9]*
+        // Grammar: signed-integer-type ::= `si` [1-9][0-9]*
+        // Grammar: unsigned-integer-type ::= `ui` [1-9][0-9]*
+        else if (type_name.len > 1 and type_name[0] == 'i' and std.ascii.isDigit(type_name[1])) {
+            _ = self.advance();
+            const width = try std.fmt.parseInt(u64, type_name[1..], 10);
+            return ast.BuiltinType{
+                .integer = .{
+                    .signedness = .signless,
+                    .width = width,
+                },
+            };
+        } else if (type_name.len > 2 and std.mem.startsWith(u8, type_name, "si") and std.ascii.isDigit(type_name[2])) {
+            _ = self.advance();
+            const width = try std.fmt.parseInt(u64, type_name[2..], 10);
+            return ast.BuiltinType{
+                .integer = .{
+                        .signedness = .signed,
+                    .width = width,
+                },
+            };
+        } else if (type_name.len > 2 and std.mem.startsWith(u8, type_name, "ui") and std.ascii.isDigit(type_name[2])) {
+            _ = self.advance();
+            const width = try std.fmt.parseInt(u64, type_name[2..], 10);
+            return ast.BuiltinType{
+                .integer = .{
+                    .signedness = .unsigned,
+                    .width = width,
+                },
+            };
+        }
+
+        // Grammar: float types: f16, f32, f64, etc.
+        else if (std.mem.eql(u8, type_name, "f16")) {
+            _ = self.advance();
+            return ast.BuiltinType{ .float = .f16 };
+        } else if (std.mem.eql(u8, type_name, "f32")) {
+            _ = self.advance();
+            return ast.BuiltinType{ .float = .f32 };
+        } else if (std.mem.eql(u8, type_name, "f64")) {
+            _ = self.advance();
+            return ast.BuiltinType{ .float = .f64 };
+        } else if (std.mem.eql(u8, type_name, "f80")) {
+            _ = self.advance();
+            return ast.BuiltinType{ .float = .f80 };
+        } else if (std.mem.eql(u8, type_name, "f128")) {
+            _ = self.advance();
+            return ast.BuiltinType{ .float = .f128 };
+        } else if (std.mem.eql(u8, type_name, "bf16")) {
+            _ = self.advance();
+            return ast.BuiltinType{ .float = .bf16 };
+        } else if (std.mem.eql(u8, type_name, "tf32")) {
+            _ = self.advance();
+            return ast.BuiltinType{ .float = .tf32 };
+        }
+
+        // Grammar: none-type ::= `none`
+        else if (std.mem.eql(u8, type_name, "none")) {
+            _ = self.advance();
+            return ast.BuiltinType.none;
+        }
+
+        // TODO: Implement tensor, memref, vector, complex, tuple types
+
+        self.reportError("Unknown type");
+        return ParseError.InvalidType;
+    }
+
+    // Grammar: function-type ::= (type | type-list-parens) `->` (type | type-list-parens)
+    fn parseFunctionType(self: *Parser) !ast.FunctionType {
+        var inputs: std.ArrayList(ast.Type) = .empty;
+        errdefer inputs.deinit();
+
+        // Parse input types
+        if (self.check(.lparen)) {
+            _ = self.advance();
+            // Grammar: type-list-parens ::= `(` type-list-no-parens? `)`
+            if (!self.check(.rparen)) {
+                // Grammar: type-list-no-parens ::= type (`,` type)*
+                while (true) {
+                    try inputs.append(try self.parseType());
+                    if (!self.match(&.{.comma})) break;
+                }
+            }
+            _ = try self.expect(.rparen);
+        } else {
+            // Single type without parens
+            try inputs.append(try self.parseType());
+        }
+
+        _ = try self.expect(.arrow);
+
+        var outputs: std.ArrayList(ast.Type) = .empty;
+        errdefer outputs.deinit();
+
+        // Parse output types
+        if (self.check(.lparen)) {
+            _ = self.advance();
+            if (!self.check(.rparen)) {
+                while (true) {
+                    try outputs.append(try self.parseType());
+                    if (!self.match(&.{.comma})) break;
+                }
+            }
+            _ = try self.expect(.rparen);
+        } else {
+            // Single type without parens
+            try outputs.append(try self.parseType());
+        }
+
+        return ast.FunctionType{
+            .inputs = try inputs.toOwnedSlice(),
+            .outputs = try outputs.toOwnedSlice(),
+        };
+    }
+
+    // Grammar: attribute-value ::= attribute-alias | dialect-attribute | builtin-attribute
+    fn parseAttributeValue(self: *Parser) !ast.AttributeValue {
+        // Check for attribute-alias: #alias-name
+        if (self.check(.attribute_alias_id)) {
+            const token = self.advance();
+            return ast.AttributeValue{ .alias = token.lexeme[1..] }; // Skip '#'
+        }
+
+        // Check for dialect-attribute: #namespace...
+        if (self.check(.hash)) {
+            return ast.AttributeValue{ .dialect = try self.parseDialectAttribute() };
+        }
+
+        // Otherwise, parse builtin attribute
+        return ast.AttributeValue{ .builtin = try self.parseBuiltinAttribute() };
+    }
+
+    // Grammar: dialect-attribute ::= `#` (opaque-dialect-attribute | pretty-dialect-attribute)
+    fn parseDialectAttribute(self: *Parser) !ast.DialectAttribute {
+        _ = try self.expect(.hash);
+
+        const namespace_token = try self.expect(.bare_id);
+        var body: ?[]const u8 = null;
+
+        // Check for dialect-attribute-body: <...>
+        if (self.check(.langle)) {
+            const start = self.current;
+            _ = self.advance(); // consume '<'
+
+            // Simplified: just capture everything until matching '>'
+            var depth: usize = 1;
+            while (depth > 0 and !self.isAtEnd()) {
+                if (self.check(.langle)) depth += 1;
+                if (self.check(.rangle)) depth -= 1;
+                _ = self.advance();
+            }
+
+            body = self.lexer.source[start.lexeme.ptr - self.lexer.source.ptr..self.previous.lexeme.ptr - self.lexer.source.ptr + self.previous.lexeme.len];
+        }
+
+        return ast.DialectAttribute{
+            .namespace = namespace_token.lexeme,
+            .body = body,
+        };
+    }
+
+    // Parse builtin attribute values (integers, floats, strings, booleans, arrays)
+    fn parseBuiltinAttribute(self: *Parser) !ast.BuiltinAttribute {
+        const token = self.peek();
+
+        // Integer literal
+        if (token.type == .integer_literal) {
+            _ = self.advance();
+            const value = try std.fmt.parseInt(i64, token.lexeme, 0);
+            return ast.BuiltinAttribute{ .integer = value };
+        }
+
+        // Float literal
+        if (token.type == .float_literal) {
+            _ = self.advance();
+            const value = try std.fmt.parseFloat(f64, token.lexeme);
+            return ast.BuiltinAttribute{ .float = value };
+        }
+
+        // String literal
+        if (token.type == .string_literal) {
+            _ = self.advance();
+            // Strip quotes
+            const value = token.lexeme[1..token.lexeme.len-1];
+            return ast.BuiltinAttribute{ .string = value };
+        }
+
+        // Boolean (true/false as bare identifiers)
+        if (token.type == .bare_id) {
+            if (std.mem.eql(u8, token.lexeme, "true")) {
+                _ = self.advance();
+                return ast.BuiltinAttribute{ .boolean = true };
+            } else if (std.mem.eql(u8, token.lexeme, "false")) {
+                _ = self.advance();
+                return ast.BuiltinAttribute{ .boolean = false };
+            }
+        }
+
+        // Array: [value, value, ...]
+        if (token.type == .lbracket) {
+            _ = self.advance();
+            var values: std.ArrayList(ast.AttributeValue) = .empty;
+            errdefer values.deinit();
+
+            if (!self.check(.rbracket)) {
+                try values.append(try self.parseAttributeValue());
+                while (self.match(&.{.comma})) {
+                    try values.append(try self.parseAttributeValue());
+                }
+            }
+
+            _ = try self.expect(.rbracket);
+            return ast.BuiltinAttribute{ .array = try values.toOwnedSlice() };
+        }
+
+        self.reportError("Expected attribute value");
+        return ParseError.InvalidAttribute;
+    }
+};
+
+test "parser - initialization" {
+    const source = "%0 = arith.constant 42 : i32";
+    var lex = Lexer.init(source);
+    var parser = try Parser.init(std.testing.allocator, &lex);
+    defer parser.deinit();
+
+    try std.testing.expectEqual(TokenType.value_id, parser.current.type);
+}
+
+test "parser - helper methods" {
+    const source = "%0 = arith.constant";
+    var lex = Lexer.init(source);
+    var parser = try Parser.init(std.testing.allocator, &lex);
+    defer parser.deinit();
+
+    // Test peek
+    try std.testing.expectEqual(TokenType.value_id, parser.peek().type);
+
+    // Test check
+    try std.testing.expect(parser.check(.value_id));
+    try std.testing.expect(!parser.check(.equal));
+
+    // Test advance
+    const token = parser.advance();
+    try std.testing.expectEqual(TokenType.value_id, token.type);
+    try std.testing.expectEqual(TokenType.equal, parser.current.type);
+
+    // Test expect
+    _ = try parser.expect(.equal);
+    try std.testing.expectEqual(TokenType.bare_id, parser.current.type);
+}
+
+test "parser - parse integer types" {
+    const source = "i32";
+    var lex = Lexer.init(source);
+    var parser = try Parser.init(std.testing.allocator, &lex);
+    defer parser.deinit();
+
+    var type_result = try parser.parseType();
+    defer type_result.deinit(std.testing.allocator);
+
+    try std.testing.expect(type_result == .builtin);
+    try std.testing.expect(type_result.builtin == .integer);
+    try std.testing.expectEqual(@as(u64, 32), type_result.builtin.integer.width);
+}
+
+test "parser - parse float types" {
+    const source = "f64";
+    var lex = Lexer.init(source);
+    var parser = try Parser.init(std.testing.allocator, &lex);
+    defer parser.deinit();
+
+    var type_result = try parser.parseType();
+    defer type_result.deinit(std.testing.allocator);
+
+    try std.testing.expect(type_result == .builtin);
+    try std.testing.expect(type_result.builtin == .float);
+    try std.testing.expectEqual(ast.FloatType.f64, type_result.builtin.float);
+}
+
+test "parser - parse index type" {
+    const source = "index";
+    var lex = Lexer.init(source);
+    var parser = try Parser.init(std.testing.allocator, &lex);
+    defer parser.deinit();
+
+    var type_result = try parser.parseType();
+    defer type_result.deinit(std.testing.allocator);
+
+    try std.testing.expect(type_result == .builtin);
+    try std.testing.expect(type_result.builtin == .index);
+}
+
+test "parser - parse simple custom operation" {
+    const source = "%0 = arith.constant 42 : i32";
+    var lex = Lexer.init(source);
+    var parser = try Parser.init(std.testing.allocator, &lex);
+    defer parser.deinit();
+
+    var op = try parser.parseOperation();
+    defer op.deinit(std.testing.allocator);
+
+    try std.testing.expect(op.results != null);
+    try std.testing.expectEqual(@as(usize, 1), op.results.?.results.len);
+    try std.testing.expect(op.kind == .custom);
+}
