@@ -162,10 +162,13 @@ pub const LispPrinter = struct {
             // Print key with : prefix (keyword)
             try self.writer.writeByte(':');
             try self.writer.writeAll(entry.name);
-            try self.writer.writeByte(' ');
 
-            // Print value - need to parse and convert
-            try self.printAttributeValue(entry);
+            // If there's a value, print it; otherwise it's a unit attribute (just the name)
+            if (entry.value) |_| {
+                try self.writer.writeByte(' ');
+                // Print value - need to parse and convert
+                try self.printAttributeValue(entry);
+            }
         }
 
         try self.writer.writeAll("})");
@@ -233,55 +236,129 @@ pub const LispPrinter = struct {
         try self.writer.writeByte(')');
     }
 
-    // Print attribute value - this is the tricky part
+    // Print attribute value - properly handle all attribute types
     fn printAttributeValue(self: *LispPrinter, entry: ast.AttributeEntry) !void {
-        // Currently attributes are stored as raw strings
-        // We need to parse and convert them
-        const raw_value = entry.value.builtin.string;
-
-        // Try to detect typed integer literals: "42 : i32"
-        if (std.mem.indexOf(u8, raw_value, " : ")) |colon_pos| {
-            const value_part = std.mem.trim(u8, raw_value[0..colon_pos], " \t");
-            const type_part = std.mem.trim(u8, raw_value[colon_pos + 3..], " \t");
-
-            // Check if value is an integer
-            if (std.fmt.parseInt(i64, value_part, 0)) |int_val| {
-                // Typed literal: (: value type)
-                try self.writer.writeAll("(: ");
-                try self.writer.print("{d}", .{int_val});
-                try self.writer.writeByte(' ');
-                try self.writer.writeAll(type_part);
-                try self.writer.writeByte(')');
-                return;
-            } else |_| {
-                // Not an integer, fall through
-            }
+        // Handle unit attributes (no value)
+        if (entry.value == null) {
+            return; // Already printed the name, nothing more to do
         }
 
-        // Check for symbol references (heuristic: sym_name, callee attributes)
-        if (std.mem.eql(u8, entry.name, "sym_name") or
-            std.mem.eql(u8, entry.name, "callee")) {
-            // Symbol reference: @name
-            const trimmed = std.mem.trim(u8, raw_value, "\" \t");
-            // Check if it already starts with @
-            if (trimmed.len > 0 and trimmed[0] == '@') {
-                try self.writer.writeAll(trimmed);
+        const attr_value = entry.value.?;
+
+        switch (attr_value) {
+            .builtin => |builtin| {
+                switch (builtin) {
+                    .array => |arr| try self.printArrayAttribute(arr),
+                    .dictionary => |dict| try self.printNestedDictionaryAttribute(dict),
+                    .string => |raw_value| {
+                        // Legacy handling for raw strings
+                        // Try to detect typed integer literals: "42 : i32"
+                        if (std.mem.indexOf(u8, raw_value, " : ")) |colon_pos| {
+                            const value_part = std.mem.trim(u8, raw_value[0..colon_pos], " \t");
+                            const type_part = std.mem.trim(u8, raw_value[colon_pos + 3..], " \t");
+
+                            // Check if value is an integer
+                            if (std.fmt.parseInt(i64, value_part, 0)) |int_val| {
+                                // Typed literal: (: value type)
+                                try self.writer.writeAll("(: ");
+                                try self.writer.print("{d}", .{int_val});
+                                try self.writer.writeByte(' ');
+                                try self.writer.writeAll(type_part);
+                                try self.writer.writeByte(')');
+                                return;
+                            } else |_| {
+                                // Not an integer, fall through
+                            }
+                        }
+
+                        // Check for symbol references (heuristic: sym_name, callee attributes)
+                        if (std.mem.eql(u8, entry.name, "sym_name") or
+                            std.mem.eql(u8, entry.name, "callee")) {
+                            // Symbol reference: @name
+                            const trimmed = std.mem.trim(u8, raw_value, "\" \t");
+                            // Check if it already starts with @
+                            if (trimmed.len > 0 and trimmed[0] == '@') {
+                                try self.writer.writeAll(trimmed);
+                            } else {
+                                try self.writer.writeByte('@');
+                                try self.writer.writeAll(trimmed);
+                            }
+                            return;
+                        }
+
+                        // Check for function_type attribute
+                        if (std.mem.eql(u8, entry.name, "function_type")) {
+                            // Convert function type to Lisp format: (!function (inputs ...) (results ...))
+                            try self.printFunctionTypeAttribute(raw_value);
+                            return;
+                        }
+
+                        // Default: output as-is
+                        try self.writer.writeAll(raw_value);
+                    },
+                    else => {
+                        // TODO: Handle integer, float, boolean if needed
+                        try self.writer.writeAll("<unsupported-builtin-attr>");
+                    },
+                }
+            },
+            else => {
+                // TODO: Handle alias, dialect if needed
+                try self.writer.writeAll("<unsupported-attr-type>");
+            },
+        }
+    }
+
+    // Print array attribute: [element1, element2, ...]  ->  [element1 element2 ...]
+    fn printArrayAttribute(self: *LispPrinter, elements: []ast.AttributeValue) anyerror!void {
+        try self.writer.writeByte('[');
+
+        for (elements, 0..) |element, i| {
+            if (i > 0) try self.writer.writeByte(' ');
+            try self.printAttributeValueDirect(element);
+        }
+
+        try self.writer.writeByte(']');
+    }
+
+    // Print nested dictionary: {key1 = val1, key2 = val2} -> {:key1 val1 :key2 val2}
+    // Unit attributes (no value) become {:key true}
+    fn printNestedDictionaryAttribute(self: *LispPrinter, entries: []ast.AttributeEntry) anyerror!void {
+        try self.writer.writeByte('{');
+
+        for (entries, 0..) |entry, i| {
+            if (i > 0) try self.writer.writeByte(' ');
+
+            // Print key with : prefix
+            try self.writer.writeByte(':');
+            try self.writer.writeAll(entry.name);
+
+            // Print value if present, otherwise print 'true' for unit attributes
+            try self.writer.writeByte(' ');
+            if (entry.value) |_| {
+                try self.printAttributeValue(entry);
             } else {
-                try self.writer.writeByte('@');
-                try self.writer.writeAll(trimmed);
+                // Unit attribute: print 'true'
+                try self.writer.writeAll("true");
             }
-            return;
         }
 
-        // Check for function_type attribute
-        if (std.mem.eql(u8, entry.name, "function_type")) {
-            // Convert function type to Lisp format: (!function (inputs ...) (results ...))
-            try self.printFunctionTypeAttribute(raw_value);
-            return;
-        }
+        try self.writer.writeByte('}');
+    }
 
-        // Default: output as-is (may need refinement)
-        try self.writer.writeAll(raw_value);
+    // Helper to print AttributeValue directly without entry context
+    fn printAttributeValueDirect(self: *LispPrinter, value: ast.AttributeValue) anyerror!void {
+        switch (value) {
+            .builtin => |builtin| {
+                switch (builtin) {
+                    .array => |arr| try self.printArrayAttribute(arr),
+                    .dictionary => |dict| try self.printNestedDictionaryAttribute(dict),
+                    .string => |s| try self.writer.writeAll(s),
+                    else => try self.writer.writeAll("<unsupported>"),
+                }
+            },
+            else => try self.writer.writeAll("<unsupported>"),
+        }
     }
 
     // Lisp Grammar: SUCCESSORS ::= (successors SUCCESSOR*)

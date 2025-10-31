@@ -1,0 +1,35 @@
+# Zig build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
+# Build artifacts
+*.o
+*.bc
+*.ll
+*.dylib
+*.so
+*.a
+
+# But allow examples/generated files (for reference/testing)
+!examples/generated/*.ll
+!examples/generated/*.mlir
+
+# macOS
+.DS_Store
+
+# Temporary test files
+tmp.*
+expected.mlir
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Generated files
+libroot.dylib
+root.bc
+mlir-lisp

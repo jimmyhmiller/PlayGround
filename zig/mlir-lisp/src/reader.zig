@@ -263,92 +263,36 @@ pub const Reader = struct {
 
             // Special markers
             .type_marker => {
-                // Read the type expression
-                // For simple types like i32, !llvm.ptr, store "i32" as a string
-                // For function types like (!function ...), parse as structured function_type
-                try self.advance(); // consume '!'
+                // Type markers like !llvm.array<10 x i8> are now scanned as opaque tokens
+                // using bracket-aware scanning (similar to attr_marker)
+                // The lexeme includes the '!', which we keep as part of the type string
+                const type_content = tok.lexeme;
 
-                // Check if this is a simple identifier or a function type
-                const type_tok = self.current orelse return error.UnexpectedEOF;
-                if (type_tok.type == .identifier) {
-                    // Dialect type with ! prefix: !llvm.ptr, !transform.any_op, etc.
-                    // Store with the ! prefix
-                    const type_name = type_tok.lexeme;
-                    const full_type = try std.fmt.allocPrint(self.allocator, "!{s}", .{type_name});
-
+                // Check if this is a function type (!function ...)
+                // Function types still need special handling as they have structure
+                if (type_content.len > 1 and std.mem.startsWith(u8, type_content, "!function")) {
+                    // This is a function type - we need to parse it specially
+                    // But function types should be written as (!function ...) not !function(...)
+                    // So this shouldn't happen with bracket-aware scanning
+                    // For now, treat it as a simple type string
                     const value = try self.allocator.create(Value);
                     value.* = Value{
                         .type = .type,
-                        .data = .{ .type = full_type },
+                        .data = .{ .type = type_content },
                     };
-                    try self.advance(); // consume the type identifier
+                    try self.advance();
                     return value;
-                } else if (type_tok.type == .left_paren) {
-                    // Function type: (!function (inputs ...) (results ...))
-                    // Parse the list to check if it's a function type
-                    const list_value = try self.readList(.right_paren, .list);
-                    const list = list_value.data.list;
-
-                    // Check if first element is "function"
-                    if (list.len() == 0) return error.ExpectedFunctionType;
-                    const first = list.at(0);
-                    if (first.type != .identifier or !std.mem.eql(u8, first.data.atom, "function")) {
-                        return error.ExpectedFunctionType;
-                    }
-
-                    // Parse (inputs ...) and (results ...)
-                    if (list.len() < 3) return error.ExpectedFunctionType;
-
-                    const inputs_list_value = list.at(1);
-                    const results_list_value = list.at(2);
-
-                    if (inputs_list_value.type != .list or results_list_value.type != .list) {
-                        return error.ExpectedFunctionType;
-                    }
-
-                    const inputs_list = inputs_list_value.data.list;
-                    const results_list = results_list_value.data.list;
-
-                    // Check that first element is "inputs" and "results"
-                    if (inputs_list.len() == 0 or results_list.len() == 0) return error.ExpectedFunctionType;
-
-                    const inputs_kw = inputs_list.at(0);
-                    const results_kw = results_list.at(0);
-
-                    if (inputs_kw.type != .identifier or !std.mem.eql(u8, inputs_kw.data.atom, "inputs")) {
-                        return error.ExpectedFunctionType;
-                    }
-                    if (results_kw.type != .identifier or !std.mem.eql(u8, results_kw.data.atom, "results")) {
-                        return error.ExpectedFunctionType;
-                    }
-
-                    // Extract input and result types (skip the "inputs" and "results" keywords)
-                    var input_types = vector.PersistentVector(*Value).init(self.allocator, null);
-                    for (1..inputs_list.len()) |i| {
-                        input_types = try input_types.push(inputs_list.at(i));
-                    }
-
-                    var result_types = vector.PersistentVector(*Value).init(self.allocator, null);
-                    for (1..results_list.len()) |i| {
-                        result_types = try result_types.push(results_list.at(i));
-                    }
-
-                    // Clean up the temporary list structure
-                    list_value.deinit(self.allocator);
-                    self.allocator.destroy(list_value);
-
-                    const value = try self.allocator.create(Value);
-                    value.* = Value{
-                        .type = .function_type,
-                        .data = .{ .function_type = .{
-                            .inputs = input_types,
-                            .results = result_types,
-                        } },
-                    };
-                    return value;
-                } else {
-                    return error.ExpectedTypeIdentifier;
                 }
+
+                // For all other dialect types (simple or complex with brackets)
+                // Store the entire type string including the ! prefix
+                const value = try self.allocator.create(Value);
+                value.* = Value{
+                    .type = .type,
+                    .data = .{ .type = type_content },
+                };
+                try self.advance();
+                return value;
             },
             .attr_marker => {
                 // Attribute markers like #arith.overflow<none> are now scanned as opaque tokens

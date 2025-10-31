@@ -534,17 +534,73 @@ pub const Parser = struct {
         };
     }
 
-    // Grammar: attribute-entry ::= (bare-id | string-literal) `=` attribute-value
+    // Grammar: attribute-entry ::= (bare-id | string-literal) (`=` attribute-value)?
     fn parseAttributeEntry(self: *Parser) !ast.AttributeEntry {
         const name_token = if (self.check(.bare_id))
             try self.expect(.bare_id)
         else
             try self.expect(.string_literal);
 
+        // Check if this is a unit attribute (no '=' follows)
+        if (!self.check(.equal)) {
+            // Unit attribute: just a bare identifier
+            return ast.AttributeEntry{
+                .name = name_token.lexeme,
+                .value = null,
+            };
+        }
+
         _ = try self.expect(.equal);
 
-        // For now, simplify attribute value parsing by just capturing the raw text
-        // until we hit a comma or closing brace
+        // Parse the attribute value properly
+        const attr_value = try self.parseAttributeEntryValue();
+
+        return ast.AttributeEntry{
+            .name = name_token.lexeme,
+            .value = attr_value,
+        };
+    }
+
+    // Grammar: attribute-value ::= attribute-alias | dialect-attribute | builtin-attribute
+    // Note: This is for parsing values inside dictionary entries
+    fn parseAttributeEntryValue(self: *Parser) !ast.AttributeValue {
+        // Check for array: [...]
+        if (self.check(.lbracket)) {
+            return try self.parseArrayAttribute();
+        }
+
+        // Check for dictionary: {...}
+        if (self.check(.lbrace)) {
+            return try self.parseNestedDictionaryAttribute();
+        }
+
+        // Check for dialect attribute: #namespace...
+        if (self.check(.attribute_alias_id) or self.check(.hash)) {
+            // Capture as raw string for now
+            const start_pos = self.current.lexeme.ptr - self.lexer.source.ptr;
+            var depth: usize = 0;
+
+            while (!self.isAtEnd()) {
+                if (self.check(.lbrace) or self.check(.lbracket) or self.check(.lparen) or self.check(.langle)) {
+                    depth += 1;
+                    _ = self.advance();
+                } else if (self.check(.rbrace) or self.check(.rbracket) or self.check(.rparen) or self.check(.rangle)) {
+                    if (depth == 0) break;
+                    depth -= 1;
+                    _ = self.advance();
+                } else if (self.check(.comma) and depth == 0) {
+                    break;
+                } else {
+                    _ = self.advance();
+                }
+            }
+
+            const end_pos = self.previous.lexeme.ptr - self.lexer.source.ptr + self.previous.lexeme.len;
+            const raw_value = self.lexer.source[start_pos..end_pos];
+            return ast.AttributeValue{ .builtin = .{ .string = raw_value } };
+        }
+
+        // Otherwise, capture as raw string (typed literals, strings, etc.)
         const start_pos = self.current.lexeme.ptr - self.lexer.source.ptr;
         var depth: usize = 0;
 
@@ -553,11 +609,11 @@ pub const Parser = struct {
                 depth += 1;
                 _ = self.advance();
             } else if (self.check(.rbrace) or self.check(.rbracket) or self.check(.rparen) or self.check(.rangle)) {
-                if (depth == 0) break; // Hit closing brace of dictionary
+                if (depth == 0) break;
                 depth -= 1;
                 _ = self.advance();
             } else if (self.check(.comma) and depth == 0) {
-                break; // Hit separator
+                break;
             } else {
                 _ = self.advance();
             }
@@ -565,11 +621,50 @@ pub const Parser = struct {
 
         const end_pos = self.previous.lexeme.ptr - self.lexer.source.ptr + self.previous.lexeme.len;
         const raw_value = self.lexer.source[start_pos..end_pos];
+        return ast.AttributeValue{ .builtin = .{ .string = raw_value } };
+    }
 
-        // Create a simple builtin attribute with the raw string
-        return ast.AttributeEntry{
-            .name = name_token.lexeme,
-            .value = .{ .builtin = .{ .string = raw_value } },
+    // Parse array attribute: [..., ...]
+    fn parseArrayAttribute(self: *Parser) !ast.AttributeValue {
+        _ = try self.expect(.lbracket);
+
+        var elements: std.ArrayList(ast.AttributeValue) = .empty;
+        errdefer elements.deinit(self.allocator);
+
+        while (!self.check(.rbracket) and !self.isAtEnd()) {
+            try elements.append(self.allocator, try self.parseAttributeValue());
+
+            if (self.check(.comma)) {
+                _ = self.advance();
+            }
+        }
+
+        _ = try self.expect(.rbracket);
+
+        return ast.AttributeValue{
+            .builtin = .{ .array = try elements.toOwnedSlice(self.allocator) },
+        };
+    }
+
+    // Parse nested dictionary attribute: {key = value, ...}
+    fn parseNestedDictionaryAttribute(self: *Parser) ParseError!ast.AttributeValue {
+        _ = try self.expect(.lbrace);
+
+        var entries: std.ArrayList(ast.AttributeEntry) = .empty;
+        errdefer entries.deinit(self.allocator);
+
+        while (!self.check(.rbrace) and !self.isAtEnd()) {
+            try entries.append(self.allocator, try self.parseAttributeEntry());
+
+            if (self.check(.comma)) {
+                _ = self.advance();
+            }
+        }
+
+        _ = try self.expect(.rbrace);
+
+        return ast.AttributeValue{
+            .builtin = .{ .dictionary = try entries.toOwnedSlice(self.allocator) },
         };
     }
 
@@ -630,6 +725,7 @@ pub const Parser = struct {
 
     // Grammar: attribute-alias-def ::= `#` alias-name `=` attribute-value
     // Note: We capture attribute-value as an opaque string to handle all syntax forms
+    // Attribute aliases consume until end of line (newline) or EOF
     fn parseAttributeAliasDef(self: *Parser) !ast.AttributeAliasDef {
         const alias_token = try self.expect(.attribute_alias_id);
         _ = try self.expect(.equal);
@@ -642,17 +738,20 @@ pub const Parser = struct {
             return ParseError.UnexpectedEndOfFile;
         }
 
-        // Advance tokens until we hit another alias definition or operation
-        while (true) {
-            _ = self.advance();
+        // Track the line we started on
+        const start_line = self.current.line;
 
-            // Stop before next alias definition or operation
-            if (self.isAtEnd() or
-                self.check(.attribute_alias_id) or
-                self.check(.type_alias_id) or
-                self.check(.string_literal)) {
+        // Advance tokens until we hit a newline (different line) or EOF
+        // This allows attribute values to contain #, !, and other special characters
+        while (true) {
+            const current_line = self.current.line;
+
+            // Stop if we've moved to a new line or reached EOF
+            if (self.isAtEnd() or current_line > start_line) {
                 break;
             }
+
+            _ = self.advance();
         }
 
         const end_pos = self.previous.lexeme.ptr - self.lexer.source.ptr + self.previous.lexeme.len;
@@ -1363,6 +1462,23 @@ pub const Parser = struct {
 
             _ = try self.expect(.rbracket);
             return ast.BuiltinAttribute{ .array = try values.toOwnedSlice(self.allocator) };
+        }
+
+        // Dictionary: {key = value, ...}
+        if (token.type == .lbrace) {
+            _ = self.advance();
+            var entries: std.ArrayList(ast.AttributeEntry) = .empty;
+            errdefer entries.deinit(self.allocator);
+
+            if (!self.check(.rbrace)) {
+                try entries.append(self.allocator, try self.parseAttributeEntry());
+                while (self.match(&.{.comma})) {
+                    try entries.append(self.allocator, try self.parseAttributeEntry());
+                }
+            }
+
+            _ = try self.expect(.rbrace);
+            return ast.BuiltinAttribute{ .dictionary = try entries.toOwnedSlice(self.allocator) };
         }
 
         self.reportError("Expected attribute value");

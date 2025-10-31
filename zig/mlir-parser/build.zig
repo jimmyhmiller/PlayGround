@@ -251,7 +251,7 @@ pub fn build(b: *std.Build) void {
     const debug_printer = b.addExecutable(.{
         .name = "debug_printer",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("debug_printer.zig"),
+            .root_source_file = b.path("src/debug_printer.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -269,7 +269,7 @@ pub fn build(b: *std.Build) void {
     const mlir_to_lisp = b.addExecutable(.{
         .name = "mlir-to-lisp",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("mlir_to_lisp.zig"),
+            .root_source_file = b.path("src/mlir_to_lisp.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
