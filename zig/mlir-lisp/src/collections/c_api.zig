@@ -18,16 +18,36 @@ fn getAllocator(allocator: ?*anyopaque) std.mem.Allocator {
 // Allocator Management
 // ============================================================================
 
+// Global arena allocator pointer for JIT'd code to use
+// This is set by the runtime before JIT execution
+var global_arena_allocator: ?*std.mem.Allocator = null;
+
+// Set the global arena allocator (called before JIT execution)
+pub export fn allocator_set_global_arena(allocator: ?*anyopaque) void {
+    if (allocator == null) {
+        global_arena_allocator = null;
+        return;
+    }
+    global_arena_allocator = @ptrCast(@alignCast(allocator));
+}
+
 // Create a C allocator (malloc/free based) for use with the API
-export fn allocator_create_c() ?*anyopaque {
+pub export fn allocator_create_c() ?*anyopaque {
+    // If we have a global arena allocator set, use that instead
+    if (global_arena_allocator) |arena_ptr| {
+        return @ptrCast(arena_ptr);
+    }
+    // Otherwise fall back to C allocator
     const alloc_ptr = std.heap.c_allocator.create(std.mem.Allocator) catch return null;
     alloc_ptr.* = std.heap.c_allocator;
     return @ptrCast(alloc_ptr);
 }
 
 // Destroy an allocator created with allocator_create_c
-export fn allocator_destroy(allocator: ?*anyopaque) void {
+pub export fn allocator_destroy(allocator: ?*anyopaque) void {
     if (allocator == null) return;
+    // If using arena, destroy is a no-op anyway
+    // Otherwise destroy normally
     const alloc_ptr: *std.mem.Allocator = @ptrCast(@alignCast(allocator));
     const alloc = alloc_ptr.*;
     alloc.destroy(alloc_ptr);
@@ -37,7 +57,7 @@ export fn allocator_destroy(allocator: ?*anyopaque) void {
 // Vector API (Value pointers) - Primary collection type for reader
 // ============================================================================
 
-export fn vector_value_create(allocator: ?*anyopaque) ?*CVectorValue {
+pub export fn vector_value_create(allocator: ?*anyopaque) ?*CVectorValue {
     if (allocator == null) return null;
     const alloc = getAllocator(allocator);
     const vec_ptr = alloc.create(vector.PersistentVector(*reader.Value)) catch return null;
@@ -45,15 +65,19 @@ export fn vector_value_create(allocator: ?*anyopaque) ?*CVectorValue {
     return @ptrCast(vec_ptr);
 }
 
-export fn vector_value_destroy(allocator: ?*anyopaque, vec: ?*CVectorValue) void {
+pub export fn vector_value_destroy(allocator: ?*anyopaque, vec: ?*CVectorValue) void {
     if (vec == null or allocator == null) return;
+    // When using arena, skip deinit completely
+    if (global_arena_allocator != null) {
+        return;
+    }
     const alloc = getAllocator(allocator);
     const vec_ptr: *vector.PersistentVector(*reader.Value) = @ptrCast(@alignCast(vec));
     vec_ptr.deinit();
     alloc.destroy(vec_ptr);
 }
 
-export fn vector_value_push(allocator: ?*anyopaque, vec: ?*CVectorValue, value: ?*CValue) ?*CVectorValue {
+pub export fn vector_value_push(allocator: ?*anyopaque, vec: ?*CVectorValue, value: ?*CValue) ?*CVectorValue {
     if (vec == null or value == null or allocator == null) return null;
     const alloc = getAllocator(allocator);
     var vec_ptr: *vector.PersistentVector(*reader.Value) = @ptrCast(@alignCast(vec));
@@ -64,7 +88,7 @@ export fn vector_value_push(allocator: ?*anyopaque, vec: ?*CVectorValue, value: 
     return @ptrCast(new_vec_ptr);
 }
 
-export fn vector_value_pop(allocator: ?*anyopaque, vec: ?*CVectorValue) ?*CVectorValue {
+pub export fn vector_value_pop(allocator: ?*anyopaque, vec: ?*CVectorValue) ?*CVectorValue {
     if (vec == null or allocator == null) return null;
     const alloc = getAllocator(allocator);
     var vec_ptr: *vector.PersistentVector(*reader.Value) = @ptrCast(@alignCast(vec));
@@ -74,20 +98,20 @@ export fn vector_value_pop(allocator: ?*anyopaque, vec: ?*CVectorValue) ?*CVecto
     return @ptrCast(new_vec_ptr);
 }
 
-export fn vector_value_at(vec: ?*const CVectorValue, index: usize) ?*CValue {
+pub export fn vector_value_at(vec: ?*const CVectorValue, index: usize) ?*CValue {
     if (vec == null) return null;
     const vec_ptr: *const vector.PersistentVector(*reader.Value) = @ptrCast(@alignCast(vec));
     const val = vec_ptr.at(index);
     return @ptrCast(val);
 }
 
-export fn vector_value_len(vec: ?*const CVectorValue) usize {
+pub export fn vector_value_len(vec: ?*const CVectorValue) usize {
     if (vec == null) return 0;
     const vec_ptr: *const vector.PersistentVector(*reader.Value) = @ptrCast(@alignCast(vec));
     return vec_ptr.len();
 }
 
-export fn vector_value_is_empty(vec: ?*const CVectorValue) bool {
+pub export fn vector_value_is_empty(vec: ?*const CVectorValue) bool {
     if (vec == null) return true;
     const vec_ptr: *const vector.PersistentVector(*reader.Value) = @ptrCast(@alignCast(vec));
     return vec_ptr.isEmpty();
@@ -97,7 +121,7 @@ export fn vector_value_is_empty(vec: ?*const CVectorValue) bool {
 // Map API (string -> Value) - For manipulating map data structures
 // ============================================================================
 
-export fn map_str_value_create(allocator: ?*anyopaque) ?*CMapStrValue {
+pub export fn map_str_value_create(allocator: ?*anyopaque) ?*CMapStrValue {
     if (allocator == null) return null;
     const alloc = getAllocator(allocator);
     const map_ptr = alloc.create(map.PersistentMap([]const u8, *reader.Value)) catch return null;
@@ -105,15 +129,19 @@ export fn map_str_value_create(allocator: ?*anyopaque) ?*CMapStrValue {
     return @ptrCast(map_ptr);
 }
 
-export fn map_str_value_destroy(allocator: ?*anyopaque, m: ?*CMapStrValue) void {
+pub export fn map_str_value_destroy(allocator: ?*anyopaque, m: ?*CMapStrValue) void {
     if (m == null or allocator == null) return;
+    // When using arena, skip deinit completely
+    if (global_arena_allocator != null) {
+        return;
+    }
     const alloc = getAllocator(allocator);
     const map_ptr: *map.PersistentMap([]const u8, *reader.Value) = @ptrCast(@alignCast(m));
     map_ptr.deinit();
     alloc.destroy(map_ptr);
 }
 
-export fn map_str_value_get(m: ?*const CMapStrValue, key: [*:0]const u8, found: ?*bool) ?*CValue {
+pub export fn map_str_value_get(m: ?*const CMapStrValue, key: [*:0]const u8, found: ?*bool) ?*CValue {
     if (m == null) {
         if (found != null) found.?.* = false;
         return null;
@@ -128,7 +156,7 @@ export fn map_str_value_get(m: ?*const CMapStrValue, key: [*:0]const u8, found: 
     return null;
 }
 
-export fn map_str_value_set(allocator: ?*anyopaque, m: ?*CMapStrValue, key: [*:0]const u8, value: ?*CValue) ?*CMapStrValue {
+pub export fn map_str_value_set(allocator: ?*anyopaque, m: ?*CMapStrValue, key: [*:0]const u8, value: ?*CValue) ?*CMapStrValue {
     if (m == null or value == null or allocator == null) return null;
     const alloc = getAllocator(allocator);
     var map_ptr: *map.PersistentMap([]const u8, *reader.Value) = @ptrCast(@alignCast(m));
@@ -164,13 +192,13 @@ pub const CValueType = enum(c_int) {
     has_type = 15,
 };
 
-export fn value_get_type(val: ?*const CValue) CValueType {
+pub export fn value_get_type(val: ?*const CValue) CValueType {
     if (val == null) return .identifier;
     const val_ptr: *const reader.Value = @ptrCast(@alignCast(val));
     return @enumFromInt(@intFromEnum(val_ptr.type));
 }
 
-export fn value_get_atom(allocator: ?*anyopaque, val: ?*const CValue) ?[*:0]const u8 {
+pub export fn value_get_atom(allocator: ?*anyopaque, val: ?*const CValue) ?[*:0]const u8 {
     if (val == null or allocator == null) return null;
     const val_ptr: *const reader.Value = @ptrCast(@alignCast(val));
 
@@ -189,7 +217,7 @@ export fn value_get_atom(allocator: ?*anyopaque, val: ?*const CValue) ?[*:0]cons
     }
 }
 
-export fn value_get_list(allocator: ?*anyopaque, val: ?*const CValue) ?*CVectorValue {
+pub export fn value_get_list(allocator: ?*anyopaque, val: ?*const CValue) ?*CVectorValue {
     if (val == null or allocator == null) return null;
     const val_ptr: *const reader.Value = @ptrCast(@alignCast(val));
     if (val_ptr.type != .list) return null;
@@ -200,7 +228,7 @@ export fn value_get_list(allocator: ?*anyopaque, val: ?*const CValue) ?*CVectorV
     return @ptrCast(vec_ptr);
 }
 
-export fn value_get_vector(allocator: ?*anyopaque, val: ?*const CValue) ?*CVectorValue {
+pub export fn value_get_vector(allocator: ?*anyopaque, val: ?*const CValue) ?*CVectorValue {
     if (val == null or allocator == null) return null;
     const val_ptr: *const reader.Value = @ptrCast(@alignCast(val));
     if (val_ptr.type != .vector) return null;
@@ -211,7 +239,7 @@ export fn value_get_vector(allocator: ?*anyopaque, val: ?*const CValue) ?*CVecto
     return @ptrCast(vec_ptr);
 }
 
-export fn value_get_map(allocator: ?*anyopaque, val: ?*const CValue) ?*CVectorValue {
+pub export fn value_get_map(allocator: ?*anyopaque, val: ?*const CValue) ?*CVectorValue {
     if (val == null or allocator == null) return null;
     const val_ptr: *const reader.Value = @ptrCast(@alignCast(val));
     if (val_ptr.type != .map) return null;
@@ -222,29 +250,30 @@ export fn value_get_map(allocator: ?*anyopaque, val: ?*const CValue) ?*CVectorVa
     return @ptrCast(vec_ptr);
 }
 
-export fn value_get_type_string(val: ?*const CValue) [*:0]const u8 {
+pub export fn value_get_type_string(val: ?*const CValue) [*:0]const u8 {
     if (val == null) return "";
     const val_ptr: *const reader.Value = @ptrCast(@alignCast(val));
     if (val_ptr.type != .type) return "";
-    // type is a string, return it as a C string
-    return val_ptr.data.type.ptr;
+    // type is a string, return it as a C string - need to ensure it's sentinel-terminated
+    const type_str = val_ptr.data.type;
+    return @ptrCast(type_str.ptr);
 }
 
-export fn value_get_attr_expr(val: ?*const CValue) ?*CValue {
+pub export fn value_get_attr_expr(val: ?*const CValue) ?*CValue {
     if (val == null) return null;
     const val_ptr: *const reader.Value = @ptrCast(@alignCast(val));
     if (val_ptr.type != .attr_expr) return null;
     return @ptrCast(val_ptr.data.attr_expr);
 }
 
-export fn value_get_has_type_value(val: ?*const CValue) ?*CValue {
+pub export fn value_get_has_type_value(val: ?*const CValue) ?*CValue {
     if (val == null) return null;
     const val_ptr: *const reader.Value = @ptrCast(@alignCast(val));
     if (val_ptr.type != .has_type) return null;
     return @ptrCast(val_ptr.data.has_type.value);
 }
 
-export fn value_get_has_type_type_expr(val: ?*const CValue) ?*CValue {
+pub export fn value_get_has_type_type_expr(val: ?*const CValue) ?*CValue {
     if (val == null) return null;
     const val_ptr: *const reader.Value = @ptrCast(@alignCast(val));
     if (val_ptr.type != .has_type) return null;
@@ -252,7 +281,7 @@ export fn value_get_has_type_type_expr(val: ?*const CValue) ?*CValue {
 }
 
 // Create atom values
-export fn value_create_identifier(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
+pub export fn value_create_identifier(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
     if (allocator == null) return null;
     const alloc = getAllocator(allocator);
     const val = alloc.create(reader.Value) catch return null;
@@ -264,7 +293,7 @@ export fn value_create_identifier(allocator: ?*anyopaque, atom: [*:0]const u8) ?
     return @ptrCast(val);
 }
 
-export fn value_create_number(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
+pub export fn value_create_number(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
     if (allocator == null) return null;
     const alloc = getAllocator(allocator);
     const val = alloc.create(reader.Value) catch return null;
@@ -276,7 +305,7 @@ export fn value_create_number(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CVa
     return @ptrCast(val);
 }
 
-export fn value_create_string(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
+pub export fn value_create_string(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
     if (allocator == null) return null;
     const alloc = getAllocator(allocator);
     const val = alloc.create(reader.Value) catch return null;
@@ -288,7 +317,7 @@ export fn value_create_string(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CVa
     return @ptrCast(val);
 }
 
-export fn value_create_value_id(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
+pub export fn value_create_value_id(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
     if (allocator == null) return null;
     const alloc = getAllocator(allocator);
     const val = alloc.create(reader.Value) catch return null;
@@ -300,7 +329,7 @@ export fn value_create_value_id(allocator: ?*anyopaque, atom: [*:0]const u8) ?*C
     return @ptrCast(val);
 }
 
-export fn value_create_block_id(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
+pub export fn value_create_block_id(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
     if (allocator == null) return null;
     const alloc = getAllocator(allocator);
     const val = alloc.create(reader.Value) catch return null;
@@ -312,7 +341,7 @@ export fn value_create_block_id(allocator: ?*anyopaque, atom: [*:0]const u8) ?*C
     return @ptrCast(val);
 }
 
-export fn value_create_symbol(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
+pub export fn value_create_symbol(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
     if (allocator == null) return null;
     const alloc = getAllocator(allocator);
     const val = alloc.create(reader.Value) catch return null;
@@ -324,7 +353,7 @@ export fn value_create_symbol(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CVa
     return @ptrCast(val);
 }
 
-export fn value_create_keyword(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
+pub export fn value_create_keyword(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CValue {
     if (allocator == null) return null;
     const alloc = getAllocator(allocator);
     const val = alloc.create(reader.Value) catch return null;
@@ -336,7 +365,7 @@ export fn value_create_keyword(allocator: ?*anyopaque, atom: [*:0]const u8) ?*CV
     return @ptrCast(val);
 }
 
-export fn value_create_true(allocator: ?*anyopaque) ?*CValue {
+pub export fn value_create_true(allocator: ?*anyopaque) ?*CValue {
     if (allocator == null) return null;
     const alloc = getAllocator(allocator);
     const val = alloc.create(reader.Value) catch return null;
@@ -347,7 +376,7 @@ export fn value_create_true(allocator: ?*anyopaque) ?*CValue {
     return @ptrCast(val);
 }
 
-export fn value_create_false(allocator: ?*anyopaque) ?*CValue {
+pub export fn value_create_false(allocator: ?*anyopaque) ?*CValue {
     if (allocator == null) return null;
     const alloc = getAllocator(allocator);
     const val = alloc.create(reader.Value) catch return null;
@@ -359,7 +388,7 @@ export fn value_create_false(allocator: ?*anyopaque) ?*CValue {
 }
 
 // Create collection values
-export fn value_create_list(allocator: ?*anyopaque, vec: ?*CVectorValue) ?*CValue {
+pub export fn value_create_list(allocator: ?*anyopaque, vec: ?*CVectorValue) ?*CValue {
     if (vec == null or allocator == null) return null;
     const alloc = getAllocator(allocator);
     const vec_ptr: *vector.PersistentVector(*reader.Value) = @ptrCast(@alignCast(vec));
@@ -371,7 +400,7 @@ export fn value_create_list(allocator: ?*anyopaque, vec: ?*CVectorValue) ?*CValu
     return @ptrCast(val);
 }
 
-export fn value_create_vector(allocator: ?*anyopaque, vec: ?*CVectorValue) ?*CValue {
+pub export fn value_create_vector(allocator: ?*anyopaque, vec: ?*CVectorValue) ?*CValue {
     if (vec == null or allocator == null) return null;
     const alloc = getAllocator(allocator);
     const vec_ptr: *vector.PersistentVector(*reader.Value) = @ptrCast(@alignCast(vec));
@@ -383,7 +412,7 @@ export fn value_create_vector(allocator: ?*anyopaque, vec: ?*CVectorValue) ?*CVa
     return @ptrCast(val);
 }
 
-export fn value_create_map(allocator: ?*anyopaque, vec: ?*CVectorValue) ?*CValue {
+pub export fn value_create_map(allocator: ?*anyopaque, vec: ?*CVectorValue) ?*CValue {
     if (vec == null or allocator == null) return null;
     const alloc = getAllocator(allocator);
     const vec_ptr: *vector.PersistentVector(*reader.Value) = @ptrCast(@alignCast(vec));
@@ -396,8 +425,8 @@ export fn value_create_map(allocator: ?*anyopaque, vec: ?*CVectorValue) ?*CValue
 }
 
 // Create special expression values
-export fn value_create_type(allocator: ?*anyopaque, type_str: [*:0]const u8) ?*CValue {
-    if (type_str == null or allocator == null) return null;
+pub export fn value_create_type(allocator: ?*anyopaque, type_str: [*:0]const u8) ?*CValue {
+    if (allocator == null) return null;
     const alloc = getAllocator(allocator);
     // type takes a string directly (like "i32", "!llvm.ptr")
     const str_slice = std.mem.span(type_str);
@@ -409,7 +438,7 @@ export fn value_create_type(allocator: ?*anyopaque, type_str: [*:0]const u8) ?*C
     return @ptrCast(val);
 }
 
-export fn value_create_attr_expr(allocator: ?*anyopaque, inner: ?*CValue) ?*CValue {
+pub export fn value_create_attr_expr(allocator: ?*anyopaque, inner: ?*CValue) ?*CValue {
     if (inner == null or allocator == null) return null;
     const alloc = getAllocator(allocator);
     const inner_ptr: *reader.Value = @ptrCast(@alignCast(inner));
@@ -421,7 +450,22 @@ export fn value_create_attr_expr(allocator: ?*anyopaque, inner: ?*CValue) ?*CVal
     return @ptrCast(val);
 }
 
-export fn value_create_has_type(allocator: ?*anyopaque, value: ?*CValue, type_expr: ?*CValue) ?*CValue {
+// Create a type expression value (alias for value_create_type for compatibility)
+pub export fn value_create_type_expr(allocator: ?*anyopaque, inner: ?*CValue) ?*CValue {
+    // For now, treat type_expr the same as attr_expr since we don't have a separate type_expr type
+    // This is used by c_api_transform.zig to wrap type expressions
+    if (inner == null or allocator == null) return null;
+    const alloc = getAllocator(allocator);
+    const inner_ptr: *reader.Value = @ptrCast(@alignCast(inner));
+    const val = alloc.create(reader.Value) catch return null;
+    val.* = reader.Value{
+        .type = .attr_expr, // Using attr_expr as the closest match
+        .data = .{ .attr_expr = inner_ptr },
+    };
+    return @ptrCast(val);
+}
+
+pub export fn value_create_has_type(allocator: ?*anyopaque, value: ?*CValue, type_expr: ?*CValue) ?*CValue {
     if (value == null or type_expr == null or allocator == null) return null;
     const alloc = getAllocator(allocator);
     const value_ptr: *reader.Value = @ptrCast(@alignCast(value));
@@ -434,8 +478,13 @@ export fn value_create_has_type(allocator: ?*anyopaque, value: ?*CValue, type_ex
     return @ptrCast(val);
 }
 
-export fn value_destroy(allocator: ?*anyopaque, val: ?*CValue) void {
+pub export fn value_destroy(allocator: ?*anyopaque, val: ?*CValue) void {
     if (val == null or allocator == null) return;
+    // When using arena allocator, skip deinit - it might access freed memory
+    // Arena will clean up everything at once
+    if (global_arena_allocator != null) {
+        return; // Complete no-op
+    }
     const alloc = getAllocator(allocator);
     var val_ptr: *reader.Value = @ptrCast(@alignCast(val));
     val_ptr.deinit(alloc);
@@ -443,8 +492,9 @@ export fn value_destroy(allocator: ?*anyopaque, val: ?*CValue) void {
 }
 
 // Free null-terminated strings returned by value_get_atom
-export fn value_free_atom(allocator: ?*anyopaque, atom: ?[*:0]const u8) void {
+pub export fn value_free_atom(allocator: ?*anyopaque, atom: ?[*:0]const u8) void {
     if (atom == null or allocator == null) return;
+    // Arena allocator makes free a no-op
     const alloc = getAllocator(allocator);
     const len = std.mem.len(atom.?);
     alloc.free(atom.?[0..len :0]);

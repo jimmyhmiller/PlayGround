@@ -3,29 +3,24 @@
 ///
 /// These tests ensure that our parser produces identical ASTs to
 /// the official Pyret implementation for all supported syntax.
+///
+/// Note: Tests in this file use a global lock to run serially to avoid
+/// race conditions with shared temp files in the comparison script.
 
 use std::process::Command;
 use std::path::Path;
-use std::thread;
-use std::time::SystemTime;
+use std::sync::Mutex;
+
+// Global lock to ensure tests run serially
+static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Helper to run the comparison and check if parsers match
-/// Uses unique temp files per test to avoid race conditions
 fn compare_with_pyret(expr: &str) -> bool {
-    // Create unique ID using thread ID and timestamp
-    let thread_id = format!("{:?}", thread::current().id());
-    let timestamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let unique_id = format!("{}_{}", thread_id.replace("ThreadId(", "").replace(")", ""), timestamp);
-
-    let script_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("compare_parsers_quiet.sh");
+    let script_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("compare_parsers.sh");
 
     let output = Command::new("bash")
         .arg(&script_path)
         .arg(expr)
-        .arg(&unique_id)
         .output()
         .expect("Failed to run comparison script");
 
@@ -34,7 +29,14 @@ fn compare_with_pyret(expr: &str) -> bool {
 }
 
 /// Helper that asserts our parser matches Pyret's parser
+/// Uses a global lock to ensure serial execution
 fn assert_matches_pyret(expr: &str) {
+    // Handle poisoned mutex (from panics in other tests)
+    let _lock = match TEST_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
     if !compare_with_pyret(expr) {
         panic!("Expression '{}' produces different AST than official Pyret parser. Run:\n  ./compare_parsers.sh \"{}\"", expr, expr);
     }
@@ -299,31 +301,31 @@ fn test_pyret_match_nested_complexity() {
 
 #[test]
 fn test_pyret_match_empty_array() {
-    assert_matches_pyret("[]");
+    assert_matches_pyret("[list:]");
 }
 
 #[test]
 fn test_pyret_match_array_numbers() {
-    assert_matches_pyret("[1, 2, 3]");
-    assert_matches_pyret("[42]");
+    assert_matches_pyret("[list: 1, 2, 3]");
+    assert_matches_pyret("[list: 42]");
 }
 
 #[test]
 fn test_pyret_match_array_identifiers() {
-    assert_matches_pyret("[x, y, z]");
-    assert_matches_pyret("[foo]");
+    assert_matches_pyret("[list: x, y, z]");
+    assert_matches_pyret("[list: foo]");
 }
 
 #[test]
 fn test_pyret_match_nested_arrays() {
-    assert_matches_pyret("[[1, 2], [3, 4]]");
-    assert_matches_pyret("[[], []]");
+    assert_matches_pyret("[list: [list: 1, 2], [list: 3, 4]]");
+    assert_matches_pyret("[list: [list:], [list:]]");
 }
 
 #[test]
 fn test_pyret_match_array_with_exprs() {
-    assert_matches_pyret("[1 + 2, 3 * 4]");
-    assert_matches_pyret("[f(x), g(y)]");
+    assert_matches_pyret("[list: 1 + 2, 3 * 4]");
+    assert_matches_pyret("[list: f(x), g(y)]");
 }
 
 // ============================================================================
@@ -337,7 +339,7 @@ fn test_pyret_match_deeply_nested_parens() {
 
 #[test]
 fn test_pyret_match_deeply_nested_arrays() {
-    assert_matches_pyret("[[[[1]]]]");
+    assert_matches_pyret("[list: [list: [list: [list: 1]]]]");
 }
 
 #[test]
@@ -357,7 +359,7 @@ fn test_pyret_match_long_addition_chain() {
 
 #[test]
 fn test_pyret_match_long_array() {
-    let expr = format!("[{}]", (1..=50).map(|n| n.to_string()).collect::<Vec<_>>().join(", "));
+    let expr = format!("[list: {}]", (1..=50).map(|n| n.to_string()).collect::<Vec<_>>().join(", "));
     assert_matches_pyret(&expr);
 }
 
@@ -429,4 +431,37 @@ fn test_pyret_match_satisfies_operator() {
 #[test]
 fn test_pyret_match_violates_operator() {
     assert_matches_pyret("x violates pred");
+}
+
+// ============================================================================
+// Complex Integration Tests
+// ============================================================================
+
+#[test]
+fn test_pyret_match_ultra_complex_expression() {
+    // This test combines ALL currently supported features:
+    // - Numbers, strings, booleans, identifiers
+    // - Binary operators (15 operators, left-associative with NO precedence)
+    // - Function calls with multiple arguments
+    // - Chained function calls
+    // - Dot access (single and chained)
+    // - Postfix operator chaining (call().dot.call())
+    // - Nested expressions with parentheses
+    // - Complex operator precedence demonstration (left-to-right evaluation)
+    //
+    // Expression breakdown:
+    // foo(x + y, bar.baz(a, b))      - function call with operator in arg and nested call with dot
+    //   .qux(w * z)                   - chained dot and call with operator arg
+    //   .result(true and false)       - another chained call with boolean operator
+    // + obj.field1.field2(p < q or r >= s)  - addition with chained dot access and complex boolean
+    // * helper(1, 2).chain()          - multiplication with call and chained method
+    //
+    // This demonstrates:
+    // 1. Left-associative evaluation (no operator precedence)
+    // 2. Complex postfix operator chaining
+    // 3. Nested function calls with dot access
+    // 4. Multiple operator types (arithmetic, comparison, logical)
+    assert_matches_pyret(
+        "foo(x + y, bar.baz(a, b)).qux(w * z).result(true and false) + obj.field1.field2(p < q or r >= s) * helper(1, 2).chain()"
+    );
 }

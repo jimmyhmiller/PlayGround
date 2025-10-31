@@ -48,6 +48,9 @@ pub const Executor = @import("executor.zig").Executor;
 pub const ExecutorConfig = @import("executor.zig").ExecutorConfig;
 pub const OptLevel = @import("executor.zig").OptLevel;
 
+// Export the runtime symbols registration module
+pub const runtime_symbols = @import("runtime_symbols.zig");
+
 // Export the function call helper module
 pub const function_call_helper = @import("function_call_helper.zig");
 pub const FunctionSignature = function_call_helper.FunctionSignature;

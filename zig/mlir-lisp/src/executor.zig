@@ -109,7 +109,7 @@ pub const Executor = struct {
     /// Register an external symbol that can be called from JIT'd code
     /// Useful for registering C library functions like printf, malloc, etc.
     pub fn registerSymbol(self: *Executor, name: []const u8, sym: *anyopaque) void {
-        if (self.engine) |eng| {
+        if (self.engine) |*eng| {
             eng.registerSymbol(name, sym);
         }
     }

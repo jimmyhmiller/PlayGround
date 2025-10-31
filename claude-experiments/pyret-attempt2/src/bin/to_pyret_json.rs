@@ -54,9 +54,11 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "args": args.iter().map(|e| expr_to_pyret_json(e.as_ref())).collect::<Vec<_>>()
             })
         }
-        Expr::SArray { values, .. } => {
+        Expr::SConstruct { modifier, constructor, values, .. } => {
             json!({
-                "type": "s-array",
+                "type": "s-construct",
+                "modifier": modifier_to_pyret_json(modifier),
+                "constructor": expr_to_pyret_json(constructor),
                 "values": values.iter().map(|e| expr_to_pyret_json(e.as_ref())).collect::<Vec<_>>()
             })
         }
@@ -67,12 +69,56 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "field": field
             })
         }
+        Expr::SBracket { obj, field, .. } => {
+            json!({
+                "type": "s-bracket",
+                "obj": expr_to_pyret_json(obj),
+                "field": expr_to_pyret_json(field)
+            })
+        }
+        Expr::SCheckTest { op, refinement, left, right, cause, .. } => {
+            json!({
+                "type": "s-check-test",
+                "op": check_op_to_pyret_json(op),
+                "refinement": refinement.as_ref().map(|e| expr_to_pyret_json(e)),
+                "left": expr_to_pyret_json(left),
+                "right": right.as_ref().map(|e| expr_to_pyret_json(e)),
+                "cause": cause.as_ref().map(|e| expr_to_pyret_json(e))
+            })
+        }
         _ => {
             json!({
                 "type": "UNSUPPORTED",
                 "debug": format!("{:?}", expr)
             })
         }
+    }
+}
+
+fn check_op_to_pyret_json(op: &pyret_attempt2::CheckOp) -> Value {
+    use pyret_attempt2::CheckOp;
+    match op {
+        CheckOp::SOpIs { .. } => json!({"type": "s-op-is"}),
+        CheckOp::SOpIsRoughly { .. } => json!({"type": "s-op-is-roughly"}),
+        CheckOp::SOpIsNot { .. } => json!({"type": "s-op-is-not"}),
+        CheckOp::SOpIsNotRoughly { .. } => json!({"type": "s-op-is-not-roughly"}),
+        CheckOp::SOpIsOp { op, .. } => json!({"type": "s-op-is-op", "op": op}),
+        CheckOp::SOpIsNotOp { op, .. } => json!({"type": "s-op-is-not-op", "op": op}),
+        CheckOp::SOpSatisfies { .. } => json!({"type": "s-op-satisfies"}),
+        CheckOp::SOpSatisfiesNot { .. } => json!({"type": "s-op-satisfies-not"}),
+        CheckOp::SOpRaises { .. } => json!({"type": "s-op-raises"}),
+        CheckOp::SOpRaisesOther { .. } => json!({"type": "s-op-raises-other"}),
+        CheckOp::SOpRaisesNot { .. } => json!({"type": "s-op-raises-not"}),
+        CheckOp::SOpRaisesSatisfies { .. } => json!({"type": "s-op-raises-satisfies"}),
+        CheckOp::SOpRaisesViolates { .. } => json!({"type": "s-op-raises-violates"}),
+    }
+}
+
+fn modifier_to_pyret_json(modifier: &pyret_attempt2::ConstructModifier) -> Value {
+    use pyret_attempt2::ConstructModifier;
+    match modifier {
+        ConstructModifier::SConstructNormal => json!("s-construct-normal"),
+        ConstructModifier::SConstructLazy => json!("s-construct-lazy"),
     }
 }
 
