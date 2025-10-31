@@ -1,0 +1,86 @@
+(mlir
+  (operation
+    (name builtin.module)
+    (regions
+      (region
+        (block
+          (arguments [])
+          (operation
+            (name func.func)
+            (attributes {:function_type (!function (inputs i32) (results i32)) :sym_name @fibonacci})
+            (regions
+              (region
+                (block [^bb0]
+                  (arguments [[%arg0 i32]])
+                  (operation
+                    (name arith.constant)
+                    (result-bindings [%0])
+                    (result-types i32)
+                    (attributes {:value (: 1 i32)}))
+                  (operation
+                    (name arith.cmpi)
+                    (result-bindings [%1])
+                    (result-types i1)
+                    (operand-uses %arg0 %0)
+                    (attributes {:predicate (: 3 i64)}))
+                  (operation
+                    (name scf.if)
+                    (result-bindings [%2])
+                    (result-types i32)
+                    (operand-uses %1)
+                    (regions
+                      (region
+                        (block
+                          (arguments [])
+                          (operation
+                            (name scf.yield)
+                            (operand-uses %arg0))))
+                      (region
+                        (block
+                          (arguments [])
+                          (operation
+                            (name arith.constant)
+                            (result-bindings [%3])
+                            (result-types i32)
+                            (attributes {:value (: 1 i32)}))
+                          (operation
+                            (name arith.subi)
+                            (result-bindings [%4])
+                            (result-types i32)
+                            (operand-uses %arg0 %3)
+                            (attributes {:overflowFlags #arith.overflow<none>}))
+                          (operation
+                            (name func.call)
+                            (result-bindings [%5])
+                            (result-types i32)
+                            (operand-uses %4)
+                            (attributes {:callee @fibonacci}))
+                          (operation
+                            (name arith.constant)
+                            (result-bindings [%6])
+                            (result-types i32)
+                            (attributes {:value (: 2 i32)}))
+                          (operation
+                            (name arith.subi)
+                            (result-bindings [%7])
+                            (result-types i32)
+                            (operand-uses %arg0 %6)
+                            (attributes {:overflowFlags #arith.overflow<none>}))
+                          (operation
+                            (name func.call)
+                            (result-bindings [%8])
+                            (result-types i32)
+                            (operand-uses %7)
+                            (attributes {:callee @fibonacci}))
+                          (operation
+                            (name arith.addi)
+                            (result-bindings [%9])
+                            (result-types i32)
+                            (operand-uses %5 %8)
+                            (attributes {:overflowFlags #arith.overflow<none>}))
+                          (operation
+                            (name scf.yield)
+                            (operand-uses %9))))))
+                  (operation
+                    (name func.return)
+                    (operand-uses %2)))))))))))
