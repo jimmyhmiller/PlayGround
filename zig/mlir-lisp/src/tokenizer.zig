@@ -50,6 +50,8 @@ pub const Tokenizer = struct {
     current: usize = 0,
     line: usize = 1,
     column: usize = 1,
+    error_line: usize = 0,
+    error_column: usize = 0,
 
     /// Initialize a new tokenizer with the given allocator and source string
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Tokenizer {
@@ -57,6 +59,11 @@ pub const Tokenizer = struct {
             .allocator = allocator,
             .source = source,
         };
+    }
+
+    /// Get the current position for error reporting
+    pub fn getPosition(self: *const Tokenizer) struct { line: usize, column: usize } {
+        return .{ .line = self.error_line, .column = self.error_column };
     }
 
     /// Get the next token from the source
@@ -89,7 +96,7 @@ pub const Tokenizer = struct {
             '^' => self.scanBlockId(),
             '@' => self.scanSymbol(),
             '!' => self.makeToken(.type_marker),
-            '#' => self.makeToken(.attr_marker),
+            '#' => self.scanAttrMarker(),
 
             // Keywords (colon-prefixed) or standalone ':' as identifier
             ':' => self.scanColonToken(),
@@ -101,6 +108,8 @@ pub const Tokenizer = struct {
                 } else if (self.isAlpha(c) or c == '_') {
                     return self.scanIdentifier();
                 } else {
+                    self.error_line = self.line;
+                    self.error_column = self.column - 1;
                     return error.UnexpectedCharacter;
                 }
             },
@@ -173,6 +182,8 @@ pub const Tokenizer = struct {
         }
 
         if (self.isAtEnd()) {
+            self.error_line = self.line;
+            self.error_column = self.column;
             return error.UnterminatedString;
         }
 
@@ -198,6 +209,8 @@ pub const Tokenizer = struct {
                 _ = self.advance();
             }
         } else {
+            self.error_line = self.line;
+            self.error_column = self.column;
             return error.InvalidValueId;
         }
 
@@ -220,6 +233,8 @@ pub const Tokenizer = struct {
                 _ = self.advance();
             }
         } else {
+            self.error_line = self.line;
+            self.error_column = self.column;
             return error.InvalidBlockId;
         }
 
@@ -242,6 +257,8 @@ pub const Tokenizer = struct {
                 _ = self.advance();
             }
         } else {
+            self.error_line = self.line;
+            self.error_column = self.column;
             return error.InvalidSymbol;
         }
 
@@ -261,6 +278,8 @@ pub const Tokenizer = struct {
 
         // Otherwise, it's a keyword - scan the identifier part
         if (!self.isAlpha(next_char) and next_char != '_') {
+            self.error_line = self.line;
+            self.error_column = self.column;
             return error.InvalidKeyword;
         }
 
@@ -269,6 +288,26 @@ pub const Tokenizer = struct {
         }
 
         return self.makeToken(.keyword);
+    }
+
+    fn scanAttrMarker(self: *Tokenizer) Token {
+        // Already consumed '#', now scan the opaque attribute value
+        // This can include characters like <, >, (, ), , etc.
+        // Stop at whitespace or delimiters like {, }, [, ], or ;
+
+        while (!self.isAtEnd()) {
+            const c = self.peek();
+
+            // Stop at whitespace
+            if (c == ' ' or c == '\t' or c == '\n' or c == '\r') break;
+
+            // Stop at these delimiters (but allow < > ( ) ,)
+            if (c == '{' or c == '}' or c == '[' or c == ']' or c == ';') break;
+
+            _ = self.advance();
+        }
+
+        return self.makeToken(.attr_marker);
     }
 
     fn scanNumber(self: *Tokenizer) Token {

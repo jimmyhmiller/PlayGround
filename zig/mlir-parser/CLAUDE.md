@@ -4,6 +4,49 @@
 
 This project implements a **recursive descent parser for MLIR** (Multi-Level Intermediate Representation) written in Zig. The parser strictly follows the official MLIR grammar specification and produces an Abstract Syntax Tree (AST).
 
+## Zig 0.15.1 - I/O API Changes
+
+**This project uses Zig 0.15.1**, which introduced breaking changes to I/O operations ("Writergate").
+
+### Writing to stdout
+
+The proper way to write to stdout now requires **buffering and explicit flushing**:
+
+```zig
+var stdout_buffer: [1024]u8 = undefined;
+var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+const stdout = &stdout_writer.interface;
+
+try stdout.print("...", .{});
+try stdout.flush();  // Don't forget to flush!
+```
+
+**Key points:**
+- You must provide a buffer as a parameter to `writer()`
+- Call `.writer(&buffer)` on the file to get a writer object
+- Access the `.interface` field to get the `*std.Io.Writer`
+- **Always flush** when done writing
+
+**For debug output**, use `std.debug.print()` which handles buffering automatically:
+```zig
+std.debug.print("Debug: {s}\n", .{output});
+```
+
+## Quick Start
+
+**To add a new test case:**
+1. Add a `.mlir` file to `test_data/examples/`
+2. Run `./scripts/convert_to_generic.sh` to ensure generic format
+3. Run `zig build test` - your file is automatically tested!
+
+**To see what needs implementing next:**
+```bash
+zig build test
+```
+The first failing test shows exactly what feature to implement next.
+
+**Key Philosophy: Failing tests are our roadmap!** Don't skip or hide them.
+
 ## Core Principles
 
 ### 1. Grammar-Driven Development
@@ -47,33 +90,47 @@ This makes it easy to:
 - Help others understand the parser/printer structure
 - Ensure parser and printer stay in sync
 
-### 3. Test-Driven Development
+### 3. Test-Driven Development with Failing Tests
+
+**IMPORTANT: We embrace failing tests!** Failing tests show us exactly what features need to be implemented next. Do not skip or hide failing tests - they are our roadmap for development.
 
 We follow a strict progression:
 
 1. **Start Simple**: Create the simplest possible MLIR example
    ```mlir
-   %0 = arith.constant 42 : i32
+   %0 = "arith.constant"() <{value = 42 : i32}> : () -> i32
    ```
 
-2. **Validate with mlir-opt**: Every test case MUST pass validation
+2. **Ensure Generic Format**: ALL test files MUST be in generic format (not custom/pretty-printed format)
+   - Use `mlir-opt --mlir-print-op-generic` to convert files
+   - Run `./scripts/convert_to_generic.sh` to convert all files at once
+   - Generic format uses quoted operation names: `"arith.constant"()`
+   - Custom format uses bare names: `arith.constant` (NOT ALLOWED in tests)
+
+3. **Validate with mlir-opt**: Every test case should be valid MLIR
    ```bash
-   mlir-opt --verify-diagnostics examples/01_simple_constant.mlir
+   mlir-opt --verify-diagnostics test_data/examples/simple_constant.mlir
    ```
 
-3. **Incrementally Add Complexity**: Only after simple cases work
+4. **Add to test_data/examples/**: Place all MLIR examples here
+   - The roundtrip test automatically discovers and tests ALL `.mlir` files
+   - No need to manually add test cases
+   - Failing tests tell us what to implement next
+
+5. **Incrementally Add Complexity**: Add more complex examples
    ```mlir
-   %0 = arith.constant 42 : i32
-   %1 = arith.constant 13 : i32
-   %2 = arith.addi %0, %1 : i32
+   %0 = "arith.constant"() <{value = 42 : i32}> : () -> i32
+   %1 = "arith.constant"() <{value = 13 : i32}> : () -> i32
+   %2 = "arith.addi"(%0, %1) : (i32, i32) -> i32
    ```
 
-4. **Find Real-World Examples**: Search MLIR test suites online
+6. **Find Real-World Examples**: Search MLIR test suites online
    - LLVM project MLIR tests
    - Dialect-specific examples
    - Complex control flow examples
+   - Convert them to generic format with `./scripts/convert_to_generic.sh`
 
-### 4. Roundtrip Testing
+### 4. Automatic Roundtrip Testing
 
 **The printer enables roundtrip validation**: `parse → print → parse → print`, with stable output.
 
@@ -91,25 +148,39 @@ This ensures:
 - No information is lost in the roundtrip
 - Output is stable and canonical
 
-**Example roundtrip test:**
-```zig
-const source = "%0 = \"arith.constant\"() <{value = 42 : i32}> : () -> i32";
+**Automatic Discovery:**
 
-// Parse → Print → Parse → Print
-var module1 = try parseSource(allocator, source);
-const printed1 = try printModule(allocator, module1);
-var module2 = try parseSource(allocator, printed1);
-const printed2 = try printModule(allocator, module2);
+The roundtrip test (`test/roundtrip_test.zig`) automatically discovers and tests ALL `.mlir` files in `test_data/examples/`:
 
-// printed1 and printed2 must be identical
-try testing.expectEqualStrings(printed1, printed2);
+```bash
+zig build test
 ```
 
+This will:
+- Find all `.mlir` files in `test_data/examples/`
+- Run roundtrip testing on each file
+- **Stop at the first failure** and show exactly what's wrong
+- Print which file failed and what error occurred
+
+**Example output:**
+```
+Testing roundtrip for: simple_constant.mlir
+Testing roundtrip for: simple_addition.mlir
+Testing roundtrip for: complex_llvm_module.mlir
+FAILED: complex_llvm_module.mlir - Error: error.InvalidOperation
+Parse error at line 1, column 47: Expected generic operation...
+```
+
+**This is exactly what we want!** The failing test shows us that attribute alias definitions (line 1) need to be implemented.
+
 **When adding new features:**
-1. Implement parser function with grammar comment
-2. Add corresponding printer function with same grammar comment
-3. Create roundtrip test that exercises the feature
-4. Validate with `mlir-opt` if possible
+1. Add a `.mlir` file to `test_data/examples/` demonstrating the feature
+2. Ensure it's in generic format (run `./scripts/convert_to_generic.sh`)
+3. Run `zig build test` - it will automatically be tested
+4. If it fails, implement the parser function with grammar comment
+5. Implement corresponding printer function with same grammar comment
+6. Re-run tests until it passes
+7. Move on to the next failing test!
 
 ### 5. Grammar Reference
 
@@ -168,6 +239,8 @@ The complete MLIR grammar is in `grammar.ebnf`. Key sections:
 mlir-parser/
 ├── grammar.ebnf              # Official MLIR grammar (source of truth)
 ├── CLAUDE.md                 # This file
+├── scripts/
+│   └── convert_to_generic.sh # Convert all MLIR files to generic format
 ├── src/
 │   ├── lexer.zig            # Tokenization (grammar lines 5-15, 23-33)
 │   ├── ast.zig              # AST node definitions
@@ -175,37 +248,63 @@ mlir-parser/
 │   ├── printer.zig          # AST to MLIR text printer (roundtrip support)
 │   ├── root.zig             # Public API exports
 │   └── main.zig             # CLI tool
-├── examples/
-│   ├── 01_simple_constant.mlir
-│   ├── 02_simple_add.mlir
-│   ├── 03_basic_block.mlir
-│   ├── 04_region.mlir
-│   └── ... (progressively more complex)
+├── test_data/
+│   └── examples/            # All MLIR test files (in generic format)
+│       ├── simple_constant.mlir
+│       ├── simple_addition.mlir
+│       ├── complex_llvm_module.mlir
+│       └── ... (all test cases - automatically discovered)
 └── test/
     ├── basic_test.zig
     ├── integration_test.zig
-    ├── roundtrip_test.zig   # Roundtrip validation tests
+    ├── roundtrip_test.zig   # Auto-discovers and tests ALL example files
     └── ...
 ```
 
 ## Development Workflow
 
-### For New Features
+### Adding Test Files
 
-1. **Identify the grammar rule** in `grammar.ebnf`
-2. **Write the simplest test case** that uses that rule
-3. **Validate with mlir-opt** to ensure correctness
+1. **Find or create an MLIR example** demonstrating the feature
+   - Can be from LLVM test suites, documentation, or hand-written
+   - Should be valid MLIR (validate with `mlir-opt` if possible)
+
+2. **Convert to generic format**
+   ```bash
+   ./scripts/convert_to_generic.sh
+   ```
+   This ensures ALL files use the generic format required by the parser.
+
+3. **Add to test_data/examples/**
+   - No need to update any test files
+   - The roundtrip test automatically discovers it
+
+4. **Run tests**
+   ```bash
+   zig build test
+   ```
+   - If it fails, great! Now you know what to implement next
+   - The error message tells you exactly what's missing
+
+### For New Features (Implementing What Tests Show)
+
+1. **Run `zig build test`** to see which file fails first
+2. **Look at the error message** - it tells you what's missing
+3. **Identify the grammar rule** in `grammar.ebnf`
 4. **Implement the parser function** with grammar comment
-5. **Test and iterate** until the parser handles the case
-6. **Add more complex examples** and repeat
+5. **Implement the printer function** with matching grammar comment
+6. **Re-run tests** until that file passes
+7. **Move on to the next failing test**
 
 ### For Bug Fixes
 
 1. **Create a minimal MLIR example** that triggers the bug
-2. **Validate it with mlir-opt** to confirm it's valid MLIR
-3. **Identify which grammar rule** is being misparsed
-4. **Fix the parser function** for that rule
-5. **Verify all existing tests** still pass
+2. **Add it to test_data/examples/**
+3. **Convert to generic format** with `./scripts/convert_to_generic.sh`
+4. **Run tests** to confirm it fails
+5. **Identify which grammar rule** is being misparsed
+6. **Fix the parser and/or printer function** for that rule
+7. **Verify all existing tests** still pass
 
 ### Code Review Checklist
 
@@ -214,8 +313,9 @@ mlir-parser/
 - [ ] Grammar comments match the actual EBNF rule
 - [ ] Implementation follows the grammar structure
 - [ ] Parser and printer functions are in sync (same grammar rules)
-- [ ] Test cases included and validated with mlir-opt
-- [ ] Roundtrip test added for new features
+- [ ] Test file added to test_data/examples/ and converted to generic format
+- [ ] All test files are in generic format (verified with `./scripts/convert_to_generic.sh`)
+- [ ] Tests run and either pass or show clear failure indicating what to implement next
 - [ ] Error messages are clear and reference grammar when possible
 
 ## Common Patterns
@@ -410,15 +510,21 @@ When developing new parser features, always follow this workflow:
 
 **Collaboration**: New contributors can understand the code by reading it alongside the grammar.
 
-**Testing**: Simple → complex progression ensures we build on a solid foundation. Roundtrip tests catch bugs early.
+**Testing**: Failing tests are our roadmap! They show exactly what features need implementation. The automatic test discovery means you just add a `.mlir` file and it's immediately tested.
 
 **Reliability**: The printer enables validation that parsing is complete and correct by ensuring stable roundtrips.
 
+**Progressive Development**: Start with simple features, add complex examples, let tests guide you to what needs implementing next.
+
 ---
 
-Remember:
+## Key Principles to Remember
+
 - **Every parser function needs a grammar comment. No exceptions.**
 - **Every printer function needs a matching grammar comment.**
-- **Every new feature needs a roundtrip test.**
+- **ALL test files MUST be in generic format** - use `./scripts/convert_to_generic.sh`
+- **Failing tests are good!** They tell us what to work on next.
+- **Don't skip or hide failing tests** - they are our development roadmap.
+- **Add test files to test_data/examples/** - they're automatically discovered and tested.
 
 This is what makes the codebase maintainable, understandable, and correct.

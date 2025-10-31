@@ -204,9 +204,10 @@ pub const FunctionType = struct {
 };
 
 /// Grammar: type-alias-def ::= `!` alias-name `=` type
+/// Note: We store the type as an opaque string to handle all syntax forms
 pub const TypeAliasDef = struct {
     alias_name: []const u8,
-    type: Type,
+    type_value: []const u8, // Opaque string - everything after '='
 };
 
 /// Grammar: dialect-type ::= `!` (opaque-dialect-type | pretty-dialect-type)
@@ -331,9 +332,10 @@ pub const AttributeValue = union(enum) {
 };
 
 /// Grammar: attribute-alias-def ::= `#` alias-name `=` attribute-value
+/// Note: We store the attribute as an opaque string to handle all syntax forms
 pub const AttributeAliasDef = struct {
     alias_name: []const u8,
-    value: AttributeValue,
+    attr_value: []const u8, // Opaque string - everything after '='
 };
 
 /// Grammar: dialect-attribute ::= `#` (opaque-dialect-attribute | pretty-dialect-attribute)

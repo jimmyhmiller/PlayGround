@@ -1,1 +1,4 @@
-!my_type = i32
+"builtin.module"() ({
+^bb0:
+}) : () -> ()
+

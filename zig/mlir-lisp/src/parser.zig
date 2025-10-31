@@ -12,17 +12,35 @@ pub const ParseError = error{
     ExpectedKeyword,
     ExpectedValueId,
     ExpectedBlockId,
+    ExpectedTypeIdentifier,
     UnexpectedStructure,
     MissingRequiredField,
     InvalidSectionName,
 } || std.mem.Allocator.Error;
 
-/// Top-level MLIR module containing operations
+/// Type alias definition
+pub const TypeAlias = struct {
+    name: []const u8, // e.g., "!my_vec"
+    definition: []const u8, // opaque string e.g., "vector<4xf32>"
+
+    pub fn deinit(self: *TypeAlias, allocator: std.mem.Allocator) void {
+        // Strings are owned by the reader, so we don't free them
+        _ = self;
+        _ = allocator;
+    }
+};
+
+/// Top-level MLIR module containing type aliases and operations
 pub const MlirModule = struct {
+    type_aliases: []TypeAlias,
     operations: []Operation,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *MlirModule) void {
+        for (self.type_aliases) |*alias| {
+            alias.deinit(self.allocator);
+        }
+        self.allocator.free(self.type_aliases);
         for (self.operations) |*op| {
             op.deinit(self.allocator);
         }
@@ -158,7 +176,7 @@ pub const Parser = struct {
 
     /// Parse top-level MLIR module
     pub fn parseModule(self: *Parser, value: *Value) ParseError!MlirModule {
-        // Expect (mlir OPERATION*)
+        // Expect (mlir (TYPE_ALIAS | OPERATION)*)
         if (value.type != .list) return error.ExpectedList;
 
         const list = value.data.list;
@@ -170,7 +188,15 @@ pub const Parser = struct {
             return error.UnexpectedStructure;
         }
 
-        // Parse operations
+        // Parse type aliases and operations
+        var type_aliases = std.ArrayList(TypeAlias){};
+        errdefer {
+            for (type_aliases.items) |*alias| {
+                alias.deinit(self.allocator);
+            }
+            type_aliases.deinit(self.allocator);
+        }
+
         var operations = std.ArrayList(Operation){};
         errdefer {
             for (operations.items) |*op| {
@@ -181,14 +207,63 @@ pub const Parser = struct {
 
         var i: usize = 1;
         while (i < list.len()) : (i += 1) {
-            const op_value = list.at(i);
-            const op = try self.parseOperation(op_value);
-            try operations.append(self.allocator, op);
+            const item = list.at(i);
+            if (item.type != .list) continue;
+
+            const item_list = item.data.list;
+            if (item_list.isEmpty()) continue;
+
+            const item_name = item_list.at(0);
+            if (item_name.type != .identifier) continue;
+
+            if (std.mem.eql(u8, item_name.data.atom, "type-alias")) {
+                const alias = try self.parseTypeAlias(item);
+                try type_aliases.append(self.allocator, alias);
+            } else if (std.mem.eql(u8, item_name.data.atom, "operation")) {
+                const op = try self.parseOperation(item);
+                try operations.append(self.allocator, op);
+            }
         }
 
         return MlirModule{
+            .type_aliases = try type_aliases.toOwnedSlice(self.allocator),
             .operations = try operations.toOwnedSlice(self.allocator),
             .allocator = self.allocator,
+        };
+    }
+
+    /// Parse a type alias
+    pub fn parseTypeAlias(_: *Parser, value: *Value) ParseError!TypeAlias {
+        // Expect (type-alias TYPE_ID STRING)
+        if (value.type != .list) return error.ExpectedList;
+
+        const list = value.data.list;
+        if (list.len() != 3) return error.UnexpectedStructure;
+
+        const first = list.at(0);
+        if (first.type != .identifier) return error.ExpectedIdentifier;
+        if (!std.mem.eql(u8, first.data.atom, "type-alias")) {
+            return error.UnexpectedStructure;
+        }
+
+        // Get the type name (should be .type like !my_vec)
+        const type_name = list.at(1);
+        var name: []const u8 = undefined;
+        if (type_name.type == .type) {
+            name = type_name.data.type;
+        } else {
+            // Might also be an identifier starting with !
+            return error.ExpectedTypeIdentifier;
+        }
+
+        // Get the definition (should be a string)
+        const def = list.at(2);
+        if (def.type != .string) return error.ExpectedIdentifier;
+        const definition = def.data.atom;
+
+        return TypeAlias{
+            .name = name,
+            .definition = definition,
         };
     }
 

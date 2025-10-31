@@ -279,19 +279,21 @@ pub const Printer = struct {
     }
 
     /// Grammar: type-alias-def ::= `!` alias-name `=` type
+    /// Note: We store type as opaque string, so just print it as-is
     fn printTypeAliasDef(self: *Printer, type_alias: ast.TypeAliasDef) !void {
         try self.writer.writeByte('!');
         try self.writer.writeAll(type_alias.alias_name);
         try self.writer.writeAll(" = ");
-        try self.printType(type_alias.type);
+        try self.writer.writeAll(type_alias.type_value);
     }
 
     /// Grammar: attribute-alias-def ::= `#` alias-name `=` attribute-value
+    /// Note: We store attribute as opaque string, so just print it as-is
     fn printAttributeAliasDef(self: *Printer, attr_alias: ast.AttributeAliasDef) !void {
         try self.writer.writeByte('#');
         try self.writer.writeAll(attr_alias.alias_name);
         try self.writer.writeAll(" = ");
-        try self.printAttributeValue(attr_alias.value);
+        try self.writer.writeAll(attr_alias.attr_value);
     }
 
     /// Grammar: type ::= type-alias | dialect-type | builtin-type | function-type

@@ -67,121 +67,213 @@ fn testRoundtripFromFile(allocator: std.mem.Allocator, filename: []const u8) !vo
 }
 
 test "roundtrip - simple constant operation" {
-    try testRoundtripFromFile(testing.allocator, "simple_constant.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "simple_constant.mlir");
 }
 
 test "roundtrip - simple addition operation" {
-    try testRoundtripFromFile(testing.allocator, "simple_addition.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "simple_addition.mlir");
 }
 
 test "roundtrip - integer types" {
-    try testRoundtripFromFile(testing.allocator, "integer_type_i1.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "integer_type_i1.mlir");
 }
 
 test "roundtrip - signed and unsigned integers" {
-    try testRoundtripFromFile(testing.allocator, "integer_type_si32.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "integer_type_si32.mlir");
 }
 
 test "roundtrip - float types" {
-    try testRoundtripFromFile(testing.allocator, "float_type_f32.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "float_type_f32.mlir");
 }
 
 test "roundtrip - index type" {
-    try testRoundtripFromFile(testing.allocator, "index_type.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "index_type.mlir");
 }
 
 test "roundtrip - multiple results" {
-    try testRoundtripFromFile(testing.allocator, "multiple_results.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "multiple_results.mlir");
 }
 
 test "roundtrip - value use with result number" {
-    try testRoundtripFromFile(testing.allocator, "value_use_with_result_number.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "value_use_with_result_number.mlir");
 }
 
 test "roundtrip - tensor type" {
-    try testRoundtripFromFile(testing.allocator, "tensor_type.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "tensor_type.mlir");
 }
 
 test "roundtrip - tensor with dynamic dimensions" {
-    try testRoundtripFromFile(testing.allocator, "tensor_dynamic_dimensions.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "tensor_dynamic_dimensions.mlir");
 }
 
 test "roundtrip - memref type" {
-    try testRoundtripFromFile(testing.allocator, "memref_type.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "memref_type.mlir");
 }
 
 test "roundtrip - vector type" {
-    try testRoundtripFromFile(testing.allocator, "vector_type.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "vector_type.mlir");
 }
 
 test "roundtrip - vector with scalable dimensions" {
-    try testRoundtripFromFile(testing.allocator, "vector_scalable_dimensions.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "vector_scalable_dimensions.mlir");
 }
 
 test "roundtrip - complex type" {
-    try testRoundtripFromFile(testing.allocator, "complex_type.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "complex_type.mlir");
 }
 
 test "roundtrip - tuple type" {
-    try testRoundtripFromFile(testing.allocator, "tuple_type.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "tuple_type.mlir");
 }
 
 test "roundtrip - empty tuple type" {
-    try testRoundtripFromFile(testing.allocator, "empty_tuple_type.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "empty_tuple_type.mlir");
 }
 
 test "roundtrip - none type" {
-    try testRoundtripFromFile(testing.allocator, "none_type.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "none_type.mlir");
 }
 
 test "roundtrip - dialect type" {
-    try testRoundtripFromFile(testing.allocator, "dialect_type.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "dialect_type.mlir");
 }
 
 test "roundtrip - dialect type with body" {
-    try testRoundtripFromFile(testing.allocator, "dialect_type_with_body.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "dialect_type_with_body.mlir");
 }
 
 test "roundtrip - type alias" {
-    try testRoundtripFromFile(testing.allocator, "type_alias.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "type_alias.mlir");
 }
 
 test "roundtrip - operation with attributes" {
-    try testRoundtripFromFile(testing.allocator, "operation_with_attributes.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "operation_with_attributes.mlir");
 }
 
 test "roundtrip - operation with region (entry block only)" {
-    try testRoundtripFromFile(testing.allocator, "operation_with_region_entry_block.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "operation_with_region_entry_block.mlir");
 }
 
 test "roundtrip - operation with region (labeled blocks)" {
-    try testRoundtripFromFile(testing.allocator, "operation_with_region_labeled_blocks.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "operation_with_region_labeled_blocks.mlir");
 }
 
 test "roundtrip - operation with successors" {
-    try testRoundtripFromFile(testing.allocator, "operation_with_successors.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "operation_with_successors.mlir");
 }
 
 test "roundtrip - operation with successor arguments" {
-    try testRoundtripFromFile(testing.allocator, "operation_with_successor_arguments.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "operation_with_successor_arguments.mlir");
 }
 
 test "roundtrip - operation with location" {
-    try testRoundtripFromFile(testing.allocator, "operation_with_location.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "operation_with_location.mlir");
 }
 
 test "roundtrip - type alias definition" {
-    try testRoundtripFromFile(testing.allocator, "type_alias_definition.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "type_alias_definition.mlir");
 }
 
 test "roundtrip - attribute alias definition" {
-    try testRoundtripFromFile(testing.allocator, "attribute_alias_definition.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "attribute_alias_definition.mlir");
 }
 
 test "roundtrip - module with multiple operations" {
-    try testRoundtripFromFile(testing.allocator, "module_with_multiple_operations.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "module_with_multiple_operations.mlir");
 }
 
 test "roundtrip - complex nested region" {
-    try testRoundtripFromFile(testing.allocator, "complex_nested_region.mlir");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testRoundtripFromFile(arena.allocator(), "complex_nested_region.mlir");
+}
+
+// Auto-discover and test all .mlir files in test_data/examples/
+test "roundtrip - all example files" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Open the test_data/examples directory
+    const dir = try std.fs.cwd().openDir("test_data/examples", .{ .iterate = true });
+    var iter = dir.iterate();
+
+    var tested_count: usize = 0;
+
+    while (try iter.next()) |entry| {
+        // Only test .mlir files
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".mlir")) continue;
+
+        // ALL files MUST be in generic format and pass roundtrip test
+        // Failing tests show us what features need to be implemented
+
+        // Run roundtrip test on this file
+        std.debug.print("Testing roundtrip for: {s}\n", .{entry.name});
+        testRoundtripFromFile(allocator, entry.name) catch |err| {
+            std.debug.print("FAILED: {s} - Error: {}\n", .{ entry.name, err });
+            return err;
+        };
+        tested_count += 1;
+    }
+
+    std.debug.print("Roundtrip testing complete: {d} files tested\n", .{tested_count});
 }

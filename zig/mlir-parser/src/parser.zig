@@ -19,6 +19,7 @@ pub const ParseError = error{
     InvalidAttribute,
     Overflow,
     InvalidCharacter,
+    UnexpectedEndOfFile,
 };
 
 pub const Parser = struct {
@@ -592,26 +593,74 @@ pub const Parser = struct {
     }
 
     // Grammar: type-alias-def ::= `!` alias-name `=` type
+    // Note: We capture type as an opaque string to handle all syntax forms
     fn parseTypeAliasDef(self: *Parser) !ast.TypeAliasDef {
         const alias_token = try self.expect(.type_alias_id);
         _ = try self.expect(.equal);
-        const type_value = try self.parseType();
+
+        // Capture everything after '=' until end of line as opaque string
+        const start_pos = self.current.lexeme.ptr - self.lexer.source.ptr;
+
+        // Consume at least one token
+        if (self.isAtEnd()) {
+            return ParseError.UnexpectedEndOfFile;
+        }
+
+        // Advance tokens until we hit another alias definition or operation
+        while (true) {
+            _ = self.advance();
+
+            // Stop before next alias definition or operation
+            if (self.isAtEnd() or
+                self.check(.attribute_alias_id) or
+                self.check(.type_alias_id) or
+                self.check(.string_literal)) {
+                break;
+            }
+        }
+
+        const end_pos = self.previous.lexeme.ptr - self.lexer.source.ptr + self.previous.lexeme.len;
+        const type_value = self.lexer.source[start_pos..end_pos];
 
         return ast.TypeAliasDef{
             .alias_name = alias_token.lexeme[1..], // Skip the '!' prefix
-            .type = type_value,
+            .type_value = std.mem.trim(u8, type_value, " \t\r\n"),
         };
     }
 
     // Grammar: attribute-alias-def ::= `#` alias-name `=` attribute-value
+    // Note: We capture attribute-value as an opaque string to handle all syntax forms
     fn parseAttributeAliasDef(self: *Parser) !ast.AttributeAliasDef {
         const alias_token = try self.expect(.attribute_alias_id);
         _ = try self.expect(.equal);
-        const attr_value = try self.parseAttributeValue();
+
+        // Capture everything after '=' until end of line as opaque string
+        const start_pos = self.current.lexeme.ptr - self.lexer.source.ptr;
+
+        // Consume at least one token
+        if (self.isAtEnd()) {
+            return ParseError.UnexpectedEndOfFile;
+        }
+
+        // Advance tokens until we hit another alias definition or operation
+        while (true) {
+            _ = self.advance();
+
+            // Stop before next alias definition or operation
+            if (self.isAtEnd() or
+                self.check(.attribute_alias_id) or
+                self.check(.type_alias_id) or
+                self.check(.string_literal)) {
+                break;
+            }
+        }
+
+        const end_pos = self.previous.lexeme.ptr - self.lexer.source.ptr + self.previous.lexeme.len;
+        const attr_value = self.lexer.source[start_pos..end_pos];
 
         return ast.AttributeAliasDef{
             .alias_name = alias_token.lexeme[1..], // Skip the '#' prefix
-            .value = attr_value,
+            .attr_value = std.mem.trim(u8, attr_value, " \t\r\n"),
         };
     }
 

@@ -48,6 +48,14 @@ pub const Printer = struct {
         try writer.writeAll("(mlir");
         self.indent_level += 1;
 
+        // Print type aliases first
+        for (module.type_aliases) |*alias| {
+            try writer.writeAll("\n");
+            try self.writeIndent();
+            try self.printTypeAlias(alias);
+        }
+
+        // Then print operations
         for (module.operations) |*op| {
             try writer.writeAll("\n");
             try self.writeIndent();
@@ -56,6 +64,12 @@ pub const Printer = struct {
 
         self.indent_level -= 1;
         try writer.writeAll(")");
+    }
+
+    /// Print a type alias
+    pub fn printTypeAlias(self: *Printer, alias: *const parser.TypeAlias) PrintError!void {
+        const writer = self.buffer.writer(self.allocator);
+        try writer.print("(type-alias {s} \"{s}\")", .{alias.name, alias.definition});
     }
 
     /// Print an operation

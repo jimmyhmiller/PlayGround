@@ -85,6 +85,14 @@ pub const Module = struct {
         return Module{ .module = mod };
     }
 
+    pub fn fromOperation(op: MlirOperation) !Module {
+        const mod = c.mlirModuleFromOperation(op);
+        if (c.mlirModuleIsNull(mod)) {
+            return error.InvalidModuleOperation;
+        }
+        return Module{ .module = mod };
+    }
+
     pub fn destroy(self: *Module) void {
         c.mlirModuleDestroy(self.module);
     }
@@ -100,6 +108,14 @@ pub const Module = struct {
     pub fn print(self: *Module) void {
         const op = self.getOperation();
         c.mlirOperationPrint(op, &printCallback, null);
+    }
+
+    pub fn printGeneric(self: *Module) void {
+        const op = self.getOperation();
+        const flags = c.mlirOpPrintingFlagsCreate();
+        defer c.mlirOpPrintingFlagsDestroy(flags);
+        c.mlirOpPrintingFlagsPrintGenericOpForm(flags);
+        c.mlirOperationPrintWithFlags(op, flags, &printCallback, null);
     }
 
     fn printCallback(str: c.MlirStringRef, userData: ?*anyopaque) callconv(.c) void {

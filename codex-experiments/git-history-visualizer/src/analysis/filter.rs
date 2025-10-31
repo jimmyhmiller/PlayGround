@@ -6,6 +6,7 @@ use super::filetypes::DEFAULT_FILETYPES;
 #[derive(Debug)]
 pub struct FileFilter {
     allow_all_filetypes: bool,
+    has_only_patterns: bool,
     filetype_matcher: GlobSet,
     only_matcher: Option<GlobSet>,
     ignore_matcher: Option<GlobSet>,
@@ -17,13 +18,14 @@ impl FileFilter {
         only_patterns: &[String],
         ignore_patterns: &[String],
     ) -> Result<Self> {
-        let only_patterns = normalize_only_patterns(only_patterns, ignore_patterns);
-        let only_matcher = build_globset_from_owned(&only_patterns)?;
+        let normalized_only = normalize_only_patterns(only_patterns, ignore_patterns);
+        let only_matcher = build_globset_from_owned(&normalized_only)?;
         let ignore_matcher = build_globset_from_owned(ignore_patterns)?;
         let filetype_matcher = build_globset_from_static(DEFAULT_FILETYPES)?;
 
         Ok(Self {
             allow_all_filetypes,
+            has_only_patterns: !only_patterns.is_empty(),
             filetype_matcher,
             only_matcher,
             ignore_matcher,
@@ -40,6 +42,9 @@ impl FileFilter {
             if ignore.is_match(path) {
                 return false;
             }
+        }
+        if !self.allow_all_filetypes && !self.has_only_patterns && file_name.starts_with('.') {
+            return false;
         }
         if self.allow_all_filetypes {
             return true;
@@ -80,4 +85,37 @@ fn build_globset_from_static(patterns: &[&'static str]) -> Result<GlobSet> {
         builder.add(build_glob(pattern)?);
     }
     builder.build().context("Failed to build filetype matcher")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileFilter;
+
+    #[test]
+    fn skips_dotfiles_by_default() {
+        let filter = FileFilter::new(false, &[], &[]).expect("filter");
+        assert!(filter.matches("src/lib.rs", "lib.rs"));
+        assert!(!filter.matches("elixir_gen/.formatter.exs", ".formatter.exs"));
+        assert!(!filter.matches(".gitignore", ".gitignore"));
+    }
+
+    #[test]
+    fn includes_dotfiles_when_requested() {
+        let filter = FileFilter::new(
+            false,
+            &["**/.formatter.exs".to_string()],
+            &[],
+        )
+        .expect("filter with only");
+        assert!(filter.matches(
+            "elixir_gen/.formatter.exs",
+            ".formatter.exs"
+        ));
+    }
+
+    #[test]
+    fn includes_dotfiles_with_all_filetypes() {
+        let filter = FileFilter::new(true, &[], &[]).expect("filter all");
+        assert!(filter.matches("services/.env", ".env"));
+    }
 }
