@@ -417,6 +417,12 @@ pub const Tokenizer = struct {
             _ = self.advance();
         }
 
+        // Check if identifier is followed by '<' (array attributes like array<i32>)
+        // If so, use bracket-aware scanning to capture the full construct
+        if (self.peek() == '<') {
+            self.scanOpaqueMarker();
+        }
+
         // Check for keywords
         const text = self.source[self.start..self.current];
         if (std.mem.eql(u8, text, "true")) {

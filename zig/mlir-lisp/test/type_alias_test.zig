@@ -19,7 +19,7 @@ test "parse simple type alias" {
     var reader = try Reader.init(allocator, &tok);
     const value = try reader.read();
 
-    var parser_obj = Parser.init(allocator);
+    var parser_obj = Parser.init(allocator, "");
     const module = try parser_obj.parseModule(value);
 
     // Should have 1 type alias
@@ -47,7 +47,7 @@ test "parse multiple type aliases" {
     var reader = try Reader.init(allocator, &tok);
     const value = try reader.read();
 
-    var parser_obj = Parser.init(allocator);
+    var parser_obj = Parser.init(allocator, "");
     const module = try parser_obj.parseModule(value);
 
     // Should have 3 type aliases
@@ -90,7 +90,7 @@ test "parse type alias with operation" {
     var reader = try Reader.init(allocator, &tok);
     const value = try reader.read();
 
-    var parser_obj = Parser.init(allocator);
+    var parser_obj = Parser.init(allocator, "");
     const module = try parser_obj.parseModule(value);
 
     // Should have 1 type alias
@@ -117,7 +117,7 @@ test "print type alias" {
     var tok = Tokenizer.init(allocator, source);
     var reader = try Reader.init(allocator, &tok);
     const value = try reader.read();
-    var parser_obj = Parser.init(allocator);
+    var parser_obj = Parser.init(allocator, "");
     const module = try parser_obj.parseModule(value);
 
     // Print
@@ -150,7 +150,7 @@ test "roundtrip type alias" {
     var tok = Tokenizer.init(allocator, source);
     var reader = try Reader.init(allocator, &tok);
     const value = try reader.read();
-    var parser_obj = Parser.init(allocator);
+    var parser_obj = Parser.init(allocator, "");
     const module = try parser_obj.parseModule(value);
 
     // Print
@@ -163,7 +163,7 @@ test "roundtrip type alias" {
     var tok2 = Tokenizer.init(allocator, output);
     var reader2 = try Reader.init(allocator, &tok2);
     const value2 = try reader2.read();
-    var parser_obj2 = Parser.init(allocator);
+    var parser_obj2 = Parser.init(allocator, "");
     const module2 = try parser_obj2.parseModule(value2);
 
     // Should have same number of type aliases
