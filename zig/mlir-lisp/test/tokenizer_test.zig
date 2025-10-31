@@ -363,3 +363,216 @@ test "error on invalid keyword" {
     const result = t.next();
     try std.testing.expectError(error.InvalidKeyword, result);
 }
+
+test "tokenize simple attribute markers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "#llvm.linkage<internal> #llvm.framePointerKind<none>";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    var token = try t.next();
+    try std.testing.expectEqual(TokenType.attr_marker, token.type);
+    try std.testing.expectEqualStrings("#llvm.linkage<internal>", token.lexeme);
+
+    token = try t.next();
+    try std.testing.expectEqual(TokenType.attr_marker, token.type);
+    try std.testing.expectEqualStrings("#llvm.framePointerKind<none>", token.lexeme);
+}
+
+test "tokenize complex nested attribute with spaces" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "#dlti.dl_spec<i1 = dense<8> : vector<2xi64>>";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    const token = try t.next();
+    try std.testing.expectEqual(TokenType.attr_marker, token.type);
+    try std.testing.expectEqualStrings("#dlti.dl_spec<i1 = dense<8> : vector<2xi64>>", token.lexeme);
+}
+
+test "tokenize attribute with multiple nested brackets and spaces" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "#dlti.dl_spec<i1 = dense<8> : vector<2xi64>, !llvm.ptr = dense<64> : vector<4xi64>>";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    const token = try t.next();
+    try std.testing.expectEqual(TokenType.attr_marker, token.type);
+    try std.testing.expectEqualStrings("#dlti.dl_spec<i1 = dense<8> : vector<2xi64>, !llvm.ptr = dense<64> : vector<4xi64>>", token.lexeme);
+}
+
+test "tokenize attribute with string literals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "#attr<\"dlti.endianness\" = \"little\">";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    const token = try t.next();
+    try std.testing.expectEqual(TokenType.attr_marker, token.type);
+    try std.testing.expectEqualStrings("#attr<\"dlti.endianness\" = \"little\">", token.lexeme);
+}
+
+test "tokenize attribute with escaped quotes in strings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "#attr<\"key\" = \"value with \\\"quotes\\\"\">";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    const token = try t.next();
+    try std.testing.expectEqual(TokenType.attr_marker, token.type);
+    try std.testing.expectEqualStrings("#attr<\"key\" = \"value with \\\"quotes\\\"\">", token.lexeme);
+}
+
+test "tokenize attribute with parentheses" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "#attr<func(i32, i64)>";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    const token = try t.next();
+    try std.testing.expectEqual(TokenType.attr_marker, token.type);
+    try std.testing.expectEqualStrings("#attr<func(i32, i64)>", token.lexeme);
+}
+
+test "tokenize attribute stops at s-expr delimiters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "#attr<value> { :key #attr2<val> }";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    var token = try t.next();
+    try std.testing.expectEqual(TokenType.attr_marker, token.type);
+    try std.testing.expectEqualStrings("#attr<value>", token.lexeme);
+
+    token = try t.next();
+    try std.testing.expectEqual(TokenType.left_brace, token.type);
+
+    token = try t.next();
+    try std.testing.expectEqual(TokenType.keyword, token.type);
+
+    token = try t.next();
+    try std.testing.expectEqual(TokenType.attr_marker, token.type);
+    try std.testing.expectEqualStrings("#attr2<val>", token.lexeme);
+}
+
+test "tokenize deeply nested attribute" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "#attr<outer<inner<deep<value>>>>";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    const token = try t.next();
+    try std.testing.expectEqual(TokenType.attr_marker, token.type);
+    try std.testing.expectEqualStrings("#attr<outer<inner<deep<value>>>>", token.lexeme);
+}
+
+test "tokenize attribute with type annotations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "#attr<!llvm.ptr<272> = dense<64> : vector<4xi64>>";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    const token = try t.next();
+    try std.testing.expectEqual(TokenType.attr_marker, token.type);
+    try std.testing.expectEqualStrings("#attr<!llvm.ptr<272> = dense<64> : vector<4xi64>>", token.lexeme);
+}
+
+test "tokenize real-world dlti.dl_spec attribute" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // This is an abbreviated version of the actual dlti.dl_spec from c_api_transform.mlir-lisp
+    const source = "#dlti.dl_spec<i1 = dense<8> : vector<2xi64>, i64 = dense<64> : vector<2xi64>, \"dlti.endianness\" = \"little\">";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    const token = try t.next();
+    try std.testing.expectEqual(TokenType.attr_marker, token.type);
+    try std.testing.expectEqualStrings("#dlti.dl_spec<i1 = dense<8> : vector<2xi64>, i64 = dense<64> : vector<2xi64>, \"dlti.endianness\" = \"little\">", token.lexeme);
+}
+
+test "tokenize simple type markers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "!llvm.ptr !transform.any_op";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    var token = try t.next();
+    try std.testing.expectEqual(TokenType.type_marker, token.type);
+    try std.testing.expectEqualStrings("!llvm.ptr", token.lexeme);
+
+    token = try t.next();
+    try std.testing.expectEqual(TokenType.type_marker, token.type);
+    try std.testing.expectEqualStrings("!transform.any_op", token.lexeme);
+}
+
+test "tokenize complex type with spaces - array" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "!llvm.array<10 x i8>";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    const token = try t.next();
+    try std.testing.expectEqual(TokenType.type_marker, token.type);
+    try std.testing.expectEqualStrings("!llvm.array<10 x i8>", token.lexeme);
+}
+
+test "tokenize complex type with nested brackets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "!llvm.struct<(i32, array<10 x i8>)>";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    const token = try t.next();
+    try std.testing.expectEqual(TokenType.type_marker, token.type);
+    try std.testing.expectEqualStrings("!llvm.struct<(i32, array<10 x i8>)>", token.lexeme);
+}
+
+test "tokenize type with pointer and nested angle brackets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "!llvm.ptr<272>";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    const token = try t.next();
+    try std.testing.expectEqual(TokenType.type_marker, token.type);
+    try std.testing.expectEqualStrings("!llvm.ptr<272>", token.lexeme);
+}
+
+test "tokenize multiple complex types in sequence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "!llvm.array<10 x i8> !llvm.ptr<271>";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    var token = try t.next();
+    try std.testing.expectEqual(TokenType.type_marker, token.type);
+    try std.testing.expectEqualStrings("!llvm.array<10 x i8>", token.lexeme);
+
+    token = try t.next();
+    try std.testing.expectEqual(TokenType.type_marker, token.type);
+    try std.testing.expectEqualStrings("!llvm.ptr<271>", token.lexeme);
+}
+
+test "tokenize type stops at s-expr delimiters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "!llvm.array<10 x i8> }";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    var token = try t.next();
+    try std.testing.expectEqual(TokenType.type_marker, token.type);
+    try std.testing.expectEqualStrings("!llvm.array<10 x i8>", token.lexeme);
+
+    token = try t.next();
+    try std.testing.expectEqual(TokenType.right_brace, token.type);
+}
+
+test "tokenize deeply nested type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "!llvm.struct<(ptr<struct<(i32, i64)>>)>";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    const token = try t.next();
+    try std.testing.expectEqual(TokenType.type_marker, token.type);
+    try std.testing.expectEqualStrings("!llvm.struct<(ptr<struct<(i32, i64)>>)>", token.lexeme);
+}

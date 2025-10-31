@@ -50,6 +50,8 @@ pub const Tokenizer = struct {
     current: usize = 0,
     line: usize = 1,
     column: usize = 1,
+    start_line: usize = 1,
+    start_column: usize = 1,
     error_line: usize = 0,
     error_column: usize = 0,
 
@@ -71,6 +73,8 @@ pub const Tokenizer = struct {
         self.skipWhitespaceAndComments();
 
         self.start = self.current;
+        self.start_line = self.line;
+        self.start_column = self.column;
 
         if (self.isAtEnd()) {
             return self.makeToken(.eof);
@@ -95,7 +99,7 @@ pub const Tokenizer = struct {
             '%' => self.scanValueId(),
             '^' => self.scanBlockId(),
             '@' => self.scanSymbol(),
-            '!' => self.makeToken(.type_marker),
+            '!' => self.scanTypeMarker(),
             '#' => self.scanAttrMarker(),
 
             // Keywords (colon-prefixed) or standalone ':' as identifier
@@ -164,8 +168,8 @@ pub const Tokenizer = struct {
         return Token{
             .type = token_type,
             .lexeme = self.source[self.start..self.current],
-            .line = self.line,
-            .column = self.column - (self.current - self.start),
+            .line = self.start_line,
+            .column = self.start_column,
         };
     }
 
@@ -290,24 +294,71 @@ pub const Tokenizer = struct {
         return self.makeToken(.keyword);
     }
 
-    fn scanAttrMarker(self: *Tokenizer) Token {
-        // Already consumed '#', now scan the opaque attribute value
-        // This can include characters like <, >, (, ), , etc.
-        // Stop at whitespace or delimiters like {, }, [, ], or ;
+    /// Helper function to scan opaque marker values (types and attributes)
+    /// with bracket-aware parsing. Handles nested brackets <>, (), [] and strings.
+    fn scanOpaqueMarker(self: *Tokenizer) void {
+        // This uses bracket-aware scanning to handle complex nested values
+        // with spaces, like: #dlti.dl_spec<i1 = dense<8> : vector<2xi64>, ...>
+        // or #llvm.target_features<["+aes", "+alternate-sextload-cvt-f32-pattern"]>
+        //
+        // Algorithm:
+        // - Track depth of <>, (), and [] brackets
+        // - Track whether we're inside a string literal "..."
+        // - Only stop at whitespace or delimiters when depth is 0 and not in string
+
+        var depth: i32 = 0;
+        var in_string = false;
 
         while (!self.isAtEnd()) {
             const c = self.peek();
 
-            // Stop at whitespace
-            if (c == ' ' or c == '\t' or c == '\n' or c == '\r') break;
+            // Handle string literals (quotes toggle in_string state)
+            if (c == '"') {
+                // Check if the quote is escaped by looking back
+                // We need to check if there's an odd number of backslashes before it
+                var num_backslashes: usize = 0;
+                var check_pos = self.current;
+                while (check_pos > self.start and self.source[check_pos - 1] == '\\') {
+                    num_backslashes += 1;
+                    check_pos -= 1;
+                }
+                // If even number of backslashes (including 0), quote is not escaped
+                if (num_backslashes % 2 == 0) {
+                    in_string = !in_string;
+                }
+            }
 
-            // Stop at these delimiters (but allow < > ( ) ,)
-            if (c == '{' or c == '}' or c == '[' or c == ']' or c == ';') break;
+            // When not in a string, track bracket depth
+            if (!in_string) {
+                if (c == '<' or c == '(' or c == '[') {
+                    depth += 1;
+                } else if (c == '>' or c == ')' or c == ']') {
+                    depth -= 1;
+                    // If depth goes negative, we hit a closing bracket at s-expr level
+                    if (depth < 0) break;
+                }
+
+                // At depth 0, stop at whitespace or s-expr delimiters
+                if (depth == 0) {
+                    if (c == ' ' or c == '\t' or c == '\n' or c == '\r') break;
+                    if (c == '{' or c == '}' or c == ';') break;
+                }
+            }
 
             _ = self.advance();
         }
+    }
 
+    fn scanAttrMarker(self: *Tokenizer) Token {
+        // Already consumed '#', now scan the opaque attribute value
+        self.scanOpaqueMarker();
         return self.makeToken(.attr_marker);
+    }
+
+    fn scanTypeMarker(self: *Tokenizer) Token {
+        // Already consumed '!', now scan the opaque type value
+        self.scanOpaqueMarker();
+        return self.makeToken(.type_marker);
     }
 
     fn scanNumber(self: *Tokenizer) Token {

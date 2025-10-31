@@ -2,66 +2,25 @@
 
 A grammar-driven recursive descent parser for MLIR (Multi-Level Intermediate Representation) written in Zig.
 
-## Project Status
+## Features
 
-**21/22 tests passing** ✅
+- **MLIR Parser**: Parse MLIR generic format to AST
+- **MLIR Printer**: Print AST back to MLIR format (roundtrip support)
+- **Lisp Converter**: Convert MLIR to S-expression Lisp format
+- Grammar-driven implementation following official MLIR specification
 
-This is a work-in-progress implementation that strictly follows the MLIR grammar specification. Each parser function is annotated with its corresponding grammar rule for clarity and maintainability.
+## Quick Start
 
-## What Works
+```bash
+# Build everything
+zig build
 
-### ✅ Lexer (`src/lexer.zig`)
-- **Complete tokenization** of MLIR source
-- All token types from grammar lines 5-15, 23-33
-- Handles:
-  - Identifiers: `bare-id`, `value-id` (`%0`), `symbol-ref-id` (`@foo`), `caret-id` (`^bb0`)
-  - Literals: integers, floats, strings, hexadecimal
-  - Type/attribute aliases: `!alias`, `#alias`
-  - Punctuation: `()`, `{}`, `[]`, `<>`, `,`, `:`, `=`, `->`, `::`
-  - Keywords: `loc`, `func`, `return`, `module`
-  - Comments (line comments with `//`)
+# Run tests
+zig build test
 
-**All lexer tests pass!**
-
-### ✅ AST (`src/ast.zig`)
-- Complete AST node definitions for all grammar productions
-- Types: `Module`, `Operation`, `Block`, `Region`, `Type`, `Attribute`
-- Proper memory management with `deinit()` methods
-- Each AST node corresponds to a grammar rule
-
-**All AST tests pass!**
-
-### ✅ Type Parsing (`src/parser.zig`)
-Fully implements type parsing according to grammar lines 71-105:
-
-- **Integer types**: `i32`, `i64`, `si8`, `ui16` (signless, signed, unsigned)
-- **Float types**: `f16`, `f32`, `f64`, `f80`, `f128`, `bf16`, `tf32`
-- **Index type**: `index`
-- **Function types**: `(i32, f64) -> i32`
-- **Dialect types**: `!llvm.ptr<i32>`, `!custom<...>`
-- **Type aliases**: `!myalias`
-
-**All type parsing tests pass!**
-
-### ⚠️ Operation Parsing (Partial)
-Basic structure is complete, but custom operations need refinement:
-
-- ✅ **Op result lists**: `%0 = ...`, `%0, %1 = ...`, `%0:2 = ...`
-- ✅ **Generic operations**: String-based generic ops with full syntax
-- ✅ **Value uses**: `%0`, `%1#2` (with result numbers)
-- ✅ **Dictionary attributes**: `{attr1 = value, attr2 = value}`
-- ✅ **Attribute values**: integers, floats, strings, booleans, arrays
-- ❌ **Custom operations**: `arith.constant`, `func.return` (1 failing test)
-
-**Issue**: `parseCustomOperation` currently consumes too many tokens. The parser needs to know when a custom operation ends (likely at newline or when seeing another `value-id` that starts a new operation).
-
-### 🔨 Not Yet Implemented
-- Block parsing (`block-label`, `block-arg-list`)
-- Region parsing (`region`, `entry-block`)
-- Tensor/memref/vector/complex/tuple types
-- Successor lists
-- Location information (partially implemented)
-- Full custom operation format handling
+# Convert MLIR to Lisp S-expressions
+zig build mlir-to-lisp -- myfile.mlir
+```
 
 ## Project Structure
 
@@ -70,24 +29,70 @@ mlir-parser/
 ├── grammar.ebnf              # Official MLIR grammar (source of truth)
 ├── CLAUDE.md                 # Developer guide with rules and patterns
 ├── README.md                 # This file
+├── build.zig                 # Build configuration
 ├── src/
-│   ├── lexer.zig            # Tokenization (Grammar lines 5-15, 23-33)
+│   ├── lexer.zig            # Tokenization
 │   ├── ast.zig              # AST node definitions
-│   ├── parser.zig           # Recursive descent parser (main logic)
+│   ├── parser.zig           # Recursive descent parser
+│   ├── printer.zig          # MLIR printer (roundtrip support)
+│   ├── lisp_printer.zig     # Lisp S-expression converter
 │   ├── root.zig             # Public API exports
-│   └── main.zig             # CLI tool
-├── examples/
-│   ├── 01_simple_constant.mlir  # Validated with mlir-opt ✓
-│   ├── 02_simple_add.mlir       # Validated with mlir-opt ✓
-│   └── 03_basic_block.mlir      # Validated with mlir-opt ✓
-└── test/
-    ├── basic_test.zig
-    └── integration_test.zig
+│   ├── main.zig             # Main executable
+│   ├── mlir_to_lisp.zig     # MLIR to Lisp converter CLI
+│   └── debug_printer.zig    # Debug utility
+├── test/
+│   ├── basic_test.zig
+│   ├── integration_test.zig
+│   ├── roundtrip_test.zig
+│   ├── lisp_printer_test.zig
+│   └── ...
+├── test_data/
+│   └── examples/            # Test MLIR files (generic format)
+├── scripts/
+│   ├── convert_to_generic.sh    # Convert MLIR to generic format
+│   └── validate_examples.sh     # Validate MLIR files
+├── docs/                    # Documentation and reports
+└── archive/                 # Old test files and examples
 ```
+
+## Tools
+
+### MLIR to Lisp Converter
+
+Convert MLIR (generic format) to S-expression Lisp format:
+
+```bash
+# Convert a file
+zig build mlir-to-lisp -- fibonacci.mlir
+
+# Example output
+(mlir
+  (operation
+    (name builtin.module)
+    (regions
+      (region
+        (block
+          (arguments [])
+          (operation
+            (name func.func)
+            (attributes {:function_type (!function (inputs i32) (results i32))
+                        :sym_name @fibonacci})
+            ...))))))
+```
+
+### Convert to Generic Format
+
+Before parsing, convert MLIR to generic format:
+
+```bash
+./scripts/convert_to_generic.sh
+```
+
+This uses `mlir-opt --mlir-print-op-generic` to convert all `.mlir` files in `test_data/examples/` to the generic format required by the parser.
 
 ## Grammar-Driven Approach
 
-**Every parser function MUST have a grammar comment.** This is the core principle of this project.
+**Every parser and printer function MUST have a grammar comment.** This is the core principle of this project.
 
 Example:
 ```zig
@@ -100,85 +105,86 @@ pub fn parseType(self: *Parser) ParseError!ast.Type {
 
 See `CLAUDE.md` for complete development guidelines.
 
-## Testing Strategy
+## Testing
 
-1. **Simple examples first**: Start with `%0 = arith.constant 42 : i32`
-2. **Validate with mlir-opt**: Every test case must pass `mlir-opt --verify-diagnostics`
-3. **Incremental complexity**: Add operations, then blocks, then regions
-4. **Real-world examples**: Test with actual MLIR from LLVM test suite
-
-## Building and Testing
+All test files in `test_data/examples/` are automatically discovered and tested:
 
 ```bash
 # Run all tests
 zig build test
 
-# Run just the parser tests
-zig test src/parser.zig
-
-# Run just the lexer tests
-zig test src/lexer.zig
-
-# Build the executable
-zig build
-
-# Run the CLI
-zig build run
+# Tests include:
+# - Lexer tests
+# - Parser tests
+# - Roundtrip tests (parse → print → parse)
+# - Lisp printer tests
+# - Integration tests
 ```
 
-## Validation with mlir-opt
+## API Usage
 
-All example files can be validated:
+```zig
+const std = @import("std");
+const mlir = @import("mlir_parser");
 
-```bash
-mlir-opt --verify-diagnostics examples/01_simple_constant.mlir
-mlir-opt --verify-diagnostics examples/02_simple_add.mlir
-mlir-opt --verify-diagnostics examples/03_basic_block.mlir
+pub fn main() !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source = "%0 = \"arith.constant\"() <{value = 42 : i32}> : () -> i32";
+
+    // Parse MLIR
+    var module = try mlir.parse(allocator, source);
+    defer module.deinit();
+
+    // Print back to MLIR
+    const mlir_output = try mlir.print(allocator, module);
+    defer allocator.free(mlir_output);
+
+    // Convert to Lisp
+    const lisp_output = try mlir.printLisp(allocator, module);
+    defer allocator.free(lisp_output);
+}
 ```
 
-## Current Test Results
+## What Works
 
-```
-Lexer:          7/7 tests passing ✅
-AST:            2/2 tests passing ✅
-Parser:        10/11 tests passing ⚠️ (1 failing: custom operation parsing)
-Basic tests:    2/2 tests passing ✅
-Integration:    2/2 tests passing ✅
-Total:         21/22 tests passing (95.5%)
-```
+### ✅ Complete Features
+- Lexer with all token types
+- AST node definitions
+- Type parsing (integer, float, index, function, dialect, tensor, memref, vector, complex, tuple)
+- Operation parsing (generic operations)
+- Block and region parsing
+- Attributes and properties
+- Successors (control flow)
+- MLIR printer (roundtrip support)
+- **Lisp S-expression converter**
 
-## Next Steps (In Priority Order)
+### ✅ Lisp Format Highlights
+- Converts MLIR to clean S-expression format
+- Function types: `(!function (inputs i32) (results i32))`
+- Typed literals: `(: 42 i32)`
+- Symbol references: `@fibonacci`
+- Keyword attributes: `:value`, `:sym_name`
+- Full nested region and block support
 
-1. **Fix custom operation parsing** (failing test in `src/parser.zig:757`)
-   - Determine proper termination conditions for custom ops
-   - Handle dialect-specific syntax properly
-   - Likely need to stop at newline or when seeing `%` at start of line
+## Testing Strategy
 
-2. **Implement block parsing** (Grammar lines 54-62)
-   - `block-label ::= block-id block-arg-list? ':'`
-   - Handle block arguments with types
+1. **Simple examples first**: Start with constants
+2. **Validate with mlir-opt**: Every test case validated
+3. **Generic format only**: All tests use generic format
+4. **Incremental complexity**: Operations → blocks → regions
+5. **Roundtrip testing**: Parse → print → parse stability
+6. **Real-world examples**: Test with actual MLIR from LLVM
 
-3. **Implement region parsing** (Grammar lines 66-67)
-   - Nested `{ }` with operations and blocks
+## Documentation
 
-4. **Add complex types**
-   - Tensor: `tensor<17x4x13xf32>`
-   - MemRef: `memref<10x20xf32>`
-   - Vector: `vector<4xf32>`
-
-5. **Find and test real MLIR examples**
-   - Search LLVM project test suite
-   - Test with actual dialects (LLVM, Arith, Func, etc.)
-
-## Contributing
-
-When adding new features:
-
-1. ✅ **Write the test first** (with real MLIR validated by mlir-opt)
-2. ✅ **Add grammar comment** to every parser function
-3. ✅ **Follow the grammar exactly** - don't improvise
-4. ✅ **Keep failing tests** - they show what needs work!
-5. ✅ **Test incrementally** - simple before complex
+- `CLAUDE.md` - Complete developer guide with Zig 0.15.1 API notes
+- `docs/LISP_CONVERTER_PLAN.md` - Lisp converter implementation plan
+- `docs/ROUNDTRIP_TEST_REPORT.md` - Roundtrip testing results
+- `docs/TEST_STATUS.md` - Test status summary
+- `docs/VERIFICATION_SUMMARY.md` - Verification report
 
 ## References
 

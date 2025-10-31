@@ -49,6 +49,9 @@ pub fn build(b: *std.Build) void {
     const linkMLIR = struct {
         fn link(step: *std.Build.Step.Compile, include_path: []const u8, lib_path: []const u8) void {
             step.addIncludePath(.{ .cwd_relative = include_path });
+
+            // Add library path - this will add an rpath on macOS
+            // Note: Zig issue #24349 causes duplicate rpaths, but they are harmless warnings
             step.addLibraryPath(.{ .cwd_relative = lib_path });
 
             // MLIR C API libraries
@@ -153,6 +156,34 @@ pub fn build(b: *std.Build) void {
     // step). By default the install prefix is `zig-out/` but can be overridden
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
+
+    // Workaround for Zig issue #24349: Remove duplicate rpaths on macOS
+    // Duplicate rpaths cause dyld to abort on recent macOS versions
+    if (target.result.os.tag == .macos) {
+        const fix_rpath = b.addSystemCommand(&[_][]const u8{
+            "sh",
+            "-c",
+        });
+        const cmd = b.fmt(
+            \\# Get unique rpaths and remove duplicates
+            \\unique_rpaths=$(otool -l zig-out/bin/mlir_lisp | grep -A 2 LC_RPATH | grep path | awk '{{print $2}}' | sort -u)
+            \\all_rpaths=$(otool -l zig-out/bin/mlir_lisp | grep -A 2 LC_RPATH | grep path | awk '{{print $2}}')
+            \\# For each rpath, count occurrences and remove duplicates
+            \\for rpath in $all_rpaths; do
+            \\    count=$(echo "$all_rpaths" | grep -c "^$rpath$")
+            \\    if [ "$count" -gt 1 ]; then
+            \\        # Remove all but one occurrence
+            \\        while [ "$count" -gt 1 ]; do
+            \\            install_name_tool -delete_rpath "$rpath" zig-out/bin/mlir_lisp 2>/dev/null || true
+            \\            count=$((count - 1))
+            \\        done
+            \\    fi
+            \\done
+        , .{});
+        fix_rpath.addArg(cmd);
+        fix_rpath.step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+        b.getInstallStep().dependOn(&fix_rpath.step);
+    }
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).

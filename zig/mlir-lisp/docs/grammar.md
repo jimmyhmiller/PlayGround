@@ -19,16 +19,22 @@ OP_NAME    ::= IDENT "." IDENT ( "." IDENT )*   ; dialect/op name
 KEYWORD    ::= ":" IDENT ( "." IDENT )*         ; attr keys
 ATTR_MARKER ::= "#" <opaque-text-until-delimiter>
                ; Dialect attribute, e.g. #arith.overflow<none>, #llvm.noalias
-               ; Scanned as opaque text until whitespace or delimiters {, }, [, ], ;
-               ; Can contain <, >, (, ), , and other special characters
+               ; Uses bracket-aware scanning: tracks depth of <> and () brackets
+               ; Handles string literals "..." (ignores brackets inside strings)
+               ; Stops at whitespace/delimiters {, }, [, ], ; only when bracket depth is 0
+               ; This allows complex nested attributes with spaces:
+               ;   #dlti.dl_spec<i1 = dense<8> : vector<2xi64>, i64 = dense<64>>
+               ;   #attr<"key" = "value with spaces">
 
 ;----------------------------------------
 ; 1) Core S-expressions
 ;----------------------------------------
 ATOM       ::= IDENT | NUMBER | STRING | VALUE_ID | BLOCK_ID | SYMBOL | ATTR_MARKER
-TYPE       ::= "!" IDENT ( "." IDENT )* | IDENT
+TYPE       ::= "!" <opaque-text-until-delimiter> | IDENT
                ; Builtin types (i32, f64, index, etc.) are written as plain identifiers
                ; Dialect types (!llvm.ptr, !transform.any_op, etc.) require the ! prefix
+               ; Uses bracket-aware scanning for complex types with spaces:
+               ;   !llvm.array<10 x i8>, !llvm.struct<(i32, i64)>, !llvm.ptr<272>
                ; Function types use special syntax: (!function (inputs TYPE*) (results TYPE*))
 ATTR       ::= NUMBER | STRING | true | false | SYMBOL | TYPED_LITERAL | ATTR_MARKER
 TYPED_LITERAL ::= "(:" VALUE TYPE ")"
@@ -360,10 +366,24 @@ operand-bundle ::= ( VALUE_ID* )
 ;----------------------------------------
 ; Dialect Types
 ;----------------------------------------
-; Dialect types use ! prefix:
+; Simple dialect types use ! prefix:
 ; !llvm.ptr           ; LLVM pointer type
 ; !transform.any_op   ; Transform dialect type
 ; !function           ; Function type (special case)
+
+; Complex dialect types with spaces and nested brackets:
+; Uses bracket-aware parsing to handle spaces inside <> and () brackets
+; !llvm.array<10 x i8>                  ; Array type with dimensions
+; !llvm.array<20 x f32>                 ; Float array
+; !llvm.struct<(i32, i64)>              ; Struct with multiple fields
+; !llvm.struct<(i32, array<5 x f32>)>   ; Nested types
+; !llvm.ptr<270>                        ; Pointer with address space
+; !llvm.ptr<271>                        ; Different address space
+; !llvm.func<ptr (ptr, ptr)>            ; Function type
+
+; Multi-dimensional and complex nested types:
+; !llvm.array<10 x array<20 x i32>>     ; 2D array
+; !llvm.struct<(ptr, array<10 x i8>, i64)>  ; Complex struct
 
 ;----------------------------------------
 ; Builtin Types
@@ -372,4 +392,42 @@ operand-bundle ::= ( VALUE_ID* )
 ; i32, i64, i1       ; Integer types
 ; f32, f64           ; Float types
 ; index              ; Index type
+
+;----------------------------------------
+; Dialect Attribute Markers
+;----------------------------------------
+; Simple dialect attributes (no spaces):
+; (attributes { :linkage #llvm.linkage<internal> })
+; (attributes { :frame_pointer #llvm.framePointerKind<none> })
+; (attributes { :overflow #arith.overflow<none> })
+
+; Complex nested attributes (with spaces):
+; Uses bracket-aware parsing to handle spaces inside <> brackets
+; (attributes {
+;   :dlti.dl_spec #dlti.dl_spec<
+;     i1 = dense<8> : vector<2xi64>,
+;     i64 = dense<64> : vector<2xi64>,
+;     "dlti.endianness" = "little"
+;   >
+; })
+
+; Attributes with string literals containing special characters:
+; (attributes { :meta #attr<"key" = "value with spaces"> })
+; (attributes { :path #attr<"file.path" = "/usr/local/bin"> })
+
+; Deeply nested attributes:
+; (attributes { :nested #attr<outer<inner<deep<value>>>> })
+
+; Real-world example - LLVM Data Layout Specification:
+; #dlti.dl_spec<
+;   i1 = dense<8> : vector<2xi64>,
+;   !llvm.ptr = dense<64> : vector<4xi64>,
+;   i128 = dense<128> : vector<2xi64>,
+;   i64 = dense<64> : vector<2xi64>,
+;   !llvm.ptr<272> = dense<64> : vector<4xi64>,
+;   f64 = dense<64> : vector<2xi64>,
+;   i32 = dense<32> : vector<2xi64>,
+;   "dlti.stack_alignment" = 128 : i64,
+;   "dlti.endianness" = "little"
+; >
 ```

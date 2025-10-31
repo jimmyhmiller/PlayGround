@@ -230,11 +230,14 @@ pub const Printer = struct {
         try self.writer.writeByte('}');
     }
 
-    /// Grammar: attribute-entry ::= (bare-id | string-literal) `=` attribute-value
+    /// Grammar: attribute-entry ::= (bare-id | string-literal) (`=` attribute-value)?
     fn printAttributeEntry(self: *Printer, entry: ast.AttributeEntry) !void {
         try self.writer.writeAll(entry.name);
-        try self.writer.writeAll(" = ");
-        try self.printAttributeValue(entry.value);
+        // Unit attributes don't have a value
+        if (entry.value) |value| {
+            try self.writer.writeAll(" = ");
+            try self.printAttributeValue(value);
+        }
     }
 
     /// Grammar: attribute-value ::= attribute-alias | dialect-attribute | builtin-attribute
@@ -260,7 +263,7 @@ pub const Printer = struct {
         }
     }
 
-    /// Print builtin attributes (integers, floats, strings, booleans, arrays)
+    /// Print builtin attributes (integers, floats, strings, booleans, arrays, dictionaries)
     fn printBuiltinAttribute(self: *Printer, attr: ast.BuiltinAttribute) !void {
         switch (attr) {
             .integer => |val| try self.writer.print("{d}", .{val}),
@@ -274,6 +277,14 @@ pub const Printer = struct {
                     try self.printAttributeValue(elem);
                 }
                 try self.writer.writeByte(']');
+            },
+            .dictionary => |dict| {
+                try self.writer.writeByte('{');
+                for (dict, 0..) |entry, i| {
+                    if (i > 0) try self.writer.writeAll(", ");
+                    try self.printAttributeEntry(entry);
+                }
+                try self.writer.writeByte('}');
             },
         }
     }

@@ -318,10 +318,11 @@ pub const VectorType = struct {
     };
 };
 
-/// Grammar: attribute-entry ::= (bare-id | string-literal) `=` attribute-value
+/// Grammar: attribute-entry ::= (bare-id | string-literal) (`=` attribute-value)?
+/// Note: When value is null, this represents a unit attribute (bare identifier)
 pub const AttributeEntry = struct {
     name: []const u8,
-    value: AttributeValue,
+    value: ?AttributeValue,
 };
 
 /// Grammar: attribute-value ::= attribute-alias | dialect-attribute | builtin-attribute
@@ -344,13 +345,14 @@ pub const DialectAttribute = struct {
     body: ?[]const u8,
 };
 
-/// Builtin attributes (integers, floats, strings, arrays, etc.)
+/// Builtin attributes (integers, floats, strings, arrays, dictionaries, etc.)
 pub const BuiltinAttribute = union(enum) {
     integer: i64,
     float: f64,
     string: []const u8,
     boolean: bool,
     array: []AttributeValue,
+    dictionary: []AttributeEntry,
     // More builtin attributes can be added as needed
 };
 

@@ -2,9 +2,7 @@ const std = @import("std");
 const mlir_parser = @import("mlir_parser");
 
 pub fn main() !void {
-    // Prints to stderr, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-    try mlir_parser.bufferedPrint();
+    std.debug.print("MLIR Parser - Use 'zig build mlir-to-lisp -- file.mlir' to convert MLIR to Lisp\n", .{});
 }
 
 test "simple test" {
