@@ -563,7 +563,7 @@ pub const Parser = struct {
 
     // Grammar: attribute-value ::= attribute-alias | dialect-attribute | builtin-attribute
     // Note: This is for parsing values inside dictionary entries
-    fn parseAttributeEntryValue(self: *Parser) !ast.AttributeValue {
+    fn parseAttributeEntryValue(self: *Parser) ParseError!ast.AttributeValue {
         // Check for array: [...]
         if (self.check(.lbracket)) {
             return try self.parseArrayAttribute();
@@ -625,14 +625,15 @@ pub const Parser = struct {
     }
 
     // Parse array attribute: [..., ...]
-    fn parseArrayAttribute(self: *Parser) !ast.AttributeValue {
+    fn parseArrayAttribute(self: *Parser) ParseError!ast.AttributeValue {
         _ = try self.expect(.lbracket);
 
         var elements: std.ArrayList(ast.AttributeValue) = .empty;
         errdefer elements.deinit(self.allocator);
 
         while (!self.check(.rbracket) and !self.isAtEnd()) {
-            try elements.append(self.allocator, try self.parseAttributeValue());
+            // Recursively parse nested attribute values
+            try elements.append(self.allocator, try self.parseAttributeEntryValue());
 
             if (self.check(.comma)) {
                 _ = self.advance();

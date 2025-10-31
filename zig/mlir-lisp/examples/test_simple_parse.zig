@@ -21,7 +21,7 @@ pub fn main() !void {
 
     std.debug.print("Read value type: {s}\n", .{@tagName(value.type)});
 
-    var p = mlir_lisp.Parser.init(allocator);
+    var p = mlir_lisp.Parser.init(allocator, "");
     var parsed_module = try p.parseModule(value);
     defer parsed_module.deinit();
 

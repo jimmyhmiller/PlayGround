@@ -128,7 +128,7 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
     // No need to manually free - arena handles it
 
     // Parse to AST
-    var parser = Parser.init(allocator);
+    var parser = Parser.init(allocator, source);
     var parsed_module = try parser.parseModule(value);
     defer parsed_module.deinit();
 

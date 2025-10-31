@@ -24,7 +24,7 @@ test "parser - example 1 simple constant" {
     var reader = try Reader.init(allocator, &tok);
     const value = try reader.read();
 
-    var parser = Parser.init(allocator);
+    var parser = Parser.init(allocator, "");
     var module = try parser.parseModule(value);
     defer module.deinit();
 
@@ -74,7 +74,7 @@ test "parser - example 2 function with regions" {
     var reader = try Reader.init(allocator, &tok);
     const value = try reader.read();
 
-    var parser = Parser.init(allocator);
+    var parser = Parser.init(allocator, "");
     var module = try parser.parseModule(value);
     defer module.deinit();
 
@@ -155,7 +155,7 @@ test "parser - example 3 multiple operations" {
     var reader = try Reader.init(allocator, &tok);
     const value = try reader.read();
 
-    var parser = Parser.init(allocator);
+    var parser = Parser.init(allocator, "");
     var module = try parser.parseModule(value);
     defer module.deinit();
 
@@ -220,7 +220,7 @@ test "parser - example 4 control flow" {
     var reader = try Reader.init(allocator, &tok);
     const value = try reader.read();
 
-    var parser = Parser.init(allocator);
+    var parser = Parser.init(allocator, "");
     var module = try parser.parseModule(value);
     defer module.deinit();
 
@@ -359,7 +359,7 @@ test "parser - example 5 recursive fibonacci" {
     var reader = try Reader.init(allocator, &tok);
     const value = try reader.read();
 
-    var parser = Parser.init(allocator);
+    var parser = Parser.init(allocator, "");
     var module = try parser.parseModule(value);
     defer module.deinit();
 
@@ -422,7 +422,7 @@ test "parser - error on invalid structure" {
     var reader = try Reader.init(allocator, &tok);
     const value = try reader.read();
 
-    var parser = Parser.init(allocator);
+    var parser = Parser.init(allocator, "");
     const result = parser.parseModule(value);
     try std.testing.expectError(error.ExpectedList, result);
 }
@@ -438,7 +438,7 @@ test "parser - error on missing name" {
     var reader = try Reader.init(allocator, &tok);
     const value = try reader.read();
 
-    var parser = Parser.init(allocator);
+    var parser = Parser.init(allocator, "");
     const result = parser.parseModule(value);
     try std.testing.expectError(error.MissingRequiredField, result);
 }

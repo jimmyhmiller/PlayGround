@@ -26,7 +26,7 @@ pub fn main() !void {
         allocator.destroy(value);
     }
 
-    var p = mlir_lisp.Parser.init(allocator);
+    var p = mlir_lisp.Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -48,7 +48,7 @@ pub fn main() !void {
         allocator.destroy(value2);
     }
 
-    var p2 = mlir_lisp.Parser.init(allocator);
+    var p2 = mlir_lisp.Parser.init(allocator, "");
     var module2 = try p2.parseModule(value2);
     defer module2.deinit();
 

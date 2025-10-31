@@ -37,7 +37,7 @@ test "printer validation - multiple operations in module" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -53,7 +53,7 @@ test "printer validation - multiple operations in module" {
     var r2 = try Reader.init(allocator, &tok2);
     const value2 = try r2.read();
 
-    var p2 = Parser.init(allocator);
+    var p2 = Parser.init(allocator, "");
     var module2 = try p2.parseModule(value2);
     defer module2.deinit();
 
@@ -94,7 +94,7 @@ test "printer validation - nested regions and blocks" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -110,7 +110,7 @@ test "printer validation - nested regions and blocks" {
     var r2 = try Reader.init(allocator, &tok2);
     const value2 = try r2.read();
 
-    var p2 = Parser.init(allocator);
+    var p2 = Parser.init(allocator, "");
     var module2 = try p2.parseModule(value2);
     defer module2.deinit();
 
@@ -139,7 +139,7 @@ test "printer validation - multiple result bindings and types" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -155,7 +155,7 @@ test "printer validation - multiple result bindings and types" {
     var r2 = try Reader.init(allocator, &tok2);
     const value2 = try r2.read();
 
-    var p2 = Parser.init(allocator);
+    var p2 = Parser.init(allocator, "");
     var module2 = try p2.parseModule(value2);
     defer module2.deinit();
 
@@ -192,7 +192,7 @@ test "printer validation - complex attribute types" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -217,7 +217,7 @@ test "printer validation - complex attribute types" {
     var r2 = try Reader.init(allocator, &tok2);
     const value2 = try r2.read();
 
-    var p2 = Parser.init(allocator);
+    var p2 = Parser.init(allocator, "");
     var module2 = try p2.parseModule(value2);
     defer module2.deinit();
 
@@ -257,7 +257,7 @@ test "printer validation - multiple blocks in region" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -273,7 +273,7 @@ test "printer validation - multiple blocks in region" {
     var r2 = try Reader.init(allocator, &tok2);
     const value2 = try r2.read();
 
-    var p2 = Parser.init(allocator);
+    var p2 = Parser.init(allocator, "");
     var module2 = try p2.parseModule(value2);
     defer module2.deinit();
 
@@ -304,7 +304,7 @@ test "printer validation - complex type expressions" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -325,7 +325,7 @@ test "printer validation - complex type expressions" {
     var r2 = try Reader.init(allocator, &tok2);
     const value2 = try r2.read();
 
-    var p2 = Parser.init(allocator);
+    var p2 = Parser.init(allocator, "");
     var module2 = try p2.parseModule(value2);
     defer module2.deinit();
 
@@ -350,7 +350,7 @@ test "printer validation - successor with multiple operands" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -366,7 +366,7 @@ test "printer validation - successor with multiple operands" {
     var r2 = try Reader.init(allocator, &tok2);
     const value2 = try r2.read();
 
-    var p2 = Parser.init(allocator);
+    var p2 = Parser.init(allocator, "");
     var module2 = try p2.parseModule(value2);
     defer module2.deinit();
 
@@ -399,7 +399,7 @@ test "printer validation - string literals" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -419,7 +419,7 @@ test "printer validation - string literals" {
     var r2 = try Reader.init(allocator, &tok2);
     const value2 = try r2.read();
 
-    var p2 = Parser.init(allocator);
+    var p2 = Parser.init(allocator, "");
     var module2 = try p2.parseModule(value2);
     defer module2.deinit();
 
@@ -445,7 +445,7 @@ test "printer validation - operation with location metadata" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -465,7 +465,7 @@ test "printer validation - operation with location metadata" {
     var r2 = try Reader.init(allocator, &tok2);
     const value2 = try r2.read();
 
-    var p2 = Parser.init(allocator);
+    var p2 = Parser.init(allocator, "");
     var module2 = try p2.parseModule(value2);
     defer module2.deinit();
 
@@ -548,7 +548,7 @@ test "printer validation - full round-trip with complex nested structure" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -564,7 +564,7 @@ test "printer validation - full round-trip with complex nested structure" {
     var r2 = try Reader.init(allocator, &tok2);
     const value2 = try r2.read();
 
-    var p2 = Parser.init(allocator);
+    var p2 = Parser.init(allocator, "");
     var module2 = try p2.parseModule(value2);
     defer module2.deinit();
 
@@ -580,7 +580,7 @@ test "printer validation - full round-trip with complex nested structure" {
     var r3 = try Reader.init(allocator, &tok3);
     const value3 = try r3.read();
 
-    var p3 = Parser.init(allocator);
+    var p3 = Parser.init(allocator, "");
     var module3 = try p3.parseModule(value3);
     defer module3.deinit();
 

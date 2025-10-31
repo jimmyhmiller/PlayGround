@@ -26,7 +26,7 @@ test "printer - simple constant round-trip" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -79,7 +79,7 @@ test "printer - function with operations round-trip" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -137,7 +137,7 @@ test "printer - control flow with successors" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -177,7 +177,7 @@ test "printer - empty block arguments" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -212,7 +212,7 @@ test "printer - preserve semantic round-trip" {
     var r = try Reader.init(allocator, &tok);
     const value = try r.read();
 
-    var p = Parser.init(allocator);
+    var p = Parser.init(allocator, "");
     var module = try p.parseModule(value);
     defer module.deinit();
 
@@ -228,7 +228,7 @@ test "printer - preserve semantic round-trip" {
     var r2 = try Reader.init(allocator, &tok2);
     const value2 = try r2.read();
 
-    var p2 = Parser.init(allocator);
+    var p2 = Parser.init(allocator, "");
     var module2 = try p2.parseModule(value2);
     defer module2.deinit();
 

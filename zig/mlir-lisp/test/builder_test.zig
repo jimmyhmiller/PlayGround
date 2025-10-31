@@ -28,7 +28,7 @@ test "builder - example 1 simple constant" {
     var rd = try Reader.init(allocator, &tok);
     const value = try rd.read();
 
-    var parser = Parser.init(allocator);
+    var parser = Parser.init(allocator, "");
     var parsed_module = try parser.parseModule(value);
 
     // Create MLIR context

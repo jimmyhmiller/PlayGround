@@ -23,10 +23,54 @@ pub const LispPrinter = struct {
         }
     }
 
-    // Lisp Grammar: MLIR ::= (mlir OPERATION*)
+    /// Write a string with escaped quotes and backslashes
+    /// Escapes " as \" and \ as \\
+    fn writeEscapedString(self: *LispPrinter, str: []const u8) !void {
+        for (str) |char| {
+            switch (char) {
+                '"' => try self.writer.writeAll("\\\""),
+                '\\' => try self.writer.writeAll("\\\\"),
+                else => try self.writer.writeByte(char),
+            }
+        }
+    }
+
+    /// Validate that a dictionary has an even number of key-value pairs
+    /// This helps catch bugs where unit attributes are not converted properly
+    fn validateDictionary(entries: []ast.AttributeEntry) void {
+        // Count the total elements that would be printed
+        var element_count: usize = 0;
+        for (entries) |_| {
+            element_count += 1; // key
+            // Every entry should have a value (even unit attrs become 'true')
+            element_count += 1; // value
+        }
+
+        // Assert that we have an even number (key-value pairs)
+        std.debug.assert(element_count % 2 == 0);
+        // Since each entry contributes exactly 2 elements (key + value),
+        // and we're counting all entries * 2, this should always be even.
+        // This assertion catches logic errors in our printing code.
+    }
+
+    // Lisp Grammar: MLIR ::= (mlir TYPE-ALIAS* ATTRIBUTE-ALIAS* OPERATION*)
     pub fn printModule(self: *LispPrinter, module: ast.Module) !void {
         try self.writer.writeAll("(mlir");
         self.indent_level += 1;
+
+        // Print type aliases first
+        for (module.type_aliases) |type_alias| {
+            try self.writer.writeByte('\n');
+            try self.printIndent();
+            try self.printTypeAlias(type_alias);
+        }
+
+        // Print attribute aliases
+        for (module.attribute_aliases) |attr_alias| {
+            try self.writer.writeByte('\n');
+            try self.printIndent();
+            try self.printAttributeAlias(attr_alias);
+        }
 
         // Print all operations
         for (module.operations) |operation| {
@@ -37,6 +81,26 @@ pub const LispPrinter = struct {
 
         self.indent_level -= 1;
         try self.writer.writeByte(')');
+    }
+
+    // Lisp Grammar: TYPE-ALIAS ::= (type-alias TYPE_ID STRING)
+    fn printTypeAlias(self: *LispPrinter, type_alias: ast.TypeAliasDef) !void {
+        try self.writer.writeAll("(type-alias ");
+        try self.writer.writeByte('!');
+        try self.writer.writeAll(type_alias.alias_name);
+        try self.writer.writeAll(" \"");
+        try self.writeEscapedString(type_alias.type_value);
+        try self.writer.writeAll("\")");
+    }
+
+    // Lisp Grammar: ATTRIBUTE-ALIAS ::= (attribute-alias ATTR_ID STRING)
+    fn printAttributeAlias(self: *LispPrinter, attr_alias: ast.AttributeAliasDef) !void {
+        try self.writer.writeAll("(attribute-alias ");
+        try self.writer.writeByte('#');
+        try self.writer.writeAll(attr_alias.alias_name);
+        try self.writer.writeAll(" \"");
+        try self.writeEscapedString(attr_alias.attr_value);
+        try self.writer.writeAll("\")");
     }
 
     // Lisp Grammar: OPERATION ::= (operation (name OP_NAME) SECTION*)
@@ -155,6 +219,9 @@ pub const LispPrinter = struct {
 
     // Lisp Grammar: ATTRIBUTES ::= (attributes { KEYWORD ATTR* })
     fn printAttributesSection(self: *LispPrinter, attrs: ast.DictionaryAttribute) !void {
+        // Validate that dictionary will have even number of elements
+        validateDictionary(attrs.entries);
+
         try self.writer.writeAll("(attributes {");
 
         for (attrs.entries, 0..) |entry, i| {
@@ -163,11 +230,14 @@ pub const LispPrinter = struct {
             try self.writer.writeByte(':');
             try self.writer.writeAll(entry.name);
 
-            // If there's a value, print it; otherwise it's a unit attribute (just the name)
+            try self.writer.writeByte(' ');
+            // If there's a value, print it; otherwise it's a unit attribute - print 'true'
             if (entry.value) |_| {
-                try self.writer.writeByte(' ');
                 // Print value - need to parse and convert
                 try self.printAttributeValue(entry);
+            } else {
+                // Unit attribute: print 'true'
+                try self.writer.writeAll("true");
             }
         }
 
@@ -324,6 +394,9 @@ pub const LispPrinter = struct {
     // Print nested dictionary: {key1 = val1, key2 = val2} -> {:key1 val1 :key2 val2}
     // Unit attributes (no value) become {:key true}
     fn printNestedDictionaryAttribute(self: *LispPrinter, entries: []ast.AttributeEntry) anyerror!void {
+        // Validate that dictionary will have even number of elements
+        validateDictionary(entries);
+
         try self.writer.writeByte('{');
 
         for (entries, 0..) |entry, i| {

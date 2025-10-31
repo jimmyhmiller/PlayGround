@@ -10,6 +10,7 @@ const Executor = mlir_lisp.Executor;
 const ExecutorConfig = mlir_lisp.ExecutorConfig;
 const MlirModule = mlir_lisp.MlirModule;
 const TypeAlias = mlir_lisp.TypeAlias;
+const AttributeAlias = mlir_lisp.AttributeAlias;
 const Operation = mlir_lisp.Operation;
 
 pub fn run(allocator: std.mem.Allocator) !void {
@@ -320,7 +321,7 @@ fn processInput(
     const value = try reader.read();
 
     // Parse to AST using arena allocator
-    var parser = Parser.init(parse_allocator);
+    var parser = Parser.init(parse_allocator, "");
 
     // Check if this is a module definition or a single operation
     if (value.type != .list) {
@@ -368,6 +369,7 @@ fn processInput(
 
         var module_ast = MlirModule{
             .type_aliases = &[_]TypeAlias{},
+            .attribute_aliases = &[_]AttributeAlias{},
             .operations = operations_list.items,
             .allocator = parse_allocator,
         };
@@ -400,6 +402,7 @@ fn processInput(
 
             var module_ast = MlirModule{
                 .type_aliases = &[_]TypeAlias{},
+                .attribute_aliases = &[_]AttributeAlias{},
                 .operations = operations_list.items,
                 .allocator = parse_allocator,
             };
@@ -435,6 +438,7 @@ fn processInput(
 
             var module_ast = MlirModule{
                 .type_aliases = &[_]TypeAlias{},
+                .attribute_aliases = &[_]AttributeAlias{},
                 .operations = operations_list.items,
                 .allocator = parse_allocator,
             };
@@ -479,6 +483,7 @@ fn processInput(
 
             var clean_module_ast = MlirModule{
                 .type_aliases = &[_]TypeAlias{},
+                .attribute_aliases = &[_]AttributeAlias{},
                 .operations = operations_list.items,
                 .allocator = parse_allocator,
             };

@@ -1,0 +1,16 @@
+(mlir
+  (operation
+    (name builtin.module)
+    (attributes {})
+    (regions
+      (region
+        (block
+          (arguments [])
+          (operation
+            (name llvm.mlir.global)
+            (attributes {:constant true :dso_local true :sym_name @test_global :global_type !llvm.array<5 x i8> :value "test\00" :linkage #llvm.linkage<internal> :unnamed_addr (: 2 i64) :addr_space (: 0 i32) :visibility_ (: 0 i64)})
+            (regions (region)))
+          (operation
+            (name llvm.func)
+            (attributes {:no_unwind true :sym_name @test_func :function_type (!function !llvm.func<void ()>) :CConv #llvm.cconv<ccc> :linkage #llvm.linkage<external> :unnamed_addr (: 0 i64) :visibility_ (: 0 i64)})
+            (regions (region))))))))

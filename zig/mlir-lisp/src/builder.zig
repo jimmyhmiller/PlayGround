@@ -27,6 +27,9 @@ pub const Builder = struct {
     /// Maps type alias names (!my_vec, etc.) to their type definitions
     type_alias_map: std.StringHashMap([]const u8),
 
+    /// Maps attribute alias names (#alias_scope, etc.) to their attribute definitions
+    attribute_alias_map: std.StringHashMap([]const u8),
+
     pub fn init(allocator: std.mem.Allocator, ctx: *mlir.Context) Builder {
         return Builder{
             .allocator = allocator,
@@ -34,18 +37,21 @@ pub const Builder = struct {
             .location = mlir.Location.unknown(ctx),
             .value_map = std.StringHashMap(mlir.MlirValue).init(allocator),
             .type_alias_map = std.StringHashMap([]const u8).init(allocator),
+            .attribute_alias_map = std.StringHashMap([]const u8).init(allocator),
         };
     }
 
     pub fn deinit(self: *Builder) void {
         self.value_map.deinit();
         self.type_alias_map.deinit();
+        self.attribute_alias_map.deinit();
     }
 
     /// Build a complete MLIR module from our parsed AST
     pub fn buildModule(self: *Builder, parsed_module: *parser.MlirModule) BuildError!mlir.Module {
-        // Register all type aliases first
+        // Register all type aliases and attribute aliases first
         try self.registerTypeAliases(parsed_module.type_aliases);
+        try self.registerAttributeAliases(parsed_module.attribute_aliases);
 
         // Special case: if we have exactly one operation and it's a builtin.module,
         // use that directly instead of creating a wrapper module
@@ -76,6 +82,13 @@ pub const Builder = struct {
     fn registerTypeAliases(self: *Builder, type_aliases: []const parser.TypeAlias) BuildError!void {
         for (type_aliases) |alias| {
             try self.type_alias_map.put(alias.name, alias.definition);
+        }
+    }
+
+    /// Register attribute aliases in the builder context
+    fn registerAttributeAliases(self: *Builder, attribute_aliases: []const parser.AttributeAlias) BuildError!void {
+        for (attribute_aliases) |alias| {
+            try self.attribute_alias_map.put(alias.name, alias.definition);
         }
     }
 
@@ -147,12 +160,13 @@ pub const Builder = struct {
         var buffer = std.ArrayList(u8){};
         errdefer buffer.deinit(self.allocator);
 
-        try self.serializeValueToMLIRImpl(value, &buffer);
+        try self.serializeValueToMLIRImpl(value, &buffer, false);
         return buffer.toOwnedSlice(self.allocator);
     }
 
     /// Helper to recursively serialize a Value to MLIR syntax
-    fn serializeValueToMLIRImpl(self: *Builder, value: *const reader.Value, buffer: *std.ArrayList(u8)) BuildError!void {
+    /// is_dict_key indicates if we're currently serializing a dictionary key (to handle keyword formatting)
+    fn serializeValueToMLIRImpl(self: *Builder, value: *const reader.Value, buffer: *std.ArrayList(u8), is_dict_key: bool) BuildError!void {
         const writer = buffer.writer(self.allocator);
 
         switch (value.type) {
@@ -160,7 +174,14 @@ pub const Builder = struct {
             .value_id => try writer.writeAll(value.data.atom),
             .block_id => try writer.writeAll(value.data.atom),
             .symbol => try writer.writeAll(value.data.atom),
-            .keyword => try writer.print(":{s}", .{value.keywordToName()}),
+            .keyword => {
+                // In dictionary keys, keywords don't have the ':' prefix
+                if (is_dict_key) {
+                    try writer.writeAll(value.keywordToName());
+                } else {
+                    try writer.print(":{s}", .{value.keywordToName()});
+                }
+            },
             .string => try writer.writeAll(value.data.atom), // String lexeme already includes quotes
             .number => try writer.writeAll(value.data.atom),
             .true_lit => try writer.writeAll("true"),
@@ -175,25 +196,25 @@ pub const Builder = struct {
                 const inputs = value.data.function_type.inputs;
                 for (0..inputs.len()) |i| {
                     try writer.writeAll(" ");
-                    try self.serializeValueToMLIRImpl(inputs.at(i), buffer);
+                    try self.serializeValueToMLIRImpl(inputs.at(i), buffer, false);
                 }
                 try writer.writeAll(") (results");
                 const results = value.data.function_type.results;
                 for (0..results.len()) |i| {
                     try writer.writeAll(" ");
-                    try self.serializeValueToMLIRImpl(results.at(i), buffer);
+                    try self.serializeValueToMLIRImpl(results.at(i), buffer, false);
                 }
                 try writer.writeAll("))");
             },
             .attr_expr => {
                 try writer.writeAll("#");
-                try self.serializeValueToMLIRImpl(value.data.attr_expr, buffer);
+                try self.serializeValueToMLIRImpl(value.data.attr_expr, buffer, false);
             },
             .has_type => {
                 // Serialize as "value : type" for MLIR
-                try self.serializeValueToMLIRImpl(value.data.has_type.value, buffer);
+                try self.serializeValueToMLIRImpl(value.data.has_type.value, buffer, is_dict_key);
                 try writer.writeAll(" : ");
-                try self.serializeValueToMLIRImpl(value.data.has_type.type_expr, buffer);
+                try self.serializeValueToMLIRImpl(value.data.has_type.type_expr, buffer, false);
             },
             .list => {
                 try writer.writeAll("(");
@@ -201,29 +222,40 @@ pub const Builder = struct {
                 var i: usize = 0;
                 while (i < list.len()) : (i += 1) {
                     if (i > 0) try writer.writeAll(" ");
-                    try self.serializeValueToMLIRImpl(list.at(i), buffer);
+                    try self.serializeValueToMLIRImpl(list.at(i), buffer, false);
                 }
                 try writer.writeAll(")");
             },
             .vector => {
-                try writer.writeAll("[");
+                // MLIR arrays always use comma separators
                 const vec = value.data.vector;
+
+                try writer.writeAll("[");
                 var i: usize = 0;
                 while (i < vec.len()) : (i += 1) {
-                    if (i > 0) try writer.writeAll(" ");
-                    try self.serializeValueToMLIRImpl(vec.at(i), buffer);
+                    if (i > 0) try writer.writeAll(", ");
+                    try self.serializeValueToMLIRImpl(vec.at(i), buffer, false);
                 }
                 try writer.writeAll("]");
             },
             .map => {
+                // Maps are MLIR dictionary attributes: {key1 = value1, key2 = value2}
                 try writer.writeAll("{");
                 const map = value.data.map;
                 var i: usize = 0;
                 while (i + 1 < map.len()) : (i += 2) {
-                    if (i > 0) try writer.writeAll(" ");
-                    try self.serializeValueToMLIRImpl(map.at(i), buffer);
-                    try writer.writeAll(" ");
-                    try self.serializeValueToMLIRImpl(map.at(i + 1), buffer);
+                    if (i > 0) try writer.writeAll(", ");
+
+                    // Serialize key (with is_dict_key = true to strip ':' from keywords)
+                    try self.serializeValueToMLIRImpl(map.at(i), buffer, true);
+
+                    // Check if value is just 'true' - if so, it's a unit attribute (no value needed)
+                    const val = map.at(i + 1);
+                    if (val.type != .true_lit) {
+                        try writer.writeAll(" = ");
+                        try self.serializeValueToMLIRImpl(val, buffer, false);
+                    }
+                    // If it's true_lit, we just write the key name (unit attribute)
                 }
                 try writer.writeAll("}");
             },
@@ -350,6 +382,13 @@ pub const Builder = struct {
             return mlir.namedAttribute(self.ctx, attr.key, attr_value);
         }
 
+        // Special handling for unit attributes - when value is just 'true'
+        // These are attributes like 'constant', 'dso_local', 'no_unwind' that are just flags
+        if (attr.value.value.type == .true_lit) {
+            const attr_value = mlir.c.mlirUnitAttrGet(self.ctx.ctx);
+            return mlir.namedAttribute(self.ctx, attr.key, attr_value);
+        }
+
         const attr_value = try self.buildAttributeValue(&attr.value);
         return mlir.namedAttribute(self.ctx, attr.key, attr_value);
     }
@@ -368,50 +407,59 @@ pub const Builder = struct {
                 const first = list.at(0);
                 // First element should be a type marker for "function"
                 if (first.type == .type and std.mem.eql(u8, first.data.type, "!function")) {
-                    // This is a function type - convert the list to a function_type
-                    // Parse it manually here
-                    if (list.len() < 3) return error.InvalidType;
+                    // Two possible formats:
+                    // 1. (!function !llvm.func<...>) - 2 elements, already in MLIR format
+                    // 2. (!function (inputs ...) (results ...)) - 3+ elements, explicit format
 
-                    const inputs_list_value = list.at(1);
-                    const results_list_value = list.at(2);
+                    if (list.len() == 2) {
+                        // Format 1: (!function !llvm.func<...>)
+                        // The second element is the actual type, just use it directly
+                        break :blk list.at(1);
+                    } else if (list.len() >= 3) {
+                        // Format 2: (!function (inputs ...) (results ...))
+                        const inputs_list_value = list.at(1);
+                        const results_list_value = list.at(2);
 
-                    if (inputs_list_value.type != .list or results_list_value.type != .list) {
+                        if (inputs_list_value.type != .list or results_list_value.type != .list) {
+                            return error.InvalidType;
+                        }
+
+                        const inputs_list = inputs_list_value.data.list;
+                        const results_list = results_list_value.data.list;
+
+                        // Skip "inputs" and "results" keywords and build types
+                        const num_inputs = if (inputs_list.len() > 0) inputs_list.len() - 1 else 0;
+                        const num_results = if (results_list.len() > 0) results_list.len() - 1 else 0;
+
+                        var input_types = try self.allocator.alloc(mlir.MlirType, num_inputs);
+                        defer self.allocator.free(input_types);
+
+                        for (0..num_inputs) |i| {
+                            const input_value = inputs_list.at(i + 1);
+                            input_types[i] = try self.buildTypeFromValue(input_value);
+                        }
+
+                        var result_types = try self.allocator.alloc(mlir.MlirType, num_results);
+                        defer self.allocator.free(result_types);
+
+                        for (0..num_results) |i| {
+                            const result_value = results_list.at(i + 1);
+                            result_types[i] = try self.buildTypeFromValue(result_value);
+                        }
+
+                        // Create function type directly
+                        const mlir_type = mlir.c.mlirFunctionTypeGet(
+                            self.ctx.ctx,
+                            @intCast(num_inputs),
+                            input_types.ptr,
+                            @intCast(num_results),
+                            result_types.ptr,
+                        );
+
+                        return mlir.c.mlirTypeAttrGet(mlir_type);
+                    } else {
                         return error.InvalidType;
                     }
-
-                    const inputs_list = inputs_list_value.data.list;
-                    const results_list = results_list_value.data.list;
-
-                    // Skip "inputs" and "results" keywords and build types
-                    const num_inputs = if (inputs_list.len() > 0) inputs_list.len() - 1 else 0;
-                    const num_results = if (results_list.len() > 0) results_list.len() - 1 else 0;
-
-                    var input_types = try self.allocator.alloc(mlir.MlirType, num_inputs);
-                    defer self.allocator.free(input_types);
-
-                    for (0..num_inputs) |i| {
-                        const input_value = inputs_list.at(i + 1);
-                        input_types[i] = try self.buildTypeFromValue(input_value);
-                    }
-
-                    var result_types = try self.allocator.alloc(mlir.MlirType, num_results);
-                    defer self.allocator.free(result_types);
-
-                    for (0..num_results) |i| {
-                        const result_value = results_list.at(i + 1);
-                        result_types[i] = try self.buildTypeFromValue(result_value);
-                    }
-
-                    // Create function type directly
-                    const mlir_type = mlir.c.mlirFunctionTypeGet(
-                        self.ctx.ctx,
-                        @intCast(num_inputs),
-                        input_types.ptr,
-                        @intCast(num_results),
-                        result_types.ptr,
-                    );
-
-                    return mlir.c.mlirTypeAttrGet(mlir_type);
                 }
             }
             break :blk value;
@@ -480,8 +528,50 @@ pub const Builder = struct {
         const attr_str = try self.serializeValueToMLIR(value);
         defer self.allocator.free(attr_str);
 
+        // Resolve attribute aliases in the string
+        const resolved_attr_str = try self.resolveAttributeAliases(attr_str);
+        defer self.allocator.free(resolved_attr_str);
+
         // Use MLIR's built-in attribute parser
-        return mlir.Attribute.parse(self.ctx, attr_str) catch error.InvalidAttribute;
+        return mlir.Attribute.parse(self.ctx, resolved_attr_str) catch error.InvalidAttribute;
+    }
+
+    /// Resolve attribute alias references in a string
+    /// Recursively expands #alias_name references with their definitions
+    fn resolveAttributeAliases(self: *Builder, input: []const u8) BuildError![]const u8 {
+        var result = std.ArrayList(u8){};
+        errdefer result.deinit(self.allocator);
+
+        var i: usize = 0;
+        while (i < input.len) {
+            // Look for '#' which starts an attribute alias reference
+            if (input[i] == '#') {
+                // Find the end of the identifier (skip the '#')
+                var j = i + 1;
+                while (j < input.len and (std.ascii.isAlphanumeric(input[j]) or input[j] == '_' or input[j] == '.')) : (j += 1) {}
+
+                const alias_name_with_hash = input[i..j];
+                const alias_name = input[i + 1 .. j]; // without the '#'
+
+                // Try to resolve the alias (stored without #)
+                if (self.attribute_alias_map.get(alias_name)) |definition| {
+                    // Recursively resolve aliases in the definition
+                    const resolved_def = try self.resolveAttributeAliases(definition);
+                    defer self.allocator.free(resolved_def);
+                    try result.appendSlice(self.allocator, resolved_def);
+                    i = j;
+                } else {
+                    // Not an alias, keep the original '#alias_name'
+                    try result.appendSlice(self.allocator, alias_name_with_hash);
+                    i = j;
+                }
+            } else {
+                try result.append(self.allocator, input[i]);
+                i += 1;
+            }
+        }
+
+        return result.toOwnedSlice(self.allocator);
     }
 
     /// Build a region

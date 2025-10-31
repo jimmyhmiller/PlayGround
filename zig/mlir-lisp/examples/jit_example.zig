@@ -56,7 +56,7 @@ pub fn main() !void {
     }
 
     // Parse to our AST
-    var p = mlir_lisp.Parser.init(allocator);
+    var p = mlir_lisp.Parser.init(allocator, "");
     var parsed_module = try p.parseModule(value);
     defer parsed_module.deinit();
 
@@ -135,7 +135,7 @@ pub fn main() !void {
             allocator.destroy(value2);
         }
 
-        var p2 = mlir_lisp.Parser.init(allocator);
+        var p2 = mlir_lisp.Parser.init(allocator, "");
         var parsed_module2 = try p2.parseModule(value2);
         defer parsed_module2.deinit();
 

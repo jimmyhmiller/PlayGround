@@ -15,6 +15,7 @@ pub const ValueType = @import("reader.zig").ValueType;
 pub const Parser = @import("parser.zig").Parser;
 pub const MlirModule = @import("parser.zig").MlirModule;
 pub const TypeAlias = @import("parser.zig").TypeAlias;
+pub const AttributeAlias = @import("parser.zig").AttributeAlias;
 pub const Operation = @import("parser.zig").Operation;
 pub const Region = @import("parser.zig").Region;
 pub const Block = @import("parser.zig").Block;

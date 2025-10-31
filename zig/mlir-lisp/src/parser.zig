@@ -30,9 +30,22 @@ pub const TypeAlias = struct {
     }
 };
 
-/// Top-level MLIR module containing type aliases and operations
+/// Attribute alias definition
+pub const AttributeAlias = struct {
+    name: []const u8, // e.g., "#alias_scope"
+    definition: []const u8, // opaque string e.g., "#llvm.alias_scope<...>"
+
+    pub fn deinit(self: *AttributeAlias, allocator: std.mem.Allocator) void {
+        // Strings are owned by the reader, so we don't free them
+        _ = self;
+        _ = allocator;
+    }
+};
+
+/// Top-level MLIR module containing aliases and operations
 pub const MlirModule = struct {
     type_aliases: []TypeAlias,
+    attribute_aliases: []AttributeAlias,
     operations: []Operation,
     allocator: std.mem.Allocator,
 
@@ -41,6 +54,10 @@ pub const MlirModule = struct {
             alias.deinit(self.allocator);
         }
         self.allocator.free(self.type_aliases);
+        for (self.attribute_aliases) |*alias| {
+            alias.deinit(self.allocator);
+        }
+        self.allocator.free(self.attribute_aliases);
         for (self.operations) |*op| {
             op.deinit(self.allocator);
         }
@@ -169,9 +186,74 @@ pub const AttrExpr = struct {
 /// Parser - converts Reader Values into typed AST
 pub const Parser = struct {
     allocator: std.mem.Allocator,
+    source: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator) Parser {
-        return Parser{ .allocator = allocator };
+    pub fn init(allocator: std.mem.Allocator, source: []const u8) Parser {
+        return Parser{
+            .allocator = allocator,
+            .source = source,
+        };
+    }
+
+    fn printErrorLocation(self: *const Parser, line: usize, column: usize) void {
+        if (line == 0 or column == 0) return;
+
+        // Find the line in the source
+        var current_line: usize = 1;
+        var line_start: usize = 0;
+        var i: usize = 0;
+
+        while (i < self.source.len) : (i += 1) {
+            if (current_line == line) {
+                // Find the end of this line
+                var line_end = i;
+                while (line_end < self.source.len and self.source[line_end] != '\n') : (line_end += 1) {}
+
+                // Print the line
+                const line_content = self.source[line_start..line_end];
+                std.debug.print("{s}\n", .{line_content});
+
+                // Print pointer to error location
+                var j: usize = 0;
+                while (j < column - 1) : (j += 1) {
+                    std.debug.print(" ", .{});
+                }
+                std.debug.print("^\n", .{});
+                return;
+            }
+
+            if (self.source[i] == '\n') {
+                current_line += 1;
+                line_start = i + 1;
+            }
+        }
+    }
+
+    /// Unescape a string literal by processing escape sequences
+    fn unescapeString(allocator: std.mem.Allocator, str: []const u8) ![]const u8 {
+        var result = std.ArrayList(u8){};
+        errdefer result.deinit(allocator);
+
+        var i: usize = 0;
+        while (i < str.len) : (i += 1) {
+            if (str[i] == '\\' and i + 1 < str.len) {
+                // Handle escape sequences
+                i += 1;
+                const escaped_char = switch (str[i]) {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '\\' => '\\',
+                    '"' => '"',
+                    else => str[i], // Unknown escape, keep as-is
+                };
+                try result.append(allocator, escaped_char);
+            } else {
+                try result.append(allocator, str[i]);
+            }
+        }
+
+        return result.toOwnedSlice(allocator);
     }
 
     /// Parse top-level MLIR module
@@ -188,13 +270,21 @@ pub const Parser = struct {
             return error.UnexpectedStructure;
         }
 
-        // Parse type aliases and operations
+        // Parse type aliases, attribute aliases, and operations
         var type_aliases = std.ArrayList(TypeAlias){};
         errdefer {
             for (type_aliases.items) |*alias| {
                 alias.deinit(self.allocator);
             }
             type_aliases.deinit(self.allocator);
+        }
+
+        var attribute_aliases = std.ArrayList(AttributeAlias){};
+        errdefer {
+            for (attribute_aliases.items) |*alias| {
+                alias.deinit(self.allocator);
+            }
+            attribute_aliases.deinit(self.allocator);
         }
 
         var operations = std.ArrayList(Operation){};
@@ -219,6 +309,9 @@ pub const Parser = struct {
             if (std.mem.eql(u8, item_name.data.atom, "type-alias")) {
                 const alias = try self.parseTypeAlias(item);
                 try type_aliases.append(self.allocator, alias);
+            } else if (std.mem.eql(u8, item_name.data.atom, "attribute-alias")) {
+                const alias = try self.parseAttributeAlias(item);
+                try attribute_aliases.append(self.allocator, alias);
             } else if (std.mem.eql(u8, item_name.data.atom, "operation")) {
                 const op = try self.parseOperation(item);
                 try operations.append(self.allocator, op);
@@ -227,18 +320,44 @@ pub const Parser = struct {
 
         return MlirModule{
             .type_aliases = try type_aliases.toOwnedSlice(self.allocator),
+            .attribute_aliases = try attribute_aliases.toOwnedSlice(self.allocator),
             .operations = try operations.toOwnedSlice(self.allocator),
             .allocator = self.allocator,
         };
     }
 
     /// Parse a type alias
-    pub fn parseTypeAlias(_: *Parser, value: *Value) ParseError!TypeAlias {
+    pub fn parseTypeAlias(self: *Parser, value: *Value) ParseError!TypeAlias {
         // Expect (type-alias TYPE_ID STRING)
         if (value.type != .list) return error.ExpectedList;
 
         const list = value.data.list;
-        if (list.len() != 3) return error.UnexpectedStructure;
+        if (list.len() != 3) {
+            std.debug.print("\nerror: Invalid type-alias structure\n", .{});
+            std.debug.print("Expected: (type-alias TYPE_ID STRING)\n", .{});
+            std.debug.print("Found: list with {} elements\n", .{list.len()});
+            if (list.len() > 0) {
+                std.debug.print("Structure: (", .{});
+                var i: usize = 0;
+                while (i < list.len() and i < 5) : (i += 1) {
+                    if (i > 0) std.debug.print(" ", .{});
+                    const item = list.at(i);
+                    switch (item.type) {
+                        .identifier => std.debug.print("{s}", .{item.data.atom}),
+                        .string => std.debug.print("\"{s}\"", .{item.data.atom}),
+                        .type => std.debug.print("!{s}", .{item.data.type}),
+                        else => std.debug.print("{s}", .{@tagName(item.type)}),
+                    }
+                }
+                if (list.len() > 5) std.debug.print(" ...", .{});
+                std.debug.print(")\n", .{});
+            }
+            std.debug.print("\nType aliases must have exactly 3 elements:\n", .{});
+            std.debug.print("  1. The keyword 'type-alias'\n", .{});
+            std.debug.print("  2. A type identifier (e.g., !my_type)\n", .{});
+            std.debug.print("  3. A string definition\n", .{});
+            return error.UnexpectedStructure;
+        }
 
         const first = list.at(0);
         if (first.type != .identifier) return error.ExpectedIdentifier;
@@ -259,9 +378,81 @@ pub const Parser = struct {
         // Get the definition (should be a string)
         const def = list.at(2);
         if (def.type != .string) return error.ExpectedIdentifier;
-        const definition = def.data.atom;
+        // String tokens include quotes - strip them and unescape
+        const raw_string = def.data.atom;
+        const stripped = if (raw_string.len >= 2) raw_string[1 .. raw_string.len - 1] else raw_string;
+        const definition = unescapeString(self.allocator, stripped) catch return error.OutOfMemory;
 
         return TypeAlias{
+            .name = name,
+            .definition = definition,
+        };
+    }
+
+    /// Parse an attribute alias
+    pub fn parseAttributeAlias(self: *Parser, value: *Value) ParseError!AttributeAlias {
+        // Expect (attribute-alias ATTR_ID STRING)
+        if (value.type != .list) return error.ExpectedList;
+
+        const list = value.data.list;
+        if (list.len() != 3) {
+            std.debug.print("\nerror: Invalid attribute-alias structure\n", .{});
+            std.debug.print("Expected: (attribute-alias ATTR_ID STRING)\n", .{});
+            std.debug.print("Found: list with {} elements\n", .{list.len()});
+            if (list.len() > 0) {
+                std.debug.print("Structure: (", .{});
+                var i: usize = 0;
+                while (i < list.len() and i < 5) : (i += 1) {
+                    if (i > 0) std.debug.print(" ", .{});
+                    const item = list.at(i);
+                    switch (item.type) {
+                        .identifier => std.debug.print("{s}", .{item.data.atom}),
+                        .string => std.debug.print("\"{s}\"", .{item.data.atom}),
+                        .attr_expr => std.debug.print("#{s}", .{item.data.attr_expr.data.atom}),
+                        else => std.debug.print("{s}", .{@tagName(item.type)}),
+                    }
+                }
+                if (list.len() > 5) std.debug.print(" ...", .{});
+                std.debug.print(")\n", .{});
+            }
+            std.debug.print("\nAttribute aliases must have exactly 3 elements:\n", .{});
+            std.debug.print("  1. The keyword 'attribute-alias'\n", .{});
+            std.debug.print("  2. An attribute identifier (e.g., #my_attr)\n", .{});
+            std.debug.print("  3. A string definition\n", .{});
+            return error.UnexpectedStructure;
+        }
+
+        const first = list.at(0);
+        if (first.type != .identifier) return error.ExpectedIdentifier;
+        if (!std.mem.eql(u8, first.data.atom, "attribute-alias")) {
+            return error.UnexpectedStructure;
+        }
+
+        // Get the attribute alias name (should be an attr_expr like #alias_scope)
+        const attr_name = list.at(1);
+        var name: []const u8 = undefined;
+        if (attr_name.type == .attr_expr) {
+            // attr_expr wraps an inner identifier with the name (without #)
+            // We store it without the # and handle that in resolution
+            const inner = attr_name.data.attr_expr;
+            if (inner.type != .identifier) return error.ExpectedIdentifier;
+            name = inner.data.atom;
+        } else if (attr_name.type == .identifier) {
+            // Fallback for identifiers (though # should create attr_expr)
+            name = attr_name.data.atom;
+        } else {
+            return error.ExpectedIdentifier;
+        }
+
+        // Get the definition (should be a string)
+        const def = list.at(2);
+        if (def.type != .string) return error.ExpectedIdentifier;
+        // String tokens include quotes - strip them and unescape
+        const raw_string = def.data.atom;
+        const stripped = if (raw_string.len >= 2) raw_string[1 .. raw_string.len - 1] else raw_string;
+        const definition = unescapeString(self.allocator, stripped) catch return error.OutOfMemory;
+
+        return AttributeAlias{
             .name = name,
             .definition = definition,
         };
@@ -432,7 +623,25 @@ pub const Parser = struct {
             const key = map.at(i);
             const val = map.at(i + 1);
 
-            if (key.type != .keyword) return error.ExpectedKeyword;
+            if (key.type != .keyword) {
+                const key_str = if (key.type == .identifier or key.type == .keyword) key.data.atom else "(complex value)";
+                std.debug.print("\nerror: Expected keyword in attribute map, but found {s} '{s}'\n", .{
+                    @tagName(key.type),
+                    key_str,
+                });
+                std.debug.print("Attribute maps must use keywords (starting with ':') as keys\n", .{});
+                std.debug.print("Map has {} elements, currently at index {}\n", .{map.len(), i});
+                std.debug.print("Previous elements:\n", .{});
+                var j: usize = 0;
+                while (j < i and j < 10) : (j += 2) {
+                    const prev_key = map.at(j);
+                    const prev_val = map.at(j + 1);
+                    const pk_str = if (prev_key.type == .identifier or prev_key.type == .keyword) prev_key.data.atom else "(complex)";
+                    const pv_str = if (prev_val.type == .identifier or prev_val.type == .keyword) prev_val.data.atom else @tagName(prev_val.type);
+                    std.debug.print("  [{}: {s} => {s}]\n", .{j/2, pk_str, pv_str});
+                }
+                return error.ExpectedKeyword;
+            }
 
             // Convert keyword to name (strip the leading colon)
             const key_name = key.keywordToName();
