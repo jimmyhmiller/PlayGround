@@ -38,6 +38,7 @@ test "executor - pass manager creation and pipeline" {
     var ctx = try mlir_lisp.mlir.Context.create();
     defer ctx.destroy();
     ctx.registerAllDialects();
+    mlir_lisp.mlir.Context.registerAllPasses();
 
     // Create a simple module
     const loc = mlir_lisp.mlir.Location.unknown(&ctx);
@@ -48,9 +49,9 @@ test "executor - pass manager creation and pipeline" {
     var pm = try mlir_lisp.mlir.PassManager.create(&ctx);
     defer pm.destroy();
 
-    // Try to add a simple pipeline (may fail if passes aren't available, which is ok)
-    pm.addPipeline("canonicalize") catch |err| {
-        // Expected to fail if conversion passes aren't linked
-        try std.testing.expect(err == error.PassPipelineAddFailed);
-    };
+    // Add a simple pipeline - should succeed now that passes are registered
+    try pm.addPipeline("builtin.module(canonicalize)");
+
+    // Run the pass manager on the module
+    try pm.run(&mod);
 }

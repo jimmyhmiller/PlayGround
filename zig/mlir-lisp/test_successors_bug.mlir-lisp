@@ -1,0 +1,47 @@
+(mlir
+  (operation
+    (name builtin.module)
+    (regions
+      (region
+        (block
+          (arguments [])
+          (operation
+            (name func.func)
+            (attributes {:function_type (!function (inputs i1) (results i64)) :sym_name @test_branch})
+            (regions
+              (region
+                (block
+                  (arguments [[%arg0 i1]])
+                  (operation
+                    (name cf.cond_br)
+                    (operand-uses %arg0)
+                    (successors
+                      (successor ^bb1)
+                      (successor ^bb2))))
+                (block [^bb1]
+                  (arguments [])
+                  (operation
+                    (name arith.constant)
+                    (result-bindings [%0])
+                    (result-types i64)
+                    (attributes {:value (: 42 i64)}))
+                  (operation
+                    (name cf.br)
+                    (successors
+                      (successor ^bb3))))
+                (block [^bb2]
+                  (arguments [])
+                  (operation
+                    (name arith.constant)
+                    (result-bindings [%1])
+                    (result-types i64)
+                    (attributes {:value (: 0 i64)}))
+                  (operation
+                    (name cf.br)
+                    (successors
+                      (successor ^bb3))))
+                (block [^bb3]
+                  (arguments [[%2 i64]])
+                  (operation
+                    (name func.return)
+                    (operand-uses %2))))))))))))

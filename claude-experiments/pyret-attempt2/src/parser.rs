@@ -219,40 +219,12 @@ impl Parser {
         // Start with a primary expression
         let mut left = self.parse_prim_expr()?;
 
-        // Check for postfix operators (function application and dot access)
-        // These can be chained together, e.g., obj.foo().bar()
+        // Check for postfix operators (function application, dot access, and bracket access)
+        // These can be chained together, e.g., obj.foo()[0].bar()
         loop {
             if self.matches(&TokenType::ParenNoSpace) {
                 // Function application (no whitespace before paren)
                 left = self.parse_app_expr(left)?;
-            } else if self.matches(&TokenType::ParenSpace) && matches!(left, Expr::SId { .. } | Expr::SApp { .. }) {
-                // Juxtaposition application: f (x) means f applied to (x)
-                let arg = self.parse_prim_expr()?;
-
-                let start_loc = match &left {
-                    Expr::SId { l, .. } => l.clone(),
-                    Expr::SApp { l, .. } => l.clone(),
-                    _ => self.current_loc(),
-                };
-
-                let end_loc = match &arg {
-                    Expr::SParen { l, .. } => l.clone(),
-                    _ => self.current_loc(),
-                };
-
-                left = Expr::SApp {
-                    l: Loc::new(
-                        self.file_name.clone(),
-                        start_loc.start_line,
-                        start_loc.start_column,
-                        start_loc.start_char,
-                        end_loc.end_line,
-                        end_loc.end_column,
-                        end_loc.end_char,
-                    ),
-                    _fun: Box::new(left),
-                    args: vec![Box::new(arg)],
-                };
             } else if self.matches(&TokenType::Dot) {
                 // Dot access
                 let _dot_token = self.expect(TokenType::Dot)?;
@@ -266,8 +238,9 @@ impl Parser {
                     Expr::SOp { l, .. } => l.clone(),
                     Expr::SParen { l, .. } => l.clone(),
                     Expr::SApp { l, .. } => l.clone(),
-                    Expr::SArray { l, .. } => l.clone(),
+                    Expr::SConstruct { l, .. } => l.clone(),
                     Expr::SDot { l, .. } => l.clone(),
+                    Expr::SBracket { l, .. } => l.clone(),
                     _ => self.current_loc(),
                 };
 
@@ -284,6 +257,9 @@ impl Parser {
                     obj: Box::new(left),
                     field: field_token.value.clone(),
                 };
+            } else if self.matches(&TokenType::LBrack) {
+                // Bracket access
+                left = self.parse_bracket_expr(left)?;
             } else {
                 // No more postfix operators
                 break;
@@ -302,33 +278,6 @@ impl Parser {
             loop {
                 if self.matches(&TokenType::ParenNoSpace) {
                     right = self.parse_app_expr(right)?;
-                } else if self.matches(&TokenType::ParenSpace) && matches!(right, Expr::SId { .. } | Expr::SApp { .. }) {
-                    let arg = self.parse_prim_expr()?;
-
-                    let start_loc = match &right {
-                        Expr::SId { l, .. } => l.clone(),
-                        Expr::SApp { l, .. } => l.clone(),
-                        _ => self.current_loc(),
-                    };
-
-                    let end_loc = match &arg {
-                        Expr::SParen { l, .. } => l.clone(),
-                        _ => self.current_loc(),
-                    };
-
-                    right = Expr::SApp {
-                        l: Loc::new(
-                            self.file_name.clone(),
-                            start_loc.start_line,
-                            start_loc.start_column,
-                            start_loc.start_char,
-                            end_loc.end_line,
-                            end_loc.end_column,
-                            end_loc.end_char,
-                        ),
-                        _fun: Box::new(right),
-                        args: vec![Box::new(arg)],
-                    };
                 } else if self.matches(&TokenType::Dot) {
                     let _dot_token = self.expect(TokenType::Dot)?;
                     let field_token = self.expect(TokenType::Name)?;
@@ -341,8 +290,9 @@ impl Parser {
                         Expr::SOp { l, .. } => l.clone(),
                         Expr::SParen { l, .. } => l.clone(),
                         Expr::SApp { l, .. } => l.clone(),
-                        Expr::SArray { l, .. } => l.clone(),
+                        Expr::SConstruct { l, .. } => l.clone(),
                         Expr::SDot { l, .. } => l.clone(),
+                        Expr::SBracket { l, .. } => l.clone(),
                         _ => self.current_loc(),
                     };
 
@@ -359,6 +309,9 @@ impl Parser {
                         obj: Box::new(right),
                         field: field_token.value.clone(),
                     };
+                } else if self.matches(&TokenType::LBrack) {
+                    // Bracket access
+                    right = self.parse_bracket_expr(right)?;
                 } else {
                     break;
                 }
@@ -384,7 +337,7 @@ impl Parser {
                 Expr::SOp { l, .. } => l.clone(),
                 Expr::SParen { l, .. } => l.clone(),
                 Expr::SApp { l, .. } => l.clone(),
-                Expr::SArray { l, .. } => l.clone(),
+                Expr::SConstruct { l, .. } => l.clone(),
                 Expr::SDot { l, .. } => l.clone(),
                 _ => self.current_loc(),
             };
@@ -398,7 +351,7 @@ impl Parser {
                 Expr::SOp { l, .. } => l.clone(),
                 Expr::SParen { l, .. } => l.clone(),
                 Expr::SApp { l, .. } => l.clone(),
-                Expr::SArray { l, .. } => l.clone(),
+                Expr::SConstruct { l, .. } => l.clone(),
                 Expr::SDot { l, .. } => l.clone(),
                 _ => self.current_loc(),
             };
@@ -422,6 +375,88 @@ impl Parser {
             };
         }
 
+        // Check for check operators (is, raises, satisfies, violates)
+        // These have lower precedence than binary operators
+        if self.is_check_op() {
+            let op = self.parse_check_op()?;
+
+            // Parse the right-hand side (if needed)
+            // Some check operators may not have a right side (e.g., "raises" without specific error)
+            let right = if !self.is_at_end() && !matches!(self.peek().token_type, TokenType::Eof) {
+                Some(Box::new(self.parse_prim_expr()?))
+            } else {
+                None
+            };
+
+            // Get location from left expression
+            let start_loc = match &left {
+                Expr::SNum { l, .. } => l.clone(),
+                Expr::SBool { l, .. } => l.clone(),
+                Expr::SStr { l, .. } => l.clone(),
+                Expr::SId { l, .. } => l.clone(),
+                Expr::SOp { l, .. } => l.clone(),
+                Expr::SParen { l, .. } => l.clone(),
+                Expr::SApp { l, .. } => l.clone(),
+                Expr::SConstruct { l, .. } => l.clone(),
+                Expr::SDot { l, .. } => l.clone(),
+                Expr::SBracket { l, .. } => l.clone(),
+                _ => self.current_loc(),
+            };
+
+            // Get end location from right expression if it exists, otherwise from operator
+            let end_loc = if let Some(ref right_expr) = right {
+                match right_expr.as_ref() {
+                    Expr::SNum { l, .. } => l.clone(),
+                    Expr::SBool { l, .. } => l.clone(),
+                    Expr::SStr { l, .. } => l.clone(),
+                    Expr::SId { l, .. } => l.clone(),
+                    Expr::SOp { l, .. } => l.clone(),
+                    Expr::SParen { l, .. } => l.clone(),
+                    Expr::SApp { l, .. } => l.clone(),
+                    Expr::SConstruct { l, .. } => l.clone(),
+                    Expr::SDot { l, .. } => l.clone(),
+                    Expr::SBracket { l, .. } => l.clone(),
+                    _ => self.current_loc(),
+                }
+            } else {
+                // If no right expression, use operator location
+                match &op {
+                    CheckOp::SOpIs { l } => l.clone(),
+                    CheckOp::SOpIsRoughly { l } => l.clone(),
+                    CheckOp::SOpIsNot { l } => l.clone(),
+                    CheckOp::SOpIsNotRoughly { l } => l.clone(),
+                    CheckOp::SOpIsOp { l, .. } => l.clone(),
+                    CheckOp::SOpIsNotOp { l, .. } => l.clone(),
+                    CheckOp::SOpSatisfies { l } => l.clone(),
+                    CheckOp::SOpSatisfiesNot { l } => l.clone(),
+                    CheckOp::SOpRaises { l } => l.clone(),
+                    CheckOp::SOpRaisesOther { l } => l.clone(),
+                    CheckOp::SOpRaisesNot { l } => l.clone(),
+                    CheckOp::SOpRaisesSatisfies { l } => l.clone(),
+                    CheckOp::SOpRaisesViolates { l } => l.clone(),
+                }
+            };
+
+            let loc = Loc::new(
+                self.file_name.clone(),
+                start_loc.start_line,
+                start_loc.start_column,
+                start_loc.start_char,
+                end_loc.end_line,
+                end_loc.end_column,
+                end_loc.end_char,
+            );
+
+            left = Expr::SCheckTest {
+                l: loc,
+                op,
+                refinement: None,
+                left: Box::new(left),
+                right,
+                cause: None,
+            };
+        }
+
         Ok(left)
     }
 
@@ -437,7 +472,7 @@ impl Parser {
             TokenType::String => self.parse_str(),
             TokenType::Name => self.parse_id_expr(),
             TokenType::ParenSpace | TokenType::LParen => self.parse_paren_expr(),
-            TokenType::LBrack => self.parse_array_expr(),
+            TokenType::LBrack => self.parse_construct_expr(),
             _ => Err(ParseError::unexpected(token)),
         }
     }
@@ -669,6 +704,23 @@ impl Parser {
         )
     }
 
+    /// Check if current token is a check operator (is, raises, satisfies, violates)
+    fn is_check_op(&self) -> bool {
+        matches!(
+            self.peek().token_type,
+            TokenType::Is
+                | TokenType::IsRoughly
+                | TokenType::IsNot
+                | TokenType::IsNotRoughly
+                | TokenType::Satisfies
+                | TokenType::Violates
+                | TokenType::Raises
+                | TokenType::RaisesOtherThan
+                | TokenType::RaisesSatisfies
+                | TokenType::RaisesViolates
+        )
+    }
+
     /// Parse a binary operator token and return the operator name
     fn parse_binop(&mut self) -> ParseResult<String> {
         let token = self.peek().clone();
@@ -695,6 +747,36 @@ impl Parser {
         Ok(op.to_string())
     }
 
+    /// Parse a check operator token and return CheckOp enum
+    fn parse_check_op(&mut self) -> ParseResult<CheckOp> {
+        let token = self.advance().clone();
+        let l = Loc::new(
+            self.file_name.clone(),
+            token.location.start_line,
+            token.location.start_col,
+            token.location.start_pos,
+            token.location.end_line,
+            token.location.end_col,
+            token.location.end_pos,
+        );
+
+        let op = match token.token_type {
+            TokenType::Is => CheckOp::SOpIs { l },
+            TokenType::IsRoughly => CheckOp::SOpIsRoughly { l },
+            TokenType::IsNot => CheckOp::SOpIsNot { l },
+            TokenType::IsNotRoughly => CheckOp::SOpIsNotRoughly { l },
+            TokenType::Satisfies => CheckOp::SOpSatisfies { l },
+            TokenType::Violates => CheckOp::SOpSatisfiesNot { l }, // violates = satisfies-not
+            TokenType::Raises => CheckOp::SOpRaises { l },
+            TokenType::RaisesOtherThan => CheckOp::SOpRaisesOther { l },
+            TokenType::RaisesSatisfies => CheckOp::SOpRaisesSatisfies { l },
+            TokenType::RaisesViolates => CheckOp::SOpRaisesViolates { l },
+            _ => return Err(ParseError::unexpected(token)),
+        };
+
+        Ok(op)
+    }
+
     /// paren-expr: LPAREN expr RPAREN | PARENSPACE expr RPAREN
     /// Parenthesized expression (with whitespace before paren)
     fn parse_paren_expr(&mut self) -> ParseResult<Expr> {
@@ -716,25 +798,79 @@ impl Parser {
 
     /// array-expr: LBRACK (expr COMMA)* RBRACK
     /// Array literal expression
-    fn parse_array_expr(&mut self) -> ParseResult<Expr> {
+    /// construct-expr: LBRACK construct-modifier binop-expr COLON trailing-opt-comma-binops RBRACK
+    /// Construct expressions like [list: 1, 2, 3] or [lazy set: x, y]
+    fn parse_construct_expr(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::LBrack)?;
 
-        // Handle empty array
-        if self.matches(&TokenType::RBrack) {
-            let end = self.expect(TokenType::RBrack)?;
-            return Ok(Expr::SArray {
-                l: self.make_loc(&start, &end),
-                values: Vec::new(),
-            });
-        }
+        // Check for optional LAZY modifier
+        let modifier = if self.matches(&TokenType::Lazy) {
+            self.advance();
+            ConstructModifier::SConstructLazy
+        } else {
+            ConstructModifier::SConstructNormal
+        };
 
-        // Parse comma-separated expressions
-        let values = self.parse_comma_list(|p| p.parse_expr())?;
+        // Parse the constructor expression (like "list", "set", etc.)
+        let constructor = self.parse_expr()?;
+
+        // Expect colon
+        self.expect(TokenType::Colon)?;
+
+        // Parse comma-separated values (can be empty)
+        let values = if self.matches(&TokenType::RBrack) {
+            Vec::new()
+        } else {
+            self.parse_comma_list(|p| p.parse_expr())?
+        };
+
         let end = self.expect(TokenType::RBrack)?;
 
-        Ok(Expr::SArray {
+        Ok(Expr::SConstruct {
             l: self.make_loc(&start, &end),
+            modifier,
+            constructor: Box::new(constructor),
             values: values.into_iter().map(Box::new).collect(),
+        })
+    }
+
+    /// bracket-expr: expr LBRACK binop-expr RBRACK
+    /// Bracket access expression like arr[0] or dict["key"]
+    fn parse_bracket_expr(&mut self, obj: Expr) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::LBrack)?;
+
+        // Parse the field expression (can be any expression)
+        let field = self.parse_expr()?;
+
+        let end = self.expect(TokenType::RBrack)?;
+
+        // Get location from obj expression
+        let obj_loc = match &obj {
+            Expr::SNum { l, .. } => l.clone(),
+            Expr::SBool { l, .. } => l.clone(),
+            Expr::SStr { l, .. } => l.clone(),
+            Expr::SId { l, .. } => l.clone(),
+            Expr::SOp { l, .. } => l.clone(),
+            Expr::SParen { l, .. } => l.clone(),
+            Expr::SApp { l, .. } => l.clone(),
+            Expr::SConstruct { l, .. } => l.clone(),
+            Expr::SDot { l, .. } => l.clone(),
+            Expr::SBracket { l, .. } => l.clone(),
+            _ => self.current_loc(),
+        };
+
+        Ok(Expr::SBracket {
+            l: Loc::new(
+                self.file_name.clone(),
+                obj_loc.start_line,
+                obj_loc.start_column,
+                obj_loc.start_char,
+                end.location.end_line,
+                end.location.end_col,
+                end.location.end_pos,
+            ),
+            obj: Box::new(obj),
+            field: Box::new(field),
         })
     }
 
@@ -750,8 +886,9 @@ impl Parser {
             Expr::SOp { l, .. } => l.clone(),
             Expr::SParen { l, .. } => l.clone(),
             Expr::SApp { l, .. } => l.clone(),
-            Expr::SArray { l, .. } => l.clone(),
+            Expr::SConstruct { l, .. } => l.clone(),
             Expr::SDot { l, .. } => l.clone(),
+            Expr::SBracket { l, .. } => l.clone(),
             _ => self.current_loc(),
         };
 

@@ -74,6 +74,49 @@ pub fn build(b: *std.Build) void {
         }
     }.link;
 
+    // Helper function to fix duplicate rpaths on macOS for test executables
+    const fixRpathForTest = struct {
+        fn fix(builder: *std.Build, test_artifact: *std.Build.Step.Compile, tgt: std.Build.ResolvedTarget) *std.Build.Step.Run {
+            const run_step = builder.addRunArtifact(test_artifact);
+
+            if (tgt.result.os.tag == .macos) {
+                // Create a wrapper script that fixes rpaths before running the test
+                const fix_and_run = builder.addSystemCommand(&[_][]const u8{
+                    "sh",
+                    "-c",
+                });
+
+                const test_path = builder.getInstallPath(.bin, test_artifact.name);
+                const cmd = builder.fmt(
+                    \\# Fix duplicate rpaths
+                    \\all_rpaths=$(otool -l {s} 2>/dev/null | grep -A 2 LC_RPATH | grep path | awk '{{print $2}}')
+                    \\for rpath in $all_rpaths; do
+                    \\    count=$(echo "$all_rpaths" | grep -c "^$rpath$")
+                    \\    if [ "$count" -gt 1 ]; then
+                    \\        while [ "$count" -gt 1 ]; do
+                    \\            install_name_tool -delete_rpath "$rpath" {s} 2>/dev/null || true
+                    \\            count=$((count - 1))
+                    \\        done
+                    \\    fi
+                    \\done
+                    \\# Run the test
+                    \\exec {s} "$@"
+                , .{test_path, test_path, test_path});
+                fix_and_run.addArg(cmd);
+
+                // Pass through any test arguments
+                if (builder.args) |args| {
+                    fix_and_run.addArgs(args);
+                }
+
+                fix_and_run.step.dependOn(&builder.addInstallArtifact(test_artifact, .{}).step);
+                return fix_and_run;
+            }
+
+            return run_step;
+        }
+    }.fix;
+
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Zig modules are the preferred way of making Zig code available to consumers.
@@ -220,7 +263,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(mod_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the test executable.
-    const run_mod_tests = b.addRunArtifact(mod_tests);
+    const run_mod_tests = fixRpathForTest(b, mod_tests, target);
 
     // Creates an executable that will run `test` blocks from the executable's
     // root module. Note that test executables only test one module at a time,
@@ -231,7 +274,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(exe_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the second test executable.
-    const run_exe_tests = b.addRunArtifact(exe_tests);
+    const run_exe_tests = fixRpathForTest(b, exe_tests, target);
 
     // Creates a test executable for test/main_test.zig with access to the main module
     const main_tests = b.addTest(.{
@@ -246,7 +289,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // A run step that will run the main test executable.
-    const run_main_tests = b.addRunArtifact(main_tests);
+    const run_main_tests = fixRpathForTest(b, main_tests, target);
 
     // Creates a test executable for grammar examples
     const grammar_tests = b.addTest(.{
@@ -261,7 +304,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // A run step that will run the grammar test executable.
-    const run_grammar_tests = b.addRunArtifact(grammar_tests);
+    const run_grammar_tests = fixRpathForTest(b, grammar_tests, target);
 
     // Creates a test executable for MLIR integration
     const mlir_tests = b.addTest(.{
@@ -277,7 +320,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(mlir_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the MLIR test executable.
-    const run_mlir_tests = b.addRunArtifact(mlir_tests);
+    const run_mlir_tests = fixRpathForTest(b, mlir_tests, target);
 
     // Creates a test executable for parser
     const parser_tests = b.addTest(.{
@@ -293,7 +336,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(parser_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the parser test executable.
-    const run_parser_tests = b.addRunArtifact(parser_tests);
+    const run_parser_tests = fixRpathForTest(b, parser_tests, target);
 
     // Creates a test executable for builder
     const builder_tests = b.addTest(.{
@@ -309,7 +352,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(builder_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the builder test executable.
-    const run_builder_tests = b.addRunArtifact(builder_tests);
+    const run_builder_tests = fixRpathForTest(b, builder_tests, target);
 
     // Creates a test executable for printer
     const printer_tests = b.addTest(.{
@@ -325,7 +368,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(printer_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the printer test executable.
-    const run_printer_tests = b.addRunArtifact(printer_tests);
+    const run_printer_tests = fixRpathForTest(b, printer_tests, target);
 
     // Creates a test executable for printer validation
     const printer_validation_tests = b.addTest(.{
@@ -341,7 +384,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(printer_validation_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the printer validation test executable.
-    const run_printer_validation_tests = b.addRunArtifact(printer_validation_tests);
+    const run_printer_validation_tests = fixRpathForTest(b, printer_validation_tests, target);
 
     // Creates a test executable for executor
     const executor_tests = b.addTest(.{
@@ -357,7 +400,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(executor_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the executor test executable.
-    const run_executor_tests = b.addRunArtifact(executor_tests);
+    const run_executor_tests = fixRpathForTest(b, executor_tests, target);
 
     // Creates a test executable for type builder
     const type_builder_tests = b.addTest(.{
@@ -373,7 +416,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(type_builder_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the type builder test executable.
-    const run_type_builder_tests = b.addRunArtifact(type_builder_tests);
+    const run_type_builder_tests = fixRpathForTest(b, type_builder_tests, target);
 
     // Creates a test executable for REPL integration tests
     const repl_tests = b.addTest(.{
@@ -389,7 +432,39 @@ pub fn build(b: *std.Build) void {
     linkMLIR(repl_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the REPL test executable.
-    const run_repl_tests = b.addRunArtifact(repl_tests);
+    const run_repl_tests = fixRpathForTest(b, repl_tests, target);
+
+    // Creates a test executable for reader print round-trip tests
+    const reader_roundtrip_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/reader_print_roundtrip_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(reader_roundtrip_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the reader roundtrip test executable.
+    const run_reader_roundtrip_tests = fixRpathForTest(b, reader_roundtrip_tests, target);
+
+    // Creates a test executable for tokenizer
+    const tokenizer_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/tokenizer_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(tokenizer_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the tokenizer test executable.
+    const run_tokenizer_tests = fixRpathForTest(b, tokenizer_tests, target);
 
     // Creates an executable to test the printer manually
     const test_printer_exe = b.addExecutable(.{
@@ -467,6 +542,55 @@ pub fn build(b: *std.Build) void {
     const fib_jit_example_step = b.step("fib-jit-example", "Run fibonacci JIT compilation demo");
     fib_jit_example_step.dependOn(&run_fib_jit_example.step);
 
+    // Creates an executable to test JIT compilation with runtime symbol resolution
+    const temp_testing_mlir_jit_exe = b.addExecutable(.{
+        .name = "temp_testing_mlir_jit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/temp_testing_mlir_jit.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(temp_testing_mlir_jit_exe, mlir_include_path, mlir_lib_path);
+    b.installArtifact(temp_testing_mlir_jit_exe);
+
+    // Workaround for Zig issue #24349: Remove duplicate rpaths on macOS
+    if (target.result.os.tag == .macos) {
+        const fix_rpath_temp_jit = b.addSystemCommand(&[_][]const u8{
+            "sh",
+            "-c",
+        });
+        const cmd_temp_jit = b.fmt(
+            \\# Get unique rpaths and remove duplicates
+            \\unique_rpaths=$(otool -l zig-out/bin/temp_testing_mlir_jit | grep -A 2 LC_RPATH | grep path | awk '{{print $2}}' | sort -u)
+            \\all_rpaths=$(otool -l zig-out/bin/temp_testing_mlir_jit | grep -A 2 LC_RPATH | grep path | awk '{{print $2}}')
+            \\# For each rpath, count occurrences and remove duplicates
+            \\for rpath in $all_rpaths; do
+            \\    count=$(echo "$all_rpaths" | grep -c "^$rpath$")
+            \\    if [ "$count" -gt 1 ]; then
+            \\        # Remove all but one occurrence
+            \\        while [ "$count" -gt 1 ]; do
+            \\            install_name_tool -delete_rpath "$rpath" zig-out/bin/temp_testing_mlir_jit 2>/dev/null || true
+            \\            count=$((count - 1))
+            \\        done
+            \\    fi
+            \\done
+        , .{});
+        fix_rpath_temp_jit.addArg(cmd_temp_jit);
+        fix_rpath_temp_jit.step.dependOn(&b.addInstallArtifact(temp_testing_mlir_jit_exe, .{}).step);
+        b.getInstallStep().dependOn(&fix_rpath_temp_jit.step);
+    }
+
+    const run_temp_testing_mlir_jit = b.addRunArtifact(temp_testing_mlir_jit_exe);
+    if (b.args) |args| {
+        run_temp_testing_mlir_jit.addArgs(args);
+    }
+    const temp_testing_mlir_jit_step = b.step("temp-jit", "Run temporary JIT testing with runtime symbols");
+    temp_testing_mlir_jit_step.dependOn(&run_temp_testing_mlir_jit.step);
+
     // Creates an executable to test round-trip parsing/printing
     // NOTE: Commented out because test_roundtrip_funccall.zig was removed
     // const roundtrip_test_exe = b.addExecutable(.{
@@ -503,6 +627,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_executor_tests.step);
     test_step.dependOn(&run_type_builder_tests.step);
     test_step.dependOn(&run_repl_tests.step);
+    test_step.dependOn(&run_reader_roundtrip_tests.step);
+    test_step.dependOn(&run_tokenizer_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

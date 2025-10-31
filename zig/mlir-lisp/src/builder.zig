@@ -10,6 +10,7 @@ pub const BuildError = error{
     InvalidType,
     InvalidAttribute,
     UnknownValue,
+    UnknownBlock,
     InvalidStructure,
     ModuleCreationFailed,
     InvalidModuleOperation,
@@ -24,6 +25,9 @@ pub const Builder = struct {
     /// Maps SSA value IDs (%c0, %sum, etc.) to MLIR values
     value_map: std.StringHashMap(mlir.MlirValue),
 
+    /// Maps block IDs (^bb1, ^bb2, etc.) to MLIR blocks (scoped to current region)
+    block_map: std.StringHashMap(mlir.MlirBlock),
+
     /// Maps type alias names (!my_vec, etc.) to their type definitions
     type_alias_map: std.StringHashMap([]const u8),
 
@@ -36,6 +40,7 @@ pub const Builder = struct {
             .ctx = ctx,
             .location = mlir.Location.unknown(ctx),
             .value_map = std.StringHashMap(mlir.MlirValue).init(allocator),
+            .block_map = std.StringHashMap(mlir.MlirBlock).init(allocator),
             .type_alias_map = std.StringHashMap([]const u8).init(allocator),
             .attribute_alias_map = std.StringHashMap([]const u8).init(allocator),
         };
@@ -43,6 +48,7 @@ pub const Builder = struct {
 
     pub fn deinit(self: *Builder) void {
         self.value_map.deinit();
+        self.block_map.deinit();
         self.type_alias_map.deinit();
         self.attribute_alias_map.deinit();
     }
@@ -133,7 +139,11 @@ pub const Builder = struct {
         // Parse successors
         var successors = std.ArrayList(mlir.MlirBlock){};
         defer successors.deinit(self.allocator);
-        // TODO: Implement successor lookups when we need control flow
+
+        for (operation.successors) |successor| {
+            const block = self.block_map.get(successor.block_id) orelse return error.UnknownBlock;
+            try successors.append(self.allocator, block);
+        }
 
         // Create the operation
         const mlir_op = mlir.Operation.create(
@@ -578,16 +588,39 @@ pub const Builder = struct {
     fn buildRegion(self: *Builder, region: *const parser.Region) BuildError!mlir.MlirRegion {
         const mlir_region = mlir.Region.create();
 
-        for (region.blocks) |*block| {
-            const mlir_block = try self.buildBlock(block);
-            mlir.Region.appendBlock(mlir_region, mlir_block);
+        // Save the current block_map state to restore after building this region
+        // (block labels are scoped to regions)
+        const saved_block_map = self.block_map;
+        self.block_map = std.StringHashMap(mlir.MlirBlock).init(self.allocator);
+        defer {
+            self.block_map.deinit();
+            self.block_map = saved_block_map;
+        }
+
+        // Phase 1: Create all blocks and register their labels
+        var mlir_blocks = try self.allocator.alloc(mlir.MlirBlock, region.blocks.len);
+        defer self.allocator.free(mlir_blocks);
+
+        for (region.blocks, 0..) |*block, i| {
+            mlir_blocks[i] = try self.createBlockWithArguments(block);
+            mlir.Region.appendBlock(mlir_region, mlir_blocks[i]);
+
+            // Register block label if it has one
+            if (block.label) |label| {
+                try self.block_map.put(label, mlir_blocks[i]);
+            }
+        }
+
+        // Phase 2: Build operations in each block (now successors can be resolved)
+        for (region.blocks, 0..) |*block, i| {
+            try self.buildBlockOperations(block, mlir_blocks[i]);
         }
 
         return mlir_region;
     }
 
-    /// Build a block
-    fn buildBlock(self: *Builder, block: *const parser.Block) BuildError!mlir.MlirBlock {
+    /// Create a block with its arguments (but without operations)
+    fn createBlockWithArguments(self: *Builder, block: *const parser.Block) BuildError!mlir.MlirBlock {
         // Parse block arguments
         var arg_types = std.ArrayList(mlir.MlirType){};
         defer arg_types.deinit(self.allocator);
@@ -610,12 +643,14 @@ pub const Builder = struct {
             try self.value_map.put(arg.value_id, value);
         }
 
-        // Build operations in the block
+        return mlir_block;
+    }
+
+    /// Build operations in a block (called after all blocks in region are created)
+    fn buildBlockOperations(self: *Builder, block: *const parser.Block, mlir_block: mlir.MlirBlock) BuildError!void {
         for (block.operations) |*operation| {
             const mlir_op = try self.buildOperation(operation);
             mlir.Block.appendOperation(mlir_block, mlir_op);
         }
-
-        return mlir_block;
     }
 };

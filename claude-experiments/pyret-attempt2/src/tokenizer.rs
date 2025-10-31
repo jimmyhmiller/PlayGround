@@ -1061,6 +1061,8 @@ impl Tokenizer {
             ')' => {
                 self.advance();
                 let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                // After ), paren should be treated like after a name/number (can be followed by function call)
+                self.paren_is_for_exp = false;
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::RParen, ")".to_string(), loc))
             }

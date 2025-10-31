@@ -1,4 +1,4 @@
-use pyret_attempt2::{Parser, Expr, Name};
+use pyret_attempt2::{Parser, Expr, Name, ConstructModifier};
 use pyret_attempt2::tokenizer::Tokenizer;
 
 /// Helper to parse a string into an expression
@@ -460,44 +460,12 @@ fn test_parse_function_call_with_expr_args() {
 
 #[test]
 fn test_whitespace_paren_space() {
-    // "f (x)" with space should parse as f applied to parenthesized expression
-    // This is: SApp { fun: f, args: [SParen(x)] }
-    let expr = parse_expr("f (x)").expect("Failed to parse");
-
-    match expr {
-        Expr::SApp { _fun, args, .. } => {
-            // Function should be 'f'
-            match *_fun {
-                Expr::SId { id, .. } => {
-                    match id {
-                        Name::SName { s, .. } => assert_eq!(s, "f"),
-                        _ => panic!("Expected SName"),
-                    }
-                }
-                _ => panic!("Expected SId for function"),
-            }
-
-            // Should have one argument which is a parenthesized expression
-            assert_eq!(args.len(), 1);
-
-            match &*args[0] {
-                Expr::SParen { expr, .. } => {
-                    // Inside the paren should be identifier 'x'
-                    match &**expr {
-                        Expr::SId { id, .. } => {
-                            match id {
-                                Name::SName { s, .. } => assert_eq!(s, "x"),
-                                _ => panic!("Expected SName inside paren"),
-                            }
-                        }
-                        _ => panic!("Expected SId inside paren"),
-                    }
-                }
-                _ => panic!("Expected SParen as argument, got {:?}", args[0]),
-            }
-        }
-        _ => panic!("Expected SApp for 'f (x)', got {:?}", expr),
-    }
+    // CORRECTED: "f (x)" with space should NOT parse as function application
+    // Pyret treats this as TWO separate statements/expressions
+    // So parse_expr_complete() should fail because there are leftover tokens
+    // This test now correctly expects an error
+    let result = parse_expr("f (x)");
+    assert!(result.is_err(), "Should fail: 'f (x)' has leftover tokens after 'f'")
 }
 
 #[test]
@@ -575,28 +543,47 @@ fn test_parse_paren_changes_associativity() {
     }
 }
 
-// ===== Array Expression Tests =====
+// ===== Construct Expression Tests =====
 
 #[test]
-fn test_parse_empty_array() {
-    let expr = parse_expr("[]").expect("Failed to parse");
+fn test_parse_empty_construct() {
+    let expr = parse_expr("[list: ]").expect("Failed to parse");
 
     match expr {
-        Expr::SArray { values, .. } => {
+        Expr::SConstruct { modifier, constructor, values, .. } => {
             assert_eq!(values.len(), 0);
+            match modifier {
+                ConstructModifier::SConstructNormal => {},
+                _ => panic!("Expected SConstructNormal modifier"),
+            }
+            match *constructor {
+                Expr::SId { id: Name::SName { s, .. }, .. } => {
+                    assert_eq!(s, "list");
+                }
+                _ => panic!("Expected SId constructor, got {:?}", constructor),
+            }
         }
-        _ => panic!("Expected SArray, got {:?}", expr),
+        _ => panic!("Expected SConstruct, got {:?}", expr),
     }
 }
 
 #[test]
-fn test_parse_array_with_numbers() {
-    let expr = parse_expr("[1, 2, 3]").expect("Failed to parse");
+fn test_parse_construct_with_numbers() {
+    let expr = parse_expr("[list: 1, 2, 3]").expect("Failed to parse");
 
     match expr {
-        Expr::SArray { values, .. } => {
+        Expr::SConstruct { values, constructor, .. } => {
             assert_eq!(values.len(), 3);
 
+            // Check constructor
+            match *constructor {
+                Expr::SId { id: Name::SName { s, .. }, .. } => {
+                    assert_eq!(s, "list");
+                }
+                _ => panic!("Expected SId constructor"),
+            }
+
+            // Check values
             match &*values[0] {
                 Expr::SNum { n, .. } => assert_eq!(*n, 1.0),
                 _ => panic!("Expected SNum"),
@@ -610,18 +597,49 @@ fn test_parse_array_with_numbers() {
                 _ => panic!("Expected SNum"),
             }
         }
-        _ => panic!("Expected SArray, got {:?}", expr),
+        _ => panic!("Expected SConstruct, got {:?}", expr),
     }
 }
 
 #[test]
-fn test_parse_array_with_identifiers() {
-    let expr = parse_expr("[x, y, z]").expect("Failed to parse");
+fn test_parse_construct_lazy_modifier() {
+    let expr = parse_expr("[lazy list: 1, 2]").expect("Failed to parse");
 
     match expr {
-        Expr::SArray { values, .. } => {
+        Expr::SConstruct { modifier, constructor, values, .. } => {
+            match modifier {
+                ConstructModifier::SConstructLazy => {},
+                _ => panic!("Expected SConstructLazy modifier"),
+            }
+            match *constructor {
+                Expr::SId { id: Name::SName { s, .. }, .. } => {
+                    assert_eq!(s, "list");
+                }
+                _ => panic!("Expected SId constructor"),
+            }
+            assert_eq!(values.len(), 2);
+        }
+        _ => panic!("Expected SConstruct, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_construct_with_identifiers() {
+    let expr = parse_expr("[set: x, y, z]").expect("Failed to parse");
+
+    match expr {
+        Expr::SConstruct { values, constructor, .. } => {
             assert_eq!(values.len(), 3);
 
+            // Check constructor
+            match *constructor {
+                Expr::SId { id: Name::SName { s, .. }, .. } => {
+                    assert_eq!(s, "set");
+                }
+                _ => panic!("Expected SId constructor"),
+            }
+
+            // Check values
             match &*values[0] {
                 Expr::SId { id, .. } => match id {
                     Name::SName { s, .. } => assert_eq!(s, "x"),
@@ -629,59 +647,45 @@ fn test_parse_array_with_identifiers() {
                 },
                 _ => panic!("Expected SId"),
             }
-            match &*values[1] {
-                Expr::SId { id, .. } => match id {
-                    Name::SName { s, .. } => assert_eq!(s, "y"),
-                    _ => panic!("Expected SName"),
-                },
-                _ => panic!("Expected SId"),
-            }
-            match &*values[2] {
-                Expr::SId { id, .. } => match id {
-                    Name::SName { s, .. } => assert_eq!(s, "z"),
-                    _ => panic!("Expected SName"),
-                },
-                _ => panic!("Expected SId"),
-            }
         }
-        _ => panic!("Expected SArray, got {:?}", expr),
+        _ => panic!("Expected SConstruct, got {:?}", expr),
     }
 }
 
 #[test]
-fn test_parse_nested_arrays() {
-    let expr = parse_expr("[[1, 2], [3, 4]]").expect("Failed to parse");
+fn test_parse_nested_constructs() {
+    let expr = parse_expr("[list: [list: 1, 2], [list: 3, 4]]").expect("Failed to parse");
 
     match expr {
-        Expr::SArray { values, .. } => {
+        Expr::SConstruct { values, .. } => {
             assert_eq!(values.len(), 2);
 
-            // First nested array
+            // First nested construct
             match &*values[0] {
-                Expr::SArray { values: inner1, .. } => {
+                Expr::SConstruct { values: inner1, .. } => {
                     assert_eq!(inner1.len(), 2);
                 }
-                _ => panic!("Expected nested SArray"),
+                _ => panic!("Expected nested SConstruct"),
             }
 
-            // Second nested array
+            // Second nested construct
             match &*values[1] {
-                Expr::SArray { values: inner2, .. } => {
+                Expr::SConstruct { values: inner2, .. } => {
                     assert_eq!(inner2.len(), 2);
                 }
-                _ => panic!("Expected nested SArray"),
+                _ => panic!("Expected nested SConstruct"),
             }
         }
-        _ => panic!("Expected SArray, got {:?}", expr),
+        _ => panic!("Expected SConstruct, got {:?}", expr),
     }
 }
 
 #[test]
-fn test_parse_array_with_expressions() {
-    let expr = parse_expr("[1 + 2, 3 * 4]").expect("Failed to parse");
+fn test_parse_construct_with_expressions() {
+    let expr = parse_expr("[list: 1 + 2, 3 * 4]").expect("Failed to parse");
 
     match expr {
-        Expr::SArray { values, .. } => {
+        Expr::SConstruct { values, .. } => {
             assert_eq!(values.len(), 2);
 
             // First element should be 1 + 2
@@ -696,23 +700,7 @@ fn test_parse_array_with_expressions() {
                 _ => panic!("Expected SOp"),
             }
         }
-        _ => panic!("Expected SArray, got {:?}", expr),
-    }
-}
-
-#[test]
-fn test_parse_single_element_array() {
-    let expr = parse_expr("[42]").expect("Failed to parse");
-
-    match expr {
-        Expr::SArray { values, .. } => {
-            assert_eq!(values.len(), 1);
-            match &*values[0] {
-                Expr::SNum { n, .. } => assert_eq!(*n, 42.0),
-                _ => panic!("Expected SNum"),
-            }
-        }
-        _ => panic!("Expected SArray, got {:?}", expr),
+        _ => panic!("Expected SConstruct, got {:?}", expr),
     }
 }
 
@@ -829,6 +817,151 @@ fn test_parse_dot_access_in_binop() {
     }
 }
 
+// ===== Bracket Access Tests =====
+
+#[test]
+fn test_parse_simple_bracket_access() {
+    let expr = parse_expr("arr[0]").expect("Failed to parse");
+
+    match expr {
+        Expr::SBracket { obj, field, .. } => {
+            // Check obj is an identifier
+            match &*obj {
+                Expr::SId { id, .. } => match id {
+                    Name::SName { s, .. } => assert_eq!(s, "arr"),
+                    _ => panic!("Expected SName"),
+                },
+                _ => panic!("Expected SId"),
+            }
+
+            // Check field is a number
+            match &*field {
+                Expr::SNum { n, .. } => assert_eq!(*n, 0.0),
+                _ => panic!("Expected SNum"),
+            }
+        }
+        _ => panic!("Expected SBracket, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_bracket_access_with_string() {
+    let expr = parse_expr(r#"dict["key"]"#).expect("Failed to parse");
+
+    match expr {
+        Expr::SBracket { obj, field, .. } => {
+            match &*obj {
+                Expr::SId { id, .. } => match id {
+                    Name::SName { s, .. } => assert_eq!(s, "dict"),
+                    _ => panic!("Expected SName"),
+                },
+                _ => panic!("Expected SId"),
+            }
+
+            match &*field {
+                Expr::SStr { s, .. } => assert_eq!(s, "key"),
+                _ => panic!("Expected SStr"),
+            }
+        }
+        _ => panic!("Expected SBracket, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_chained_bracket_access() {
+    let expr = parse_expr("matrix[i][j]").expect("Failed to parse");
+
+    match expr {
+        Expr::SBracket { obj, field, .. } => {
+            // Outer bracket should access [j]
+            match &*field {
+                Expr::SId { id, .. } => match id {
+                    Name::SName { s, .. } => assert_eq!(s, "j"),
+                    _ => panic!("Expected SName for j"),
+                },
+                _ => panic!("Expected SId for j"),
+            }
+
+            // Inner should be matrix[i]
+            match &*obj {
+                Expr::SBracket { obj: inner_obj, field: inner_field, .. } => {
+                    match &**inner_obj {
+                        Expr::SId { id, .. } => match id {
+                            Name::SName { s, .. } => assert_eq!(s, "matrix"),
+                            _ => panic!("Expected SName for matrix"),
+                        },
+                        _ => panic!("Expected SId for matrix"),
+                    }
+                    match &**inner_field {
+                        Expr::SId { id, .. } => match id {
+                            Name::SName { s, .. } => assert_eq!(s, "i"),
+                            _ => panic!("Expected SName for i"),
+                        },
+                        _ => panic!("Expected SId for i"),
+                    }
+                }
+                _ => panic!("Expected inner SBracket"),
+            }
+        }
+        _ => panic!("Expected SBracket, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_mixed_dot_and_bracket() {
+    let expr = parse_expr("obj.foo[0].bar").expect("Failed to parse");
+
+    match expr {
+        Expr::SDot { obj, field, .. } => {
+            // Outer should be .bar
+            assert_eq!(field, "bar");
+
+            // Middle should be bracket access [0]
+            match &*obj {
+                Expr::SBracket { obj: bracket_obj, field: bracket_field, .. } => {
+                    match &**bracket_field {
+                        Expr::SNum { n, .. } => assert_eq!(*n, 0.0),
+                        _ => panic!("Expected SNum for [0]"),
+                    }
+
+                    // Inner should be obj.foo
+                    match &**bracket_obj {
+                        Expr::SDot { obj: dot_obj, field: dot_field, .. } => {
+                            assert_eq!(dot_field, "foo");
+                            match &**dot_obj {
+                                Expr::SId { id, .. } => match id {
+                                    Name::SName { s, .. } => assert_eq!(s, "obj"),
+                                    _ => panic!("Expected SName for obj"),
+                                },
+                                _ => panic!("Expected SId for obj"),
+                            }
+                        }
+                        _ => panic!("Expected SDot for obj.foo"),
+                    }
+                }
+                _ => panic!("Expected SBracket for [0]"),
+            }
+        }
+        _ => panic!("Expected SDot, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_bracket_with_expression() {
+    let expr = parse_expr("arr[i + 1]").expect("Failed to parse");
+
+    match expr {
+        Expr::SBracket { field, .. } => {
+            // Field should be i + 1
+            match &*field {
+                Expr::SOp { op, .. } => assert_eq!(op, "op+"),
+                _ => panic!("Expected SOp"),
+            }
+        }
+        _ => panic!("Expected SBracket, got {:?}", expr),
+    }
+}
+
 // ============================================================================
 // Bug Fix Tests - Trailing Token Detection
 // ============================================================================
@@ -885,4 +1018,97 @@ fn test_reject_trailing_comma() {
     // Additional test: trailing comma in function call
     let result = parse_expr("f(1, 2,) extra");
     assert!(result.is_err(), "Should reject trailing tokens after function call");
+}
+
+#[test]
+fn test_whitespace_before_paren_stops_parsing() {
+    // Bug: slow-thankful-krill
+    // When there is whitespace before parentheses, like "f (x)",
+    // Pyret treats this as TWO separate statements:
+    // 1. The identifier "f"
+    // 2. A parenthesized expression "(x)"
+    //
+    // This means parse_expr_complete() should fail because there are
+    // leftover tokens after parsing "f".
+    let result = parse_expr("f (x)");
+    assert!(result.is_err(), "Should fail: 'f (x)' has leftover tokens after 'f'");
+}
+
+#[test]
+fn test_no_whitespace_before_paren_is_function_call() {
+    // Contrast: "f(x)" (no space) IS a function call
+    let expr = parse_expr("f(x)").expect("Failed to parse");
+    match expr {
+        Expr::SApp { _fun, args, .. } => {
+            assert_eq!(args.len(), 1);
+            match &*_fun {
+                Expr::SId { id, .. } => match id {
+                    Name::SName { s, .. } => assert_eq!(s, "f"),
+                    _ => panic!("Expected SName"),
+                },
+                _ => panic!("Expected SId for fun"),
+            }
+        }
+        _ => panic!("Expected SApp, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_function_call_then_whitespace_before_paren() {
+    // Bug: slow-thankful-krill
+    // "f() (x)" should be TWO statements: f() and (x)
+    // So parse_expr_complete() should fail
+    let result = parse_expr("f() (x)");
+    assert!(result.is_err(), "Should fail: 'f() (x)' has leftover tokens after 'f()'");
+}
+
+#[test]
+fn test_parse_chained_call_with_call_args() {
+    // Bug fix: interesting-artistic-shark
+    // f()(g()) should parse as: SApp(fun: SApp(f, []), args: [SApp(g, [])])
+    let expr = parse_expr("f()(g())").expect("Failed to parse");
+
+    match expr {
+        Expr::SApp { _fun, args, .. } => {
+            // Outer call should have 1 argument: g()
+            assert_eq!(args.len(), 1);
+
+            // The function should be f()
+            match *_fun {
+                Expr::SApp { _fun: inner_fun, args: inner_args, .. } => {
+                    // Inner function should be f
+                    match *inner_fun {
+                        Expr::SId { id, .. } => match id {
+                            Name::SName { s, .. } => assert_eq!(s, "f"),
+                            _ => panic!("Expected SName"),
+                        },
+                        _ => panic!("Expected SId for inner function"),
+                    }
+
+                    // f() has no arguments
+                    assert_eq!(inner_args.len(), 0);
+                }
+                _ => panic!("Expected inner SApp"),
+            }
+
+            // The argument should be g()
+            match &*args[0] {
+                Expr::SApp { _fun: arg_fun, args: arg_args, .. } => {
+                    // Argument function should be g
+                    match &**arg_fun {
+                        Expr::SId { id, .. } => match id {
+                            Name::SName { s, .. } => assert_eq!(s, "g"),
+                            _ => panic!("Expected SName"),
+                        },
+                        _ => panic!("Expected SId for arg function"),
+                    }
+
+                    // g() has no arguments
+                    assert_eq!(arg_args.len(), 0);
+                }
+                _ => panic!("Expected SApp for argument"),
+            }
+        }
+        _ => panic!("Expected outer SApp, got {:?}", expr),
+    }
 }

@@ -593,7 +593,7 @@ pub enum Expr {
     SBracket {
         l: Loc,
         obj: Box<Expr>,
-        key: Box<Expr>,
+        field: Box<Expr>,
     },
 
     /// Get-bang (mutable field access)

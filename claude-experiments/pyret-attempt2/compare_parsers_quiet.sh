@@ -19,31 +19,43 @@ echo "$EXPR" > "$TEMP_FILE"
 
 # Parse with Pyret's official parser
 cd /Users/jimmyhmiller/Documents/Code/open-source/pyret-lang
-node ast-to-json.jarr "$TEMP_FILE" "$PYRET_JSON" 2>&1 > /dev/null || { rm -f "$TEMP_FILE" "$PYRET_JSON"; exit 1; }
+node ast-to-json.jarr "$TEMP_FILE" "$PYRET_JSON" >/dev/null 2>&1 || { rm -f "$TEMP_FILE" "$PYRET_JSON"; exit 1; }
 
 # Extract just the expression from Pyret's output (first statement in body)
-python3 -c "
-import json, sys
+export PYRET_JSON PYRET_EXPR
+python3 << 'EXTRACT_EOF'
+import json, sys, os
+
+pyret_json = os.environ['PYRET_JSON']
+pyret_expr = os.environ['PYRET_EXPR']
+
 try:
-    with open('$PYRET_JSON') as f:
+    with open(pyret_json) as f:
         data = json.load(f)
     if 'body' in data and 'stmts' in data['body'] and len(data['body']['stmts']) > 0:
-        with open('$PYRET_EXPR', 'w') as out:
+        with open(pyret_expr, 'w') as out:
             json.dump(data['body']['stmts'][0], out, indent=2)
     else:
         sys.exit(1)
 except:
     sys.exit(1)
-" || { rm -f "$TEMP_FILE" "$PYRET_JSON" "$RUST_JSON" "$PYRET_EXPR"; exit 1; }
+EXTRACT_EOF
+
+if [ $? -ne 0 ]; then
+    rm -f "$TEMP_FILE" "$PYRET_JSON" "$RUST_JSON" "$PYRET_EXPR"
+    exit 1
+fi
 
 # Parse with our Rust parser
-cd /Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/pyret-attempt2
-./target/debug/to_pyret_json "$TEMP_FILE" 2>/dev/null > "$RUST_JSON" || { rm -f "$TEMP_FILE" "$PYRET_JSON" "$RUST_JSON" "$PYRET_EXPR"; exit 1; }
+/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/pyret-attempt2/target/debug/to_pyret_json "$TEMP_FILE" > "$RUST_JSON" 2>/dev/null || { rm -f "$TEMP_FILE" "$PYRET_JSON" "$RUST_JSON" "$PYRET_EXPR"; exit 1; }
 
 # Compare the two JSON outputs (normalize for field order)
-python3 << EOF
-import json
-import sys
+export PYRET_EXPR RUST_JSON
+python3 << 'COMPARE_EOF'
+import json, sys, os
+
+pyret_expr = os.environ['PYRET_EXPR']
+rust_json = os.environ['RUST_JSON']
 
 def normalize_json(obj):
     if isinstance(obj, dict):
@@ -54,9 +66,9 @@ def normalize_json(obj):
         return obj
 
 try:
-    with open('$PYRET_EXPR') as f:
+    with open(pyret_expr) as f:
         pyret = json.load(f)
-    with open('$RUST_JSON') as f:
+    with open(rust_json) as f:
         rust = json.load(f)
 
     pyret_norm = normalize_json(pyret)
@@ -68,7 +80,7 @@ try:
         sys.exit(1)
 except:
     sys.exit(1)
-EOF
+COMPARE_EOF
 
 RESULT=$?
 

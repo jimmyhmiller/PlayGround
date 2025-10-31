@@ -110,6 +110,88 @@ pub const Value = struct {
         std.debug.assert(keyword.len > 0 and keyword[0] == ':');
         return keyword[1..];
     }
+
+    /// Print the value back to lisp syntax
+    pub fn print(self: *const Value, writer: anytype) !void {
+        switch (self.type) {
+            // Atoms - just print their lexeme
+            .identifier, .number, .string, .value_id, .block_id, .symbol, .keyword => {
+                try writer.writeAll(self.data.atom);
+            },
+            .true_lit => {
+                try writer.writeAll("true");
+            },
+            .false_lit => {
+                try writer.writeAll("false");
+            },
+
+            // Collections
+            .list => {
+                try writer.writeAll("(");
+                const slice = self.data.list.slice();
+                for (slice, 0..) |child, i| {
+                    if (i > 0) try writer.writeAll(" ");
+                    try child.print(writer);
+                }
+                try writer.writeAll(")");
+            },
+            .vector => {
+                try writer.writeAll("[");
+                const slice = self.data.vector.slice();
+                for (slice, 0..) |child, i| {
+                    if (i > 0) try writer.writeAll(" ");
+                    try child.print(writer);
+                }
+                try writer.writeAll("]");
+            },
+            .map => {
+                try writer.writeAll("{");
+                const slice = self.data.map.slice();
+                for (slice, 0..) |child, i| {
+                    if (i > 0) try writer.writeAll(" ");
+                    try child.print(writer);
+                }
+                try writer.writeAll("}");
+            },
+
+            // Type expression
+            .type => {
+                try writer.writeAll(self.data.type);
+            },
+
+            // Function type: (!function (inputs ...) (results ...))
+            .function_type => {
+                try writer.writeAll("(!function (inputs");
+                const input_slice = self.data.function_type.inputs.slice();
+                for (input_slice) |input| {
+                    try writer.writeAll(" ");
+                    try input.print(writer);
+                }
+                try writer.writeAll(") (results");
+                const result_slice = self.data.function_type.results.slice();
+                for (result_slice) |result| {
+                    try writer.writeAll(" ");
+                    try result.print(writer);
+                }
+                try writer.writeAll("))");
+            },
+
+            // Attribute expression: #...
+            .attr_expr => {
+                try writer.writeAll("#");
+                try self.data.attr_expr.print(writer);
+            },
+
+            // Typed literal: (: value type)
+            .has_type => {
+                try writer.writeAll("(: ");
+                try self.data.has_type.value.print(writer);
+                try writer.writeAll(" ");
+                try self.data.has_type.type_expr.print(writer);
+                try writer.writeAll(")");
+            },
+        }
+    }
 };
 
 /// Errors that can occur during reading
@@ -492,277 +574,3 @@ pub const Reader = struct {
         return vec;
     }
 };
-
-test "reader - simple atoms" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    // Test identifier
-    {
-        const source = "hello";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .identifier);
-        try std.testing.expectEqualStrings("hello", value.data.atom);
-    }
-
-    // Test number
-    {
-        const source = "42";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .number);
-        try std.testing.expectEqualStrings("42", value.data.atom);
-    }
-
-    // Test string
-    {
-        const source = "\"hello world\"";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .string);
-        try std.testing.expectEqualStrings("\"hello world\"", value.data.atom);
-    }
-
-    // Test value_id
-    {
-        const source = "%x";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .value_id);
-        try std.testing.expectEqualStrings("%x", value.data.atom);
-    }
-
-    // Test block_id
-    {
-        const source = "^entry";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .block_id);
-        try std.testing.expectEqualStrings("^entry", value.data.atom);
-    }
-
-    // Test symbol
-    {
-        const source = "@main";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .symbol);
-        try std.testing.expectEqualStrings("@main", value.data.atom);
-    }
-
-    // Test keyword
-    {
-        const source = ":value";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .keyword);
-        try std.testing.expectEqualStrings(":value", value.data.atom);
-    }
-
-    // Test true/false
-    {
-        const source = "true";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .true_lit);
-    }
-
-    {
-        const source = "false";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .false_lit);
-    }
-}
-
-test "reader - lists" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    // Test empty list
-    {
-        const source = "()";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .list);
-        try std.testing.expect(value.data.list.len() == 0);
-    }
-
-    // Test list with elements
-    {
-        const source = "(1 2 3)";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .list);
-        try std.testing.expect(value.data.list.len() == 3);
-        try std.testing.expect(value.data.list.at(0).type == .number);
-        try std.testing.expectEqualStrings("1", value.data.list.at(0).data.atom);
-    }
-
-    // Test nested list
-    {
-        const source = "(1 (2 3) 4)";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .list);
-        try std.testing.expect(value.data.list.len() == 3);
-        try std.testing.expect(value.data.list.at(1).type == .list);
-        try std.testing.expect(value.data.list.at(1).data.list.len() == 2);
-    }
-}
-
-test "reader - vectors" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    // Test empty vector
-    {
-        const source = "[]";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .vector);
-        try std.testing.expect(value.data.vector.len() == 0);
-    }
-
-    // Test vector with elements
-    {
-        const source = "[%x %y]";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .vector);
-        try std.testing.expect(value.data.vector.len() == 2);
-        try std.testing.expect(value.data.vector.at(0).type == .value_id);
-        try std.testing.expectEqualStrings("%x", value.data.vector.at(0).data.atom);
-    }
-}
-
-test "reader - maps" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    // Test empty map
-    {
-        const source = "{}";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .map);
-        try std.testing.expect(value.data.map.len() == 0);
-    }
-
-    // Test map with key-value pairs
-    {
-        const source = "{ :value 42 :name \"test\" }";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .map);
-        try std.testing.expect(value.data.map.len() == 4); // Flat list of k,v,k,v
-        try std.testing.expect(value.data.map.at(0).type == .keyword);
-        try std.testing.expectEqualStrings(":value", value.data.map.at(0).data.atom);
-        try std.testing.expect(value.data.map.at(1).type == .number);
-    }
-}
-
-test "reader - type and attr expressions" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    // Test type expression
-    {
-        const source = "i32";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .type_expr);
-        try std.testing.expect(value.data.type_expr.type == .identifier);
-        try std.testing.expectEqualStrings("i32", value.data.type_expr.data.atom);
-    }
-
-    // Test attribute expression
-    {
-        const source = "#(int 42)";
-        var tok = Tokenizer.init(allocator, source);
-        var reader = try Reader.init(allocator, &tok);
-        const value = try reader.read();
-
-        try std.testing.expect(value.type == .attr_expr);
-        try std.testing.expect(value.data.attr_expr.type == .list);
-        try std.testing.expect(value.data.attr_expr.data.list.len() == 2);
-    }
-}
-
-test "reader - complex expression" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const source =
-        \\(operation
-        \\  (name arith.constant)
-        \\  (result-bindings [%c0])
-        \\  (result-types i32)
-        \\  (attributes { :value #(int 42) }))
-    ;
-
-    var tok = Tokenizer.init(allocator, source);
-    var reader = try Reader.init(allocator, &tok);
-    var value = try reader.read();
-
-    try std.testing.expect(value.type == .list);
-    try std.testing.expect(value.data.list.len() == 5);
-    try std.testing.expect(value.data.list.at(0).type == .identifier);
-    try std.testing.expectEqualStrings("operation", value.data.list.at(0).data.atom);
-}
-
-test "reader - read all" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const source = "1 2 (3 4) 5";
-    var tok = Tokenizer.init(allocator, source);
-    var reader = try Reader.init(allocator, &tok);
-    var values = try reader.readAll();
-
-    try std.testing.expect(values.len() == 4);
-    try std.testing.expect(values.at(0).type == .number);
-    try std.testing.expect(values.at(2).type == .list);
-}

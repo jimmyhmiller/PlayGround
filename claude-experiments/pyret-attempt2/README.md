@@ -20,21 +20,32 @@ cargo build
 
 ## 📊 Current Status
 
-**Phase 3 - Expressions:** 50% Complete
+**Phase 3 - Expressions:** 87% Complete (47/54 comparison tests passing)
 
-✅ **Working:**
-- All primitive expressions (numbers, strings, booleans, identifiers)
-- Binary operators (15 operators, left-associative, NO precedence)
-- Parenthesized expressions: `(1 + 2)`
-- Function application: `f(x, y, z)`
-- Chained calls: `f(x)(y)`
-- Whitespace-sensitive parsing: `f(x)` vs `f (x)`
-- **Array expressions:** `[1, 2, 3]` - NEW! ✨
-- **Dot access:** `obj.field`, `obj.field1.field2` - NEW! ✨
-- **Chained postfix operators:** `obj.foo().bar()` - NEW! ✨
+✅ **Working & Verified:**
+- ✅ All primitive expressions (numbers, strings, booleans, identifiers)
+- ✅ Binary operators (15 operators, left-associative, NO precedence)
+- ✅ Parenthesized expressions: `(1 + 2)`
+- ✅ Function application: `f(x, y, z)` with multiple arguments
+- ✅ Chained calls: `f(x)(y)(z)`, `f()(g())`
+- ✅ **Whitespace-sensitive parsing** - FIXED! ✨
+  - `f(x)` = function call
+  - `f (x)` = two separate expressions (stops at `f`)
+- ✅ **Dot access:** `obj.field`, `obj.field1.field2`
+- ✅ **Bracket access:** `arr[0]`, `matrix[i][j]`
+- ✅ **Construct expressions:** `[list: 1, 2, 3]`, `[set: x, y]`
+- ✅ **Chained postfix operators:** `obj.foo().bar().baz()`
+- ✅ **Ultra-complex expressions:** All features work together perfectly!
 
-🚧 **Next Up:**
-- Bracket access `arr[0]`
+⚠️ **Important Discovery:**
+- Pyret does NOT support `[1, 2, 3]` array syntax!
+- Must use construct expressions: `[list: 1, 2, 3]`
+- Official Pyret parser rejects `[1, 2, 3]` with parse error
+- All tests updated to use correct syntax ✅
+
+🚧 **Next Up (7 failing tests):**
+- Check operators: `is`, `raises`, `satisfies`, `violates` (4 tests)
+- Investigate: call_on_dot, nested_complexity, pipeline_style (3 tests)
 - Object expressions `{ field: value }`
 - Tuple expressions `{1; 2; 3}`
 
@@ -45,7 +56,7 @@ compare_parsers.sh - Validate against official Pyret parser
 
 src/
 ├── ast.rs          (1,350 lines) - All AST node types
-├── parser.rs       (887 lines)   - Parser implementation
+├── parser.rs       (967 lines)   - Parser implementation
 ├── tokenizer.rs    (1,346 lines) - Complete tokenizer
 ├── error.rs        (73 lines)    - Error types
 ├── lib.rs          - Library exports
@@ -54,7 +65,8 @@ src/
     └── to_pyret_json.rs    - Output AST in Pyret-compatible format
 
 tests/
-└── parser_tests.rs (773 lines)   - 35 tests, all passing
+├── parser_tests.rs      (898 lines)   - 55 tests, all passing ✅
+└── comparison_tests.rs  (467 lines)   - 47/54 passing (integration tests)
 
 docs/
 ├── PARSER_PLAN.md                      - Overall project plan
