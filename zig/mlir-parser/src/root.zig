@@ -6,12 +6,14 @@ const std = @import("std");
 pub const lexer = @import("lexer.zig");
 pub const parser = @import("parser.zig");
 pub const printer = @import("printer.zig");
+pub const lisp_printer = @import("lisp_printer.zig");
 pub const ast = @import("ast.zig");
 
 // Convenience exports
 pub const Lexer = lexer.Lexer;
 pub const Parser = parser.Parser;
 pub const Printer = printer.Printer;
+pub const LispPrinter = lisp_printer.LispPrinter;
 pub const Token = lexer.Token;
 pub const TokenType = lexer.TokenType;
 
@@ -43,10 +45,27 @@ pub fn format(module: Module, writer: std.io.AnyWriter) !void {
     try p.printModule(module);
 }
 
-/// Simple print function for testing
-pub fn bufferedPrint() !void {
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("MLIR Parser initialized successfully!\n", .{});
+/// Print MLIR module to Lisp S-expression string
+/// Caller must free the returned string
+pub fn printLisp(allocator: std.mem.Allocator, module: Module) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var output: std.ArrayList(u8) = .empty;
+
+    var p = LispPrinter.init(output.writer(arena_allocator).any());
+    try p.printModule(module);
+
+    // Duplicate the result with the parent allocator so it survives arena.deinit()
+    const result = try allocator.dupe(u8, output.items);
+    return result;
+}
+
+/// Format MLIR module to Lisp S-expression to a writer
+pub fn formatLisp(module: Module, writer: std.io.AnyWriter) !void {
+    var p = LispPrinter.init(writer);
+    try p.printModule(module);
 }
 
 test "parse simple types" {

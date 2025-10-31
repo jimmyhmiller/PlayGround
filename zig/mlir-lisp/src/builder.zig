@@ -12,6 +12,7 @@ pub const BuildError = error{
     UnknownValue,
     InvalidStructure,
     ModuleCreationFailed,
+    InvalidModuleOperation,
 } || std.mem.Allocator.Error;
 
 /// Builder context for constructing MLIR IR
@@ -23,21 +24,40 @@ pub const Builder = struct {
     /// Maps SSA value IDs (%c0, %sum, etc.) to MLIR values
     value_map: std.StringHashMap(mlir.MlirValue),
 
+    /// Maps type alias names (!my_vec, etc.) to their type definitions
+    type_alias_map: std.StringHashMap([]const u8),
+
     pub fn init(allocator: std.mem.Allocator, ctx: *mlir.Context) Builder {
         return Builder{
             .allocator = allocator,
             .ctx = ctx,
             .location = mlir.Location.unknown(ctx),
             .value_map = std.StringHashMap(mlir.MlirValue).init(allocator),
+            .type_alias_map = std.StringHashMap([]const u8).init(allocator),
         };
     }
 
     pub fn deinit(self: *Builder) void {
         self.value_map.deinit();
+        self.type_alias_map.deinit();
     }
 
     /// Build a complete MLIR module from our parsed AST
     pub fn buildModule(self: *Builder, parsed_module: *parser.MlirModule) BuildError!mlir.Module {
+        // Register all type aliases first
+        try self.registerTypeAliases(parsed_module.type_aliases);
+
+        // Special case: if we have exactly one operation and it's a builtin.module,
+        // use that directly instead of creating a wrapper module
+        if (parsed_module.operations.len == 1) {
+            const operation = &parsed_module.operations[0];
+            if (std.mem.eql(u8, operation.name, "builtin.module")) {
+                const mlir_op = try self.buildOperation(operation);
+                return try mlir.Module.fromOperation(mlir_op);
+            }
+        }
+
+        // Otherwise, create a new module and add all operations to it
         var mod = try mlir.Module.create(self.location);
 
         // Get the module's body block
@@ -50,6 +70,13 @@ pub const Builder = struct {
         }
 
         return mod;
+    }
+
+    /// Register type aliases in the builder context
+    fn registerTypeAliases(self: *Builder, type_aliases: []const parser.TypeAlias) BuildError!void {
+        for (type_aliases) |alias| {
+            try self.type_alias_map.put(alias.name, alias.definition);
+        }
     }
 
     /// Build a single operation
@@ -210,20 +237,23 @@ pub const Builder = struct {
         // Handle different type forms
         switch (value.type) {
             .type => {
-                // Simple type - pass string directly to MLIR parser
+                // Simple type - check if it's an alias, otherwise parse directly
                 const type_str = value.data.type;
-                std.debug.print("buildType: value.type = .type, type_str = {s}\n", .{type_str});
+
+                // Check if this is a type alias
+                if (self.type_alias_map.get(type_str)) |definition| {
+                    return mlir.Type.parse(self.ctx, definition) catch error.InvalidType;
+                }
+
                 return mlir.Type.parse(self.ctx, type_str) catch error.InvalidType;
             },
             .identifier => {
                 // Plain identifier (builtin type like i32, f64, etc.)
                 const type_str = value.data.atom;
-                std.debug.print("buildType: value.type = .identifier, type_str = {s}\n", .{type_str});
                 return mlir.Type.parse(self.ctx, type_str) catch error.InvalidType;
             },
             .function_type => {
                 // Function type - build from inputs/results
-                std.debug.print("buildType: value.type = .function_type\n", .{});
                 return self.buildFunctionTypeFromValue(value);
             },
             else => return error.InvalidType,
@@ -270,18 +300,21 @@ pub const Builder = struct {
 
     /// Build an MLIR type from a reader Value (used recursively)
     pub fn buildTypeFromValue(self: *Builder, value: *const reader.Value) BuildError!mlir.MlirType {
-        std.debug.print("buildTypeFromValue: value.type = {}\n", .{value.type});
         switch (value.type) {
             .type => {
-                // Simple type - pass string directly to MLIR parser
+                // Simple type - check if it's an alias, otherwise parse directly
                 const type_str = value.data.type;
-                std.debug.print("  -> .type, type_str = {s}\n", .{type_str});
+
+                // Check if this is a type alias
+                if (self.type_alias_map.get(type_str)) |definition| {
+                    return mlir.Type.parse(self.ctx, definition) catch error.InvalidType;
+                }
+
                 return mlir.Type.parse(self.ctx, type_str) catch error.InvalidType;
             },
             .identifier => {
                 // Plain identifier (builtin type like i32, f64, etc.)
                 const type_str = value.data.atom;
-                std.debug.print("  -> .identifier, type_str = {s}\n", .{type_str});
                 return mlir.Type.parse(self.ctx, type_str) catch error.InvalidType;
             },
             .function_type => {

@@ -1,0 +1,595 @@
+// Pyret Grammar in Pest
+// Based on pyret-grammar.bnf
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT = _{ block_comment | line_comment }
+line_comment = _{ "#" ~ (!"\n" ~ ANY)* }
+block_comment = _{ "#|" ~ (block_comment | (!"|#" ~ ANY))* ~ "|#" }
+
+// Helper for keyword boundaries
+kw_boundary = _{ !(ASCII_ALPHANUMERIC | "_" | "-") }
+
+// Keywords - all followed by word boundary check
+USE = @{ "use" ~ kw_boundary }
+PROVIDE = @{ "provide" ~ kw_boundary }
+PROVIDE_TYPES = @{ "provide-types" ~ kw_boundary }
+INCLUDE = @{ "include" ~ kw_boundary }
+IMPORT = @{ "import" ~ kw_boundary }
+FROM = @{ "from" ~ kw_boundary }
+AS = @{ "as" ~ kw_boundary }
+TYPE = @{ "type" ~ kw_boundary }
+NEWTYPE = @{ "newtype" ~ kw_boundary }
+DATA = @{ "data" ~ kw_boundary }
+MODULE = @{ "module" ~ kw_boundary }
+END = @{ "end" ~ kw_boundary }
+FUN = @{ "fun" ~ kw_boundary }
+LAM = @{ "lam" ~ kw_boundary }
+METHOD = @{ "method" ~ kw_boundary }
+DOC = @{ "doc:" }
+WHERE = @{ "where:" }
+CHECK = @{ "check" ~ kw_boundary }
+CHECKCOLON = @{ "check:" }
+EXAMPLES = @{ "examples" ~ kw_boundary }
+EXAMPLESCOLON = @{ "examples:" }
+LET = @{ "let" ~ kw_boundary }
+LETREC = @{ "letrec" ~ kw_boundary }
+TYPE_LET = @{ "type-let" ~ kw_boundary }
+VAR = @{ "var" ~ kw_boundary }
+REC = @{ "rec" ~ kw_boundary }
+REF = @{ "ref" ~ kw_boundary }
+WHEN = @{ "when" ~ kw_boundary }
+IF = @{ "if" ~ kw_boundary }
+ELSEIF = @{ "else if" ~ kw_boundary }
+ELSECOLON = @{ "else:" }
+ASK = @{ "ask" ~ kw_boundary }
+OTHERWISECOLON = @{ "otherwise:" }
+THENCOLON = @{ "then:" }
+ELSE = @{ "else" ~ kw_boundary }
+CASES = @{ "cases" ~ kw_boundary }
+FOR = @{ "for" ~ kw_boundary }
+BLOCK = @{ "block:" }
+SPY = @{ "spy" ~ kw_boundary }
+TABLE = @{ "table:" }
+TABLE_SELECT = @{ "select" ~ kw_boundary }
+TABLE_FILTER = @{ "sieve" ~ kw_boundary }
+TABLE_ORDER = @{ "order" ~ kw_boundary }
+TABLE_EXTEND = @{ "extend" ~ kw_boundary }
+TABLE_EXTRACT = @{ "extract" ~ kw_boundary }
+TABLE_UPDATE = @{ "transform" ~ kw_boundary }
+LOAD_TABLE = @{ "load-table" ~ kw_boundary }
+SOURCECOLON = @{ "source:" }
+SANITIZE = @{ "sanitize" ~ kw_boundary }
+USING = @{ "using" ~ kw_boundary }
+OF = @{ "of" ~ kw_boundary }
+ROW = @{ "row:" }
+REACTOR = @{ "reactor" ~ kw_boundary }
+ASCENDING = @{ "ascending" ~ kw_boundary }
+DESCENDING = @{ "descending" ~ kw_boundary }
+LAZY = @{ "lazy" ~ kw_boundary }
+WITH = @{ "with:" }
+SHARING = @{ "sharing:" }
+HIDING = @{ "hiding" ~ kw_boundary }
+SHADOW = @{ "shadow" ~ kw_boundary }
+BECAUSE = @{ "because" ~ kw_boundary }
+PROVIDECOLON = @{ "provide:" }
+BY = @{ "by" ~ kw_boundary }
+DO = @{ "do" ~ kw_boundary }
+
+// Check operators
+IS = @{ "is" ~ kw_boundary }
+ISEQUALEQUAL = @{ "is==" }
+ISEQUALTILDE = @{ "is=~" }
+ISSPACESHIP = @{ "is<=>" }
+ISROUGHLY = @{ "is-roughly" ~ kw_boundary }
+ISNOTROUGHLY = @{ "is-not-roughly" ~ kw_boundary }
+ISNOT = @{ "is-not" ~ kw_boundary }
+ISNOTEQUALEQUAL = @{ "is-not==" }
+ISNOTEQUALTILDE = @{ "is-not=~" }
+ISNOTSPACESHIP = @{ "is-not<=>" }
+RAISES = @{ "raises" ~ kw_boundary }
+RAISESOTHER = @{ "raises-other-than" ~ kw_boundary }
+RAISESNOT = @{ "does-not-raise" ~ kw_boundary }
+SATISFIES = @{ "satisfies" ~ kw_boundary }
+SATISFIESNOT = @{ "violates" ~ kw_boundary }
+RAISESSATISFIES = @{ "raises-satisfies" ~ kw_boundary }
+RAISESVIOLATES = @{ "raises-violates" ~ kw_boundary }
+
+// Literals
+TRUE = @{ "true" ~ kw_boundary }
+FALSE = @{ "false" ~ kw_boundary }
+
+// Operators
+PLUS = { "+" }
+DASH = { "-" }
+TIMES = { "*" }
+SLASH = { "/" }
+LEQ = { "<=" }
+GEQ = { ">=" }
+EQUALEQUAL = { "==" }
+SPACESHIP = { "<=>" }
+EQUALTILDE = { "=~" }
+NEQ = { "<>" }
+LT = { "<" }
+GT = { ">" }
+AND = @{ "and" ~ kw_boundary }
+OR = @{ "or" ~ kw_boundary }
+CARET = { "^" }
+BACKSLASH = { "\\" }
+
+// Delimiters and punctuation
+COLON = { ":" }
+COLONCOLON = { "::" }
+COLONEQUALS = { ":=" }
+EQUALS = { "=" }
+COMMA = { "," }
+SEMI = { ";" }
+DOT = { "." }
+BANG = { "!" }
+PERCENT = { "%" }
+BAR = { "|" }
+THINARROW = { "->" }
+THICKARROW = { "=>" }
+LANGLE = { "<" }
+RANGLE = { ">" }
+STAR = { "*" }
+DOTDOTDOT = { "..." }
+
+// Parentheses - distinguished by preceding whitespace
+PARENSPACE = { "(" }      // preceded by space
+PARENNOSPACE = { "(" }    // no space before
+PARENAFTERBRACE = { "(" } // after a brace
+RPAREN = { ")" }
+LBRACE = { "{" }
+RBRACE = { "}" }
+LBRACK = { "[" }
+RBRACK = { "]" }
+
+// Identifiers and literals
+NAME = @{
+    !KEYWORDS ~
+    (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")*
+}
+
+KEYWORDS = _{
+    USE | PROVIDE_TYPES | PROVIDE | INCLUDE | IMPORT | FROM | AS | TYPE | NEWTYPE |
+    DATA | MODULE | END | FUN | LAM | METHOD | DOC | WHERE | CHECKCOLON | CHECK |
+    EXAMPLESCOLON | EXAMPLES | LETREC | TYPE_LET | LET | VAR | REC | REF | WHEN |
+    ELSEIF | ELSECOLON | IF | ASK | OTHERWISECOLON | THENCOLON | ELSE | CASES | FOR |
+    BLOCK | SPY | TABLE_SELECT | TABLE_FILTER | TABLE_ORDER | TABLE_EXTEND |
+    TABLE_EXTRACT | TABLE_UPDATE | TABLE | LOAD_TABLE | SOURCECOLON | SANITIZE |
+    USING | OF | ROW | REACTOR | ASCENDING | DESCENDING | LAZY | WITH | SHARING |
+    HIDING | SHADOW | BECAUSE | PROVIDECOLON | BY | DO | ISEQUALEQUAL | ISEQUALTILDE |
+    ISSPACESHIP | ISROUGHLY | ISNOTROUGHLY | ISNOTEQUALEQUAL | ISNOTEQUALTILDE |
+    ISNOTSPACESHIP | ISNOT | IS | RAISESOTHER | RAISESNOT | RAISESSATISFIES |
+    RAISESVIOLATES | RAISES | SATISFIESNOT | SATISFIES | TRUE | FALSE | AND | OR
+}
+
+NUMBER = @{
+    "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+)?
+}
+
+RATIONAL = @{
+    "-"? ~ ASCII_DIGIT+ ~ "/" ~ ASCII_DIGIT+
+}
+
+ROUGHRATIONAL = @{
+    "~" ~ "-"? ~ ASCII_DIGIT+ ~ "/" ~ ASCII_DIGIT+
+}
+
+STRING = @{
+    triple_backtick_string |
+    double_quote_string |
+    single_quote_string
+}
+
+triple_backtick_string = @{ "```" ~ (!"```" ~ ANY)* ~ "```" }
+double_quote_string = @{ "\"" ~ string_char_double* ~ "\"" }
+single_quote_string = @{ "'" ~ string_char_single* ~ "'" }
+
+string_char_double = @{
+    escape_sequence |
+    (!"\"" ~ !"\\" ~ ANY)
+}
+
+string_char_single = @{
+    escape_sequence |
+    (!"'" ~ !"\\" ~ ANY)
+}
+
+escape_sequence = @{
+    "\\" ~ ("n" | "t" | "r" | "\\" | "\"" | "'" | "b" | "f" | "v" | "0")
+}
+
+// Error tokens
+UNTERMINATED_STRING = @{
+    ("\"" ~ (!"\"" ~ ANY)*) |
+    ("'" ~ (!"'" ~ ANY)*) |
+    ("```" ~ (!"```" ~ ANY)*)
+}
+UNTERMINATED_BLOCK_COMMENT = { "#|" ~ (!"|#" ~ ANY)* }
+BAD_OPER = { "###BAD_OPER###" }
+BAD_NUMBER = { "###BAD_NUMBER###" }
+UNKNOWN = { "###UNKNOWN###" }
+
+// Program structure
+program = { SOI ~ prelude ~ block ~ EOI }
+
+prelude = { use_stmt? ~ (provide_stmt | import_stmt)* }
+
+use_stmt = { USE ~ NAME ~ import_source }
+
+// Import statements
+import_stmt = {
+    (INCLUDE ~ FROM ~ module_ref ~ COLON ~ include_spec? ~ (COMMA ~ include_spec)* ~ COMMA? ~ END) |
+    (INCLUDE ~ import_source) |
+    (IMPORT ~ import_source ~ AS ~ NAME) |
+    (IMPORT ~ comma_names ~ FROM ~ import_source)
+}
+
+import_source = { import_special | import_name }
+import_special = { NAME ~ PARENNOSPACE ~ STRING ~ (COMMA ~ STRING)* ~ RPAREN }
+import_name = { NAME }
+
+include_spec = {
+    include_module_spec |
+    include_data_spec |
+    include_type_spec |
+    include_name_spec
+}
+
+include_name_spec = { name_spec }
+include_type_spec = { TYPE ~ name_spec }
+include_data_spec = { DATA ~ data_name_spec ~ hiding_spec? }
+include_module_spec = { MODULE ~ name_spec }
+
+// Provide statements
+provide_stmt = { provide_block | provide_types_stmt | provide_vals_stmt }
+
+provide_vals_stmt = {
+    (PROVIDE ~ stmt ~ END) |
+    (PROVIDE ~ (STAR | TIMES))
+}
+
+provide_types_stmt = {
+    (PROVIDE_TYPES ~ record_ann) |
+    (PROVIDE_TYPES ~ (STAR | TIMES))
+}
+
+provide_block = {
+    (PROVIDE ~ FROM ~ module_ref ~ COLON ~ provide_spec? ~ (COMMA ~ provide_spec)* ~ COMMA? ~ END) |
+    (PROVIDECOLON ~ provide_spec? ~ (COMMA ~ provide_spec)* ~ COMMA? ~ END)
+}
+
+provide_spec = {
+    provide_module_spec |
+    provide_data_spec |
+    provide_type_spec |
+    provide_name_spec
+}
+
+provide_name_spec = { name_spec }
+provide_type_spec = { TYPE ~ name_spec }
+provide_data_spec = { DATA ~ data_name_spec ~ hiding_spec? }
+provide_module_spec = { MODULE ~ name_spec }
+
+name_spec = {
+    ((STAR | TIMES) ~ hiding_spec?) |
+    (module_ref ~ AS ~ NAME) |
+    module_ref
+}
+
+data_name_spec = { (STAR | TIMES) | module_ref }
+
+hiding_spec = { HIDING ~ (PARENSPACE | PARENNOSPACE) ~ (NAME ~ COMMA)* ~ NAME? ~ RPAREN }
+
+module_ref = { (NAME ~ DOT)* ~ NAME }
+
+comma_names = { NAME ~ (COMMA ~ NAME)* }
+
+// Block and statements
+block = { stmt* }
+
+stmt = {
+    type_expr |
+    newtype_expr |
+    spy_stmt |
+    let_expr |
+    fun_expr |
+    data_expr |
+    when_expr |
+    var_expr |
+    rec_expr |
+    assign_expr |
+    check_test |
+    check_expr |
+    contract_stmt
+}
+
+spy_stmt = { SPY ~ binop_expr? ~ COLON ~ spy_contents? ~ END }
+spy_contents = { spy_field ~ (COMMA ~ spy_field)* }
+spy_field = { (NAME ~ COLON ~ binop_expr) | id_expr }
+
+// Type and binding statements
+type_expr = { TYPE ~ NAME ~ ty_params ~ EQUALS ~ ann }
+newtype_expr = { NEWTYPE ~ NAME ~ AS ~ NAME }
+
+let_expr = { toplevel_binding ~ EQUALS ~ binop_expr }
+
+binding = { tuple_binding | name_binding }
+
+tuple_binding = { LBRACE ~ (binding ~ SEMI)* ~ binding ~ SEMI? ~ RBRACE ~ (AS ~ name_binding)? }
+name_binding = { SHADOW? ~ NAME ~ (COLONCOLON ~ ann)? }
+
+toplevel_binding = { binding }
+
+multi_let_expr = { LET ~ let_binding ~ (COMMA ~ let_binding)* ~ (BLOCK | COLON) ~ block ~ END }
+let_binding = { let_expr | var_expr }
+
+letrec_expr = { LETREC ~ let_expr ~ (COMMA ~ let_expr)* ~ (BLOCK | COLON) ~ block ~ END }
+
+type_bind = { NAME ~ ty_params ~ EQUALS ~ ann }
+newtype_bind = { NEWTYPE ~ NAME ~ AS ~ NAME }
+
+type_let_bind = { type_bind | newtype_bind }
+type_let_expr = { TYPE_LET ~ type_let_bind ~ (COMMA ~ type_let_bind)* ~ (BLOCK | COLON) ~ block ~ END }
+
+contract_stmt = { NAME ~ COLONCOLON ~ ty_params ~ (ann | noparen_arrow_ann) }
+
+// Function definitions
+fun_expr = { FUN ~ NAME ~ fun_header ~ (BLOCK | COLON) ~ doc_string ~ block ~ where_clause ~ END }
+
+fun_header = { ty_params ~ (bad_args | args) ~ return_ann }
+
+ty_params = { ((LANGLE | LT) ~ comma_names ~ (RANGLE | GT))? }
+
+args = { (PARENNOSPACE | PARENAFTERBRACE) ~ (binding ~ (COMMA ~ binding)*)? ~ RPAREN }
+bad_args = { PARENSPACE ~ (binding ~ (COMMA ~ binding)*)? ~ RPAREN }
+
+return_ann = { (THINARROW ~ ann)? }
+doc_string = { (DOC ~ STRING)? }
+where_clause = { (WHERE ~ block)? }
+
+// Check expressions
+check_expr = {
+    ((CHECK | EXAMPLES) ~ STRING ~ COLON ~ block ~ END) |
+    ((CHECKCOLON | EXAMPLESCOLON) ~ block ~ END)
+}
+
+check_test = {
+    (binop_expr ~ check_op_postfix ~ (BECAUSE ~ binop_expr)?) |
+    (binop_expr ~ check_op ~ (PERCENT ~ (PARENSPACE | PARENNOSPACE) ~ binop_expr ~ RPAREN)? ~ binop_expr ~ (BECAUSE ~ binop_expr)?) |
+    (binop_expr ~ !check_op)
+}
+
+check_op = {
+    ISEQUALEQUAL | ISEQUALTILDE | ISSPACESHIP | ISROUGHLY | ISNOTROUGHLY |
+    ISNOTEQUALEQUAL | ISNOTEQUALTILDE | ISNOTSPACESHIP | ISNOT | IS |
+    RAISESOTHER | RAISESSATISFIES | RAISESVIOLATES | RAISES |
+    SATISFIESNOT | SATISFIES
+}
+
+check_op_postfix = { RAISESNOT }
+
+// Data definitions
+data_expr = { DATA ~ NAME ~ ty_params ~ COLON ~ first_data_variant? ~ data_variant* ~ data_sharing ~ where_clause ~ END }
+
+variant_constructor = { NAME ~ variant_members }
+first_data_variant = { (variant_constructor ~ data_with) | (NAME ~ data_with) }
+data_variant = { BAR ~ ((variant_constructor ~ data_with) | (NAME ~ data_with)) }
+
+variant_members = { PARENNOSPACE ~ (variant_member ~ (COMMA ~ variant_member)*)? ~ RPAREN }
+variant_member = { REF? ~ binding }
+
+data_with = { (WITH ~ fields)? }
+data_sharing = { (SHARING ~ fields)? }
+
+// Variable and assignment statements
+var_expr = { VAR ~ toplevel_binding ~ EQUALS ~ binop_expr }
+rec_expr = { REC ~ toplevel_binding ~ EQUALS ~ binop_expr }
+assign_expr = { NAME ~ COLONEQUALS ~ binop_expr }
+
+when_expr = { WHEN ~ binop_expr ~ (BLOCK | COLON) ~ block ~ END }
+
+// Binary operations
+binop_expr = { expr ~ (binop ~ expr)* }
+
+binop = {
+    PLUS | DASH | TIMES | SLASH | LEQ | GEQ | EQUALEQUAL | SPACESHIP | EQUALTILDE |
+    NEQ | LT | GT | AND | OR | CARET
+}
+
+// Expressions - restructured to avoid left recursion
+expr = { primary_expr ~ postfix_op* }
+
+primary_expr = {
+    template_expr |
+    lambda_expr |
+    method_expr |
+    paren_expr |
+    obj_expr |
+    tuple_expr |
+    if_expr |
+    if_pipe_expr |
+    cases_expr |
+    for_expr |
+    user_block_expr |
+    multi_let_expr |
+    letrec_expr |
+    type_let_expr |
+    construct_expr |
+    table_select |
+    table_extend |
+    table_filter |
+    table_order |
+    table_extract |
+    table_update |
+    table_expr |
+    load_table_expr |
+    reactor_expr |
+    prim_expr |
+    id_expr
+}
+
+postfix_op = {
+    app_args |
+    (LANGLE ~ ann ~ (COMMA ~ ann)* ~ (RANGLE | GT)) |  // inst_expr
+    (DOT ~ LBRACE ~ NUMBER ~ RBRACE) |  // tuple_get
+    (DOT ~ NAME) |  // dot_expr
+    (LBRACK ~ binop_expr ~ RBRACK) |  // bracket_expr
+    (BANG ~ NAME) |  // get_bang_expr
+    (BANG ~ LBRACE ~ fields ~ RBRACE) |  // update_expr
+    (DOT ~ LBRACE ~ fields ~ RBRACE) |  // extend_expr
+    (PARENSPACE ~ binop_expr ~ COMMA ~ binop_expr ~ (COMMA ~ binop_expr)* ~ RPAREN) |
+    (PARENSPACE ~ RPAREN)
+}
+
+template_expr = { DOTDOTDOT }
+
+bad_expr = { UNTERMINATED_STRING | UNTERMINATED_BLOCK_COMMENT | BAD_OPER | BAD_NUMBER | UNKNOWN }
+
+paren_expr = { (PARENSPACE | PARENAFTERBRACE) ~ binop_expr ~ RPAREN }
+
+id_expr = { NAME }
+
+// Primitive expressions
+prim_expr = { bool_expr | rfrac_expr | frac_expr | num_expr | string_expr }
+
+num_expr = { NUMBER }
+frac_expr = { RATIONAL }
+rfrac_expr = { ROUGHRATIONAL }
+bool_expr = { TRUE | FALSE }
+string_expr = { STRING }
+
+// Lambda expressions
+lambda_expr = {
+    (LAM ~ fun_header ~ (BLOCK | COLON) ~ doc_string ~ block ~ where_clause ~ END) |
+    (LBRACE ~ fun_header ~ (BLOCK | COLON) ~ doc_string ~ block ~ where_clause ~ RBRACE)
+}
+
+method_expr = { METHOD ~ fun_header ~ (BLOCK | COLON) ~ doc_string ~ block ~ where_clause ~ END }
+
+// Application helpers
+app_args = { PARENNOSPACE ~ opt_comma_binops ~ RPAREN }
+opt_comma_binops = { comma_binops? }
+comma_binops = { binop_expr ~ (COMMA ~ binop_expr)* }
+trailing_opt_comma_binops = { (comma_binops ~ COMMA?) | "" }
+
+// Tuple expressions
+tuple_expr = { LBRACE ~ tuple_fields ~ RBRACE }
+tuple_fields = { binop_expr ~ (SEMI ~ binop_expr)* ~ SEMI? }
+
+// Object expressions
+obj_expr = { LBRACE ~ obj_fields? ~ RBRACE }
+
+obj_fields = { obj_field ~ (COMMA ~ obj_field)* ~ COMMA? }
+
+obj_field = {
+    (REF ~ key ~ (COLONCOLON ~ ann)? ~ COLON ~ binop_expr) |
+    (METHOD ~ key ~ fun_header ~ (BLOCK | COLON) ~ doc_string ~ block ~ where_clause ~ END) |
+    (key ~ COLON ~ binop_expr)
+}
+
+fields = { field ~ (COMMA ~ field)* ~ COMMA? }
+
+field = {
+    (METHOD ~ key ~ fun_header ~ (BLOCK | COLON) ~ doc_string ~ block ~ where_clause ~ END) |
+    (key ~ COLON ~ binop_expr)
+}
+
+key = { NAME }
+
+// Constructor expressions
+construct_expr = { LBRACK ~ construct_modifier ~ binop_expr ~ COLON ~ trailing_opt_comma_binops ~ RBRACK }
+construct_modifier = { LAZY? }
+
+// Table expressions
+table_expr = { TABLE ~ table_headers ~ table_rows ~ END }
+
+table_headers = { (list_table_header* ~ table_header)? }
+list_table_header = { table_header ~ COMMA }
+table_header = { NAME ~ (COLONCOLON ~ ann)? }
+
+table_rows = { (table_row* ~ table_row)? }
+table_row = { ROW ~ table_items }
+table_items = { (list_table_item* ~ binop_expr)? }
+list_table_item = { binop_expr ~ COMMA }
+
+// Reactor expressions
+reactor_expr = { REACTOR ~ COLON ~ fields ~ END }
+
+// Control flow
+if_expr = { IF ~ binop_expr ~ (BLOCK | COLON) ~ block ~ else_if* ~ (ELSECOLON ~ block)? ~ END }
+else_if = { ELSEIF ~ binop_expr ~ COLON ~ block }
+
+if_pipe_expr = { ASK ~ (BLOCK | COLON) ~ if_pipe_branch* ~ (BAR ~ OTHERWISECOLON ~ block)? ~ END }
+if_pipe_branch = { BAR ~ binop_expr ~ THENCOLON ~ block }
+
+cases_binding = { REF? ~ binding }
+cases_args = { PARENNOSPACE ~ (cases_binding ~ (COMMA ~ cases_binding)*)? ~ RPAREN }
+cases_expr = { CASES ~ (PARENSPACE | PARENNOSPACE) ~ ann ~ RPAREN ~ binop_expr ~ (BLOCK | COLON) ~ cases_branch* ~ (BAR ~ ELSE ~ THICKARROW ~ block)? ~ END }
+cases_branch = { BAR ~ NAME ~ cases_args? ~ THICKARROW ~ block }
+
+// For expressions
+for_bind = { binding ~ FROM ~ binop_expr }
+for_expr = { FOR ~ expr ~ PARENNOSPACE ~ (for_bind ~ (COMMA ~ for_bind)*)? ~ RPAREN ~ return_ann ~ (BLOCK | COLON) ~ block ~ END }
+
+// Table operations
+column_order = { NAME ~ (ASCENDING | DESCENDING) }
+
+table_select = { TABLE_SELECT ~ NAME ~ (COMMA ~ NAME)* ~ FROM ~ expr ~ END }
+table_filter = { TABLE_FILTER ~ expr ~ (USING ~ binding ~ (COMMA ~ binding)*)? ~ COLON ~ binop_expr ~ END }
+table_order = { TABLE_ORDER ~ expr ~ COLON ~ column_order ~ (COMMA ~ column_order)* ~ END }
+table_extract = { TABLE_EXTRACT ~ NAME ~ FROM ~ expr ~ END }
+table_update = { TABLE_UPDATE ~ expr ~ (USING ~ binding ~ (COMMA ~ binding)*)? ~ COLON ~ obj_fields ~ END }
+
+table_extend = { TABLE_EXTEND ~ expr ~ (USING ~ binding ~ (COMMA ~ binding)*)? ~ COLON ~ table_extend_fields ~ END }
+table_extend_fields = { list_table_extend_field* ~ table_extend_field ~ COMMA? }
+list_table_extend_field = { table_extend_field ~ COMMA }
+table_extend_field = {
+    (key ~ (COLONCOLON ~ ann)? ~ COLON ~ expr ~ OF ~ NAME) |
+    (key ~ (COLONCOLON ~ ann)? ~ COLON ~ binop_expr)
+}
+
+load_table_expr = { LOAD_TABLE ~ COLON ~ table_headers ~ load_table_specs? ~ END }
+
+load_table_specs = { load_table_spec* ~ load_table_spec }
+load_table_spec = {
+    (SOURCECOLON ~ expr) |
+    (SANITIZE ~ NAME ~ USING ~ expr)
+}
+
+user_block_expr = { BLOCK ~ block ~ END }
+
+// Annotations (types) - restructured to avoid left recursion
+ann = { base_ann ~ ann_postfix* }
+
+base_ann = {
+    tuple_ann |
+    arrow_ann |
+    record_ann |
+    dot_ann |
+    name_ann
+}
+
+ann_postfix = {
+    (LANGLE ~ comma_anns ~ (RANGLE | GT)) |  // app_ann
+    (PERCENT ~ (PARENSPACE | PARENNOSPACE) ~ id_expr ~ RPAREN)  // pred_ann
+}
+
+name_ann = { NAME }
+
+comma_ann_field = { ann_field ~ (COMMA ~ ann_field)* }
+trailing_opt_comma_ann_field = { (comma_ann_field ~ COMMA?) | "" }
+
+record_ann = { LBRACE ~ trailing_opt_comma_ann_field ~ RBRACE }
+ann_field = { NAME ~ COLONCOLON ~ ann }
+
+tuple_ann = { LBRACE ~ ann ~ (SEMI ~ ann)* ~ SEMI? ~ RBRACE }
+
+noparen_arrow_ann = { arrow_ann_args? ~ THINARROW ~ ann }
+arrow_ann_args = { comma_anns | ((PARENSPACE | PARENNOSPACE | PARENAFTERBRACE) ~ comma_ann_field ~ RPAREN) }
+arrow_ann = { (PARENSPACE | PARENNOSPACE | PARENAFTERBRACE) ~ arrow_ann_args? ~ THINARROW ~ ann ~ RPAREN }
+
+comma_anns = { ann ~ (COMMA ~ ann)* }
+
+dot_ann = { NAME ~ DOT ~ NAME }

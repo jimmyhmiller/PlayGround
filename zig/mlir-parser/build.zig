@@ -231,6 +231,22 @@ pub fn build(b: *std.Build) void {
     const run_no_inline_mlir_tests = b.addRunArtifact(no_inline_mlir_tests);
     run_no_inline_mlir_tests.setCwd(b.path("."));
 
+    // Creates a test executable for test/lisp_printer_test.zig
+    const lisp_printer_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/lisp_printer_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_parser", .module = mod },
+            },
+        }),
+    });
+
+    // A run step that will run the lisp printer test executable.
+    const run_lisp_printer_tests = b.addRunArtifact(lisp_printer_tests);
+    run_lisp_printer_tests.setCwd(b.path("."));
+
     // Debug printer executable
     const debug_printer = b.addExecutable(.{
         .name = "debug_printer",
@@ -249,6 +265,27 @@ pub fn build(b: *std.Build) void {
     const debug_step = b.step("debug-printer", "Run debug printer");
     debug_step.dependOn(&run_debug_printer.step);
 
+    // MLIR to Lisp converter executable
+    const mlir_to_lisp = b.addExecutable(.{
+        .name = "mlir-to-lisp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("mlir_to_lisp.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_parser", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(mlir_to_lisp);
+
+    const run_mlir_to_lisp = b.addRunArtifact(mlir_to_lisp);
+    if (b.args) |args| {
+        run_mlir_to_lisp.addArgs(args);
+    }
+    const mlir_to_lisp_step = b.step("mlir-to-lisp", "Convert MLIR to Lisp S-expression");
+    mlir_to_lisp_step.dependOn(&run_mlir_to_lisp.step);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -261,6 +298,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_roundtrip_tests.step);
     test_step.dependOn(&run_example_validation_tests.step);
     test_step.dependOn(&run_no_inline_mlir_tests.step);
+    test_step.dependOn(&run_lisp_printer_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

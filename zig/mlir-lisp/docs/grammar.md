@@ -17,22 +17,33 @@ BLOCK_ID   ::= "^" SUFFIX_ID         ; block label (binding/ref), e.g. ^bb0, ^en
 SYMBOL     ::= "@" SUFFIX_ID         ; symbol-table name, e.g. @main, @42
 OP_NAME    ::= IDENT "." IDENT ( "." IDENT )*   ; dialect/op name
 KEYWORD    ::= ":" IDENT ( "." IDENT )*         ; attr keys
+ATTR_MARKER ::= "#" <opaque-text-until-delimiter>
+               ; Dialect attribute, e.g. #arith.overflow<none>, #llvm.noalias
+               ; Scanned as opaque text until whitespace or delimiters {, }, [, ], ;
+               ; Can contain <, >, (, ), , and other special characters
 
 ;----------------------------------------
 ; 1) Core S-expressions
 ;----------------------------------------
-ATOM       ::= IDENT | NUMBER | STRING | VALUE_ID | BLOCK_ID | SYMBOL
-TYPE       ::= "!" IDENT | IDENT
-               ; Builtin types (i32, f64, vector<4xf32>, etc.) are written as plain identifiers
-               ; Dialect types (llvm.ptr, transform.any_op, etc.) require the ! prefix
+ATOM       ::= IDENT | NUMBER | STRING | VALUE_ID | BLOCK_ID | SYMBOL | ATTR_MARKER
+TYPE       ::= "!" IDENT ( "." IDENT )* | IDENT
+               ; Builtin types (i32, f64, index, etc.) are written as plain identifiers
+               ; Dialect types (!llvm.ptr, !transform.any_op, etc.) require the ! prefix
                ; Function types use special syntax: (!function (inputs TYPE*) (results TYPE*))
-ATTR       ::= NUMBER | STRING | true | false | "#" SEXPR
+ATTR       ::= NUMBER | STRING | true | false | SYMBOL | TYPED_LITERAL | ATTR_MARKER
+TYPED_LITERAL ::= "(:" VALUE TYPE ")"
+               ; Represents a typed literal value like (: 42 i32) or (: 3 i64)
 SEXPR      ::= ATOM | "(" SEXPR* ")" | "[" SEXPR* "]" | "{" (SEXPR SEXPR)* "}"
 
 ;----------------------------------------
 ; 2) Top-level structure
 ;----------------------------------------
-MLIR       ::= (mlir OPERATION*)
+MLIR       ::= (mlir TOP_LEVEL_ITEM*)
+TOP_LEVEL_ITEM ::= TYPE_ALIAS | OPERATION
+
+TYPE_ALIAS ::= (type-alias TYPE_ID STRING)
+TYPE_ID    ::= "!" IDENT  ; Type alias name, e.g. !my_vec, !my_tensor
+               ; STRING contains the opaque type definition, e.g. "vector<4xf32>"
 
 ;----------------------------------------
 ; 3) Operation form
@@ -78,10 +89,15 @@ operand-bundle ::= ( VALUE_ID* )
 ;----------------------------------------
 ; • (operation) must have exactly one (name …).
 ; • Section order is flexible, all optional.
-; • [ … ] always means “introduces new bindings” (values or labels).
-; • { … } always means “key/value pairs” (maps).
+; • [ … ] always means "introduces new bindings" (values or labels).
+; • { … } always means "key/value pairs" (maps).
 ; • Plain ( … ) is sequencing or grouping.
-; • Dialect types and attributes are opaque (# … and ! … payloads).
+; • Dialect types use ! prefix (!llvm.ptr, !function, etc.).
+; • Type aliases must be defined before use (at module level).
+; • Type alias definitions are opaque strings (not parsed).
+; • Typed literals use (: value type) syntax for integer attributes.
+; • Symbol references (@func_name) are used for function names and callees.
+; • Keywords (starting with :) are used for attribute keys and some enum values.
 ; • Round-trip guarantees: order preserved, no implied defaults.
 
 ;============================================================
@@ -89,15 +105,35 @@ operand-bundle ::= ( VALUE_ID* )
 ;============================================================
 
 ;----------------------------------------
-; Example 1 — simple constant
+; Example 1 — type aliases
+;----------------------------------------
+(mlir
+  (type-alias !my_vec "vector<4xf32>")
+  (type-alias !my_tensor "tensor<10x20xf32>")
+
+  (operation
+    (name func.func)
+    (attributes {
+      :sym_name @test
+      :function_type (!function (inputs !my_vec !my_tensor) (results !my_vec))
+    })
+    (regions
+      (region
+        (block [^entry]
+          (arguments [ [%arg0 !my_vec] [%arg1 !my_tensor] ])
+          (operation
+            (name func.return)
+            (operands %arg0)))))))
+
+;----------------------------------------
+; Example 2 — simple constant
 ;----------------------------------------
 (mlir
   (operation
     (name arith.constant)
     (result-bindings [%c0])
     (result-types i32)
-    (attributes { :value (#int 42) })
-    (location (#unknown))))
+    (attributes { :value (: 42 i32) })))
 
 ;----------------------------------------
 ; Example 2 — add inside a function
@@ -106,9 +142,8 @@ operand-bundle ::= ( VALUE_ID* )
   (operation
     (name func.func)
     (attributes {
-      :sym  (#sym @add)
-      :type (!function (inputs i32 i32) (results i32))
-      :visibility :public
+      :sym_name @add
+      :function_type (!function (inputs i32 i32) (results i32))
     })
     (regions
       (region
@@ -130,8 +165,8 @@ operand-bundle ::= ( VALUE_ID* )
   (operation
     (name func.func)
     (attributes {
-      :sym (#sym @main)
-      :type (!function (inputs) (results i32))
+      :sym_name @main
+      :function_type (!function (inputs) (results i32))
     })
     (regions
       (region
@@ -141,18 +176,18 @@ operand-bundle ::= ( VALUE_ID* )
             (name arith.constant)
             (result-bindings [%a])
             (result-types i32)
-            (attributes { :value (#int 1) }))
+            (attributes { :value (: 1 i32) }))
           (operation
             (name arith.constant)
             (result-bindings [%b])
             (result-types i32)
-            (attributes { :value (#int 2) }))
+            (attributes { :value (: 2 i32) }))
           (operation
             (name func.call)
             (result-bindings [%r])
             (result-types i32)
             (operands %a %b)
-            (attributes { :callee (#flat-symbol @add) }))
+            (attributes { :callee @add }))
           (operation
             (name func.return)
             (operands %r)))))))
@@ -164,8 +199,8 @@ operand-bundle ::= ( VALUE_ID* )
   (operation
     (name func.func)
     (attributes {
-      :sym (#sym @branchy)
-      :type (!function (inputs i1 i32 i32) (results i32))
+      :sym_name @branchy
+      :function_type (!function (inputs i1 i32 i32) (results i32))
     })
     (regions
       (region
@@ -191,9 +226,8 @@ operand-bundle ::= ( VALUE_ID* )
   (operation
     (name func.func)
     (attributes {
-      :sym (#sym @fibonacci)
-      :type (!function (inputs i32) (results i32))
-      :visibility :public
+      :sym_name @fibonacci
+      :function_type (!function (inputs i32) (results i32))
     })
     (regions
       (region
@@ -205,14 +239,14 @@ operand-bundle ::= ( VALUE_ID* )
             (name arith.constant)
             (result-bindings [%c1])
             (result-types i32)
-            (attributes { :value (#int 1) }))
+            (attributes { :value (: 1 i32) }))
 
           (operation
             (name arith.cmpi)
             (result-bindings [%cond])
             (result-types i1)
             (operands %n %c1)
-            (attributes { :predicate (#string "sle") }))
+            (attributes { :predicate (: 3 i64) }))
 
           ;; scf.if with nested regions (then/else)
           (operation
@@ -239,7 +273,7 @@ operand-bundle ::= ( VALUE_ID* )
                     (name arith.constant)
                     (result-bindings [%c1_rec])
                     (result-types i32)
-                    (attributes { :value (#int 1) }))
+                    (attributes { :value (: 1 i32) }))
 
                   (operation
                     (name arith.subi)
@@ -252,14 +286,14 @@ operand-bundle ::= ( VALUE_ID* )
                     (result-bindings [%fib_n_minus_1])
                     (result-types i32)
                     (operands %n_minus_1)
-                    (attributes { :callee (#flat-symbol @fibonacci) }))
+                    (attributes { :callee @fibonacci }))
 
                   ;; Compute fib(n-2)
                   (operation
                     (name arith.constant)
                     (result-bindings [%c2])
                     (result-types i32)
-                    (attributes { :value (#int 2) }))
+                    (attributes { :value (: 2 i32) }))
 
                   (operation
                     (name arith.subi)
@@ -272,7 +306,7 @@ operand-bundle ::= ( VALUE_ID* )
                     (result-bindings [%fib_n_minus_2])
                     (result-types i32)
                     (operands %n_minus_2)
-                    (attributes { :callee (#flat-symbol @fibonacci) }))
+                    (attributes { :callee @fibonacci }))
 
                   ;; Add fib(n-1) + fib(n-2) and yield
                   (operation
@@ -289,4 +323,53 @@ operand-bundle ::= ( VALUE_ID* )
           (operation
             (name func.return)
             (operands %result)))))))
+
+;============================================================
+; 8) Common Attribute Patterns
+;============================================================
+
+;----------------------------------------
+; Integer Constants (typed literals)
+;----------------------------------------
+; Use (: value type) syntax:
+; (attributes { :value (: 42 i32) })
+; (attributes { :value (: 10 i64) })
+; (attributes { :predicate (: 3 i64) })  ; Comparison predicate as integer
+
+;----------------------------------------
+; String Attributes
+;----------------------------------------
+; Plain strings for string values:
+; (attributes { :predicate "eq" })
+; (attributes { :predicate "sle" })
+
+;----------------------------------------
+; Symbol References
+;----------------------------------------
+; Use @ prefix for function names and symbol references:
+; (attributes { :sym_name @main })
+; (attributes { :callee @fibonacci })
+
+;----------------------------------------
+; Function Type Attributes
+;----------------------------------------
+; Use !function with inputs/results sections:
+; (attributes { :function_type (!function (inputs i32 i32) (results i32)) })
+; (attributes { :function_type (!function (inputs) (results i64)) })
+
+;----------------------------------------
+; Dialect Types
+;----------------------------------------
+; Dialect types use ! prefix:
+; !llvm.ptr           ; LLVM pointer type
+; !transform.any_op   ; Transform dialect type
+; !function           ; Function type (special case)
+
+;----------------------------------------
+; Builtin Types
+;----------------------------------------
+; Builtin types are plain identifiers:
+; i32, i64, i1       ; Integer types
+; f32, f64           ; Float types
+; index              ; Index type
 ```

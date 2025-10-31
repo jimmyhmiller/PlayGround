@@ -1,1 +1,4 @@
-%0 = "arith.constant"() <{value = 1 : i1}> : () -> i1
+"builtin.module"() ({
+  %0 = "arith.constant"() <{value = true}> : () -> i1
+}) : () -> ()
+

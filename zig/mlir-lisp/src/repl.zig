@@ -9,6 +9,7 @@ const Builder = mlir_lisp.Builder;
 const Executor = mlir_lisp.Executor;
 const ExecutorConfig = mlir_lisp.ExecutorConfig;
 const MlirModule = mlir_lisp.MlirModule;
+const TypeAlias = mlir_lisp.TypeAlias;
 const Operation = mlir_lisp.Operation;
 
 pub fn run(allocator: std.mem.Allocator) !void {
@@ -366,6 +367,7 @@ fn processInput(
         if (mlir_module.*) |*mod| mod.destroy();
 
         var module_ast = MlirModule{
+            .type_aliases = &[_]TypeAlias{},
             .operations = operations_list.items,
             .allocator = parse_allocator,
         };
@@ -397,6 +399,7 @@ fn processInput(
             if (mlir_module.*) |*mod| mod.destroy();
 
             var module_ast = MlirModule{
+                .type_aliases = &[_]TypeAlias{},
                 .operations = operations_list.items,
                 .allocator = parse_allocator,
             };
@@ -431,6 +434,7 @@ fn processInput(
             if (mlir_module.*) |*mod| mod.destroy();
 
             var module_ast = MlirModule{
+                .type_aliases = &[_]TypeAlias{},
                 .operations = operations_list.items,
                 .allocator = parse_allocator,
             };
@@ -474,6 +478,7 @@ fn processInput(
             if (mlir_module.*) |*mod| mod.destroy();
 
             var clean_module_ast = MlirModule{
+                .type_aliases = &[_]TypeAlias{},
                 .operations = operations_list.items,
                 .allocator = parse_allocator,
             };

@@ -16,31 +16,76 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    // Check for flags
-    if (args.len >= 2) {
-        if (std.mem.eql(u8, args[1], "--repl")) {
+    // Parse flags
+    var use_generic_format = false;
+    var file_path: ?[]const u8 = null;
+
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--repl")) {
             try Repl.run(allocator);
             return;
+        } else if (std.mem.eql(u8, args[i], "--generic")) {
+            use_generic_format = true;
+        } else if (std.mem.eql(u8, args[i], "-g")) {
+            use_generic_format = true;
+        } else {
+            file_path = args[i];
         }
     }
 
     // If a file is provided, run it. Otherwise show usage.
-    if (args.len < 2) {
+    if (file_path == null) {
         std.debug.print("MLIR-Lisp Compiler/JIT\n", .{});
         std.debug.print("\nUsage:\n", .{});
-        std.debug.print("  {s} <file.lisp>  - JIT compile and run a .lisp file\n", .{args[0]});
-        std.debug.print("  {s} --repl       - Start interactive REPL\n", .{args[0]});
-        std.debug.print("  {s}              - Run basic MLIR tests\n", .{args[0]});
+        std.debug.print("  {s} [--generic|-g] <file.lisp>  - JIT compile and run a .lisp file\n", .{args[0]});
+        std.debug.print("  {s} --repl                       - Start interactive REPL\n", .{args[0]});
+        std.debug.print("  {s}                              - Run basic MLIR tests\n", .{args[0]});
+        std.debug.print("\nOptions:\n", .{});
+        std.debug.print("  --generic, -g  Print MLIR in generic form (shows all attributes)\n", .{});
         std.debug.print("\nRunning basic MLIR tests...\n\n", .{});
         try runBasicTests();
         return;
     }
 
-    const file_path = args[1];
-    try runFile(allocator, file_path);
+    try runFile(allocator, file_path.?, use_generic_format);
 }
 
-fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8) !void {
+fn printErrorLocation(source: []const u8, line: usize, column: usize) void {
+    if (line == 0 or column == 0) return;
+
+    // Find the line in the source
+    var current_line: usize = 1;
+    var line_start: usize = 0;
+    var i: usize = 0;
+
+    while (i < source.len) : (i += 1) {
+        if (current_line == line) {
+            // Find the end of this line
+            var line_end = i;
+            while (line_end < source.len and source[line_end] != '\n') : (line_end += 1) {}
+
+            // Print the line
+            const line_content = source[line_start..line_end];
+            std.debug.print("{s}\n", .{line_content});
+
+            // Print pointer to error location
+            var j: usize = 0;
+            while (j < column - 1) : (j += 1) {
+                std.debug.print(" ", .{});
+            }
+            std.debug.print("^\n", .{});
+            return;
+        }
+
+        if (source[i] == '\n') {
+            current_line += 1;
+            line_start = i + 1;
+        }
+    }
+}
+
+fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_generic_format: bool) !void {
     std.debug.print("Loading file: {s}\n", .{file_path});
 
     // Create an arena for the entire compilation process
@@ -68,8 +113,18 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8) !void {
     // Parse the program
     std.debug.print("Parsing...\n", .{});
     var tok = mlir_lisp.Tokenizer.init(allocator, source);
-    var reader = try Reader.init(allocator, &tok);
-    const value = try reader.read();
+    var reader = Reader.init(allocator, &tok) catch |err| {
+        const pos = tok.getPosition();
+        std.debug.print("\nerror: {} at line {}, column {}\n", .{ err, pos.line, pos.column });
+        printErrorLocation(source, pos.line, pos.column);
+        return err;
+    };
+    const value = reader.read() catch |err| {
+        const pos = tok.getPosition();
+        std.debug.print("\nerror: {} at line {}, column {}\n", .{ err, pos.line, pos.column });
+        printErrorLocation(source, pos.line, pos.column);
+        return err;
+    };
     // No need to manually free - arena handles it
 
     // Parse to AST
@@ -90,8 +145,37 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8) !void {
     // Print the MLIR
     std.debug.print("\nGenerated MLIR:\n", .{});
     std.debug.print("----------------------------------------\n", .{});
-    mlir_module.print();
+    if (use_generic_format) {
+        mlir_module.printGeneric();
+    } else {
+        mlir_module.print();
+    }
     std.debug.print("----------------------------------------\n\n", .{});
+
+    // Check if the module has a main function
+    const has_main = blk: {
+        for (parsed_module.operations) |*op| {
+            if (std.mem.eql(u8, op.name, "func.func")) {
+                // Check for sym_name attribute
+                for (op.attributes) |*attr| {
+                    if (std.mem.eql(u8, attr.key, "sym_name")) {
+                        // The value should be a symbol starting with @
+                        const val = attr.value.value;
+                        if (val.type == .symbol and std.mem.eql(u8, val.data.atom, "@main")) {
+                            break :blk true;
+                        }
+                    }
+                }
+            }
+        }
+        break :blk false;
+    };
+
+    if (!has_main) {
+        std.debug.print("Note: No main() function found - skipping JIT execution\n", .{});
+        std.debug.print("(Add a main() function with signature () -> i64 to enable execution)\n", .{});
+        return;
+    }
 
     // Create executor and compile
     const executor_config = mlir_lisp.ExecutorConfig{
@@ -109,7 +193,20 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8) !void {
 
     // Look up and call main() with fixed signature: () -> i64
     std.debug.print("Executing main()...\n", .{});
-    const main_fn_ptr = executor.lookup("main") orelse return error.MainNotFound;
+
+    // Try to look up main with MLIR's C interface mangling
+    var main_fn_ptr = executor.lookup("_mlir_ciface_main");
+    if (main_fn_ptr == null) {
+        // Try without the prefix
+        main_fn_ptr = executor.lookup("main");
+    }
+
+    if (main_fn_ptr == null) {
+        // This shouldn't happen since we validated main exists, but handle it anyway
+        std.debug.print("ERROR: main() function not found after compilation\n", .{});
+        return error.MainNotFound;
+    }
+
     const main_fn: *const fn () callconv(.c) i64 = @ptrCast(@alignCast(main_fn_ptr));
     const result = main_fn();
 

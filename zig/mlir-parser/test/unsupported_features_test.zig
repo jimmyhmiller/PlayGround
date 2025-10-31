@@ -18,7 +18,7 @@ fn loadTestFile(allocator: std.mem.Allocator, filename: []const u8) ![]u8 {
 // Grammar: successor-list ::= `[` successor (`,` successor)* `]`
 // Grammar: successor ::= caret-id (`:` block-arg-list)?
 test "unsupported - operation with successors (branch)" {
-    const source = try loadTestFile(std.testing.allocator, "unsupported_branch_with_successors.mlir");
+    const source = try loadTestFile(std.testing.allocator, "branch_with_successors.mlir");
     defer std.testing.allocator.free(source);
 
     var lex = mlir_parser.Lexer.init(source);
@@ -46,7 +46,7 @@ test "unsupported - operation with successors (branch)" {
 // Grammar: region-list ::= `(` region (`,` region)* `)`
 // Grammar: region ::= `{` entry-block? block* `}`
 test "unsupported - operation with regions (scf.if)" {
-    const source = try loadTestFile(std.testing.allocator, "unsupported_scf_if_regions.mlir");
+    const source = try loadTestFile(std.testing.allocator, "scf_if_regions.mlir");
     defer std.testing.allocator.free(source);
 
     var lex = mlir_parser.Lexer.init(source);
@@ -155,7 +155,7 @@ test "unsupported - tuple types" {
 // Test operation with multiple results (op-result with count)
 // Grammar: op-result ::= value-id (`:` integer-literal)?
 test "unsupported - operation with multiple results count" {
-    const source = try loadTestFile(std.testing.allocator, "unsupported_multi_result_count.mlir");
+    const source = try loadTestFile(std.testing.allocator, "multi_result_count.mlir");
     defer std.testing.allocator.free(source);
 
     var lex = mlir_parser.Lexer.init(source);
@@ -174,7 +174,7 @@ test "unsupported - operation with multiple results count" {
 // Test value-use with result number
 // Grammar: value-use ::= value-id (`#` decimal-literal)?
 test "unsupported - value use with result number" {
-    const source = try loadTestFile(std.testing.allocator, "unsupported_value_use_result_number.mlir");
+    const source = try loadTestFile(std.testing.allocator, "value_use_result_number.mlir");
     defer std.testing.allocator.free(source);
 
     var lex = mlir_parser.Lexer.init(source);
@@ -197,7 +197,7 @@ test "unsupported - value use with result number" {
 // Test trailing location
 // Grammar: trailing-location ::= `loc` `(` location `)`
 test "unsupported - trailing location" {
-    const source = try loadTestFile(std.testing.allocator, "unsupported_trailing_location.mlir");
+    const source = try loadTestFile(std.testing.allocator, "trailing_location.mlir");
     defer std.testing.allocator.free(source);
 
     var lex = mlir_parser.Lexer.init(source);
@@ -213,7 +213,7 @@ test "unsupported - trailing location" {
 // Test dialect attribute (pretty format)
 // Grammar: pretty-dialect-attribute ::= dialect-namespace `.` pretty-dialect-attribute-lead-ident
 test "unsupported - pretty dialect attribute" {
-    const source = try loadTestFile(std.testing.allocator, "unsupported_pretty_dialect_attribute.mlir");
+    const source = try loadTestFile(std.testing.allocator, "pretty_dialect_attribute.mlir");
     defer std.testing.allocator.free(source);
 
     var lex = mlir_parser.Lexer.init(source);
@@ -244,7 +244,7 @@ test "unsupported - pretty dialect type" {
 // Test type alias usage
 // Grammar: type-alias ::= `!` alias-name
 test "unsupported - type alias usage" {
-    const source = try loadTestFile(std.testing.allocator, "unsupported_type_alias_usage.mlir");
+    const source = try loadTestFile(std.testing.allocator, "type_alias_usage.mlir");
     defer std.testing.allocator.free(source);
 
     var lex = mlir_parser.Lexer.init(source);
@@ -261,7 +261,7 @@ test "unsupported - type alias usage" {
 // Test attribute alias usage
 // Grammar: attribute-alias ::= `#` alias-name
 test "unsupported - attribute alias usage" {
-    const source = try loadTestFile(std.testing.allocator, "unsupported_attribute_alias_usage.mlir");
+    const source = try loadTestFile(std.testing.allocator, "attribute_alias_usage.mlir");
     defer std.testing.allocator.free(source);
 
     var lex = mlir_parser.Lexer.init(source);

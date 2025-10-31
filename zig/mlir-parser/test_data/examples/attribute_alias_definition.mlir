@@ -1,1 +1,4 @@
-#my_attr = 42 : i32
+"builtin.module"() ({
+^bb0:
+}) : () -> ()
+

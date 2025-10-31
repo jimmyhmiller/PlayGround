@@ -1,0 +1,18 @@
+# Simple Pyret program
+
+fun factorial(n):
+  if n <= 1:
+    1
+  else:
+    n * factorial(n - 1)
+  end
+end
+
+fun greet(name):
+  "Hello, " + name + "!"
+end
+
+let result = factorial(5)
+let message = greet("World")
+
+result

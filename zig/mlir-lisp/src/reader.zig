@@ -90,8 +90,7 @@ pub const Value = struct {
                 mut_results.deinit();
             },
             .attr_expr => {
-                self.data.attr_expr.deinit(allocator);
-                allocator.destroy(self.data.attr_expr);
+                // attr_expr now uses .atom which is owned by tokenizer, no cleanup needed
             },
             .has_type => {
                 self.data.has_type.value.deinit(allocator);
@@ -352,13 +351,28 @@ pub const Reader = struct {
                 }
             },
             .attr_marker => {
-                try self.advance(); // consume '#'
-                const inner = try self.read();
+                // Attribute markers like #arith.overflow<none> are now scanned as opaque tokens
+                // We need to create a nested Value for the attribute content
+                // The lexeme includes the '#', so we need to strip it
+                const attr_content = if (tok.lexeme.len > 1 and tok.lexeme[0] == '#')
+                    tok.lexeme[1..]
+                else
+                    tok.lexeme;
+
+                // Create inner value for the attribute content
+                const inner_value = try self.allocator.create(Value);
+                inner_value.* = Value{
+                    .type = .identifier,
+                    .data = .{ .atom = attr_content },
+                };
+
+                // Create the attr_expr value wrapping the inner value
                 const value = try self.allocator.create(Value);
                 value.* = Value{
                     .type = .attr_expr,
-                    .data = .{ .attr_expr = inner },
+                    .data = .{ .attr_expr = inner_value },
                 };
+                try self.advance();
                 return value;
             },
 
