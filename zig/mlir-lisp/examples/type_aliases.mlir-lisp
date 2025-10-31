@@ -1,0 +1,54 @@
+;; Example demonstrating type aliases in MLIR S-expression syntax
+;; Type aliases allow defining reusable type names for complex types
+
+(mlir
+  ;; Define some type aliases
+  (type-alias !my_vec "vector<4xf32>")
+  (type-alias !my_tensor "tensor<10x20xf32>")
+  (type-alias !my_ptr "!llvm.ptr")
+
+  ;; Function that uses type aliases
+  (operation
+    (name func.func)
+    (attributes {
+      :sym_name @vector_add
+      :function_type (!function (inputs !my_vec !my_vec) (results !my_vec))
+    })
+    (regions
+      (region
+        (block [^entry]
+          (arguments [ [%arg0 !my_vec] [%arg1 !my_vec] ])
+
+          ;; Add the two vectors (placeholder operation)
+          (operation
+            (name arith.addf)
+            (result-bindings [%result])
+            (result-types !my_vec)
+            (operands %arg0 %arg1))
+
+          (operation
+            (name func.return)
+            (operands %result))))))
+
+  ;; Another function using tensor type alias
+  (operation
+    (name func.func)
+    (attributes {
+      :sym_name @tensor_zero
+      :function_type (!function (inputs) (results !my_tensor))
+    })
+    (regions
+      (region
+        (block [^entry]
+          (arguments [])
+
+          ;; Create a constant tensor (placeholder)
+          (operation
+            (name arith.constant)
+            (result-bindings [%zero_tensor])
+            (result-types !my_tensor)
+            (attributes { :value (: 0.0 f32) }))
+
+          (operation
+            (name func.return)
+            (operands %zero_tensor)))))))
