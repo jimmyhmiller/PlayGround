@@ -16,99 +16,27 @@ To add, close, or list bugs, use:
 
 This file tracks bugs discovered during development.
 
-## List/collection syntax edge cases [terrific-quarrelsome-shrew]
+## PARENNOSPACE vs PARENSPACE not distinguished in tokenizer [worthwhile-itchy-tiger]
 
-**ID:** terrific-quarrelsome-shrew
-**Timestamp:** 2025-10-31 00:17:18
-**Severity:** low
-**Location:** src/pyret.pest (construct_expr and list parsing)
-**Tags:** parser, lists, collections, grammar
-
-### Description
-
-Parser fails with 'expected RBRACK or primary_expr' in 4 files, suggesting incomplete support for list comprehensions or complex collection operations.
-
-### Minimal Reproducing Case
-
-Parse files with complex list comprehensions
-
----
-
-## Import/module statement parsing failures [lumbering-subdued-zebra]
-
-**ID:** lumbering-subdued-zebra
-**Timestamp:** 2025-10-31 00:17:19
-**Severity:** medium
-**Location:** src/pyret.pest (import_stmt parsing)
-**Tags:** parser, imports, modules, grammar
+**ID:** worthwhile-itchy-tiger
+**Timestamp:** 2025-10-31 09:07:47
+**Severity:** high
+**Location:** src/pyret.pest (PARENNOSPACE/PARENSPACE token definitions (lines 138-139) and postfix_op usage)
+**Tags:** parser, tokenizer, whitespace, function-application, pest
 
 ### Description
 
-Parser encounters 'expected NAME or import_source' errors in 6 files. Complex import patterns, re-exports with aliases, and some provide specifications are not fully supported.
+The parser doesn't distinguish between '(' preceded by whitespace (PARENSPACE) and '(' with no preceding whitespace (PARENNOSPACE). This causes function application to be parsed incorrectly when expressions span multiple lines. The official Pyret tokenizer tracks whitespace state to emit different tokens, but our Pest-based parser uses automatic whitespace handling which doesn't support this distinction. Example: 'y = 1\n(x + 1)' is incorrectly parsed as 'y = 1(x + 1)' (function call) instead of two separate statements.
 
 ### Minimal Reproducing Case
 
-Parse files with complex import patterns or re-exporting
-
----
-
-## Statement/block structure parsing failures [nippy-lonely-fowl]
-
-**ID:** nippy-lonely-fowl
-**Timestamp:** 2025-10-31 00:17:21
-**Severity:** low
-**Location:** src/pyret.pest (block and stmt parsing)
-**Tags:** parser, blocks, statements, grammar
-
-### Description
-
-Parser fails with 'expected END, BECAUSE, stmt, binop, or postfix_op' in 5 files. Issues with block structure termination or statement separation.
-
-### Minimal Reproducing Case
-
-Parse files with complex block structures
-
----
-
-## Anonymous function syntax not supported [jaunty-small-canary]
-
-**ID:** jaunty-small-canary
-**Timestamp:** 2025-10-31 00:17:34
-**Severity:** medium
-**Location:** src/pyret.pest (lambda_expr and function parsing)
-**Tags:** parser, functions, lambda, grammar, missing-feature
-
-### Description
-
-Parser fails on 'fun:' syntax for anonymous functions. Example: 'assert(fun: actual == expected end, message)'. This is a valid Pyret syntax but not supported in grammar.
-
-### Minimal Reproducing Case
-
-Parse: if assert(fun: x == y end, "msg"): ... end
+Create a check block with: 'y = 1' on one line, then '(x + 1) + 1 is 3' on the next line. Parser fails with 'expected END, stmt, binop, or postfix_op' at the 'is' keyword.
 
 ### Code Snippet
 
 ```
-fun: actual == expected end
+PARENSPACE = { "(" }      // preceded by space\nPARENNOSPACE = { "(" }    // no space before
 ```
-
----
-
-## Complex expression parsing failures [original-potable-gull]
-
-**ID:** original-potable-gull
-**Timestamp:** 2025-10-31 00:17:35
-**Severity:** high
-**Location:** src/pyret.pest (expr and primary_expr parsing)
-**Tags:** parser, expressions, grammar
-
-### Description
-
-Parser fails with 'expected primary_expr' or 'expected RPAREN or primary_expr' in 11 files. Issues with deeply nested expressions, operator precedence, or expression-level annotations.
-
-### Minimal Reproducing Case
-
-Parse files with deeply nested or complex expressions
 
 ---
 

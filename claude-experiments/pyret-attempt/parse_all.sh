@@ -27,6 +27,11 @@ failed=0
 
 # Find all .arr files and parse them
 while IFS= read -r file; do
+    # Skip image2.arr as it's invalid Pyret code
+    if [[ "$file" == */image2.arr ]]; then
+        continue
+    fi
+
     ((total++))
     echo "[$total] Parsing: $file" | tee -a "$LOG_FILE"
 

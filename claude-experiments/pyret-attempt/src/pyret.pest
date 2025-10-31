@@ -356,9 +356,11 @@ check_expr = {
 }
 
 check_test = {
-    (binop_expr ~ check_op_postfix ~ (BECAUSE ~ binop_expr)?) |
-    (binop_expr ~ check_op ~ (PERCENT ~ (PARENSPACE | PARENNOSPACE) ~ binop_expr ~ RPAREN)? ~ binop_expr ~ (BECAUSE ~ binop_expr)?) |
-    (binop_expr ~ !check_op)
+    binop_expr ~ (
+        (check_op ~ (PERCENT ~ (PARENSPACE | PARENNOSPACE) ~ binop_expr ~ RPAREN)? ~ binop_expr ~ (BECAUSE ~ binop_expr)?) |
+        (check_op_postfix ~ (BECAUSE ~ binop_expr)?) |
+        !(check_op | check_op_postfix)
+    )
 }
 
 check_op = {

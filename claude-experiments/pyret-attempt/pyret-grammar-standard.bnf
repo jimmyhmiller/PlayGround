@@ -1,0 +1,304 @@
+# Pyret Grammar in Standard BNF Format
+# Converted from pyret-grammar.bnf
+
+/*
+<name> ::= <PyretGrammar>
+*/
+<program> ::= <prelude> <block>
+
+<prelude> ::= [<use-stmt> ](<provide-stmt> | <import-stmt> )*
+
+<use-stmt> ::= "use" <name> <import-source>
+
+<import-stmt> ::= "include" <import-source>
+<import-stmt> ::= "include" "from" <module-ref> ":" [<include-spec> ("," <include-spec> )* ["," ]]"end"
+<import-stmt> ::= "import" <import-source> "as" <name>
+<import-stmt> ::= "import" <comma-names> "from" <import-source>
+<import-source> ::= <import-special> | <import-name>
+<import-special> ::= <name> "(" <string> ("," <string> )* ")"
+<import-name> ::= <name>
+
+
+<include-spec> ::= <include-name-spec>
+     | <include-type-spec>
+     | <include-data-spec>
+     | <include-module-spec>
+
+<include-name-spec> ::= <name-spec>
+<include-type-spec> ::= "type" <name-spec>
+<include-data-spec> ::= "data" <data-name-spec> [<hiding-spec> ]
+<include-module-spec> ::= "module" <name-spec>
+
+<provide-stmt> ::= <provide-vals-stmt> | <provide-types-stmt> | <provide-block>
+
+<provide-vals-stmt> ::= "provide" <stmt> "end" | "provide" ("*" | "*" )
+<provide-types-stmt> ::= "provide-types" <record-ann> | "provide-types" ("*" | "*" )
+
+<provide-block> ::= "provide:" [<provide-spec> ("," <provide-spec> )* ["," ]]"end"
+<provide-block> ::= "provide" "from" <module-ref> ":" [<provide-spec> ("," <provide-spec> )* ["," ]]"end"
+
+<provide-spec> ::= <provide-name-spec>
+     | <provide-type-spec>
+     | <provide-data-spec>
+     | <provide-module-spec>
+
+<name-spec> ::= ("*" | "*" )[<hiding-spec> ]| <module-ref> | <module-ref> "as" <name>
+<data-name-spec> ::= ("*" | "*" )| <module-ref>
+
+<provide-name-spec> ::= <name-spec>
+<provide-type-spec> ::= "type" <name-spec>
+<provide-data-spec> ::= "data" <data-name-spec> [<hiding-spec> ]
+<provide-module-spec> ::= "module" <name-spec>
+
+<hiding-spec> ::= "hiding" ("(" | "(" )[(<name> "," )* <name> ]")"
+
+<module-ref> ::= (<name> "." )* <name>
+
+
+
+<comma-names> ::= <name> ("," <name> )*
+
+<block> ::= <stmt>*
+
+<stmt> ::= <type-expr> | <newtype-expr> | <spy-stmt>
+     | <let-expr> | <fun-expr> | <data-expr> | <when-expr>
+     | <var-expr> | <rec-expr> | <assign-expr> | <check-test> | <check-expr>
+     | <contract-stmt>
+
+<spy-stmt> ::= "spy" [<binop-expr> ]":" [<spy-contents> ]"end"
+<spy-contents> ::= <spy-field> ("," <spy-field> )*
+<spy-field> ::= <id-expr> | <name> ":" <binop-expr>
+
+<type-expr> ::= "type" <name> <ty-params> "=" <ann>
+<newtype-expr> ::= "newtype" <name> "as" <name>
+<let-expr> ::= <toplevel-binding> "=" <binop-expr>
+<binding> ::= <name-binding> | <tuple-binding>
+
+<tuple-binding> ::= "{" (<binding> ";" )* <binding> [";" ]"}" ["as" <name-binding> ]
+<name-binding> ::= ["shadow" ]<name> ["::" <ann> ]
+
+<toplevel-binding> ::= <binding>
+# toplevel-binding: [SHADOW] NAME COLONCOLON noparen-arrow-ann
+<multi-let-expr> ::= "let" <let-binding> ("," <let-binding> )* ("block:" | ":" )<block> "end"
+<let-binding> ::= <let-expr> | <var-expr>
+<letrec-expr> ::= "letrec" <let-expr> ("," <let-expr> )* ("block:" | ":" )<block> "end"
+
+<type-bind> ::= <name> <ty-params> "=" <ann>
+<newtype-bind> ::= "newtype" <name> "as" <name>
+
+<type-let-bind> ::= <type-bind> | <newtype-bind>
+<type-let-expr> ::= "type-let" <type-let-bind> ("," <type-let-bind> )* ("block:" | ":" )<block> "end"
+
+<contract-stmt> ::= <name> "::" <ty-params> (<ann> | <noparen-arrow-ann> )
+
+<fun-expr> ::= "fun" <name> <fun-header> ("block:" | ":" )<doc-string> <block> <where-clause> "end"
+<fun-header> ::= <ty-params> <args> <return-ann> | <ty-params> <bad-args> <return-ann>
+<ty-params> ::= [("<" | "<" )<comma-names> (">" | ">" )]
+<args> ::= ("(" | "(" )[<binding> ("," <binding> )* ]")"
+<bad-args> ::= "(" [<binding> ("," <binding> )* ]")"
+<return-ann> ::= ["->" <ann> ]
+<doc-string> ::= ["doc:" <string> ]
+<where-clause> ::= ["where:" <block> ]
+
+<check-expr> ::= ("check" | "examples" )<string> ":" <block> "end"
+<check-expr> ::= ("check:" | "examples:" )<block> "end"
+<check-test> ::= <binop-expr> <check-op> ["%" ("(" | "(" )<binop-expr> ")" ]<binop-expr> ["because" <binop-expr> ]
+     | <binop-expr> <check-op-postfix> ["because" <binop-expr> ]
+     | <binop-expr>
+
+
+<data-expr> ::= "data" <name> <ty-params> ":" [<first-data-variant> ]<data-variant>* <data-sharing> <where-clause> "end"
+<variant-constructor> ::= <name> <variant-members>
+<first-data-variant> ::= <variant-constructor> <data-with> | <name> <data-with>
+<data-variant> ::= "|" <variant-constructor> <data-with> | "|" <name> <data-with>
+<variant-members> ::= "(" [<variant-member> ("," <variant-member> )* ]")"
+<variant-member> ::= ["ref" ]<binding>
+<data-with> ::= ["with:" <fields> ]
+<data-sharing> ::= ["sharing:" <fields> ]
+
+<var-expr> ::= "var" <toplevel-binding> "=" <binop-expr>
+<rec-expr> ::= "rec" <toplevel-binding> "=" <binop-expr>
+<assign-expr> ::= <name> ":=" <binop-expr>
+
+<when-expr> ::= "when" <binop-expr> ("block:" | ":" )<block> "end"
+
+<binop-expr> ::= <expr> (<binop> <expr> )*
+
+<binop> ::= "+" | "-" | "*" | "/" | "<=" | ">=" | "==" | "<=>" | "=~"
+     | "<>" | "<" | ">" | "and" | "or" | "^"
+
+<check-op> ::= "is" | "is==" | "is=~" | "is<=>" | "is-roughly" | "is-not-roughly"
+     | "is-not" | "is-not==" | "is-not=~" | "is-not<=>"
+     | "raises" | "raises-other-than"
+     | "satisfies" | "violates"
+     | "raises-satisfies" | "raises-violates"
+
+<check-op-postfix> ::= "does-not-raise"
+
+<expr> ::= <paren-expr> | <id-expr> | <prim-expr>
+     | <lambda-expr> | <method-expr> | <app-expr>
+     | <obj-expr> | <tuple-expr> | <tuple-get>
+     | <dot-expr>
+     | <template-expr>
+<| bracket-expr  # NOTE(joe)> ::= <experimental> <for> <access>
+     | <get-bang-expr> | <update-expr>
+     | <extend-expr>
+     | <if-expr> | <if-pipe-expr> | <cases-expr>
+     | <for-expr>
+     | <user-block-expr> | <inst-expr>
+     | <multi-let-expr> | <letrec-expr>
+     | <type-let-expr>
+     | <construct-expr>
+     | <table-select>
+     | <table-extend>
+     | <table-filter>
+     | <table-order>
+     | <table-extract>
+     | <table-update>
+     | <table-expr>
+     | <load-table-expr>
+     | <reactor-expr>
+
+<template-expr> ::= "..."
+
+<bad-expr> ::= <unterminated-string> | <unterminated-block-comment> | <bad-oper> | <bad-number> | <unknown>
+
+# paren-exprs must be preceded by a space, so as not be be confused with
+# function application
+<paren-expr> ::= ("(" | "(" )<binop-expr> ")"
+
+<id-expr> ::= <name>
+
+<prim-expr> ::= <num-expr> | <frac-expr> | <rfrac-expr> | <bool-expr> | <string-expr>
+
+<num-expr> ::= <number>
+<frac-expr> ::= <rational>
+<rfrac-expr> ::= <roughrational>
+<bool-expr> ::= "true" | "false"
+<string-expr> ::= <string>
+
+<lambda-expr> ::= "lam" <fun-header> ("block:" | ":" )<doc-string> <block> <where-clause> "end"
+<lambda-expr> ::= "{" <fun-header> ("block:" | ":" )<doc-string> <block> <where-clause> "}"
+
+<method-expr> ::= "method" <fun-header> ("block:" | ":" )<doc-string> <block> <where-clause> "end"
+
+<app-expr> ::= <expr> <app-args>
+# These two productions are carefully rigged to *not* parse unary `f (x)`
+# otherwise, we'd admit ambiguous parses.  Instead, parse-pyret detects these
+# two cases and produces a parse error, while well-formedness detects the unary
+# case and produces a well-formedness error with a similar message.
+     | <expr> "(" ")"
+     | <expr> "(" <binop-expr> "," <binop-expr> ("," <binop-expr> )* ")"
+     
+# application must have the function expression immediately adjacent to
+# the argument list, so as not to be confused with parenthesized exprs
+<app-args> ::= "(" <opt-comma-binops> ")"
+<opt-comma-binops> ::= [<comma-binops> ]
+<comma-binops> ::= <binop-expr> ("," <binop-expr> )*
+<trailing-opt-comma-binops> ::= (<comma-binops> ["," ]| )
+# app-arg-elt: binop-expr COMMA
+
+# at least one annotation must be provided
+<inst-expr> ::= <expr> "<" <ann> ("," <ann> )* (">" | ">" )
+
+<tuple-expr> ::= "{" <tuple-fields> "}"
+<tuple-fields> ::= <binop-expr> (";" <binop-expr> )* [";" ]
+
+<tuple-get> ::= <expr> "." "{" <number> "}"
+
+
+<obj-expr> ::= "{" <obj-fields> "}" | "{" "}"
+<obj-fields> ::= <obj-field> ("," <obj-field> )* ["," ]
+<obj-field> ::= <key> ":" <binop-expr>
+     | "ref" <key> ["::" <ann> ]":" <binop-expr>
+     | "method" <key> <fun-header> ("block:" | ":" )<doc-string> <block> <where-clause> "end"
+
+<fields> ::= <field> ("," <field> )* ["," ]
+<field> ::= <key> ":" <binop-expr>
+     | "method" <key> <fun-header> ("block:" | ":" )<doc-string> <block> <where-clause> "end"
+<key> ::= <name>
+
+<construct-expr> ::= "[" <construct-modifier> <binop-expr> ":" <trailing-opt-comma-binops> "]"
+<construct-modifier> ::= | "lazy"
+
+<table-expr> ::= "table:" <table-headers> <table-rows> "end"
+<table-headers> ::= [<list-table-header>* <table-header> ]
+<list-table-header> ::= <table-header> ","
+<table-header> ::= <name> ["::" <ann> ]
+<table-rows> ::= [<table-row>* <table-row> ]
+<table-row> ::= "row:" <table-items>
+<table-items> ::= [<list-table-item>* <binop-expr> ]
+<list-table-item> ::= <binop-expr> ","
+
+# NOTE(joe): just parsing as "fields" for now, and handling naming in
+# desugaring/well-formed, so that better error messages can be given
+<reactor-expr> ::= "reactor" ":"
+  fields
+END
+
+<dot-expr> ::= <expr> "." <name>
+<bracket-expr> ::= <expr> "[" <binop-expr> "]"
+
+<get-bang-expr> ::= <expr> "!" <name>
+
+<extend-expr> ::= <expr> "." "{" <fields> "}"
+<update-expr> ::= <expr> "!" "{" <fields> "}"
+
+<if-expr> ::= "if" <binop-expr> ("block:" | ":" )<block> <else-if>* ["else:" <block> ]"end"
+<else-if> ::= "else if" <binop-expr> ":" <block>
+<if-pipe-expr> ::= "ask" ("block:" | ":" )<if-pipe-branch>* ["|" "otherwise:" <block> ]"end"
+<if-pipe-branch> ::= "|" <binop-expr> "then:" <block>
+
+<cases-binding> ::= ["ref" ]<binding>
+<cases-args> ::= "(" [<cases-binding> ("," <cases-binding> )* ]")"
+<cases-expr> ::= "cases" ("(" | "(" )<ann> ")" <binop-expr> ("block:" | ":" )<cases-branch>* ["|" "else" "=>" <block> ]"end"
+<cases-branch> ::= "|" <name> [<cases-args> ]"=>" <block>
+
+<for-bind> ::= <binding> "from" <binop-expr>
+<for-expr> ::= "for" <expr> "(" [<for-bind> ("," <for-bind> )* ]")" <return-ann> ("block:" | ":" )<block> "end"
+
+<column-order> ::= <name> ("ascending" | "descending" )
+<table-select> ::= "select" <name> ("," <name> )* "from" <expr> "end"
+<table-filter> ::= "sieve" <expr> ["using" <binding> ("," <binding> )* ]":" <binop-expr> "end"
+<table-order> ::= "order" <expr> ":" <column-order> ("," <column-order> )* "end"
+<table-extract> ::= "extract" <name> "from" <expr> "end"
+<table-update> ::= "transform" <expr> ["using" <binding> ("," <binding> )* ]":" <obj-fields> "end"
+<table-extend> ::= "extend" <expr> ["using" <binding> ("," <binding> )* ]":" <table-extend-fields> "end"
+<table-extend-fields> ::= <list-table-extend-field>* <table-extend-field> ["," ]
+<list-table-extend-field> ::= <table-extend-field> ","
+<table-extend-field> ::= <key> ["::" <ann> ]":" <binop-expr>
+# Commenting this out until we know whether or not it makes sense
+#     | REF key [COLONCOLON ann] COLON binop-expr
+     | <key> ["::" <ann> ]":" <expr> "of" <name>
+
+# More informative to allow missing load-table-specs to parse and mark it as a
+# well-formedness error than to reject it at parse-time
+<load-table-expr> ::= "load-table" ":" <table-headers> [<load-table-specs> ]"end"
+
+<load-table-specs> ::= <load-table-spec>* <load-table-spec>
+<load-table-spec> ::= "source:" <expr>
+     | "sanitize" <name> "using" <expr>
+
+<user-block-expr> ::= "block:" <block> "end"
+
+<ann> ::= <name-ann> | <record-ann> | <arrow-ann> | <app-ann> | <pred-ann> | <dot-ann> | <tuple-ann>
+
+<name-ann> ::= <name>
+<comma-ann-field> ::= <ann-field> ("," <ann-field> )*
+<trailing-opt-comma-ann-field> ::= (<comma-ann-field> ["," ]| )
+<record-ann> ::= "{" <trailing-opt-comma-ann-field> "}"
+<ann-field> ::= <name> "::" <ann>
+
+<tuple-ann> ::= "{" <ann> (";" <ann> )* [";" ]"}"
+
+<noparen-arrow-ann> ::= [<arrow-ann-args> ]"->" <ann>
+<arrow-ann-args> ::= <comma-anns> | ("(" | "(" | "(" )<comma-ann-field> ")"
+<arrow-ann> ::= ("(" | "(" | "(" )[<arrow-ann-args> ]"->" <ann> ")"
+
+<app-ann> ::= (<name-ann> | <dot-ann> )"<" <comma-anns> (">" | ">" )
+
+<comma-anns> ::= <ann> ("," <ann> )*
+
+<pred-ann> ::= <ann> "%" ("(" | "(" )<id-expr> ")"
+
+<dot-ann> ::= <name> "." <name>
