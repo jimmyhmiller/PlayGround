@@ -1,4 +1,4 @@
-use pyret_attempt2::{Parser, Expr, Name, ConstructModifier};
+use pyret_attempt2::{Parser, Expr, Member, Name, ConstructModifier};
 use pyret_attempt2::tokenizer::Tokenizer;
 
 /// Helper to parse a string into an expression
@@ -963,6 +963,121 @@ fn test_parse_bracket_with_expression() {
 }
 
 // ============================================================================
+// Object Expression Tests
+// ============================================================================
+
+#[test]
+fn test_parse_empty_object() {
+    let expr = parse_expr("{}").expect("Failed to parse empty object");
+
+    match expr {
+        Expr::SObj { fields, .. } => {
+            assert_eq!(fields.len(), 0, "Empty object should have no fields");
+        }
+        _ => panic!("Expected SObj, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_simple_object() {
+    let expr = parse_expr("{ x: 1, y: 2 }").expect("Failed to parse simple object");
+
+    match expr {
+        Expr::SObj { fields, .. } => {
+            assert_eq!(fields.len(), 2, "Object should have 2 fields");
+
+            // Check first field
+            match &fields[0] {
+                Member::SDataField { name, value, .. } => {
+                    assert_eq!(name, "x");
+                    match value.as_ref() {
+                        Expr::SNum { n, .. } => assert_eq!(*n, 1.0f64),
+                        _ => panic!("Expected SNum for x value"),
+                    }
+                }
+                _ => panic!("Expected SDataField"),
+            }
+
+            // Check second field
+            match &fields[1] {
+                Member::SDataField { name, value, .. } => {
+                    assert_eq!(name, "y");
+                    match value.as_ref() {
+                        Expr::SNum { n, .. } => assert_eq!(*n, 2.0f64),
+                        _ => panic!("Expected SNum for y value"),
+                    }
+                }
+                _ => panic!("Expected SDataField"),
+            }
+        }
+        _ => panic!("Expected SObj, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_nested_object() {
+    let expr = parse_expr("{ point: { x: 0, y: 0 } }").expect("Failed to parse nested object");
+
+    match expr {
+        Expr::SObj { fields, .. } => {
+            assert_eq!(fields.len(), 1);
+
+            match &fields[0] {
+                Member::SDataField { name, value, .. } => {
+                    assert_eq!(name, "point");
+
+                    // Check nested object
+                    match value.as_ref() {
+                        Expr::SObj { fields: inner_fields, .. } => {
+                            assert_eq!(inner_fields.len(), 2);
+                        }
+                        _ => panic!("Expected nested SObj"),
+                    }
+                }
+                _ => panic!("Expected SDataField"),
+            }
+        }
+        _ => panic!("Expected SObj, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_object_with_expressions() {
+    let expr = parse_expr("{ sum: 1 + 2, product: 3 * 4 }").expect("Failed to parse object with expressions");
+
+    match expr {
+        Expr::SObj { fields, .. } => {
+            assert_eq!(fields.len(), 2);
+
+            // First field should have an addition operation
+            match &fields[0] {
+                Member::SDataField { name, value, .. } => {
+                    assert_eq!(name, "sum");
+                    match value.as_ref() {
+                        Expr::SOp { op, .. } => assert_eq!(op, "op+"),
+                        _ => panic!("Expected SOp"),
+                    }
+                }
+                _ => panic!("Expected SDataField"),
+            }
+        }
+        _ => panic!("Expected SObj, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_object_trailing_comma() {
+    let expr = parse_expr("{ x: 1, y: 2, }").expect("Failed to parse object with trailing comma");
+
+    match expr {
+        Expr::SObj { fields, .. } => {
+            assert_eq!(fields.len(), 2, "Trailing comma should not affect parsing");
+        }
+        _ => panic!("Expected SObj, got {:?}", expr),
+    }
+}
+
+// ============================================================================
 // Bug Fix Tests - Trailing Token Detection
 // ============================================================================
 
@@ -1110,5 +1225,118 @@ fn test_parse_chained_call_with_call_args() {
             }
         }
         _ => panic!("Expected outer SApp, got {:?}", expr),
+    }
+}
+
+// ============================================================================
+// Block Expression Tests
+// ============================================================================
+
+#[test]
+fn test_parse_simple_block() {
+    // block: 5 end
+    let expr = parse_expr("block: 5 end").expect("Failed to parse");
+
+    match expr {
+        Expr::SUserBlock { body, .. } => {
+            // Body should be an SBlock
+            match *body {
+                Expr::SBlock { stmts, .. } => {
+                    assert_eq!(stmts.len(), 1);
+
+                    // First statement should be a number
+                    match *stmts[0] {
+                        Expr::SNum { n, .. } => assert_eq!(n, 5.0),
+                        _ => panic!("Expected SNum in block"),
+                    }
+                }
+                _ => panic!("Expected SBlock as body"),
+            }
+        }
+        _ => panic!("Expected SUserBlock, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_block_multiple_expressions() {
+    // block: 1 + 2 3 * 4 end
+    let expr = parse_expr("block: 1 + 2 3 * 4 end").expect("Failed to parse");
+
+    match expr {
+        Expr::SUserBlock { body, .. } => {
+            match *body {
+                Expr::SBlock { stmts, .. } => {
+                    assert_eq!(stmts.len(), 2);
+
+                    // First statement: 1 + 2
+                    match stmts[0].as_ref() {
+                        Expr::SOp { op, .. } => assert_eq!(op, "op+"),
+                        _ => panic!("Expected SOp for first statement"),
+                    }
+
+                    // Second statement: 3 * 4
+                    match stmts[1].as_ref() {
+                        Expr::SOp { op, .. } => assert_eq!(op, "op*"),
+                        _ => panic!("Expected SOp for second statement"),
+                    }
+                }
+                _ => panic!("Expected SBlock as body"),
+            }
+        }
+        _ => panic!("Expected SUserBlock, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_empty_block() {
+    // block: end
+    let expr = parse_expr("block: end").expect("Failed to parse");
+
+    match expr {
+        Expr::SUserBlock { body, .. } => {
+            match *body {
+                Expr::SBlock { stmts, .. } => {
+                    assert_eq!(stmts.len(), 0);
+                }
+                _ => panic!("Expected SBlock as body"),
+            }
+        }
+        _ => panic!("Expected SUserBlock, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_nested_blocks() {
+    // block: block: 1 end end
+    let expr = parse_expr("block: block: 1 end end").expect("Failed to parse");
+
+    match expr {
+        Expr::SUserBlock { body, .. } => {
+            match *body {
+                Expr::SBlock { stmts, .. } => {
+                    assert_eq!(stmts.len(), 1);
+
+                    // Inner block
+                    match *stmts[0] {
+                        Expr::SUserBlock { body: ref inner_body, .. } => {
+                            match **inner_body {
+                                Expr::SBlock { stmts: ref inner_stmts, .. } => {
+                                    assert_eq!(inner_stmts.len(), 1);
+
+                                    match *inner_stmts[0] {
+                                        Expr::SNum { n, .. } => assert_eq!(n, 1.0),
+                                        _ => panic!("Expected SNum in inner block"),
+                                    }
+                                }
+                                _ => panic!("Expected inner SBlock"),
+                            }
+                        }
+                        _ => panic!("Expected inner SUserBlock"),
+                    }
+                }
+                _ => panic!("Expected SBlock as body"),
+            }
+        }
+        _ => panic!("Expected SUserBlock, got {:?}", expr),
     }
 }

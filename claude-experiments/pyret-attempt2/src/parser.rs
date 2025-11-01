@@ -16,6 +16,7 @@ use crate::tokenizer::{Token, TokenType};
 pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
+    position: usize, // Alias for current, used for checkpointing
     file_name: String,
 }
 
@@ -24,6 +25,7 @@ impl Parser {
         Parser {
             tokens,
             current: 0,
+            position: 0,
             file_name,
         }
     }
@@ -42,8 +44,19 @@ impl Parser {
     fn advance(&mut self) -> &Token {
         if !self.is_at_end() {
             self.current += 1;
+            self.position = self.current;
         }
         &self.tokens[self.current - 1]
+    }
+
+    fn peek_ahead(&self, offset: usize) -> &Token {
+        let pos = self.current + offset;
+        if pos < self.tokens.len() {
+            &self.tokens[pos]
+        } else {
+            // Return EOF token if we're past the end
+            self.tokens.last().unwrap()
+        }
     }
 
     fn expect(&mut self, token_type: TokenType) -> ParseResult<Token> {
@@ -86,6 +99,87 @@ impl Parser {
             end.location.end_line,
             end.location.end_col,
             end.location.end_pos,
+        )
+    }
+
+    /// Parse a field name (can be a Name token or a keyword used as identifier)
+    /// In Pyret, keywords can be used as field names after a dot
+    fn parse_field_name(&mut self) -> ParseResult<Token> {
+        let token = self.peek().clone();
+        // Accept Name tokens or any keyword token
+        if matches!(token.token_type, TokenType::Name) || self.is_keyword(&token.token_type) {
+            Ok(self.advance().clone())
+        } else {
+            Err(ParseError::expected(TokenType::Name, token))
+        }
+    }
+
+    /// Check if a token type is a keyword that can be used as a field name
+    fn is_keyword(&self, token_type: &TokenType) -> bool {
+        matches!(
+            token_type,
+            TokenType::Method
+                | TokenType::Fun
+                | TokenType::Var
+                | TokenType::Let
+                | TokenType::Letrec
+                | TokenType::Rec
+                | TokenType::Data
+                | TokenType::If
+                | TokenType::Else
+                | TokenType::ElseIf
+                | TokenType::ElseColon
+                | TokenType::When
+                | TokenType::Block
+                | TokenType::For
+                | TokenType::From
+                | TokenType::End
+                | TokenType::Check
+                | TokenType::CheckColon
+                | TokenType::Where
+                | TokenType::Import
+                | TokenType::Provide
+                | TokenType::ProvideColon
+                | TokenType::ProvideTypes
+                | TokenType::Include
+                | TokenType::Sharing
+                | TokenType::Shadow
+                | TokenType::Type
+                | TokenType::TypeLet
+                | TokenType::Newtype
+                | TokenType::Doc
+                | TokenType::Cases
+                | TokenType::Ask
+                | TokenType::OtherwiseColon
+                | TokenType::ThenColon
+                | TokenType::Spy
+                | TokenType::Reactor
+                | TokenType::Table
+                | TokenType::TableExtend
+                | TokenType::TableExtract
+                | TokenType::TableFilter
+                | TokenType::TableOrder
+                | TokenType::TableSelect
+                | TokenType::TableUpdate
+                | TokenType::LoadTable
+                | TokenType::Sanitize
+                | TokenType::Ref
+                | TokenType::With
+                | TokenType::Use
+                | TokenType::Using
+                | TokenType::Module
+                | TokenType::Lam
+                | TokenType::Lazy
+                | TokenType::Row
+                | TokenType::SourceColon
+                | TokenType::Examples
+                | TokenType::ExamplesColon
+                | TokenType::Do
+                | TokenType::Of
+                | TokenType::By
+                | TokenType::Hiding
+                | TokenType::Ascending
+                | TokenType::Descending
         )
     }
 }
@@ -168,9 +262,48 @@ impl Parser {
 // ============================================================================
 
 impl Parser {
-    /// binding: name-binding | tuple-binding
+    /// binding: name [:: ann]
+    /// Parses a parameter binding like: x, x :: Number
     fn parse_bind(&mut self) -> ParseResult<Bind> {
-        todo!("Implement parse_bind")
+        let name_token = self.expect(TokenType::Name)?;
+        let name_str = name_token.value.clone();
+
+        // Create Name node
+        let name = Name::SName {
+            l: Loc::new(
+                self.file_name.clone(),
+                name_token.location.start_line,
+                name_token.location.start_col,
+                name_token.location.start_pos,
+                name_token.location.end_line,
+                name_token.location.end_col,
+                name_token.location.end_pos,
+            ),
+            s: name_str,
+        };
+
+        // Optional type annotation: :: ann
+        let ann = if self.matches(&TokenType::ColonColon) {
+            self.expect(TokenType::ColonColon)?;
+            self.parse_ann()?
+        } else {
+            Ann::ABlank
+        };
+
+        Ok(Bind::SBind {
+            l: Loc::new(
+                self.file_name.clone(),
+                name_token.location.start_line,
+                name_token.location.start_col,
+                name_token.location.start_pos,
+                name_token.location.end_line,
+                name_token.location.end_col,
+                name_token.location.end_pos,
+            ),
+            shadows: false, // Default to false for lambda parameters
+            id: name,
+            ann,
+        })
     }
 
     /// tuple-binding: { id; ... }
@@ -226,37 +359,95 @@ impl Parser {
                 // Function application (no whitespace before paren)
                 left = self.parse_app_expr(left)?;
             } else if self.matches(&TokenType::Dot) {
-                // Dot access
+                // Dot access or tuple access
                 let _dot_token = self.expect(TokenType::Dot)?;
-                let field_token = self.expect(TokenType::Name)?;
 
-                let start_loc = match &left {
-                    Expr::SNum { l, .. } => l.clone(),
-                    Expr::SBool { l, .. } => l.clone(),
-                    Expr::SStr { l, .. } => l.clone(),
-                    Expr::SId { l, .. } => l.clone(),
-                    Expr::SOp { l, .. } => l.clone(),
-                    Expr::SParen { l, .. } => l.clone(),
-                    Expr::SApp { l, .. } => l.clone(),
-                    Expr::SConstruct { l, .. } => l.clone(),
-                    Expr::SDot { l, .. } => l.clone(),
-                    Expr::SBracket { l, .. } => l.clone(),
-                    _ => self.current_loc(),
-                };
+                // Check if this is tuple access: .{number}
+                if self.matches(&TokenType::LBrace) {
+                    // Tuple access: x.{2}
+                    self.expect(TokenType::LBrace)?;
+                    let index_token = self.expect(TokenType::Number)?;
+                    let index: usize = index_token.value.parse()
+                        .map_err(|_| ParseError::invalid("tuple index", &index_token, "Invalid number"))?;
+                    let index_loc = self.make_loc(&index_token, &index_token);
+                    let end = self.expect(TokenType::RBrace)?;
 
-                left = Expr::SDot {
-                    l: Loc::new(
-                        self.file_name.clone(),
-                        start_loc.start_line,
-                        start_loc.start_column,
-                        start_loc.start_char,
-                        field_token.location.end_line,
-                        field_token.location.end_col,
-                        field_token.location.end_pos,
-                    ),
-                    obj: Box::new(left),
-                    field: field_token.value.clone(),
-                };
+                    let start_loc = match &left {
+                        Expr::SNum { l, .. } => l.clone(),
+                        Expr::SBool { l, .. } => l.clone(),
+                        Expr::SStr { l, .. } => l.clone(),
+                        Expr::SId { l, .. } => l.clone(),
+                        Expr::SOp { l, .. } => l.clone(),
+                        Expr::SParen { l, .. } => l.clone(),
+                        Expr::SApp { l, .. } => l.clone(),
+                        Expr::SConstruct { l, .. } => l.clone(),
+                        Expr::SDot { l, .. } => l.clone(),
+                        Expr::SBracket { l, .. } => l.clone(),
+                        Expr::SObj { l, .. } => l.clone(),
+                        Expr::STuple { l, .. } => l.clone(),
+                        Expr::STupleGet { l, .. } => l.clone(),
+                        Expr::SLam { l, .. } => l.clone(),
+                        Expr::SBlock { l, .. } => l.clone(),
+                        Expr::SUserBlock { l, .. } => l.clone(),
+                        Expr::SIf { l, .. } => l.clone(),
+                        Expr::SIfElse { l, .. } => l.clone(),
+                        _ => self.current_loc(),
+                    };
+
+                    left = Expr::STupleGet {
+                        l: Loc::new(
+                            self.file_name.clone(),
+                            start_loc.start_line,
+                            start_loc.start_column,
+                            start_loc.start_char,
+                            end.location.end_line,
+                            end.location.end_col,
+                            end.location.end_pos,
+                        ),
+                        tup: Box::new(left),
+                        index,
+                        index_loc,
+                    };
+                } else {
+                    // Regular dot access: obj.field
+                    let field_token = self.parse_field_name()?;
+
+                    let start_loc = match &left {
+                        Expr::SNum { l, .. } => l.clone(),
+                        Expr::SBool { l, .. } => l.clone(),
+                        Expr::SStr { l, .. } => l.clone(),
+                        Expr::SId { l, .. } => l.clone(),
+                        Expr::SOp { l, .. } => l.clone(),
+                        Expr::SParen { l, .. } => l.clone(),
+                        Expr::SApp { l, .. } => l.clone(),
+                        Expr::SConstruct { l, .. } => l.clone(),
+                        Expr::SDot { l, .. } => l.clone(),
+                        Expr::SBracket { l, .. } => l.clone(),
+                        Expr::SObj { l, .. } => l.clone(),
+                        Expr::STuple { l, .. } => l.clone(),
+                        Expr::STupleGet { l, .. } => l.clone(),
+                        Expr::SLam { l, .. } => l.clone(),
+                        Expr::SBlock { l, .. } => l.clone(),
+                        Expr::SUserBlock { l, .. } => l.clone(),
+                        Expr::SIf { l, .. } => l.clone(),
+                        Expr::SIfElse { l, .. } => l.clone(),
+                        _ => self.current_loc(),
+                    };
+
+                    left = Expr::SDot {
+                        l: Loc::new(
+                            self.file_name.clone(),
+                            start_loc.start_line,
+                            start_loc.start_column,
+                            start_loc.start_char,
+                            field_token.location.end_line,
+                            field_token.location.end_col,
+                            field_token.location.end_pos,
+                        ),
+                        obj: Box::new(left),
+                        field: field_token.value.clone(),
+                    };
+                }
             } else if self.matches(&TokenType::LBrack) {
                 // Bracket access
                 left = self.parse_bracket_expr(left)?;
@@ -280,7 +471,7 @@ impl Parser {
                     right = self.parse_app_expr(right)?;
                 } else if self.matches(&TokenType::Dot) {
                     let _dot_token = self.expect(TokenType::Dot)?;
-                    let field_token = self.expect(TokenType::Name)?;
+                    let field_token = self.parse_field_name()?;
 
                     let start_loc = match &right {
                         Expr::SNum { l, .. } => l.clone(),
@@ -293,6 +484,10 @@ impl Parser {
                         Expr::SConstruct { l, .. } => l.clone(),
                         Expr::SDot { l, .. } => l.clone(),
                         Expr::SBracket { l, .. } => l.clone(),
+                        Expr::SObj { l, .. } => l.clone(),
+                        Expr::STuple { l, .. } => l.clone(),
+                        Expr::STupleGet { l, .. } => l.clone(),
+                        Expr::SLam { l, .. } => l.clone(),
                         _ => self.current_loc(),
                     };
 
@@ -400,6 +595,14 @@ impl Parser {
                 Expr::SConstruct { l, .. } => l.clone(),
                 Expr::SDot { l, .. } => l.clone(),
                 Expr::SBracket { l, .. } => l.clone(),
+                Expr::SObj { l, .. } => l.clone(),
+                Expr::STuple { l, .. } => l.clone(),
+                Expr::STupleGet { l, .. } => l.clone(),
+                Expr::SLam { l, .. } => l.clone(),
+                Expr::SBlock { l, .. } => l.clone(),
+                Expr::SUserBlock { l, .. } => l.clone(),
+                Expr::SIf { l, .. } => l.clone(),
+                Expr::SIfElse { l, .. } => l.clone(),
                 _ => self.current_loc(),
             };
 
@@ -416,6 +619,12 @@ impl Parser {
                     Expr::SConstruct { l, .. } => l.clone(),
                     Expr::SDot { l, .. } => l.clone(),
                     Expr::SBracket { l, .. } => l.clone(),
+                    Expr::SObj { l, .. } => l.clone(),
+                    Expr::STuple { l, .. } => l.clone(),
+                    Expr::STupleGet { l, .. } => l.clone(),
+                    Expr::SLam { l, .. } => l.clone(),
+                    Expr::SBlock { l, .. } => l.clone(),
+                    Expr::SUserBlock { l, .. } => l.clone(),
                     _ => self.current_loc(),
                 }
             } else {
@@ -460,7 +669,7 @@ impl Parser {
         Ok(left)
     }
 
-    /// prim-expr: num-expr | frac-expr | rfrac-expr | bool-expr | string-expr | id-expr | paren-expr | array-expr
+    /// prim-expr: num-expr | frac-expr | rfrac-expr | bool-expr | string-expr | id-expr | paren-expr | array-expr | lam-expr | block-expr
     fn parse_prim_expr(&mut self) -> ParseResult<Expr> {
         let token = self.peek().clone();
 
@@ -473,6 +682,10 @@ impl Parser {
             TokenType::Name => self.parse_id_expr(),
             TokenType::ParenSpace | TokenType::LParen => self.parse_paren_expr(),
             TokenType::LBrack => self.parse_construct_expr(),
+            TokenType::LBrace => self.parse_obj_expr(),
+            TokenType::Lam => self.parse_lambda_expr(),
+            TokenType::Block => self.parse_block_expr(),
+            TokenType::If => self.parse_if_expr(),
             _ => Err(ParseError::unexpected(token)),
         }
     }
@@ -856,6 +1069,10 @@ impl Parser {
             Expr::SConstruct { l, .. } => l.clone(),
             Expr::SDot { l, .. } => l.clone(),
             Expr::SBracket { l, .. } => l.clone(),
+            Expr::SObj { l, .. } => l.clone(),
+            Expr::STuple { l, .. } => l.clone(),
+            Expr::STupleGet { l, .. } => l.clone(),
+            Expr::SLam { l, .. } => l.clone(),
             _ => self.current_loc(),
         };
 
@@ -874,6 +1091,177 @@ impl Parser {
         })
     }
 
+    /// obj-expr: LBRACE obj-fields RBRACE | LBRACE RBRACE
+    /// tuple-expr: LBRACE expr (SEMICOLON expr)+ RBRACE
+    /// Disambiguates between object and tuple based on first separator
+    /// Objects use colons: {x: 1, y: 2}
+    /// Tuples use semicolons: {1; 2; 3}
+    fn parse_obj_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::LBrace)?;
+
+        // Check for empty object
+        if self.matches(&TokenType::RBrace) {
+            let end = self.expect(TokenType::RBrace)?;
+            return Ok(Expr::SObj {
+                l: self.make_loc(&start, &end),
+                fields: Vec::new(),
+            });
+        }
+
+        // Parse first element to determine if it's an object or tuple
+        // We need to peek ahead to see if we get a colon or semicolon
+        // For tuples, we expect: expr SEMICOLON
+        // For objects, we expect: name COLON or REF name COLON
+
+        // Try to determine the type by checking if the first token looks like an object field
+        let is_tuple = if self.matches(&TokenType::Ref) ||
+                          (self.matches(&TokenType::Name) && self.peek_ahead(1).token_type == TokenType::Colon) {
+            // This looks like an object field (ref x: or name:)
+            false
+        } else {
+            // Otherwise, parse an expression and check what follows
+            // Save position to potentially backtrack
+            let checkpoint = self.current;
+
+            // Try parsing as expression
+            match self.parse_expr() {
+                Ok(_) => {
+                    // Check what comes after the expression
+                    let is_tuple = self.matches(&TokenType::Semi);
+                    // Restore position to re-parse
+                    self.current = checkpoint;
+                    self.position = checkpoint;
+                    is_tuple
+                }
+                Err(_) => {
+                    // Failed to parse as expression, assume object
+                    self.current = checkpoint;
+                    self.position = checkpoint;
+                    false
+                }
+            }
+        };
+
+        if is_tuple {
+            self.parse_tuple_expr(start)
+        } else {
+            self.parse_obj_expr_fields(start)
+        }
+    }
+
+    /// Parse object fields after determining it's an object
+    fn parse_obj_expr_fields(&mut self, start: Token) -> ParseResult<Expr> {
+        // Parse comma-separated fields with optional trailing comma
+        let mut fields = Vec::new();
+        loop {
+            fields.push(self.parse_obj_field()?);
+
+            if !self.matches(&TokenType::Comma) {
+                break;
+            }
+            self.advance(); // consume comma
+
+            // Check for trailing comma (followed by closing brace)
+            if self.matches(&TokenType::RBrace) {
+                break;
+            }
+        }
+
+        let end = self.expect(TokenType::RBrace)?;
+
+        Ok(Expr::SObj {
+            l: self.make_loc(&start, &end),
+            fields,
+        })
+    }
+
+    /// tuple-expr: LBRACE expr (SEMICOLON expr)+ RBRACE
+    /// Parse tuple expression: {1; 2; 3}
+    fn parse_tuple_expr(&mut self, start: Token) -> ParseResult<Expr> {
+        let mut fields = Vec::new();
+
+        // Parse first expression
+        fields.push(Box::new(self.parse_expr()?));
+
+        // Parse remaining expressions (semicolon-separated)
+        while self.matches(&TokenType::Semi) {
+            self.advance(); // consume semicolon
+
+            // Check for trailing semicolon (followed by closing brace)
+            if self.matches(&TokenType::RBrace) {
+                break;
+            }
+
+            fields.push(Box::new(self.parse_expr()?));
+        }
+
+        let end = self.expect(TokenType::RBrace)?;
+
+        Ok(Expr::STuple {
+            l: self.make_loc(&start, &end),
+            fields,
+        })
+    }
+
+    /// obj-field: key COLON binop-expr
+    ///          | REF key [COLONCOLON ann] COLON binop-expr
+    ///          | METHOD key fun-header (BLOCK|COLON) doc-string block where-clause END
+    /// Parse a single object field (data, mutable, or method)
+    fn parse_obj_field(&mut self) -> ParseResult<Member> {
+        let token = self.peek().clone();
+
+        match token.token_type {
+            TokenType::Ref => {
+                // Mutable field: REF key [COLONCOLON ann] COLON binop-expr
+                let start = self.expect(TokenType::Ref)?;
+                let name_token = self.expect(TokenType::Name)?;
+                let name = name_token.value.clone();
+
+                // Optional type annotation
+                let ann = if self.matches(&TokenType::ColonColon) {
+                    self.expect(TokenType::ColonColon)?;
+                    self.parse_ann()?
+                } else {
+                    Ann::ABlank // No annotation
+                };
+
+                self.expect(TokenType::Colon)?;
+                let value = self.parse_expr()?;
+
+                Ok(Member::SMutableField {
+                    l: self.make_loc(&start, &name_token),
+                    name,
+                    ann,
+                    value: Box::new(value),
+                })
+            }
+            TokenType::Method => {
+                // Method field: METHOD key fun-header (BLOCK|COLON) doc-string block where-clause END
+                // For now, we'll implement a simplified version that just parses data fields
+                // Full method parsing requires implementing fun-header, doc-string, block, etc.
+                return Err(ParseError::invalid(
+                    "object field",
+                    &token,
+                    "Method fields not yet implemented",
+                ));
+            }
+            TokenType::Name => {
+                // Data field: key COLON binop-expr
+                let name_token = self.expect(TokenType::Name)?;
+                let name = name_token.value.clone();
+                self.expect(TokenType::Colon)?;
+                let value = self.parse_expr()?;
+
+                Ok(Member::SDataField {
+                    l: self.make_loc(&name_token, &name_token),
+                    name,
+                    value: Box::new(value),
+                })
+            }
+            _ => Err(ParseError::unexpected(token)),
+        }
+    }
+
     /// app-expr: expr PARENNOSPACE (expr COMMA)* RPAREN
     /// Function application (no whitespace before paren)
     fn parse_app_expr(&mut self, base: Expr) -> ParseResult<Expr> {
@@ -889,6 +1277,14 @@ impl Parser {
             Expr::SConstruct { l, .. } => l.clone(),
             Expr::SDot { l, .. } => l.clone(),
             Expr::SBracket { l, .. } => l.clone(),
+            Expr::SObj { l, .. } => l.clone(),
+            Expr::STuple { l, .. } => l.clone(),
+            Expr::STupleGet { l, .. } => l.clone(),
+            Expr::SLam { l, .. } => l.clone(),
+            Expr::SBlock { l, .. } => l.clone(),
+            Expr::SUserBlock { l, .. } => l.clone(),
+            Expr::SIf { l, .. } => l.clone(),
+            Expr::SIfElse { l, .. } => l.clone(),
             _ => self.current_loc(),
         };
 
@@ -924,9 +1320,132 @@ impl Parser {
 // ============================================================================
 
 impl Parser {
-    /// if-expr: IF expr: block ... END
+    /// block-expr: BLOCK COLON stmts END
+    /// Parses user-defined block expressions like: block: 5 end, block: x = 1 x + 2 end
+    fn parse_block_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::Block)?;
+
+        // Parse statements until we hit 'end'
+        let mut stmts = Vec::new();
+        while !self.matches(&TokenType::End) && !self.is_at_end() {
+            let stmt = self.parse_expr()?;
+            stmts.push(Box::new(stmt));
+        }
+
+        let end = self.expect(TokenType::End)?;
+
+        // Create the SBlock wrapper
+        let block_body = Expr::SBlock {
+            l: self.make_loc(&start, &end),
+            stmts,
+        };
+
+        // Wrap in SUserBlock
+        Ok(Expr::SUserBlock {
+            l: self.make_loc(&start, &end),
+            body: Box::new(block_body),
+        })
+    }
+
+    /// if-expr: IF expr COLON body (ELSE-IF expr COLON body)* (ELSE-COLON body)? END
+    /// Parses if expressions like: if true: 1 else: 2 end
     fn parse_if_expr(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_if_expr")
+        let start = self.expect(TokenType::If)?;
+
+        // Parse the first branch (always present)
+        let test = self.parse_expr()?;
+        self.expect(TokenType::Colon)?;
+
+        // Parse the body (statements until else/elseif/end)
+        let mut then_stmts = Vec::new();
+        while !self.matches(&TokenType::ElseColon)
+            && !self.matches(&TokenType::ElseIf)
+            && !self.matches(&TokenType::End)
+            && !self.is_at_end()
+        {
+            let stmt = self.parse_expr()?;
+            then_stmts.push(Box::new(stmt));
+        }
+
+        // Create the body as an SBlock
+        let body = Expr::SBlock {
+            l: self.current_loc(), // TODO: proper location
+            stmts: then_stmts,
+        };
+
+        // Create the first branch
+        let mut branches = vec![IfBranch {
+            node_type: "s-if-branch".to_string(),
+            l: self.current_loc(), // TODO: proper location
+            test: Box::new(test),
+            body: Box::new(body),
+        }];
+
+        // Parse optional else-if branches
+        while self.matches(&TokenType::ElseIf) {
+            self.advance();
+            let test = self.parse_expr()?;
+            self.expect(TokenType::Colon)?;
+
+            let mut elseif_stmts = Vec::new();
+            while !self.matches(&TokenType::ElseColon)
+                && !self.matches(&TokenType::ElseIf)
+                && !self.matches(&TokenType::End)
+                && !self.is_at_end()
+            {
+                let stmt = self.parse_expr()?;
+                elseif_stmts.push(Box::new(stmt));
+            }
+
+            let body = Expr::SBlock {
+                l: self.current_loc(), // TODO: proper location
+                stmts: elseif_stmts,
+            };
+
+            branches.push(IfBranch {
+                node_type: "s-if-branch".to_string(),
+                l: self.current_loc(), // TODO: proper location
+                test: Box::new(test),
+                body: Box::new(body),
+            });
+        }
+
+        // Parse optional else clause
+        let else_expr = if self.matches(&TokenType::ElseColon) {
+            self.advance();
+
+            let mut else_stmts = Vec::new();
+            while !self.matches(&TokenType::End) && !self.is_at_end() {
+                let stmt = self.parse_expr()?;
+                else_stmts.push(Box::new(stmt));
+            }
+
+            Some(Box::new(Expr::SBlock {
+                l: self.current_loc(), // TODO: proper location
+                stmts: else_stmts,
+            }))
+        } else {
+            None
+        };
+
+        let end = self.expect(TokenType::End)?;
+        let loc = self.make_loc(&start, &end);
+
+        // Return SIfElse if there's an else clause, otherwise SIf
+        if let Some(else_body) = else_expr {
+            Ok(Expr::SIfElse {
+                l: loc,
+                branches,
+                _else: else_body,
+                blocky: false,
+            })
+        } else {
+            Ok(Expr::SIf {
+                l: loc,
+                branches,
+                blocky: false,
+            })
+        }
     }
 
     /// cases-expr: CASES (type) expr: branches ... END
@@ -955,9 +1474,63 @@ impl Parser {
         todo!("Implement parse_fun_expr")
     }
 
-    /// lambda-expr: LAM(args) ann: doc body where END
+    /// lambda-expr: LAM LPAREN [args] RPAREN [COLONCOLON ann] COLON body END
+    /// Parses lambda expressions like: lam(): 5 end, lam(x): x + 1 end
     fn parse_lambda_expr(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_lambda_expr")
+        let start = self.expect(TokenType::Lam)?;
+
+        // Expect opening paren (can be LParen or ParenSpace after lam keyword)
+        if self.matches(&TokenType::LParen) {
+            self.expect(TokenType::LParen)?;
+        } else {
+            self.expect(TokenType::ParenSpace)?;
+        }
+
+        // Parse parameters (comma-separated bindings)
+        let args = if self.matches(&TokenType::RParen) {
+            Vec::new()
+        } else {
+            self.parse_comma_list(|p| p.parse_bind())?
+        };
+
+        // Expect closing paren
+        self.expect(TokenType::RParen)?;
+
+        // Optional type annotation: :: ann
+        let ann = if self.matches(&TokenType::ColonColon) {
+            self.expect(TokenType::ColonColon)?;
+            self.parse_ann()?
+        } else {
+            Ann::ABlank
+        };
+
+        // Expect colon before body
+        self.expect(TokenType::Colon)?;
+
+        // Parse body expression
+        let body_expr = self.parse_expr()?;
+
+        // Expect end keyword
+        let end = self.expect(TokenType::End)?;
+
+        // Wrap body in SBlock (required by Pyret AST format)
+        let body = Expr::SBlock {
+            l: self.current_loc(),
+            stmts: vec![Box::new(body_expr)],
+        };
+
+        Ok(Expr::SLam {
+            l: self.make_loc(&start, &end),
+            name: String::new(), // Anonymous lambda
+            params: Vec::new(),  // Empty params (used for type parameters)
+            args,
+            ann,
+            doc: String::new(),
+            body: Box::new(body),
+            check_loc: None,
+            check: None,
+            blocky: false,
+        })
     }
 
     /// method-expr: METHOD(args) ann: doc body where END

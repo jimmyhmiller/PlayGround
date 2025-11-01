@@ -86,12 +86,110 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "cause": cause.as_ref().map(|e| expr_to_pyret_json(e))
             })
         }
+        Expr::SObj { fields, .. } => {
+            json!({
+                "type": "s-obj",
+                "fields": fields.iter().map(|f| member_to_pyret_json(f)).collect::<Vec<_>>()
+            })
+        }
+        Expr::SLam { name, params, args, ann, doc, body, check, check_loc, blocky, .. } => {
+            json!({
+                "type": "s-lam",
+                "name": name,
+                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
+                "args": args.iter().map(|a| bind_to_pyret_json(a)).collect::<Vec<_>>(),
+                "ann": ann_to_pyret_json(ann),
+                "doc": doc,
+                "body": expr_to_pyret_json(body),
+                "check": check.as_ref().map(|c| expr_to_pyret_json(c)),
+                "check-loc": check_loc,
+                "blocky": blocky
+            })
+        }
+        Expr::SBlock { stmts, .. } => {
+            json!({
+                "type": "s-block",
+                "stmts": stmts.iter().map(|s| expr_to_pyret_json(s)).collect::<Vec<_>>()
+            })
+        }
+        Expr::SUserBlock { body, .. } => {
+            json!({
+                "type": "s-user-block",
+                "body": expr_to_pyret_json(body)
+            })
+        }
+        Expr::STuple { fields, .. } => {
+            json!({
+                "type": "s-tuple",
+                "fields": fields.iter().map(|f| expr_to_pyret_json(f.as_ref())).collect::<Vec<_>>()
+            })
+        }
+        Expr::STupleGet { tup, index, .. } => {
+            json!({
+                "type": "s-tuple-get",
+                "tup": expr_to_pyret_json(tup),
+                "index": index
+            })
+        }
+        Expr::SIf { branches, blocky, .. } => {
+            json!({
+                "type": "s-if",
+                "branches": branches.iter().map(|b| if_branch_to_pyret_json(b)).collect::<Vec<_>>(),
+                "blocky": blocky
+            })
+        }
+        Expr::SIfElse { branches, _else, blocky, .. } => {
+            json!({
+                "type": "s-if-else",
+                "branches": branches.iter().map(|b| if_branch_to_pyret_json(b)).collect::<Vec<_>>(),
+                "else": expr_to_pyret_json(_else),
+                "blocky": blocky
+            })
+        }
         _ => {
             json!({
                 "type": "UNSUPPORTED",
                 "debug": format!("{:?}", expr)
             })
         }
+    }
+}
+
+fn member_to_pyret_json(member: &pyret_attempt2::Member) -> Value {
+    use pyret_attempt2::Member;
+    match member {
+        Member::SDataField { name, value, .. } => {
+            json!({
+                "type": "s-data-field",
+                "name": name,
+                "value": expr_to_pyret_json(value)
+            })
+        }
+        Member::SMutableField { name, ann, value, .. } => {
+            json!({
+                "type": "s-mutable-field",
+                "name": name,
+                "ann": ann_to_pyret_json(ann),
+                "value": expr_to_pyret_json(value)
+            })
+        }
+        Member::SMethodField { .. } => {
+            json!({
+                "type": "UNSUPPORTED",
+                "debug": "Method fields not yet implemented"
+            })
+        }
+    }
+}
+
+fn ann_to_pyret_json(ann: &pyret_attempt2::Ann) -> Value {
+    use pyret_attempt2::Ann;
+    match ann {
+        Ann::ABlank => json!({"type": "a-blank"}),
+        _ => json!({
+            "type": "UNSUPPORTED",
+            "debug": format!("{:?}", ann)
+        })
     }
 }
 
@@ -162,6 +260,35 @@ fn name_to_pyret_json(name: &pyret_attempt2::Name) -> Value {
             })
         }
     }
+}
+
+fn bind_to_pyret_json(bind: &pyret_attempt2::Bind) -> Value {
+    use pyret_attempt2::Bind;
+    match bind {
+        Bind::SBind { id, ann, shadows, .. } => {
+            json!({
+                "type": "s-bind",
+                "name": name_to_pyret_json(id),
+                "ann": ann_to_pyret_json(ann),
+                "shadows": shadows
+            })
+        }
+        Bind::STupleBind { fields, as_name, .. } => {
+            json!({
+                "type": "s-tuple-bind",
+                "fields": fields.iter().map(|f| bind_to_pyret_json(f)).collect::<Vec<_>>(),
+                "as-name": as_name.as_ref().map(|n| bind_to_pyret_json(n))
+            })
+        }
+    }
+}
+
+fn if_branch_to_pyret_json(branch: &pyret_attempt2::IfBranch) -> Value {
+    json!({
+        "type": "s-if-branch",
+        "test": expr_to_pyret_json(&branch.test),
+        "body": expr_to_pyret_json(&branch.body)
+    })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
