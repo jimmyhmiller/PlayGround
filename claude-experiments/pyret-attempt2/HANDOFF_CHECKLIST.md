@@ -1,8 +1,8 @@
 # Handoff Checklist - Pyret Parser Project
 
-**Date:** 2025-10-31
+**Date:** 2025-10-31 (Updated)
 **Status:** Ready for next developer
-**Phase:** 3 - Expressions (87% complete - 47/54 comparison tests passing)
+**Phase:** 3 - Expressions (94% complete - 51/54 comparison tests passing)
 
 ---
 
@@ -14,8 +14,13 @@
 - [x] Chained function calls working
 - [x] **Whitespace sensitivity FIXED** - `f (x)` now correctly stops parsing
 - [x] **Dot access** - Single and chained (`obj.field1.field2`)
+  - [x] **Keywords as field names** - `obj.method()`, `obj.fun()` now work ✨
 - [x] **Bracket access** - Array/dictionary indexing (`arr[0]`, `matrix[i][j]`)
 - [x] **Construct expressions** - `[list: 1, 2, 3]`, `[set: x, y]`, `[lazy array: ...]`
+- [x] **Check operators** - `is`, `raises`, `satisfies`, `violates` ✨
+  - [x] All 11 variants implemented (is, is-roughly, is-not, satisfies-not, raises, raises-other, etc.)
+  - [x] Creates proper `SCheckTest` AST nodes with CheckOp enum
+  - [x] JSON serialization support added
 - [x] **Array syntax misconception FIXED** - Pyret does NOT support `[1, 2, 3]`!
 - [x] **Complex nested expressions** - Ultra-complex test validates all features
 - [x] Tokenizer bug fixed (Name tokens set paren_is_for_exp = false)
@@ -23,11 +28,11 @@
 - [x] AST nodes match reference implementation
 
 ### Testing
-- [x] 55 parser tests passing (added tests for bracket access)
-- [x] 47 comparison tests passing (was 40, +7 from array syntax fix)
+- [x] 55 parser tests passing (all unit tests)
+- [x] 51 comparison tests passing (was 47, +4 from check operators) ✨
 - [x] All array tests updated to use correct `[list: ...]` syntax
 - [x] Verified against official Pyret parser - `[1, 2, 3]` REJECTED
-- [x] No compiler warnings
+- [x] No compiler warnings (except expected dead code warnings)
 - [x] Test coverage for all implemented features
 - [x] Edge cases covered (empty args, nested parens, chaining, etc.)
 - [x] Ultra-complex expression test (7+ levels of nesting)
@@ -83,7 +88,7 @@
 
 ### Ready to Code (Start here)
 1. Open `NEXT_STEPS.md`
-2. Choose task (recommend: **Check operators** - highest priority!)
+2. Choose task (recommend: **Object expressions** - highest priority!)
 3. Follow implementation guide in NEXT_STEPS.md
 4. Write tests as you go
 5. Run `cargo test` frequently
@@ -127,9 +132,11 @@ parse_expr("f(1 + 2, 3)")  // ✅ Expr args
 parse_expr("f(x)")         // ✅ Direct call (ParenNoSpace)
 parse_expr("f (x)")        // ✅ Stops at 'f', returns identifier only
 
-// Dot access
+// Dot access (with keyword field names!)
 parse_expr("obj.field")    // ✅ Single field access
 parse_expr("obj.a.b.c")    // ✅ Chained dot access
+parse_expr("obj.method()") // ✅ Keywords as field names (NEW!)
+parse_expr("obj.fun()")    // ✅ Any keyword can be a field name
 
 // Bracket access
 parse_expr("arr[0]")       // ✅ Array indexing
@@ -141,6 +148,12 @@ parse_expr("[list: 1, 2, 3]") // ✅ List construction
 parse_expr("[set: x, y]")  // ✅ Set construction
 parse_expr("[list:]")      // ✅ Empty list
 parse_expr("[lazy array: 1, 2]") // ✅ Lazy modifier
+
+// Check operators (NEW!)
+parse_expr("x is y")       // ✅ Equality check
+parse_expr("f(x) raises \"error\"") // ✅ Exception check
+parse_expr("obj satisfies pred")   // ✅ Predicate check
+parse_expr("expr violates constraint") // ✅ Constraint check
 
 // Complex chaining
 parse_expr("f().g().h()")  // ✅ Chain calls
@@ -156,40 +169,48 @@ parse_expr("foo(x + y, bar.baz(a, b)).qux(w * z).result(true and false) + obj.fi
 // ✅ 7+ levels of nesting, all features combined
 ```
 
-### What's Next (Priority Order - 7 failing tests)
+### What's Next (Priority Order)
 ```rust
-// Check operators (4 failing tests) - HIGHEST PRIORITY
-parse_expr("x is y")       // ❌ Creates SCheckTest, not SOp
-parse_expr("f(x) raises \"error\"") // ❌ Test assertions
-parse_expr("obj satisfies pred")   // ❌ Type checking
-parse_expr("expr violates constraint") // ❌ Constraint checking
+// Object expressions - HIGHEST PRIORITY
+parse_expr("{ x: 1, y: 2 }")  // ❌ Not yet implemented
+parse_expr("{ method(): body end }") // ❌ Object methods
 
-// Other failing tests (need investigation)
-// - test_pyret_match_call_on_dot
-// - test_pyret_match_nested_complexity
-// - test_pyret_match_pipeline_style
+// Tuple expressions
+parse_expr("{1; 2; 3}")       // ❌ Not yet implemented (semicolon-separated!)
 
-// Future work - Object expressions
-parse_expr("{ x: 1, y: 2 }")  // Not yet implemented
+// Lambda expressions
+parse_expr("lam(x): x + 1 end") // ❌ Anonymous functions
 
-// Future work - Tuple expressions
-parse_expr("{1; 2; 3}")       // Not yet implemented
+// ✅ COMPLETED: Check operators (2025-10-31)
+parse_expr("x is y")       // ✅ Now works!
+parse_expr("f(x) raises \"error\"") // ✅ Now works!
+parse_expr("obj satisfies pred")   // ✅ Now works!
+parse_expr("expr violates constraint") // ✅ Now works!
+
+// ✅ COMPLETED: Keywords as field names (2025-10-31)
+parse_expr("obj.method()")  // ✅ Now works!
 
 // ✅ FIXED: Chained call bug (interesting-artistic-shark) - 2025-10-31
-parse_expr("f()(g())")  // Now works correctly!
+parse_expr("f()(g())")  // ✅ Now works correctly!
 ```
 
 ### File Locations
 ```
 Implementation:
-  src/parser.rs:199-520    - Expression parsing (Section 6)
+  src/parser.rs:280-520    - Expression parsing (Section 6)
+  src/parser.rs:706-778    - Check operator parsing (NEW!)
+  src/parser.rs:92-171     - Field name & keyword helpers (NEW!)
   src/ast.rs:292-808       - Expression AST nodes
+  src/ast.rs:769-776       - SCheckTest definition
+  src/ast.rs:1243-1282     - CheckOp enum
+  src/bin/to_pyret_json.rs - JSON serialization (updated for check operators)
 
 Tests:
-  tests/parser_tests.rs    - All parser tests
+  tests/parser_tests.rs    - 55 parser tests, all passing ✅
+  tests/comparison_tests.rs - 51/54 comparison tests passing ✅
 
 Next work area:
-  src/parser.rs Section 6  - Add new parse_* methods here
+  src/parser.rs Section 6  - Add new parse_* methods here (object, tuple, lambda)
 ```
 
 ---

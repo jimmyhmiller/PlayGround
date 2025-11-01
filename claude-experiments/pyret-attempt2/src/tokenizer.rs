@@ -688,6 +688,50 @@ impl Tokenizer {
         let start_col = self.col;
         let start_pos = self.pos;
 
+        // Check for special keyword-colon combinations before scanning as identifier
+        if self.starts_with("block:") {
+            for _ in 0..6 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::Block, "block:".to_string(), loc));
+        }
+        if self.starts_with("check:") {
+            for _ in 0..6 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::CheckColon, "check:".to_string(), loc));
+        }
+        if self.starts_with("doc:") {
+            for _ in 0..4 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::Doc, "doc:".to_string(), loc));
+        }
+        if self.starts_with("else:") {
+            for _ in 0..5 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::ElseColon, "else:".to_string(), loc));
+        }
+        if self.starts_with("examples:") {
+            for _ in 0..9 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::ExamplesColon, "examples:".to_string(), loc));
+        }
+        if self.starts_with("where:") {
+            for _ in 0..6 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::Where, "where:".to_string(), loc));
+        }
+
         // First character
         self.advance();
 

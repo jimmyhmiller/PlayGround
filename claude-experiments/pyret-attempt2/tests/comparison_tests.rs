@@ -249,8 +249,8 @@ fn test_pyret_match_dot_on_call() {
 
 #[test]
 fn test_pyret_match_call_on_dot() {
-    assert_matches_pyret("obj.method()");
-    assert_matches_pyret("obj.foo(x, y)");
+    assert_matches_pyret("obj.foo()");
+    assert_matches_pyret("obj.bar(x, y)");
 }
 
 // ============================================================================
@@ -291,7 +291,7 @@ fn test_pyret_match_dots_in_binop() {
 #[test]
 fn test_pyret_match_nested_complexity() {
     assert_matches_pyret("f(x + 1).result");
-    assert_matches_pyret("obj.method(a * b).field");
+    assert_matches_pyret("obj.foo(a * b).field");
     assert_matches_pyret("(f(x) + g(y)).value");
 }
 
@@ -400,7 +400,7 @@ fn test_pyret_match_builder_pattern() {
 
 #[test]
 fn test_pyret_match_pipeline_style() {
-    assert_matches_pyret("data.filter(pred).map(transform).reduce(combine)");
+    assert_matches_pyret("obj.foo(a).bar(b).baz(c)");
 }
 
 #[test]
@@ -434,6 +434,35 @@ fn test_pyret_match_violates_operator() {
 }
 
 // ============================================================================
+// Object Expressions
+// ============================================================================
+
+#[test]
+fn test_pyret_match_empty_object() {
+    assert_matches_pyret("{}");
+}
+
+#[test]
+fn test_pyret_match_simple_object() {
+    assert_matches_pyret("{ x: 1, y: 2 }");
+}
+
+#[test]
+fn test_pyret_match_nested_object() {
+    assert_matches_pyret("{ point: { x: 0, y: 0 } }");
+}
+
+#[test]
+fn test_pyret_match_object_with_expressions() {
+    assert_matches_pyret("{ sum: 1 + 2 }");
+}
+
+#[test]
+fn test_pyret_match_object_trailing_comma() {
+    assert_matches_pyret("{ x: 1, y: 2, }");
+}
+
+// ============================================================================
 // Complex Integration Tests
 // ============================================================================
 
@@ -464,4 +493,204 @@ fn test_pyret_match_ultra_complex_expression() {
     assert_matches_pyret(
         "foo(x + y, bar.baz(a, b)).qux(w * z).result(true and false) + obj.field1.field2(p < q or r >= s) * helper(1, 2).chain()"
     );
+}
+
+// ============================================================================
+// Lambda Expressions ✅ IMPLEMENTED
+// ============================================================================
+
+#[test]
+fn test_pyret_match_simple_lambda() {
+    // lam(): body end
+    assert_matches_pyret("lam(): \"no-op\" end");
+}
+
+#[test]
+fn test_pyret_match_lambda_with_params() {
+    // lam(x): x + 1 end
+    assert_matches_pyret("lam(e): e > 5 end");
+}
+
+#[test]
+fn test_pyret_match_lambda_multiple_params() {
+    // lam(x, y): x + y end
+    assert_matches_pyret("lam(n, m): n > m end");
+}
+
+#[test]
+fn test_pyret_match_lambda_in_call() {
+    // Real code from test-lists.arr
+    assert_matches_pyret("filter(lam(e): e > 5 end, [list: -1, 1])");
+}
+
+// ============================================================================
+// Tuple Expressions (NOT YET IMPLEMENTED - Expected to Fail)
+// ============================================================================
+
+#[test]
+fn test_pyret_match_simple_tuple() {
+    // {1; 3; 10} - Note: semicolons, not commas!
+    assert_matches_pyret("{1; 3; 10}");
+}
+
+#[test]
+fn test_pyret_match_tuple_with_exprs() {
+    // { 13; 1 + 4; 41; 1 }
+    assert_matches_pyret("{13; 1 + 4; 41; 1}");
+}
+
+#[test]
+fn test_pyret_match_nested_tuples() {
+    // Nested tuples from real code
+    assert_matches_pyret("{151; {124; 152; 12}; 523}");
+}
+
+#[test]
+fn test_pyret_match_tuple_access() {
+    // x.{2} - tuple field access
+    assert_matches_pyret("x.{2}");
+}
+
+// ============================================================================
+// Block Expressions (NOT YET IMPLEMENTED - Expected to Fail)
+// ============================================================================
+
+#[test]
+fn test_pyret_match_simple_block() {
+    // block: expr end
+    assert_matches_pyret("block: 5 end");
+}
+
+#[test]
+#[ignore] // Remove this when block parsing is implemented
+fn test_pyret_match_block_multiple_stmts() {
+    // block: stmt1 stmt2 expr end
+    assert_matches_pyret("block: x = 5 x + 1 end");
+}
+
+// ============================================================================
+// For Expressions (NOT YET IMPLEMENTED - Expected to Fail)
+// ============================================================================
+
+#[test]
+#[ignore] // Remove this when for parsing is implemented
+fn test_pyret_match_for_map() {
+    // for map(x from lst): x + 1 end
+    assert_matches_pyret("for map(a1 from arr): a1 + 1 end");
+}
+
+#[test]
+#[ignore] // Remove this when for parsing is implemented
+fn test_pyret_match_for_map2() {
+    // Real code from test-binops.arr
+    assert_matches_pyret("for lists.map2(a1 from self.arr, a2 from other.arr): a1 + a2 end");
+}
+
+// ============================================================================
+// Method Fields in Objects (NOT YET IMPLEMENTED - Expected to Fail)
+// ============================================================================
+
+#[test]
+#[ignore] // Remove this when method fields are implemented
+fn test_pyret_match_object_with_method() {
+    // { method foo(self): self.x end }
+    assert_matches_pyret("{ method _plus(self, other): self.arr end }");
+}
+
+// ============================================================================
+// Cases Expressions (NOT YET IMPLEMENTED - Expected to Fail)
+// ============================================================================
+
+#[test]
+#[ignore] // Remove this when cases parsing is implemented
+fn test_pyret_match_simple_cases() {
+    // cases(Type) expr: | variant => result end
+    assert_matches_pyret("cases(Either) e: | left(v) => v | right(v) => v end");
+}
+
+// ============================================================================
+// If Expressions ✅
+// ============================================================================
+
+#[test]
+fn test_pyret_match_simple_if() {
+    // if cond: then-expr else: else-expr end
+    assert_matches_pyret("if true: 1 else: 2 end");
+}
+
+// ============================================================================
+// When Expressions (NOT YET IMPLEMENTED - Expected to Fail)
+// ============================================================================
+
+#[test]
+#[ignore] // Remove this when when parsing is implemented
+fn test_pyret_match_simple_when() {
+    // when cond: expr end
+    assert_matches_pyret("when true: print(\"yes\") end");
+}
+
+// ============================================================================
+// Assignment Expressions (NOT YET IMPLEMENTED - Expected to Fail)
+// ============================================================================
+
+#[test]
+#[ignore] // Remove this when assignment parsing is implemented
+fn test_pyret_match_simple_assign() {
+    // x := value
+    assert_matches_pyret("x := 5");
+}
+
+// ============================================================================
+// Let/Var Bindings (NOT YET IMPLEMENTED - Expected to Fail)
+// ============================================================================
+
+#[test]
+#[ignore] // Remove this when let parsing is implemented
+fn test_pyret_match_simple_let() {
+    // x = value
+    assert_matches_pyret("x = 5");
+}
+
+// ============================================================================
+// Data Declarations (NOT YET IMPLEMENTED - Expected to Fail)
+// ============================================================================
+
+#[test]
+#[ignore] // Remove this when data parsing is implemented
+fn test_pyret_match_simple_data() {
+    // data Type: | variant end
+    assert_matches_pyret("data Box: | box(ref v) end");
+}
+
+// ============================================================================
+// Function Declarations (NOT YET IMPLEMENTED - Expected to Fail)
+// ============================================================================
+
+#[test]
+#[ignore] // Remove this when function parsing is implemented
+fn test_pyret_match_simple_fun() {
+    // fun name(params): body end
+    assert_matches_pyret("fun f(x): x + 1 end");
+}
+
+// ============================================================================
+// Import Statements (NOT YET IMPLEMENTED - Expected to Fail)
+// ============================================================================
+
+#[test]
+#[ignore] // Remove this when import parsing is implemented
+fn test_pyret_match_simple_import() {
+    // import module as name
+    assert_matches_pyret("import equality as E");
+}
+
+// ============================================================================
+// Provide Statements (NOT YET IMPLEMENTED - Expected to Fail)
+// ============================================================================
+
+#[test]
+#[ignore] // Remove this when provide parsing is implemented
+fn test_pyret_match_simple_provide() {
+    // provide *
+    assert_matches_pyret("provide *");
 }

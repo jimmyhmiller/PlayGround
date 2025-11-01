@@ -50,8 +50,7 @@ pub fn build(b: *std.Build) void {
         fn link(step: *std.Build.Step.Compile, include_path: []const u8, lib_path: []const u8) void {
             step.addIncludePath(.{ .cwd_relative = include_path });
 
-            // Add library path - this will add an rpath on macOS
-            // Note: Zig issue #24349 causes duplicate rpaths, but they are harmless warnings
+            // Add library path
             step.addLibraryPath(.{ .cwd_relative = lib_path });
 
             // MLIR C API libraries
@@ -74,46 +73,24 @@ pub fn build(b: *std.Build) void {
         }
     }.link;
 
-    // Helper function to fix duplicate rpaths on macOS for test executables
+    // Helper function to run test executables, working around duplicate rpath issues
     const fixRpathForTest = struct {
-        fn fix(builder: *std.Build, test_artifact: *std.Build.Step.Compile, tgt: std.Build.ResolvedTarget) *std.Build.Step.Run {
-            const run_step = builder.addRunArtifact(test_artifact);
+        fn fix(builder: *std.Build, test_artifact: *std.Build.Step.Compile, tgt: std.Build.ResolvedTarget, lib_path: []const u8) *std.Build.Step.Run {
+            _ = lib_path;
 
             if (tgt.result.os.tag == .macos) {
-                // Create a wrapper script that fixes rpaths before running the test
-                const fix_and_run = builder.addSystemCommand(&[_][]const u8{
-                    "sh",
-                    "-c",
+                // On macOS, use a wrapper script to fix duplicate rpaths before running
+                // This works around Zig issue #24349
+                const wrapper = builder.addSystemCommand(&[_][]const u8{
+                    "./fix-rpath-and-run.sh",
                 });
+                wrapper.addArtifactArg(test_artifact);
+                wrapper.step.dependOn(&test_artifact.step);
 
-                const test_path = builder.getInstallPath(.bin, test_artifact.name);
-                const cmd = builder.fmt(
-                    \\# Fix duplicate rpaths
-                    \\all_rpaths=$(otool -l {s} 2>/dev/null | grep -A 2 LC_RPATH | grep path | awk '{{print $2}}')
-                    \\for rpath in $all_rpaths; do
-                    \\    count=$(echo "$all_rpaths" | grep -c "^$rpath$")
-                    \\    if [ "$count" -gt 1 ]; then
-                    \\        while [ "$count" -gt 1 ]; do
-                    \\            install_name_tool -delete_rpath "$rpath" {s} 2>/dev/null || true
-                    \\            count=$((count - 1))
-                    \\        done
-                    \\    fi
-                    \\done
-                    \\# Run the test
-                    \\exec {s} "$@"
-                , .{test_path, test_path, test_path});
-                fix_and_run.addArg(cmd);
-
-                // Pass through any test arguments
-                if (builder.args) |args| {
-                    fix_and_run.addArgs(args);
-                }
-
-                fix_and_run.step.dependOn(&builder.addInstallArtifact(test_artifact, .{}).step);
-                return fix_and_run;
+                return wrapper;
             }
 
-            return run_step;
+            return builder.addRunArtifact(test_artifact);
         }
     }.fix;
 
@@ -263,7 +240,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(mod_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the test executable.
-    const run_mod_tests = fixRpathForTest(b, mod_tests, target);
+    const run_mod_tests = fixRpathForTest(b, mod_tests, target, mlir_lib_path);
 
     // Creates an executable that will run `test` blocks from the executable's
     // root module. Note that test executables only test one module at a time,
@@ -274,7 +251,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(exe_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the second test executable.
-    const run_exe_tests = fixRpathForTest(b, exe_tests, target);
+    const run_exe_tests = fixRpathForTest(b, exe_tests, target, mlir_lib_path);
 
     // Creates a test executable for test/main_test.zig with access to the main module
     const main_tests = b.addTest(.{
@@ -289,7 +266,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // A run step that will run the main test executable.
-    const run_main_tests = fixRpathForTest(b, main_tests, target);
+    const run_main_tests = fixRpathForTest(b, main_tests, target, mlir_lib_path);
 
     // Creates a test executable for grammar examples
     const grammar_tests = b.addTest(.{
@@ -304,7 +281,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // A run step that will run the grammar test executable.
-    const run_grammar_tests = fixRpathForTest(b, grammar_tests, target);
+    const run_grammar_tests = fixRpathForTest(b, grammar_tests, target, mlir_lib_path);
 
     // Creates a test executable for MLIR integration
     const mlir_tests = b.addTest(.{
@@ -320,7 +297,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(mlir_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the MLIR test executable.
-    const run_mlir_tests = fixRpathForTest(b, mlir_tests, target);
+    const run_mlir_tests = fixRpathForTest(b, mlir_tests, target, mlir_lib_path);
 
     // Creates a test executable for parser
     const parser_tests = b.addTest(.{
@@ -336,7 +313,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(parser_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the parser test executable.
-    const run_parser_tests = fixRpathForTest(b, parser_tests, target);
+    const run_parser_tests = fixRpathForTest(b, parser_tests, target, mlir_lib_path);
 
     // Creates a test executable for builder
     const builder_tests = b.addTest(.{
@@ -352,7 +329,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(builder_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the builder test executable.
-    const run_builder_tests = fixRpathForTest(b, builder_tests, target);
+    const run_builder_tests = fixRpathForTest(b, builder_tests, target, mlir_lib_path);
 
     // Creates a test executable for printer
     const printer_tests = b.addTest(.{
@@ -368,7 +345,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(printer_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the printer test executable.
-    const run_printer_tests = fixRpathForTest(b, printer_tests, target);
+    const run_printer_tests = fixRpathForTest(b, printer_tests, target, mlir_lib_path);
 
     // Creates a test executable for printer validation
     const printer_validation_tests = b.addTest(.{
@@ -384,7 +361,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(printer_validation_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the printer validation test executable.
-    const run_printer_validation_tests = fixRpathForTest(b, printer_validation_tests, target);
+    const run_printer_validation_tests = fixRpathForTest(b, printer_validation_tests, target, mlir_lib_path);
 
     // Creates a test executable for executor
     const executor_tests = b.addTest(.{
@@ -400,7 +377,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(executor_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the executor test executable.
-    const run_executor_tests = fixRpathForTest(b, executor_tests, target);
+    const run_executor_tests = fixRpathForTest(b, executor_tests, target, mlir_lib_path);
 
     // Creates a test executable for type builder
     const type_builder_tests = b.addTest(.{
@@ -416,7 +393,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(type_builder_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the type builder test executable.
-    const run_type_builder_tests = fixRpathForTest(b, type_builder_tests, target);
+    const run_type_builder_tests = fixRpathForTest(b, type_builder_tests, target, mlir_lib_path);
 
     // Creates a test executable for REPL integration tests
     const repl_tests = b.addTest(.{
@@ -432,7 +409,9 @@ pub fn build(b: *std.Build) void {
     linkMLIR(repl_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the REPL test executable.
-    const run_repl_tests = fixRpathForTest(b, repl_tests, target);
+    const run_repl_tests = fixRpathForTest(b, repl_tests, target, mlir_lib_path);
+    // REPL tests need the main executable to be installed first
+    run_repl_tests.step.dependOn(b.getInstallStep());
 
     // Creates a test executable for reader print round-trip tests
     const reader_roundtrip_tests = b.addTest(.{
@@ -448,7 +427,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(reader_roundtrip_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the reader roundtrip test executable.
-    const run_reader_roundtrip_tests = fixRpathForTest(b, reader_roundtrip_tests, target);
+    const run_reader_roundtrip_tests = fixRpathForTest(b, reader_roundtrip_tests, target, mlir_lib_path);
 
     // Creates a test executable for tokenizer
     const tokenizer_tests = b.addTest(.{
@@ -464,7 +443,7 @@ pub fn build(b: *std.Build) void {
     linkMLIR(tokenizer_tests, mlir_include_path, mlir_lib_path);
 
     // A run step that will run the tokenizer test executable.
-    const run_tokenizer_tests = fixRpathForTest(b, tokenizer_tests, target);
+    const run_tokenizer_tests = fixRpathForTest(b, tokenizer_tests, target, mlir_lib_path);
 
     // Creates an executable to test the printer manually
     const test_printer_exe = b.addExecutable(.{
