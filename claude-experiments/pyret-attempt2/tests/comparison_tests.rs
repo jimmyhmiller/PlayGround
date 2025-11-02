@@ -573,14 +573,12 @@ fn test_pyret_match_block_multiple_stmts() {
 // ============================================================================
 
 #[test]
-#[ignore] // Remove this when for parsing is implemented
 fn test_pyret_match_for_map() {
     // for map(x from lst): x + 1 end
     assert_matches_pyret("for map(a1 from arr): a1 + 1 end");
 }
 
 #[test]
-#[ignore] // Remove this when for parsing is implemented
 fn test_pyret_match_for_map2() {
     // Real code from test-binops.arr
     assert_matches_pyret("for lists.map2(a1 from self.arr, a2 from other.arr): a1 + a2 end");
@@ -645,7 +643,7 @@ fn test_pyret_match_simple_assign() {
 // ============================================================================
 
 #[test]
-#[ignore] // Remove this when let parsing is implemented
+// Enabled - let parsing now implemented
 fn test_pyret_match_simple_let() {
     // x = value
     assert_matches_pyret("x = 5");

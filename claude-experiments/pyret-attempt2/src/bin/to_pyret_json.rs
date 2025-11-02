@@ -146,6 +146,39 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "blocky": blocky
             })
         }
+        Expr::SFor { iterator, bindings, ann, body, blocky, .. } => {
+            json!({
+                "type": "s-for",
+                "iterator": expr_to_pyret_json(iterator),
+                "bindings": bindings.iter().map(|b| for_bind_to_pyret_json(b)).collect::<Vec<_>>(),
+                "ann": ann_to_pyret_json(ann),
+                "body": expr_to_pyret_json(body),
+                "blocky": blocky
+            })
+        }
+        Expr::SLetExpr { binds, body, blocky, .. } => {
+            json!({
+                "type": "s-let-expr",
+                "binds": binds.iter().map(|b| let_bind_to_pyret_json(b)).collect::<Vec<_>>(),
+                "body": expr_to_pyret_json(body),
+                "blocky": blocky
+            })
+        }
+        Expr::SLet { name, value, keyword_val, .. } => {
+            json!({
+                "type": "s-let",
+                "name": bind_to_pyret_json(name),
+                "value": expr_to_pyret_json(value),
+                "keyword-val": keyword_val
+            })
+        }
+        Expr::SVar { name, value, .. } => {
+            json!({
+                "type": "s-var",
+                "name": bind_to_pyret_json(name),
+                "value": expr_to_pyret_json(value)
+            })
+        }
         _ => {
             json!({
                 "type": "UNSUPPORTED",
@@ -289,6 +322,34 @@ fn if_branch_to_pyret_json(branch: &pyret_attempt2::IfBranch) -> Value {
         "test": expr_to_pyret_json(&branch.test),
         "body": expr_to_pyret_json(&branch.body)
     })
+}
+
+fn for_bind_to_pyret_json(for_bind: &pyret_attempt2::ForBind) -> Value {
+    json!({
+        "type": "s-for-bind",
+        "bind": bind_to_pyret_json(&for_bind.bind),
+        "value": expr_to_pyret_json(&for_bind.value)
+    })
+}
+
+fn let_bind_to_pyret_json(let_bind: &pyret_attempt2::LetBind) -> Value {
+    use pyret_attempt2::LetBind;
+    match let_bind {
+        LetBind::SLetBind { b, value, .. } => {
+            json!({
+                "type": "s-let-bind",
+                "bind": bind_to_pyret_json(b),
+                "value": expr_to_pyret_json(value)
+            })
+        }
+        LetBind::SVarBind { b, value, .. } => {
+            json!({
+                "type": "s-var-bind",
+                "bind": bind_to_pyret_json(b),
+                "value": expr_to_pyret_json(value)
+            })
+        }
+    }
 }
 
 fn program_to_pyret_json(program: &Program) -> Value {

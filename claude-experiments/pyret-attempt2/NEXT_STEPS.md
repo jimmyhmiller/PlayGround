@@ -1,154 +1,162 @@
 # Next Steps for Pyret Parser Implementation
 
 **Last Updated:** 2025-11-01
-**Current Status:** ✅ Full program parsing complete! Ready for statements.
-**Tests Passing:** 64/64 parser tests ✅, 69/81 comparison tests ✅ (all using full Program ASTs!)
+**Current Status:** ✅ For expressions complete! Ready for method fields.
+**Tests Passing:** 67/67 parser tests ✅ (100%), 72/81 comparison tests ✅ (88.9%)
 
 ---
 
-## ✅ COMPLETED - Full Program Parsing
+## ✅ COMPLETED - For Expressions
 
 **MILESTONE ACHIEVED!** 🎉
 
-We now parse complete Pyret programs and compare full Program ASTs with the official parser.
+For expressions are now fully working, bringing us to 72/81 comparison tests passing (88.9%)!
 
 **What was completed:**
-1. ✅ Implemented `parse_program()` - parses complete Pyret programs (src/parser.rs:193-234)
-2. ✅ Implemented `parse_block()` - parses statement sequences (src/parser.rs:245-269)
-3. ✅ Updated `to_pyret_json.rs` to output full Program AST with helpers
-4. ✅ Fixed `compare_parsers.sh` and `compare_parsers_quiet.sh` (removed stmts[0] hack)
+1. ✅ Implemented `parse_for_expr()` - Parses for expressions with iterator and bindings
+2. ✅ Iterator expression parsing with dot access support (`lists.map2`)
+3. ✅ For-bindings with `FROM` keyword (`x from lst`)
+4. ✅ Added `ForBind` structures with proper `Bind` and value expressions
+5. ✅ Added JSON serialization for `SFor` and `ForBind`
+6. ✅ Updated location extraction for `SFor` expressions (5 locations)
+7. ✅ Added 2 comprehensive parser tests (simple, dot access)
+8. ✅ Enabled 2 comparison tests (`test_pyret_match_for_map`, `test_pyret_match_for_map2`)
 
-All 69 passing comparison tests now compare complete Program ASTs byte-for-byte with the official parser!
+All 72 passing comparison tests produce identical ASTs to the official Pyret parser!
 
 ---
 
 ## 📋 Next Priority Tasks (IN ORDER)
 
-### 1. parse_let_expr() - Let Bindings ⭐⭐⭐⭐ (HIGHEST PRIORITY)
-**Why:** Required for `block_multiple_stmts` test and enables variable declarations
+### 1. parse_method_field() - Method Fields in Objects ⭐⭐⭐⭐ (HIGHEST PRIORITY)
+**Why:** Required for 1 comparison test (`object_with_method`) and completes object expression support
 
 **Grammar:**
 ```bnf
-let-expr: LET bind = expr
-        | LET bind = expr BLOCK body END
-var-expr: VAR bind := expr
+obj-field: NAME COLON expr                  # data field
+         | REF NAME ann COLON expr          # mutable field
+         | METHOD NAME params ann COLON doc body WHERE bindings END  # method field
 ```
 
-**AST Node:** `Expr::SLetExpr { l, binds, body }` or `Expr::SVarExpr { l, bind, value }`
+**Examples:**
+- `{ method _plus(self, other): self.x + other.x end }`
+- `{ x: 5, method double(self): self.x * 2 end }`
+
+**AST Node:** `Member::SMethodField { l, name, params, ann, doc, body, blocky }`
 
 **Implementation Steps:**
 
-1. **Study the AST structure** in `src/ast.rs`:
+1. **Study the Member AST in** `src/ast.rs`:
 ```rust
-Expr::SLetExpr {
+Member::SMethodField {
     l: Loc,
-    binds: Vec<LetBind>,  // List of let bindings
-    body: Box<Expr>,       // Body expression
-}
-
-// LetBind is defined in ast.rs
-pub struct LetBind {
-    pub b: Bind,     // The binding (name + optional type)
-    pub value: Expr, // The value expression
+    name: String,       // Method name (e.g., "_plus", "double")
+    params: Vec<Bind>,  // Parameters including 'self'
+    ann: Ann,           // Return type annotation
+    doc: String,        // Documentation string
+    body: Box<Expr>,    // Method body (usually SBlock)
+    _check: Option<Box<Expr>>,  // Optional check block
+    blocky: bool,       // true if uses 'block' keyword
 }
 ```
 
-2. **Update parse_block() to handle let statements:**
+2. **Update parse_obj_field() to handle METHOD keyword:**
 ```rust
-fn parse_block(&mut self) -> ParseResult<Expr> {
-    let start = self.peek().clone();
-    let mut stmts = Vec::new();
+fn parse_obj_field(&mut self) -> ParseResult<Member> {
+    if self.matches(&TokenType::Method) {
+        return self.parse_method_field();
+    }
+    // ... existing ref/data field logic ...
+}
+```
 
-    while !self.is_at_end() {
-        // Try to parse different statement types
-        let stmt = if self.matches(&TokenType::Let) {
-            self.parse_let_expr()?
-        } else if self.matches(&TokenType::Var) {
-            self.parse_var_expr()?
-        } else {
-            // Default: parse as expression
-            match self.parse_expr() {
-                Ok(expr) => expr,
-                Err(_) => break,  // Stop if we can't parse
-            }
-        };
-        stmts.push(Box::new(stmt));
+3. **Implement parse_method_field():**
+```rust
+fn parse_method_field(&mut self) -> ParseResult<Member> {
+    let start = self.expect(TokenType::Method)?;
+
+    // Parse method name
+    let name_token = self.expect(TokenType::Name)?;
+    let name = name_token.value.clone();
+
+    // Parse parameters (like lambda)
+    self.expect(TokenType::ParenSpace)?;  // or LParen
+    let params = if self.matches(&TokenType::RParen) {
+        Vec::new()
+    } else {
+        self.parse_comma_list(|p| p.parse_bind())?
+    };
+    self.expect(TokenType::RParen)?;
+
+    // Optional type annotation
+    let ann = if self.matches(&TokenType::ColonColon) {
+        self.advance();
+        self.parse_ann()?  // Parse type annotation
+    } else {
+        Ann::ABlank
+    };
+
+    // Parse body separator (COLON or BLOCK)
+    let blocky = if self.matches(&TokenType::Block) {
+        self.advance();
+        true
+    } else {
+        self.expect(TokenType::Colon)?;
+        false
+    };
+
+    // Parse doc string (usually empty)
+    let doc = String::new();
+
+    // Parse method body (statements until END)
+    let mut body_stmts = Vec::new();
+    while !self.matches(&TokenType::End) && !self.is_at_end() {
+        let stmt = self.parse_expr()?;
+        body_stmts.push(Box::new(stmt));
     }
 
-    let end = if self.current > 0 {
-        self.tokens[self.current - 1].clone()
-    } else {
-        start.clone()
-    };
+    let body = Box::new(Expr::SBlock {
+        l: self.current_loc(),
+        stmts: body_stmts,
+    });
 
-    Ok(Expr::SBlock {
+    let end = self.expect(TokenType::End)?;
+
+    Ok(Member::SMethodField {
         l: self.make_loc(&start, &end),
-        stmts,
-    })
-}
-```
-
-3. **Implement parse_let_expr():**
-```rust
-fn parse_let_expr(&mut self) -> ParseResult<Expr> {
-    let start = self.expect(TokenType::Let)?;
-
-    // Parse binding: name [:: type]
-    let bind = self.parse_bind()?;
-
-    // Expect =
-    self.expect(TokenType::Equals)?;
-
-    // Parse value expression
-    let value = self.parse_expr()?;
-
-    // Create LetBind
-    let let_bind = LetBind {
-        b: bind.clone(),
-        value: value.clone(),
-    };
-
-    // For now, let expressions without explicit body just use the value
-    let body = value.clone();  // TODO: Handle BLOCK ... END syntax
-
-    let end = self.tokens[self.current - 1].clone();
-
-    Ok(Expr::SLetExpr {
-        l: self.make_loc(&start, &end),
-        binds: vec![let_bind],
-        body: Box::new(body),
+        name,
+        params,
+        ann,
+        doc,
+        body,
+        _check: None,
+        blocky,
     })
 }
 ```
 
 4. **Add JSON serialization in to_pyret_json.rs:**
 ```rust
-Expr::SLetExpr { binds, body, .. } => {
+Member::SMethodField { name, params, ann, doc, body, blocky, .. } => {
     json!({
-        "type": "s-let-expr",
-        "binds": binds.iter().map(|b| let_bind_to_pyret_json(b)).collect::<Vec<_>>(),
-        "body": expr_to_pyret_json(body)
-    })
-}
-
-fn let_bind_to_pyret_json(lb: &LetBind) -> Value {
-    json!({
-        "type": "s-let-bind",
-        "bind": bind_to_pyret_json(&lb.b),
-        "value": expr_to_pyret_json(&lb.value)
+        "type": "s-method-field",
+        "name": name,
+        "params": params.iter().map(|p| bind_to_pyret_json(p)).collect::<Vec<_>>(),
+        "ann": ann_to_pyret_json(ann),
+        "doc": doc,
+        "body": expr_to_pyret_json(body),
+        "check": null,  // _check field
+        "blocky": blocky
     })
 }
 ```
 
-**Estimated Time:** 1-2 hours
+**Estimated Time:** 2-3 hours
 
 ---
 
-### 2. parse_for_expr() - For Expressions ⭐⭐⭐ (HIGH PRIORITY)
-**Why:** Required for 2 comparison tests (`for_map`, `for_map2`)
-```
-
-**Estimated Time:** 1 hour
+### 2. parse_fun_expr() - Function Definitions ⭐⭐⭐⭐ (HIGH PRIORITY)
+**Why:** Required for 1 comparison test (`simple_fun`)
 
 ---
 
@@ -276,3 +284,40 @@ But FIRST: **GET PROGRAM PARSING WORKING!**
 
 **Estimated Total Time:** 4-5 hours
 **Priority:** 🚨 CRITICAL - Drop everything else and do this first!
+
+---
+
+## 🎯 Quick Summary for Next Session
+
+**Current Status:**
+- ✅ 72/81 comparison tests passing (88.9%)
+- ✅ For expressions fully working
+- ✅ All control flow and statement parsing infrastructure in place
+
+**Next Feature to Implement: METHOD FIELDS IN OBJECTS**
+
+**What to do:**
+1. Check the ignored comparison tests to see what features are needed
+2. Look at `test_pyret_match_object_with_method`
+3. Study `Member::SMethodField` AST structure in `src/ast.rs`
+4. Update `parse_obj_field()` to handle `METHOD` keyword
+5. Implement `parse_method_field()` (similar to lambda parsing)
+6. Add JSON serialization in `to_pyret_json.rs`
+7. Add parser tests
+8. Enable comparison test
+
+**Reference:**
+- Grammar: `/Users/jimmyhmiller/Documents/Code/open-source/pyret-lang/src/js/base/pyret-grammar.bnf`
+- Look for: `obj-field` and `method-field` in the grammar
+- Similar to: lambda expressions (already implemented)
+
+**Estimated Time:** 2-3 hours for full implementation
+
+**After that:**
+- Function definitions (`fun f(x): ... end`) - 1 test waiting
+- Cases expressions (`cases (Type) expr: ... end`) - 1 test waiting
+- Data definitions (`data Point: point(x, y) end`) - 1 test waiting
+- When expressions (`when expr: ... end`) - 1 test waiting
+
+**We're at 88.9% test coverage!** 🚀 Only 9 more tests to go!
+
