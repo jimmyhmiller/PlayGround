@@ -1,4 +1,4 @@
-use pyret_attempt2::{Parser, Expr};
+use pyret_attempt2::{Parser, Expr, Program};
 use pyret_attempt2::tokenizer::Tokenizer;
 use serde_json::{json, Value};
 use std::env;
@@ -291,6 +291,82 @@ fn if_branch_to_pyret_json(branch: &pyret_attempt2::IfBranch) -> Value {
     })
 }
 
+fn program_to_pyret_json(program: &Program) -> Value {
+    let mut obj = json!({
+        "type": "s-program",
+        "provide": provide_to_pyret_json(&program._provide),
+        "provided-types": provide_types_to_pyret_json(&program.provided_types),
+        "provides": program.provides.iter().map(|p| provide_block_to_pyret_json(p)).collect::<Vec<_>>(),
+        "imports": program.imports.iter().map(|i| import_to_pyret_json(i)).collect::<Vec<_>>(),
+        "body": expr_to_pyret_json(&program.body)
+    });
+
+    // Add "use" field (set to null when not present, as Pyret does)
+    obj["use"] = match &program._use {
+        Some(use_stmt) => use_to_pyret_json(use_stmt),
+        None => Value::Null,
+    };
+
+    obj
+}
+
+fn use_to_pyret_json(_use_stmt: &pyret_attempt2::Use) -> Value {
+    json!({
+        "type": "UNSUPPORTED",
+        "debug": "Use statement not yet implemented"
+    })
+}
+
+fn provide_to_pyret_json(provide: &pyret_attempt2::Provide) -> Value {
+    use pyret_attempt2::Provide;
+    match provide {
+        Provide::SProvide { block, .. } => {
+            json!({
+                "type": "s-provide",
+                "block": expr_to_pyret_json(block)
+            })
+        }
+        Provide::SProvideAll { .. } => {
+            json!({"type": "s-provide-all"})
+        }
+        Provide::SProvideNone { .. } => {
+            json!({"type": "s-provide-none"})
+        }
+    }
+}
+
+fn provide_types_to_pyret_json(provide_types: &pyret_attempt2::ProvideTypes) -> Value {
+    use pyret_attempt2::ProvideTypes;
+    match provide_types {
+        ProvideTypes::SProvideTypes { anns, .. } => {
+            json!({
+                "type": "s-provide-types",
+                "anns": anns.iter().map(|a| ann_to_pyret_json(a)).collect::<Vec<_>>()
+            })
+        }
+        ProvideTypes::SProvideTypesAll { .. } => {
+            json!({"type": "s-provide-types-all"})
+        }
+        ProvideTypes::SProvideTypesNone { .. } => {
+            json!({"type": "s-provide-types-none"})
+        }
+    }
+}
+
+fn provide_block_to_pyret_json(_provide_block: &pyret_attempt2::ProvideBlock) -> Value {
+    json!({
+        "type": "UNSUPPORTED",
+        "debug": "ProvideBlock not yet implemented"
+    })
+}
+
+fn import_to_pyret_json(_import: &pyret_attempt2::Import) -> Value {
+    json!({
+        "type": "UNSUPPORTED",
+        "debug": "Import not yet implemented"
+    })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
@@ -307,9 +383,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tokenizer = Tokenizer::new(&input);
     let tokens = tokenizer.tokenize();
     let mut parser = Parser::new(tokens, "input.arr".to_string());
-    let expr = parser.parse_expr()?;
 
-    let json = expr_to_pyret_json(&expr);
+    // Parse as full program
+    let program = parser.parse_program()?;
+
+    let json = program_to_pyret_json(&program);
     println!("{}", serde_json::to_string_pretty(&json)?);
 
     Ok(())

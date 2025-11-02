@@ -28,18 +28,8 @@ echo "=== Pyret Parser ==="
 cd /Users/jimmyhmiller/Documents/Code/open-source/pyret-lang
 node ast-to-json.jarr "$TEMP_FILE" "$PYRET_JSON" 2>&1 | grep "JSON written" || true
 
-# Extract just the expression from Pyret's output (first statement in body)
-python3 -c "
-import json, sys
-with open('$PYRET_JSON') as f:
-    data = json.load(f)
-if 'body' in data and 'stmts' in data['body'] and len(data['body']['stmts']) > 0:
-    with open('$PYRET_EXPR', 'w') as out:
-        json.dump(data['body']['stmts'][0], out, indent=2)
-else:
-    print('ERROR: No expression found in Pyret output', file=sys.stderr)
-    sys.exit(1)
-"
+# Copy the full program AST (no longer extracting just the first statement)
+cp "$PYRET_JSON" "$PYRET_EXPR"
 
 cat "$PYRET_EXPR"
 echo

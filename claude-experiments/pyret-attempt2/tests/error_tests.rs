@@ -18,11 +18,12 @@ use pyret_attempt2::tokenizer::Tokenizer;
 use pyret_attempt2::error::ParseError;
 
 /// Helper to parse a string into an expression
+/// Uses parse_expr_complete() to ensure all tokens are consumed
 fn parse_expr(input: &str) -> Result<Expr, ParseError> {
     let mut tokenizer = Tokenizer::new(input);
     let tokens = tokenizer.tokenize();
     let mut parser = Parser::new(tokens, "test.arr".to_string());
-    parser.parse_expr()
+    parser.parse_expr_complete()
 }
 
 // ============================================================================
@@ -204,8 +205,8 @@ fn test_deeply_nested_parens_valid() {
 
 #[test]
 fn test_deeply_nested_arrays_valid() {
-    // This should work
-    let expr = "[[[[[[1]]]]]]";
+    // This should work - Pyret uses construct expression syntax
+    let expr = "[list: [list: [list: [list: [list: [list: 1]]]]]]";
     let result = parse_expr(expr);
     assert!(result.is_ok(), "Should handle deeply nested arrays");
 }
@@ -233,9 +234,9 @@ fn test_very_long_addition_chain() {
 
 #[test]
 fn test_very_long_array() {
-    // Generate a very long array
+    // Generate a very long array using Pyret construct expression syntax
     let elements: Vec<String> = (1..=200).map(|n| n.to_string()).collect();
-    let expr = format!("[{}]", elements.join(", "));
+    let expr = format!("[list: {}]", elements.join(", "));
     let result = parse_expr(&expr);
     assert!(result.is_ok(), "Should handle very long arrays");
 }

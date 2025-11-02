@@ -21,30 +21,8 @@ echo "$EXPR" > "$TEMP_FILE"
 cd /Users/jimmyhmiller/Documents/Code/open-source/pyret-lang
 node ast-to-json.jarr "$TEMP_FILE" "$PYRET_JSON" >/dev/null 2>&1 || { rm -f "$TEMP_FILE" "$PYRET_JSON"; exit 1; }
 
-# Extract just the expression from Pyret's output (first statement in body)
-export PYRET_JSON PYRET_EXPR
-python3 << 'EXTRACT_EOF'
-import json, sys, os
-
-pyret_json = os.environ['PYRET_JSON']
-pyret_expr = os.environ['PYRET_EXPR']
-
-try:
-    with open(pyret_json) as f:
-        data = json.load(f)
-    if 'body' in data and 'stmts' in data['body'] and len(data['body']['stmts']) > 0:
-        with open(pyret_expr, 'w') as out:
-            json.dump(data['body']['stmts'][0], out, indent=2)
-    else:
-        sys.exit(1)
-except:
-    sys.exit(1)
-EXTRACT_EOF
-
-if [ $? -ne 0 ]; then
-    rm -f "$TEMP_FILE" "$PYRET_JSON" "$RUST_JSON" "$PYRET_EXPR"
-    exit 1
-fi
+# Copy the full program AST (no longer extracting just the first statement)
+cp "$PYRET_JSON" "$PYRET_EXPR" || { rm -f "$TEMP_FILE" "$PYRET_JSON"; exit 1; }
 
 # Parse with our Rust parser
 /Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/pyret-attempt2/target/debug/to_pyret_json "$TEMP_FILE" > "$RUST_JSON" 2>/dev/null || { rm -f "$TEMP_FILE" "$PYRET_JSON" "$RUST_JSON" "$PYRET_EXPR"; exit 1; }
