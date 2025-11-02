@@ -115,6 +115,25 @@ function parseTestResults(output: string): TestResults {
   return { total, passing, ignored, failed, deleted: false };
 }
 
+function checkCompilation(): { success: boolean; error?: string } {
+  log('\n🔧 Checking compilation...', colors.cyan);
+  const output = runCommand('cargo check 2>&1');
+
+  if (output.includes('error:') || output.includes('error[E')) {
+    // Extract the error messages
+    const errorLines = output.split('\n').filter(line =>
+      line.includes('error:') || line.includes('error[E') || line.includes('-->') || line.trim().startsWith('|')
+    );
+    const errorSummary = errorLines.slice(0, 50).join('\n'); // First 50 lines of errors
+
+    log(`   ❌ Compilation failed!`, colors.red);
+    return { success: false, error: errorSummary };
+  }
+
+  log(`   ✓ Code compiles successfully`, colors.green);
+  return { success: true };
+}
+
 function runTests(): TestResults {
   log('\n📊 Running tests...', colors.cyan);
   const output = runCommand('cargo test --test comparison_tests 2>&1');
@@ -310,10 +329,46 @@ async function mainLoop() {
     log(`${colors.bright}Iteration ${i}/${iterationLimit}${colors.reset}`);
     log(`${colors.bright}${'='.repeat(50)}${colors.reset}`);
 
-    // Step 1: Run tests and get baseline
+    // Step 1: Check compilation before running tests
+    const initialCompileCheck = checkCompilation();
+    if (!initialCompileCheck.success) {
+      log(`\n⚠️  Code does not compile at start! Asking Claude to fix...`, colors.yellow);
+
+      try {
+        await askClaude(`CRITICAL: The code does not compile at the start of this iteration. Here are the compilation errors:
+
+${initialCompileCheck.error}
+
+Please fix all compilation errors. Do not remove or modify tests - only fix the code so it compiles.`);
+
+        // Re-check compilation after fix attempt
+        const retryInitialCompileCheck = checkCompilation();
+
+        if (!retryInitialCompileCheck.success) {
+          log(`\n❌ ABORTED: Compilation errors persist after fix attempt`, colors.red);
+          log(`\nErrors:`, colors.red);
+          log(retryInitialCompileCheck.error || 'Unknown error');
+          iterations.push({
+            iteration: i,
+            before: { total: 0, passing: 0, ignored: 0, failed: 0, deleted: false },
+            after: { total: 0, passing: 0, ignored: 0, failed: 0, deleted: false },
+            success: false,
+            message: 'Initial compilation failed and could not be fixed'
+          });
+          break;
+        }
+
+        log(`\n✓ Initial compilation errors fixed!`, colors.green);
+      } catch (error) {
+        log(`\n❌ Failed to fix initial compilation errors`, colors.red);
+        break;
+      }
+    }
+
+    // Step 2: Run tests and get baseline
     const beforeResults = runTests();
 
-    // Step 2: Determine what to ask Claude
+    // Step 3: Determine what to ask Claude
     let prompt: string;
 
     if (beforeResults.passing === beforeResults.total && beforeResults.ignored === 0) {
@@ -332,7 +387,7 @@ async function mainLoop() {
 Focus on implementing the features needed for the ignored tests.`;
     }
 
-    // Step 3: Ask Claude to work on the parser
+    // Step 4: Ask Claude to work on the parser
     try {
       const claudeResponse = await askClaude(prompt);
 
@@ -343,10 +398,47 @@ Focus on implementing the features needed for the ignored tests.`;
       break;
     }
 
-    // Step 4: Run tests again and verify
+    // Step 5: Check if code compiles
+    const compileCheck = checkCompilation();
+
+    if (!compileCheck.success) {
+      log(`\n⚠️  Code does not compile! Asking Claude to fix...`, colors.red);
+
+      try {
+        await askClaude(`CRITICAL: The code does not compile. Here are the compilation errors:
+
+${compileCheck.error}
+
+Please fix all compilation errors. Do not remove or modify tests - only fix the code so it compiles.`);
+
+        // Re-check compilation after fix attempt
+        const retryCompileCheck = checkCompilation();
+
+        if (!retryCompileCheck.success) {
+          log(`\n❌ ABORTED: Compilation errors persist after fix attempt`, colors.red);
+          log(`\nErrors:`, colors.red);
+          log(retryCompileCheck.error || 'Unknown error');
+          iterations.push({
+            iteration: i,
+            before: beforeResults,
+            after: { total: 0, passing: 0, ignored: 0, failed: 0, deleted: false },
+            success: false,
+            message: 'Compilation failed'
+          });
+          break;
+        }
+
+        log(`\n✓ Compilation errors fixed!`, colors.green);
+      } catch (error) {
+        log(`\n❌ Failed to fix compilation errors`, colors.red);
+        break;
+      }
+    }
+
+    // Step 6: Run tests again and verify
     const afterResults = runTests();
 
-    // Step 5: Check for test deletion
+    // Step 7: Check for test deletion
     if (!verifyNoTestDeletion(beforeResults, afterResults)) {
       log('\n⚠ Attempting to restore deleted tests...', colors.yellow);
       const restored = await handleTestDeletion(i);
@@ -364,7 +456,7 @@ Focus on implementing the features needed for the ignored tests.`;
       }
     }
 
-    // Step 6: Check for regression
+    // Step 8: Check for regression
     if (afterResults.passing < beforeResults.passing) {
       log('\n⚠ Regression detected - fewer tests passing', colors.yellow);
       const fixed = await handleRegression(beforeResults);
@@ -382,7 +474,7 @@ Focus on implementing the features needed for the ignored tests.`;
       }
     }
 
-    // Step 7: Update documentation
+    // Step 9: Update documentation
     log('\n📚 Updating documentation...', colors.cyan);
     try {
       await askClaude('Please update the documentation for what to work on next');
@@ -390,7 +482,7 @@ Focus on implementing the features needed for the ignored tests.`;
       log('   ⚠ Failed to update documentation', colors.yellow);
     }
 
-    // Step 8: Commit changes
+    // Step 10: Commit changes
     gitCommit('Changes');
 
     // Record iteration results

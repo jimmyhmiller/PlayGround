@@ -30,10 +30,65 @@ pub const CMacroFn = *const fn (
     args: ?*anyopaque, // *const PersistentLinkedList(*Value)
 ) ?*anyopaque; // Returns *Value or null
 
+// C-compatible transformation function type - takes a Value (usually a list) and returns transformed Value
+pub const CTransformFn = *const fn (
+    allocator: ?*anyopaque, // Allocator
+    value: ?*anyopaque, // *Value - typically a list containing the arguments
+) ?*anyopaque; // Returns transformed *Value or null
+
 // Global registry for C macro functions
 // Maps function pointer address to the actual function
 var c_macro_registry = std.AutoHashMap(usize, CMacroFn).init(std.heap.c_allocator);
 var registry_mutex = std.Thread.Mutex{};
+
+// ============================================================================
+// Generic Wrapper Infrastructure
+// ============================================================================
+
+/// Wraps a C transformation function to work as a MacroFn
+/// The C function receives a Value list containing only the arguments (no macro name)
+/// and returns a transformed Value
+pub fn wrapCTransformAsMacro(comptime c_fn: CTransformFn) MacroFn {
+    const Wrapper = struct {
+        fn call(
+            allocator: std.mem.Allocator,
+            args: *const PersistentLinkedList(*Value),
+        ) anyerror!*Value {
+            // 1. Convert Zig allocator to C allocator pointer
+            const alloc_ptr = try allocator.create(std.mem.Allocator);
+            errdefer allocator.destroy(alloc_ptr);
+            alloc_ptr.* = allocator;
+            const c_allocator: ?*anyopaque = @ptrCast(alloc_ptr);
+            defer allocator.destroy(alloc_ptr);
+
+            // 2. Convert PersistentLinkedList to a Value list
+            // Build a vector from the linked list args
+            var args_vec = PersistentVector(*Value).init(allocator, null);
+            var iter = args.iterator();
+            while (iter.next()) |value| {
+                args_vec = try args_vec.push(value);
+            }
+
+            // Create a Value list from the vector
+            const args_value = try allocator.create(Value);
+            args_value.* = Value{
+                .type = .list,
+                .data = .{ .list = args_vec },
+            };
+            const args_opaque: ?*anyopaque = @ptrCast(args_value);
+
+            // 3. Call the C transformation function
+            const result_opaque = c_fn(c_allocator, args_opaque)
+                orelse return error.TransformationFailed;
+
+            // 4. Convert result back to *Value
+            const result: *Value = @ptrCast(@alignCast(result_opaque));
+            return result;
+        }
+    };
+
+    return &Wrapper.call;
+}
 
 // ============================================================================
 // MacroExpander Lifecycle

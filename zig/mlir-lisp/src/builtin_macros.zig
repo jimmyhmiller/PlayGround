@@ -11,13 +11,22 @@ const vector = @import("collections/vector.zig");
 const PersistentVector = vector.PersistentVector;
 const linked_list = @import("collections/linked_list.zig");
 const PersistentLinkedList = linked_list.PersistentLinkedList;
+const c_api_macro = @import("c_api_macro.zig");
+const c_api_transform = @import("c_api_transform.zig");
+
+// Zig wrapper for C export function - bridges calling conventions
+fn callTransformWrapper(allocator: ?*anyopaque, value: ?*anyopaque) ?*anyopaque {
+    return c_api_transform.transformCallToOperation(allocator, value);
+}
 
 /// Register all built-in macros with the expander
 pub fn registerBuiltinMacros(expander: *MacroExpander) !void {
-    // No built-in macros registered yet
-    // The if/when/unless macros below don't generate proper operation syntax
-    // and need to be redesigned to work with the parser
-    _ = expander;
+    // Register 'call' macro using the generic wrapper
+    // Transforms (call @func type) into full operation syntax
+    try expander.registerMacro(
+        "call",
+        c_api_macro.wrapCTransformAsMacro(&callTransformWrapper),
+    );
 }
 
 // ============================================================================
