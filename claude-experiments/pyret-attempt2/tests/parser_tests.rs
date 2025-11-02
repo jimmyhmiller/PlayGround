@@ -1,4 +1,4 @@
-use pyret_attempt2::{Parser, Expr, Member, Name, ConstructModifier, LetBind, Bind, ForBind};
+use pyret_attempt2::{Parser, Expr, Member, Name, ConstructModifier, LetBind, Bind, ForBind, Program, Provide};
 use pyret_attempt2::tokenizer::Tokenizer;
 
 /// Helper to parse a string into an expression
@@ -14,6 +14,20 @@ fn parse_expr(input: &str) -> Result<Expr, Box<dyn std::error::Error>> {
 
     let mut parser = Parser::new(tokens, "test.arr".to_string());
     Ok(parser.parse_expr_complete()?)
+}
+
+/// Helper to parse a string into a program
+fn parse_program(input: &str) -> Result<Program, Box<dyn std::error::Error>> {
+    let mut tokenizer = Tokenizer::new(input);
+    let tokens = tokenizer.tokenize();
+
+    // Debug: print tokens for troubleshooting
+    if std::env::var("DEBUG_TOKENS").is_ok() {
+        eprintln!("Tokens for '{}': {:?}", input, tokens.iter().map(|t| format!("{:?}", t.token_type)).collect::<Vec<_>>());
+    }
+
+    let mut parser = Parser::new(tokens, "test.arr".to_string());
+    Ok(parser.parse_program()?)
 }
 
 #[test]
@@ -1594,5 +1608,45 @@ fn test_parse_for_with_dot_access() {
             assert_eq!(bindings.len(), 2);
         }
         _ => panic!("Expected SFor"),
+    }
+}
+
+#[test]
+fn test_parse_provide_all() {
+    // Test: provide *
+    let program = parse_program("provide *").expect("Failed to parse");
+
+    match program._provide {
+        Provide::SProvideAll { .. } => {
+            // Success!
+        }
+        _ => panic!("Expected SProvideAll, got {:?}", program._provide),
+    }
+}
+
+#[test]
+fn test_parse_provide_block() {
+    // Test: provide: x end
+    let program = parse_program("provide: x end").expect("Failed to parse");
+
+    match program._provide {
+        Provide::SProvide { block, .. } => {
+            match *block {
+                Expr::SBlock { ref stmts, .. } => {
+                    assert_eq!(stmts.len(), 1);
+                    match stmts[0].as_ref() {
+                        Expr::SId { id, .. } => {
+                            match id {
+                                Name::SName { s, .. } => assert_eq!(s, "x"),
+                                _ => panic!("Expected SName"),
+                            }
+                        }
+                        _ => panic!("Expected SId in provide block"),
+                    }
+                }
+                _ => panic!("Expected SBlock for provide block"),
+            }
+        }
+        _ => panic!("Expected SProvide, got {:?}", program._provide),
     }
 }

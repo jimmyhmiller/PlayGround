@@ -649,7 +649,6 @@ fn test_pyret_match_simple_let() {
 // ============================================================================
 
 #[test]
-#[ignore] // Remove this when data parsing is implemented
 fn test_pyret_match_simple_data() {
     // data Type: | variant end
     assert_matches_pyret("data Box: | box(ref v) end");
@@ -670,18 +669,16 @@ fn test_pyret_match_simple_fun() {
 // ============================================================================
 
 #[test]
-#[ignore] // Remove this when import parsing is implemented
 fn test_pyret_match_simple_import() {
     // import module as name
     assert_matches_pyret("import equality as E");
 }
 
 // ============================================================================
-// Provide Statements (NOT YET IMPLEMENTED - Expected to Fail)
+// Provide Statements
 // ============================================================================
 
 #[test]
-#[ignore] // Remove this when provide parsing is implemented
 fn test_pyret_match_simple_provide() {
     // provide *
     assert_matches_pyret("provide *");

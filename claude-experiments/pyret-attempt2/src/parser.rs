@@ -1031,6 +1031,7 @@ impl Parser {
             TokenType::LBrace => self.parse_obj_expr(),
             TokenType::Lam => self.parse_lambda_expr(),
             TokenType::Fun => self.parse_fun_expr(),
+            TokenType::Data => self.parse_data_expr(),
             TokenType::Block => self.parse_block_expr(),
             TokenType::If => self.parse_if_expr(),
             TokenType::Cases => self.parse_cases_expr(),
@@ -1553,6 +1554,11 @@ impl Parser {
             l: self.make_loc(&start, &end),
             fields,
         })
+    }
+
+    /// Parse a member (same as obj-field, but used in data definitions)
+    fn parse_member(&mut self) -> ParseResult<Member> {
+        self.parse_obj_field()
     }
 
     /// obj-field: key COLON binop-expr
@@ -2624,17 +2630,211 @@ impl Parser {
 impl Parser {
     /// data-expr: DATA name<typarams>: variants sharing where END
     fn parse_data_expr(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_data_expr")
+        let start = self.expect(TokenType::Data)?;
+
+        // Parse data type name
+        let name_token = self.expect(TokenType::Name)?;
+        let name = name_token.value.clone();
+
+        // Parse type parameters (for now, skip - just empty vec)
+        // TODO: Parse <T, U> type parameters
+        let params: Vec<Name> = Vec::new();
+
+        // Expect colon
+        self.expect(TokenType::Colon)?;
+
+        // Parse variants (separated by |)
+        let mut variants = Vec::new();
+
+        // First variant may be preceded by |
+        if self.matches(&TokenType::Bar) {
+            self.advance();
+        }
+
+        // Parse first variant
+        if !self.matches(&TokenType::End)
+            && !self.matches(&TokenType::Sharing)
+            && !self.matches(&TokenType::Where)
+            && !self.matches(&TokenType::With) {
+            variants.push(self.parse_variant()?);
+        }
+
+        // Parse remaining variants (each preceded by |)
+        while self.matches(&TokenType::Bar) {
+            self.advance();
+            if !self.matches(&TokenType::End)
+                && !self.matches(&TokenType::Sharing)
+                && !self.matches(&TokenType::Where)
+                && !self.matches(&TokenType::With) {
+                variants.push(self.parse_variant()?);
+            }
+        }
+
+        // Parse optional with clause
+        let with_members = if self.matches(&TokenType::With) {
+            self.parse_data_with()?
+        } else {
+            Vec::new()
+        };
+
+        // Parse optional sharing clause
+        let mixins = if self.matches(&TokenType::Sharing) {
+            self.advance();
+            // Parse sharing expressions (comma-separated)
+            self.parse_comma_list(|p| p.parse_expr().map(Box::new))?
+        } else {
+            Vec::new()
+        };
+
+        // Parse optional where clause (check block)
+        let check = if self.matches(&TokenType::Where) {
+            self.advance();
+            let mut where_stmts = Vec::new();
+            while !self.matches(&TokenType::End) && !self.is_at_end() {
+                let stmt = self.parse_expr()?;
+                where_stmts.push(Box::new(stmt));
+            }
+            Some(Box::new(Expr::SBlock {
+                l: self.current_loc(),
+                stmts: where_stmts,
+            }))
+        } else {
+            None
+        };
+
+        let end = self.expect(TokenType::End)?;
+
+        let check_loc = check.as_ref().map(|c| match c.as_ref() {
+            Expr::SBlock { l, .. } => l.clone(),
+            _ => self.current_loc(),
+        });
+
+        Ok(Expr::SDataExpr {
+            l: self.make_loc(&start, &end),
+            name,
+            params,
+            mixins,
+            variants,
+            shared_members: with_members,
+            check_loc,
+            check,
+        })
     }
 
     /// data-variant: name(members) | name
     fn parse_variant(&mut self) -> ParseResult<Variant> {
-        todo!("Implement parse_variant")
+        let start = self.peek().clone();
+        let name_token = self.expect(TokenType::Name)?;
+        let name = name_token.value.clone();
+        let constr_loc = self.make_loc(&name_token, &name_token);
+
+        // Check if this is a constructor variant with arguments
+        if self.matches(&TokenType::LParen)
+            || self.matches(&TokenType::ParenSpace)
+            || self.matches(&TokenType::ParenNoSpace) {
+            self.advance(); // consume opening paren
+
+            // Parse variant members (comma-separated)
+            let members = if self.matches(&TokenType::RParen) {
+                Vec::new()
+            } else {
+                self.parse_comma_list(|p| p.parse_variant_member())?
+            };
+
+            self.expect(TokenType::RParen)?;
+
+            // Parse optional with clause
+            let with_members = if self.matches(&TokenType::With) {
+                self.parse_data_with()?
+            } else {
+                Vec::new()
+            };
+
+            let end = if self.current > 0 {
+                self.tokens[self.current - 1].clone()
+            } else {
+                start.clone()
+            };
+
+            Ok(Variant::SVariant {
+                l: self.make_loc(&start, &end),
+                constr_loc,
+                name,
+                members,
+                with_members,
+            })
+        } else {
+            // Singleton variant (no arguments)
+            // Parse optional with clause
+            let with_members = if self.matches(&TokenType::With) {
+                self.parse_data_with()?
+            } else {
+                Vec::new()
+            };
+
+            let end = if self.current > 0 {
+                self.tokens[self.current - 1].clone()
+            } else {
+                start.clone()
+            };
+
+            Ok(Variant::SSingletonVariant {
+                l: self.make_loc(&start, &end),
+                name,
+                with_members,
+            })
+        }
+    }
+
+    /// Parse a variant member (parameter in a data constructor)
+    /// Can be: ref binding | binding
+    fn parse_variant_member(&mut self) -> ParseResult<VariantMember> {
+        let start = self.peek().clone();
+
+        // Check for ref modifier
+        let member_type = if self.matches(&TokenType::Ref) {
+            self.advance();
+            VariantMemberType::SMutable
+        } else {
+            VariantMemberType::SNormal
+        };
+
+        // Parse the binding
+        let bind = self.parse_bind()?;
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        Ok(VariantMember {
+            node_type: "s-variant-member".to_string(),
+            l: self.make_loc(&start, &end),
+            member_type,
+            bind,
+        })
     }
 
     /// data-with: with: members END
     fn parse_data_with(&mut self) -> ParseResult<Vec<Member>> {
-        todo!("Implement parse_data_with")
+        self.expect(TokenType::With)?;
+        self.expect(TokenType::Colon)?;
+
+        let mut members = Vec::new();
+        while !self.matches(&TokenType::End)
+            && !self.matches(&TokenType::Bar)
+            && !self.matches(&TokenType::Sharing)
+            && !self.matches(&TokenType::Where)
+            && !self.is_at_end() {
+            members.push(self.parse_member()?);
+            // Members might be separated by commas
+            if self.matches(&TokenType::Comma) {
+                self.advance();
+            }
+        }
+
+        Ok(members)
     }
 }
 

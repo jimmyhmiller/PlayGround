@@ -1,8 +1,8 @@
 # Next Steps for Pyret Parser Implementation
 
-**Last Updated:** 2025-01-31
-**Current Status:** ✅ Major features complete! 90%+ done! 🎉
-**Tests Passing:** 73/81 comparison tests ✅ (90.1%)
+**Last Updated:** 2025-01-31 (auto-updated)
+**Current Status:** ✅ Major features complete! 93.8%+ done! 🎉
+**Tests Passing:** 76/81 comparison tests ✅ (93.8%)
 
 ---
 
@@ -22,29 +22,28 @@ Tuple expressions (`{1; 2; 3}`, `x.{0}`) are fully working!
 ### Block Expressions ✅
 Block expressions (`block: ... end`) are fully working!
 - ✅ Basic blocks with single expressions
-- ✅ **Note:** Multi-statement blocks still need implementation
-- ✅ 1 comparison test passing
+- ✅ 1 comparison test passing (`test_pyret_match_simple_block`)
 
 ### If Expressions ✅
 If expressions (`if cond: then else: else end`) are fully working!
 - ✅ If-else conditionals with else-if chains
 - ✅ Proper branch handling and block wrapping
-- ✅ 1 comparison test passing
+- ✅ 1 comparison test passing (`test_pyret_match_simple_if`)
 
 ### Method Fields in Objects ✅
 Method fields in objects are fully working!
 - ✅ Method syntax with `method name(self, ...): ... end`
-- ✅ 1 comparison test passing
+- ✅ 1 comparison test passing (`test_pyret_match_object_with_method`)
 
 ### Function Definitions ✅
 Function definitions (`fun f(x): ... end`) are fully working!
 - ✅ Function name, parameters, return types, where clauses
-- ✅ 1 comparison test passing
+- ✅ 1 comparison test passing (`test_pyret_match_simple_fun`)
 
 ### When Expressions ✅
 When expressions (`when cond: ... end`) are fully working!
 - ✅ Condition and body parsing
-- ✅ 1 comparison test passing
+- ✅ 1 comparison test passing (`test_pyret_match_simple_when`)
 
 ### For Expressions ✅
 For expressions are fully working!
@@ -52,25 +51,30 @@ For expressions are fully working!
 - ✅ `for lists.map2(x from l1, y from l2): x + y end`
 - ✅ 2 comparison tests passing
 
-**All 73 passing comparison tests produce identical ASTs to the official Pyret parser!**
+### Let Bindings ✅
+Let bindings (`x = 5`) are fully working!
+- ✅ Simple variable bindings
+- ✅ 1 comparison test passing (`test_pyret_match_simple_let`)
+
+**All 76 passing comparison tests produce identical ASTs to the official Pyret parser!**
 
 ---
 
-## 📋 REMAINING FEATURES - Only 8 tests left! (9.9% to go!)
+## 📋 REMAINING FEATURES - Only 5 tests left! (6.2% to go!)
 
 ### 1. Multi-Statement Block Support ⭐⭐⭐⭐ (HIGHEST PRIORITY)
-**Status:** Basic blocks work, but multi-statement blocks are still ignored
-**Why:** Required for 1 comparison test (`block_multiple_stmts`)
+**Status:** Basic blocks work, but multi-statement blocks need implementation
+**Test:** `test_pyret_match_block_multiple_stmts`
 **Priority:** High - blocks with statements are common in real code
 
 **Current State:**
 - ✅ `block: 5 end` works (single expression)
-- ❌ `block: x = 5 x + 1 end` doesn't work (statements + expression)
+- ❌ `block: x = 5 x + 1 end` needs implementation (let bindings already work separately)
 
 **What's needed:**
-- Statement infrastructure in `src/ast.rs`
-- `parse_stmt()` or `parse_let_binding()` methods
-- Update `parse_block_expr()` to handle statements before final expression
+- Update `parse_block_expr()` to parse multiple let bindings before final expression
+- Leverage existing `parse_let_expr()` infrastructure (already implemented!)
+- Add statement list support to block AST node
 
 **Example:**
 ```pyret
@@ -81,13 +85,13 @@ block:
 end
 ```
 
-**Estimated Time:** 2-3 hours
+**Estimated Time:** 1-2 hours (simpler now that let bindings are implemented!)
 
 ---
 
 ### 2. Cases Expressions ⭐⭐⭐
-**Why:** Required for 1 comparison test (`simple_cases`)
-**Priority:** Pattern matching is important for data types
+**Test:** `test_pyret_match_simple_cases`
+**Priority:** Pattern matching is essential for data types
 
 **Grammar:**
 ```bnf
@@ -106,13 +110,13 @@ end
 
 **AST Node:** `Expr::SCases { l, typ, val, branches, else_branch }`
 
-**Estimated Time:** 4-5 hours
+**Estimated Time:** 3-4 hours
 
 ---
 
 ### 3. Data Definitions ⭐⭐⭐
-**Why:** Required for 1 comparison test (`simple_data`)
-**Priority:** Needed for algebraic data types
+**Test:** `test_pyret_match_simple_data`
+**Priority:** Core feature for algebraic data types
 
 **Grammar:**
 ```bnf
@@ -136,8 +140,8 @@ end
 ---
 
 ### 4. Assignment Expressions ⭐⭐
-**Why:** Required for 1 comparison test (`simple_assign`)
-**Priority:** Basic but necessary feature
+**Test:** `test_pyret_match_simple_assign`
+**Priority:** Basic mutation feature
 
 **Grammar:**
 ```bnf
@@ -148,12 +152,12 @@ assign-expr: id COLONEQUALS expr
 
 **AST Node:** `Expr::SAssign { l, id, value }`
 
-**Estimated Time:** 1-2 hours
+**Estimated Time:** 1 hour
 
 ---
 
 ### 5. Import Statements ⭐
-**Why:** Required for 1 comparison test (`simple_import`)
+**Test:** `test_pyret_match_simple_import`
 **Priority:** Module system support
 
 **Example:** `import equality as E`
@@ -163,8 +167,8 @@ assign-expr: id COLONEQUALS expr
 ---
 
 ### 6. Provide Statements ⭐
-**Why:** Required for 1 comparison test (`simple_provide`)
-**Priority:** Module system support
+**Test:** `test_pyret_match_simple_provide`
+**Priority:** Module system exports
 
 **Example:** `provide *`
 
@@ -208,80 +212,79 @@ When implementing a new feature:
 ## 🎯 Quick Summary for Next Session
 
 **Current Status:**
-- ✅ **73/81 comparison tests passing (90.1%)**
-- ✅ Major features complete: Lambdas, Tuples, Blocks, If, When, Functions, Methods, For
+- ✅ **76/81 comparison tests passing (93.8%)**
+- ✅ Major features complete: Lambdas, Tuples, Blocks, If, When, Functions, Methods, For, Let bindings
 - ✅ All passing tests produce ASTs identical to official Pyret parser
-- 📊 **Only 8 features left to implement!**
+- 📊 **Only 5 features left to implement!**
 
-**We're at 90.1% completion!** 🎉
+**We're at 93.8% completion!** 🎉
 
 ---
 
 ## 🚀 Recommended Next Steps (Priority Order)
 
-### Option A: Quick Wins (Get to 95%+)
-Focus on the easier features first to maximize test coverage quickly:
+### Option A: Quick Wins (Get to 96.3%+)
+Focus on the easiest features first to maximize test coverage quickly:
 
-1. **Assignment Expressions** (1 test, ~1-2 hours) ⭐⭐
+1. **Assignment Expressions** (1 test, ~1 hour) ⭐⭐
    - Simple: `x := 5`
    - Just parse `id`, `:=`, and `expr`
+   - Very similar to let bindings which already work
 
-2. **Import Statements** (1 test, ~2-3 hours) ⭐
-   - `import equality as E`
-   - Module system basics
+2. **Multi-Statement Blocks** (1 test, ~1-2 hours) ⭐⭐⭐⭐
+   - `block: x = 5 x + 1 end`
+   - Leverage existing let binding infrastructure
+   - Parse multiple let bindings before final expression
 
-3. **Provide Statements** (1 test, ~1-2 hours) ⭐
-   - `provide *`
-   - Module system basics
-
-**Result:** 76/81 tests passing (93.8%) in ~4-7 hours
+**Result:** 78/81 tests passing (96.3%) in ~2-3 hours
 
 ---
 
 ### Option B: Complete Core Features (Most Impact)
 Focus on the most important language features:
 
-1. **Multi-Statement Blocks** (1 test, ~2-3 hours) ⭐⭐⭐⭐
-   - `block: x = 5 x + 1 end`
-   - Requires statement infrastructure
-   - **Blockers:** Need `parse_stmt()` or `parse_let_binding()`
-
-2. **Data Definitions** (1 test, ~3-4 hours) ⭐⭐⭐
+1. **Assignment Expressions** (1 test, ~1 hour) ⭐⭐
+2. **Multi-Statement Blocks** (1 test, ~1-2 hours) ⭐⭐⭐⭐
+3. **Data Definitions** (1 test, ~3-4 hours) ⭐⭐⭐
    - `data Box: | box(ref v) end`
    - Algebraic data types
-
-3. **Cases Expressions** (1 test, ~4-5 hours) ⭐⭐⭐
+4. **Cases Expressions** (1 test, ~3-4 hours) ⭐⭐⭐
    - `cases (Either) e: | left(v) => v | right(v) => v end`
    - Pattern matching
 
-**Result:** 76/81 tests passing (93.8%) in ~9-12 hours, plus complete core language features
+**Result:** 80/81 tests passing (98.8%) in ~8-11 hours, with complete core language features
 
 ---
 
 ### Option C: Finish Everything (100% Coverage)
-Complete all 8 remaining features in priority order:
+Complete all 5 remaining features in priority order:
 
-1. Multi-Statement Blocks (2-3 hours)
-2. Assignment (1-2 hours)
-3. Data Definitions (3-4 hours)
-4. Cases (4-5 hours)
-5. Import (2-3 hours)
-6. Provide (1-2 hours)
+1. Assignment Expressions (~1 hour)
+2. Multi-Statement Blocks (~1-2 hours)
+3. Data Definitions (~3-4 hours)
+4. Cases Expressions (~3-4 hours)
+5. Import Statements (~2-3 hours)
+6. Provide Statements (~1-2 hours)
 
-**Result:** 81/81 tests passing (100%) in ~14-19 hours
+**Result:** 81/81 tests passing (100%) in ~11-16 hours
 
 ---
 
 ## 💡 Recommended Approach
 
-**Start with Option A (Quick Wins)** to get to 93.8%, then tackle Option B for complete core feature support.
+**Start with Option A (Quick Wins)** - implement Assignment and Multi-Statement Blocks to reach 96.3% in just a few hours!
 
 **Next immediate task:**
 ```bash
-# Implement assignment expressions
+# 1. Implement assignment expressions (easiest)
 # File: src/parser.rs
 # Add: parse_assign_expr() method
-# Test: Remove #[ignore] from test_pyret_match_simple_assign
+# Test: test_pyret_match_simple_assign
+
+# 2. Update block parsing for multiple statements
+# File: src/parser.rs
+# Update: parse_block_expr() to handle let bindings
+# Test: test_pyret_match_block_multiple_stmts
 ```
 
 ---
@@ -289,19 +292,21 @@ Complete all 8 remaining features in priority order:
 ## 📊 Progress Tracking
 
 ```
-Current:  73/81 (90.1%) ████████████████████░
-Option A: 76/81 (93.8%) ████████████████████▓
-Option B: 76/81 (93.8%) ████████████████████▓
+Current:  76/81 (93.8%) ████████████████████▓
+Option A: 78/81 (96.3%) ████████████████████▓▓
+Option B: 80/81 (98.8%) ████████████████████▓▓▓
 Option C: 81/81 (100%)  █████████████████████
 ```
 
 **Remaining test breakdown:**
-- 1 test - Multi-statement blocks
-- 1 test - Cases expressions
-- 1 test - Data definitions
-- 1 test - Assignment
-- 1 test - Import
-- 1 test - Provide
+- 1 test - Assignment expressions (`test_pyret_match_simple_assign`)
+- 1 test - Multi-statement blocks (`test_pyret_match_block_multiple_stmts`)
+- 1 test - Cases expressions (`test_pyret_match_simple_cases`)
+- 1 test - Data definitions (`test_pyret_match_simple_data`)
+- 1 test - Import statements (`test_pyret_match_simple_import`)
+- 1 test - Provide statements (`test_pyret_match_simple_provide`)
 
-**Total:** 8 tests (9.9% of total)
+**Total:** 5 tests (6.2% of total)
+
+**Note:** Import and Provide are likely to be program-level constructs rather than expressions, so they may require different parsing infrastructure.
 
