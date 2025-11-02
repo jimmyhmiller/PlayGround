@@ -204,17 +204,8 @@ impl Parser {
     pub fn parse_program(&mut self) -> ParseResult<Program> {
         let start = self.peek().clone();
 
-        // For now, parse empty prelude (no imports/provides)
-        // TODO: Implement full prelude parsing when needed
-        let _use = None;
-        let _provide = Provide::SProvideNone {
-            l: self.current_loc(),
-        };
-        let provided_types = ProvideTypes::SProvideTypesNone {
-            l: self.current_loc(),
-        };
-        let provides = Vec::new();
-        let imports = Vec::new();
+        // Parse prelude (imports, provides, etc.)
+        let (_use, _provide, provided_types, provides, imports) = self.parse_prelude()?;
 
         // Parse program body (statement block)
         let body = self.parse_block()?;
@@ -245,10 +236,38 @@ impl Parser {
     }
 
     /// prelude: [use-stmt] (provide-stmt|import-stmt)*
-    fn parse_prelude(&mut self) -> ParseResult<()> {
-        // TODO: Implement full prelude parsing
-        // For now, just return Ok since we're skipping prelude
-        Ok(())
+    fn parse_prelude(
+        &mut self,
+    ) -> ParseResult<(
+        Option<Use>,
+        Provide,
+        ProvideTypes,
+        Vec<ProvideBlock>,
+        Vec<Import>,
+    )> {
+        let _use = None; // TODO: parse use statements
+
+        // Parse provide statements
+        let mut _provide = Provide::SProvideNone {
+            l: self.current_loc(),
+        };
+
+        if self.matches(&TokenType::Provide) {
+            _provide = self.parse_provide_stmt()?;
+        }
+
+        let provided_types = ProvideTypes::SProvideTypesNone {
+            l: self.current_loc(),
+        };
+        let provides = Vec::new();
+
+        // Parse import statements
+        let mut imports = Vec::new();
+        while self.matches(&TokenType::Import) || self.matches(&TokenType::Include) {
+            imports.push(self.parse_import_stmt()?);
+        }
+
+        Ok((_use, _provide, provided_types, provides, imports))
     }
 
     /// block: stmt*
@@ -322,13 +341,166 @@ impl Parser {
     }
 
     /// import-stmt: INCLUDE | IMPORT | ...
+    /// Parses import statements like:
+    /// - import module as name
+    /// - include module
+    /// - import { field1, field2 } from module
     fn parse_import_stmt(&mut self) -> ParseResult<Import> {
-        todo!("Implement parse_import_stmt")
+        let start = self.peek().clone();
+
+        match start.token_type {
+            TokenType::Import => {
+                self.advance(); // consume IMPORT
+
+                // Check for field imports: import { fields } from module
+                if self.matches(&TokenType::LBrace) {
+                    self.expect(TokenType::LBrace)?;
+
+                    // Parse field names
+                    let fields = self.parse_comma_list(|p| p.parse_name())?;
+
+                    self.expect(TokenType::RBrace)?;
+                    self.expect(TokenType::From)?;
+
+                    // Parse module name
+                    let module = self.parse_import_source()?;
+
+                    let end = if self.current > 0 {
+                        self.tokens[self.current - 1].clone()
+                    } else {
+                        start.clone()
+                    };
+
+                    Ok(Import::SImportFields {
+                        l: self.make_loc(&start, &end),
+                        fields,
+                        import: module,
+                    })
+                } else {
+                    // Regular import: import module as name
+                    let module = self.parse_import_source()?;
+
+                    // Expect AS keyword
+                    if !self.matches(&TokenType::As) {
+                        return Err(ParseError::general(
+                            self.peek(),
+                            "Expected 'as' after import module",
+                        ));
+                    }
+                    self.advance(); // consume AS
+
+                    // Parse the alias name
+                    let name = self.parse_name()?;
+
+                    let end = if self.current > 0 {
+                        self.tokens[self.current - 1].clone()
+                    } else {
+                        start.clone()
+                    };
+
+                    Ok(Import::SImport {
+                        l: self.make_loc(&start, &end),
+                        import: module,
+                        name,
+                    })
+                }
+            }
+            TokenType::Include => {
+                self.advance(); // consume INCLUDE
+
+                // Check for include-from: include from module: names
+                if self.matches(&TokenType::From) {
+                    self.advance();
+                    let module = self.parse_import_source()?;
+
+                    self.expect(TokenType::Colon)?;
+
+                    // Parse include specs (names)
+                    let names = Vec::new(); // TODO: parse include specs
+
+                    let end = if self.current > 0 {
+                        self.tokens[self.current - 1].clone()
+                    } else {
+                        start.clone()
+                    };
+
+                    Ok(Import::SIncludeFrom {
+                        l: self.make_loc(&start, &end),
+                        import: module,
+                        names,
+                    })
+                } else {
+                    // Simple include: include module
+                    let module = self.parse_import_source()?;
+
+                    let end = if self.current > 0 {
+                        self.tokens[self.current - 1].clone()
+                    } else {
+                        start.clone()
+                    };
+
+                    Ok(Import::SInclude {
+                        l: self.make_loc(&start, &end),
+                        import: module,
+                    })
+                }
+            }
+            _ => Err(ParseError::general(
+                &start,
+                "Expected 'import' or 'include'",
+            )),
+        }
     }
 
-    /// provide-stmt: PROVIDE stmt END | ...
+    /// Parse import source (module name)
+    /// For now, just parse a simple name token
+    fn parse_import_source(&mut self) -> ParseResult<ImportType> {
+        let start = self.peek().clone();
+        let module_name = self.expect(TokenType::Name)?;
+
+        Ok(ImportType::SConstImport {
+            l: self.make_loc(&start, &module_name),
+            module: module_name.value,
+        })
+    }
+
+    /// provide-stmt: PROVIDE stmt END | PROVIDE *
+    /// Parses provide statements like:
+    /// - provide *
+    /// - provide: expr end
     fn parse_provide_stmt(&mut self) -> ParseResult<Provide> {
-        todo!("Implement parse_provide_stmt")
+        let start = self.expect(TokenType::Provide)?;
+
+        // Check for provide-all: provide *
+        if self.matches(&TokenType::Times) {
+            self.advance();
+
+            Ok(Provide::SProvideAll {
+                l: self.make_loc(&start, &start),
+            })
+        } else {
+            // provide: block end
+            self.expect(TokenType::Colon)?;
+
+            // Parse the provide block
+            let mut block_stmts = Vec::new();
+            while !self.matches(&TokenType::End) && !self.is_at_end() {
+                let stmt = self.parse_expr()?;
+                block_stmts.push(Box::new(stmt));
+            }
+
+            let end = self.expect(TokenType::End)?;
+
+            let block = Box::new(Expr::SBlock {
+                l: self.current_loc(),
+                stmts: block_stmts,
+            });
+
+            Ok(Provide::SProvide {
+                l: self.make_loc(&start, &end),
+                block,
+            })
+        }
     }
 
     /// provide-types-stmt: PROVIDE-TYPES ann | ...
@@ -431,6 +603,32 @@ impl Parser {
     /// expr: binop-expr | prim-expr | ...
     /// Top-level expression dispatcher
     pub fn parse_expr(&mut self) -> ParseResult<Expr> {
+        // Check for let/var bindings first (x = value or var x := value)
+        // These can appear as standalone expressions, not just in blocks
+        if self.matches(&TokenType::Let) {
+            return self.parse_let_expr();
+        }
+
+        if self.matches(&TokenType::Var) {
+            return self.parse_var_expr();
+        }
+
+        // Check for implicit let binding: name = value
+        // We need to look ahead to distinguish from other expressions
+        if self.matches(&TokenType::Name) {
+            let checkpoint = self.checkpoint();
+            let _name = self.advance(); // Consume the name
+
+            if self.matches(&TokenType::Equals) {
+                // This is a let binding: x = value
+                self.restore(checkpoint);
+                return self.parse_standalone_let_expr();
+            } else {
+                // Not a binding, restore and continue with normal parsing
+                self.restore(checkpoint);
+            }
+        }
+
         // For now, just handle binop expressions which subsume primitive expressions
         self.parse_binop_expr()
     }
@@ -812,6 +1010,7 @@ impl Parser {
             TokenType::LBrack => self.parse_construct_expr(),
             TokenType::LBrace => self.parse_obj_expr(),
             TokenType::Lam => self.parse_lambda_expr(),
+            TokenType::Fun => self.parse_fun_expr(),
             TokenType::Block => self.parse_block_expr(),
             TokenType::If => self.parse_if_expr(),
             TokenType::When => self.parse_when_expr(),
@@ -1182,7 +1381,7 @@ impl Parser {
     /// bracket-expr: expr LBRACK binop-expr RBRACK
     /// Bracket access expression like arr[0] or dict["key"]
     fn parse_bracket_expr(&mut self, obj: Expr) -> ParseResult<Expr> {
-        let start = self.expect(TokenType::LBrack)?;
+        let _start = self.expect(TokenType::LBrack)?;
 
         // Parse the field expression (can be any expression)
         let field = self.parse_expr()?;
@@ -1901,6 +2100,7 @@ impl Parser {
 
     /// Implicit let binding: x = value (no "let" keyword)
     /// Creates an s-let statement (not s-let-expr)
+    /// Used in block contexts where we want statement-style bindings
     fn parse_implicit_let_expr(&mut self) -> ParseResult<Expr> {
         let start = self.peek().clone();
 
@@ -1924,6 +2124,43 @@ impl Parser {
             name: bind,
             value: Box::new(value),
             keyword_val: false,
+        })
+    }
+
+    /// Standalone let binding: x = value (no "let" keyword)
+    /// Creates an s-let-expr (expression form that returns a value)
+    /// Used for standalone expression parsing
+    fn parse_standalone_let_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.peek().clone();
+
+        // Parse binding: name [:: type]
+        let bind = self.parse_bind()?;
+
+        // Expect =
+        self.expect(TokenType::Equals)?;
+
+        // Parse value expression
+        let value = self.parse_expr()?;
+
+        // Create LetBind
+        let let_bind = LetBind::SLetBind {
+            l: self.current_loc(),
+            b: bind.clone(),
+            value: Box::new(value.clone()),
+        };
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        // Return SLetExpr with the value as the body
+        Ok(Expr::SLetExpr {
+            l: self.make_loc(&start, &end),
+            binds: vec![let_bind],
+            body: Box::new(value),
+            blocky: false,
         })
     }
 
@@ -2002,8 +2239,110 @@ impl Parser {
 
 impl Parser {
     /// fun-expr: FUN name<typarams>(args) ann: doc body where END
+    /// Parses function declarations like: fun f(x): x + 1 end
     fn parse_fun_expr(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_fun_expr")
+        let start = self.expect(TokenType::Fun)?;
+
+        // Parse function name
+        let name_token = self.expect(TokenType::Name)?;
+        let name = name_token.value.clone();
+
+        // Parse type parameters (for now, skip - just empty vec)
+        // TODO: Parse <T, U> type parameters
+        let params: Vec<Name> = Vec::new();
+
+        // Expect opening paren (can be LParen, ParenSpace, or ParenNoSpace)
+        let paren_token = self.peek().clone();
+        match paren_token.token_type {
+            TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace => {
+                self.advance();
+            }
+            _ => {
+                return Err(ParseError::expected(TokenType::LParen, paren_token));
+            }
+        }
+
+        // Parse parameters (comma-separated bindings)
+        let args = if self.matches(&TokenType::RParen) {
+            Vec::new()
+        } else {
+            self.parse_comma_list(|p| p.parse_bind())?
+        };
+
+        // Expect closing paren
+        self.expect(TokenType::RParen)?;
+
+        // Optional return type annotation: -> ann
+        let ann = if self.matches(&TokenType::ThinArrow) {
+            self.expect(TokenType::ThinArrow)?;
+            self.parse_ann()?
+        } else {
+            Ann::ABlank
+        };
+
+        // Parse body separator (COLON or BLOCK)
+        let blocky = if self.matches(&TokenType::Block) {
+            self.advance();
+            true
+        } else {
+            self.expect(TokenType::Colon)?;
+            false
+        };
+
+        // Parse doc string (skip for now, typically empty)
+        let doc = String::new();
+
+        // Parse function body (statements until END or WHERE)
+        let mut body_stmts = Vec::new();
+        while !self.matches(&TokenType::End)
+            && !self.matches(&TokenType::Where)
+            && !self.is_at_end()
+        {
+            let stmt = self.parse_expr()?;
+            body_stmts.push(Box::new(stmt));
+        }
+
+        // Parse optional where clause
+        let check = if self.matches(&TokenType::Where) {
+            self.advance();
+            let mut where_stmts = Vec::new();
+            while !self.matches(&TokenType::End) && !self.is_at_end() {
+                let stmt = self.parse_expr()?;
+                where_stmts.push(Box::new(stmt));
+            }
+            Some(Box::new(Expr::SBlock {
+                l: self.current_loc(),
+                stmts: where_stmts,
+            }))
+        } else {
+            None
+        };
+
+        let end = self.expect(TokenType::End)?;
+
+        // Wrap body in SBlock
+        let body = Box::new(Expr::SBlock {
+            l: self.current_loc(),
+            stmts: body_stmts,
+        });
+
+        let check_loc = check.as_ref().map(|c| match c.as_ref() {
+            Expr::SBlock { l, .. } => l.clone(),
+            _ => self.current_loc(),
+        });
+
+        Ok(Expr::SFun {
+            l: self.make_loc(&start, &end),
+            name,
+            params,
+            args,
+            ann,
+            doc,
+            body,
+            check_loc,
+            check,
+            blocky,
+        })
     }
 
     /// lambda-expr: LAM LPAREN [args] RPAREN [COLONCOLON ann] COLON body END

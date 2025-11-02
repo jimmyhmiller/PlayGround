@@ -87,14 +87,27 @@ Each iteration:
      - Prompt: "You are a testing expert, we have a working parser, but we need to find areas that aren't complete with some comparison tests to actual pyret. Be sure to use real code. Once these tests are in place and failing, please update them to be ignored and update the documentation to tell people what work to do next"
      - Claude generates new tests for uncovered features
 
-3. **Safety Checks**
+3. **Ask Claude to Work**
+   - Sends prompt via Agent SDK
+   - Claude reads/writes files and makes changes
+
+4. **Compilation Check** ✨ NEW
+   - Runs `cargo check` to verify code compiles
+   - If compilation fails:
+     - Extracts error messages
+     - Sends errors to Claude: "CRITICAL: The code does not compile..."
+     - Retries compilation after fix
+     - Aborts if still broken after retry
+   - This prevents "tests deleted" false positives from non-compiling code
+
+5. **Safety Checks**
    - **Test Deletion Check**: If total tests decreased, abort (with one retry to restore)
    - **Regression Check**: If passing tests decreased, attempt to fix (with one retry)
 
-4. **Documentation Update**
+6. **Documentation Update**
    - Asks Claude: "Please update the documentation for what to work on next"
 
-5. **Git Commit**
+7. **Git Commit**
    - Commits all changes with message: "Changes"
 
 ### Termination Conditions
@@ -103,6 +116,7 @@ The script stops when:
 
 - ✅ **Success**: All tests passing (including newly generated ones)
 - ⏸️ **Max Iterations**: Reached configured limit (default: 30)
+- ❌ **Compilation Error**: Code doesn't compile and couldn't be fixed after retry
 - ❌ **Test Deletion**: Tests deleted and not restored after retry
 - ❌ **Regression**: Passing tests decreased and not fixed after retry
 
