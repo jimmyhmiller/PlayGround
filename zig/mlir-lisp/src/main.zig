@@ -6,6 +6,8 @@ const Parser = mlir_lisp.Parser;
 const Builder = mlir_lisp.Builder;
 const Executor = mlir_lisp.Executor;
 const Repl = mlir_lisp.Repl;
+const MacroExpander = mlir_lisp.MacroExpander;
+const builtin_macros = mlir_lisp.builtin_macros;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -127,9 +129,17 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
     };
     // No need to manually free - arena handles it
 
+    // Macro expansion
+    std.debug.print("Expanding macros...\n", .{});
+    var macro_expander = MacroExpander.init(allocator);
+    defer macro_expander.deinit();
+    try builtin_macros.registerBuiltinMacros(&macro_expander);
+
+    const expanded_value = try macro_expander.expandAll(value);
+
     // Parse to AST
     var parser = Parser.init(allocator, source);
-    var parsed_module = try parser.parseModule(value);
+    var parsed_module = try parser.parseModule(expanded_value);
     defer parsed_module.deinit();
 
     // Build MLIR IR

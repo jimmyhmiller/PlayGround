@@ -29,11 +29,8 @@ fn walkAndExpandCalls(allocator: std.mem.Allocator, value: *Value) !*Value {
                         // Convert the Value pointer to opaque pointer for C API
                         const call_expr_opaque: ?*anyopaque = @ptrCast(value);
 
-                        // Call the transformation
-                        const operation_opaque = c_api_transform.transformCallToOperation(c_allocator, call_expr_opaque) catch |err| {
-                            std.debug.print("Transform failed: {}\n", .{err});
-                            return value;
-                        };
+                        // Call the transformation (returns optional, not error union)
+                        const operation_opaque = c_api_transform.transformCallToOperation(c_allocator, call_expr_opaque);
 
                         // Convert back to Value pointer
                         if (operation_opaque) |op| {

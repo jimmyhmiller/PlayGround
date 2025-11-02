@@ -589,7 +589,6 @@ fn test_pyret_match_for_map2() {
 // ============================================================================
 
 #[test]
-#[ignore] // Remove this when method fields are implemented
 fn test_pyret_match_object_with_method() {
     // { method foo(self): self.x end }
     assert_matches_pyret("{ method _plus(self, other): self.arr end }");

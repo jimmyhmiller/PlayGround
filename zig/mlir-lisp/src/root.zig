@@ -37,6 +37,13 @@ pub const c_api = @import("collections/c_api.zig");
 // Export the C API transform module
 pub const c_api_transform = @import("c_api_transform.zig");
 
+// Export the macro system modules
+pub const macro_expander = @import("macro_expander.zig");
+pub const MacroExpander = macro_expander.MacroExpander;
+pub const MacroFn = macro_expander.MacroFn;
+pub const c_api_macro = @import("c_api_macro.zig");
+pub const builtin_macros = @import("builtin_macros.zig");
+
 // Export the MLIR module
 pub const mlir = @import("mlir/c.zig");
 

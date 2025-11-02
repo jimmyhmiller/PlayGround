@@ -4,11 +4,11 @@
 
 A hand-written recursive descent parser for the Pyret programming language in Rust.
 
-## 📊 Current Status (2025-11-01 - Latest Update)
+## 📊 Current Status (2025-11-02 - Latest Update)
 
-**✅ MILESTONE ACHIEVED: For Expressions Implemented! 🎉**
+**✅ MILESTONE ACHIEVED: Method Fields Implemented! 🎉**
 
-For expressions are now fully working, bringing us to 72/81 comparison tests passing (88.9%)!
+Method fields in objects are now fully working, bringing us to 73/81 comparison tests passing (90.1%)!
 
 **Phase 5 - Advanced Features (IN PROGRESS):**
 - ✅ **Let bindings** `x = 5` - Creates `SLet` statements
@@ -16,9 +16,10 @@ For expressions are now fully working, bringing us to 72/81 comparison tests pas
 - ✅ **Explicit let** `let x = 5` - Creates `SLetExpr` expressions
 - ✅ **Block statement parsing** - Recognizes let/var in blocks with lookahead
 - ✅ **For expressions** `for map(x from lst): x + 1 end` - COMPLETE! ⭐⭐⭐⭐
-- ⏳ **Method fields** - Next priority (1 test waiting)
+- ✅ **Method fields** `{ method _plus(self, other): ... end }` - COMPLETE! ⭐⭐⭐⭐
 - ⏳ **Function definitions** - `fun f(x): ... end` (1 test waiting)
 - ⏳ **Cases expressions** - Pattern matching
+- ⏳ **Data definitions** - Custom data types
 - ⏳ **When expressions** - Conditional statements
 
 **Phase 4 - Program Structure (COMPLETE!):**
@@ -27,7 +28,7 @@ For expressions are now fully working, bringing us to 72/81 comparison tests pas
 - ✅ **Program AST output** - Full s-program JSON with all fields
 - ✅ **Comparison scripts fixed** - Compare full programs, removed stmts[0] hack
 
-**Phase 3 - Expressions:** Advanced features (72/81 comparison tests passing ✅ 88.9%)
+**Phase 3 - Expressions:** Advanced features (73/81 comparison tests passing ✅ 90.1%)
 
 ✅ **Implemented & Verified:**
 - ✅ All primitive expressions (numbers, strings, booleans, identifiers)
@@ -46,14 +47,14 @@ For expressions are now fully working, bringing us to 72/81 comparison tests pas
 - ✅ **Check operators** `is`, `raises`, `satisfies`, `violates`
   - Creates `SCheckTest` expressions with proper CheckOp enum
   - Supports all variants: is, is-roughly, is-not, satisfies, violates, raises, etc.
-- ✅ **Object expressions** `{ x: 1, y: 2 }` ⭐⭐⭐
+- ✅ **Object expressions** `{ x: 1, y: 2 }` ⭐⭐⭐⭐ (COMPLETE!)
   - Empty objects: `{}`
   - Data fields: `{ x: 1, y: 2 }`
   - Nested objects: `{ point: { x: 0, y: 0 } }`
   - Fields with expressions: `{ sum: 1 + 2 }`
   - Trailing comma support: `{ x: 1, y: 2, }`
   - Mutable fields: `{ ref x :: Number : 5 }` (with optional type annotations)
-  - Method fields: Not yet implemented (requires function parsing)
+  - Method fields: `{ method _plus(self, other): self.arr end }` ⭐ NEW!
 - ✅ **Lambda expressions** `lam(x): x + 1 end` ⭐⭐⭐⭐⭐
   - Simple lambdas: `lam(): 5 end`
   - Single parameter: `lam(x): x + 1 end`
@@ -97,7 +98,24 @@ For expressions are now fully working, bringing us to 72/81 comparison tests pas
   - Statement blocks with multiple expressions
   - Proper Program AST with all required fields
 
-✅ **Recent Updates (2025-11-01 - Current Session - PART 5):**
+✅ **Recent Updates (2025-11-02 - Current Session - PART 6):**
+- ✅ **Method fields in objects fully implemented!** ⭐⭐⭐⭐ (COMPLETE!)
+  - Simple methods: `{ method _plus(self, other): self.arr end }`
+  - Method parameter parsing with `Bind` structures
+  - Empty `params` field (for future type parameters like `<T>`)
+  - `args` field contains function parameters
+  - Optional return type annotation support (-> ann)
+  - Body wrapped in `SBlock` for proper statement handling
+  - Optional where clause support for tests
+  - Added `parse_method_field()` in `src/parser.rs:1384-1509`
+  - Updated JSON serialization in `to_pyret_json.rs:209-233`
+  - Added comprehensive parser test `test_parse_object_with_method`
+  - Enabled comparison test `test_pyret_match_object_with_method`
+  - **73/81 comparison tests passing (90.1%)** - up from 72!
+  - **68/68 parser tests passing (100%)** - up from 67!
+  - All method field ASTs match official Pyret parser byte-for-byte ✨
+
+✅ **Previous Updates (2025-11-01 - Previous Session - PART 5):**
 - ✅ **For expressions fully implemented!** ⭐⭐⭐⭐ (COMPLETE!)
   - Added `parse_for_expr()` method in Section 7 (Control Flow)
   - Iterator expression parsing with dot access support (`lists.map2`)
@@ -279,51 +297,67 @@ tests/
 
 ## 🎯 Next Priority Tasks
 
-**🚨 CRITICAL PRIORITY (MUST DO FIRST):**
+With 73/81 tests passing (90.1%), the next features to implement are:
 
-1. **parse_program()** - Parse full Pyret programs - IMMEDIATE ⭐⭐⭐⭐⭐
-   - Top-level entry point for parsing complete `.arr` files
-   - Returns `Program` AST node with prelude and body
-   - Required to stop using the stmts[0] hack in comparison tests
+1. **Function definitions** `fun f(x): x + 1 end` ⭐⭐⭐⭐ (HIGHEST PRIORITY)
+   - Required for: 1 comparison test (`simple_fun`)
+   - Named function definitions (statements, not expressions)
+   - Very similar to lambdas but with names
+   - Creates `SFun` or `SFunExpr` nodes
    - Estimated: 2-3 hours
+   - **Why first:** Similar to already-implemented lambdas and methods
 
-2. **parse_block()** - Parse statement sequences - IMMEDIATE ⭐⭐⭐⭐⭐
-   - Parse sequences of statements (expressions, let bindings, etc.)
-   - Creates `SBlock` with list of statements
-   - Used by program body, function bodies, block expressions
+2. **Cases expressions** `cases (Type) expr: | variant => result end` ⭐⭐⭐
+   - Pattern matching on data types
+   - Required for: 1 comparison test (`simple_cases`)
+   - Estimated: 4-5 hours
+   - **Why second:** More complex than other features
+
+3. **Data definitions** `data Point: point(x, y) end` ⭐⭐
+   - Custom data type definitions
+   - Required for: `simple_data` test
+   - Estimated: 3-4 hours
+
+4. **When expressions** `when expr: ... end` ⭐⭐
+   - Conditional side effects
+   - Required for: `simple_when` test
    - Estimated: 1-2 hours
 
-3. **Update comparison infrastructure** - IMMEDIATE ⭐⭐⭐⭐⭐
-   - Update `to_pyret_json.rs` to output full Program AST
-   - Remove stmts[0] extraction from `compare_parsers.sh`
-   - Add Program JSON serialization
-   - Estimated: 1 hour
+5. **Assignment expressions** `x := value` ⭐⭐
+   - Update existing variables
+   - Required for: `simple_assign` test
+   - Estimated: 1-2 hours
 
-**After program parsing is working:**
-
-4. **For expressions** `for map(x from lst): ... end` - 3-4 hours ⭐⭐⭐
-   - Functional list operations
-   - 2 comparison tests waiting
-5. **Let bindings** `x = value` - 1-2 hours ⭐⭐⭐
-   - Variable bindings in blocks
-   - Needed for `block_multiple_stmts` test
-6. **Method fields in objects** `{ method _plus(self, other): ... end }` - 2-3 hours ⭐⭐⭐
-   - Complete object support
-   - 1 comparison test waiting
+6. **Import/provide statements** (Lower priority)
+   - Required for: `simple_import`, `simple_provide` tests
+   - Module system support
+   - Estimated: 4-5 hours
 
 ## ✅ Tests Status
 
 ```
-67/67 parser tests passing (unit tests) ✅ (100%)
+68/68 parser tests passing (unit tests) ✅ (100%)
   - 2 ignored: Let bindings only work in blocks, not standalone
-72/81 comparison tests passing (integration tests against official Pyret parser) ✅ (88.9%)
-9/81 comparison tests ignored (features not yet implemented)
+73/81 comparison tests passing (integration tests against official Pyret parser) ✅ (90.1%)
+8/81 comparison tests ignored (features not yet implemented)
   - All passing tests produce IDENTICAL Program ASTs to official Pyret parser
   - Full test coverage for all implemented features
   - All tests now compare complete programs, not just expressions
 ```
 
-**Recent Additions (2025-11-01 - Current Session - PART 5):**
+**Recent Additions (2025-11-02 - Current Session - PART 6):**
+- ✅ **Method fields in objects fully implemented!** ⭐⭐⭐⭐ (COMPLETE!)
+  - Simple methods: `{ method _plus(self, other): self.arr end }`
+  - Method parameter parsing, optional return types, where clauses
+  - Added `parse_method_field()` in `src/parser.rs:1384-1509`
+  - Updated JSON serialization in `to_pyret_json.rs:209-233`
+  - Added comprehensive parser test `test_parse_object_with_method`
+  - Enabled comparison test `test_pyret_match_object_with_method`
+  - **73/81 comparison tests passing (90.1%)** - up from 72!
+  - **68/68 parser tests passing (100%)** - up from 67!
+  - All method field ASTs match official Pyret parser byte-for-byte ✨
+
+**Previous Additions (2025-11-01 - Previous Session - PART 5):**
 - ✅ **For expressions fully implemented!** ⭐⭐⭐⭐ (COMPLETE!)
   - Simple for: `for map(x from lst): x + 1 end`
   - Multiple bindings: `for map2(a from arr1, b from arr2): a + b end`
@@ -477,14 +511,31 @@ The codebase is clean, well-tested, and ready for the next features. Start with 
 
 ---
 
-**Last Updated:** 2025-11-01 (For Expressions Complete! 🎉)
-**Tests:** 67/67 parser tests ✅ (100%), 72/81 comparison tests ✅ (88.9%)
-**✅ MILESTONE:** For expressions complete - all tests produce identical ASTs!
-**Next Priorities:** Method fields (1 test), function definitions (1 test), cases/data/when
+**Last Updated:** 2025-11-02 (Method Fields Complete! 🎉)
+**Tests:** 68/68 parser tests ✅ (100%), 73/81 comparison tests ✅ (90.1%)
+**✅ MILESTONE:** Method fields complete - all tests produce identical ASTs!
+**Next Priorities:** Function definitions (1 test), cases (1 test), data (1 test), when (1 test)
 
 ## 🎉 Recent Achievements
 
-**Latest (2025-11-01 - Current Session - PART 5):**
+**Latest (2025-11-02 - Current Session - PART 6):**
+- ✅ **Method fields in objects fully implemented!** ⭐⭐⭐⭐ (COMPLETE!)
+  - Simple methods: `{ method _plus(self, other): self.arr end }`
+  - Method parameter parsing with `Bind` structures
+  - Empty `params` field (for future type parameters like `<T>`)
+  - `args` field contains function parameters
+  - Optional return type annotation support (-> ann)
+  - Body wrapped in `SBlock` for proper statement handling
+  - Optional where clause support for tests
+  - Added `parse_method_field()` in `src/parser.rs:1384-1509`
+  - Updated JSON serialization in `to_pyret_json.rs:209-233`
+  - Added comprehensive parser test `test_parse_object_with_method`
+  - Enabled comparison test `test_pyret_match_object_with_method`
+  - **73/81 comparison tests passing (90.1%)** - up from 72!
+  - **68/68 parser tests passing (100%)** - up from 67!
+  - All method field ASTs match official Pyret parser byte-for-byte ✨
+
+**Previous (2025-11-01 - Previous Session - PART 5):**
 - ✅ **For expressions fully implemented!** ⭐⭐⭐⭐ (COMPLETE!)
   - Simple for expressions: `for map(x from lst): x + 1 end`
   - Multiple bindings: `for map2(a from arr1, b from arr2): a + b end`
