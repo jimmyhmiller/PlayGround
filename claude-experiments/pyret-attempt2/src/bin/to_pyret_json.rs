@@ -227,6 +227,18 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "blocky": blocky
             })
         }
+        Expr::SDataExpr { name, params, mixins, variants, shared_members, check_loc, check, .. } => {
+            json!({
+                "type": "s-data",
+                "name": name,
+                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
+                "mixins": mixins.iter().map(|m| expr_to_pyret_json(m)).collect::<Vec<_>>(),
+                "variants": variants.iter().map(|v| variant_to_pyret_json(v)).collect::<Vec<_>>(),
+                "shared-members": shared_members.iter().map(|m| member_to_pyret_json(m)).collect::<Vec<_>>(),
+                "check-loc": check_loc,
+                "check": check.as_ref().map(|c| expr_to_pyret_json(c))
+            })
+        }
         _ => {
             json!({
                 "type": "UNSUPPORTED",
@@ -279,6 +291,43 @@ fn member_to_pyret_json(member: &pyret_attempt2::Member) -> Value {
                 "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>()
             })
         }
+    }
+}
+
+fn variant_to_pyret_json(variant: &pyret_attempt2::Variant) -> Value {
+    use pyret_attempt2::Variant;
+    match variant {
+        Variant::SVariant { name, members, with_members, .. } => {
+            json!({
+                "type": "s-variant",
+                "name": name,
+                "members": members.iter().map(|m| variant_member_to_pyret_json(m)).collect::<Vec<_>>(),
+                "with-members": with_members.iter().map(|m| member_to_pyret_json(m)).collect::<Vec<_>>()
+            })
+        }
+        Variant::SSingletonVariant { name, with_members, .. } => {
+            json!({
+                "type": "s-singleton-variant",
+                "name": name,
+                "with-members": with_members.iter().map(|m| member_to_pyret_json(m)).collect::<Vec<_>>()
+            })
+        }
+    }
+}
+
+fn variant_member_to_pyret_json(member: &pyret_attempt2::VariantMember) -> Value {
+    json!({
+        "type": "s-variant-member",
+        "member-type": variant_member_type_to_pyret_json(&member.member_type),
+        "bind": bind_to_pyret_json(&member.bind)
+    })
+}
+
+fn variant_member_type_to_pyret_json(member_type: &pyret_attempt2::VariantMemberType) -> Value {
+    use pyret_attempt2::VariantMemberType;
+    match member_type {
+        VariantMemberType::SNormal => json!("s-normal"),
+        VariantMemberType::SMutable => json!("s-mutable"),
     }
 }
 
@@ -524,11 +573,124 @@ fn provide_block_to_pyret_json(_provide_block: &pyret_attempt2::ProvideBlock) ->
     })
 }
 
-fn import_to_pyret_json(_import: &pyret_attempt2::Import) -> Value {
-    json!({
-        "type": "UNSUPPORTED",
-        "debug": "Import not yet implemented"
-    })
+fn import_to_pyret_json(import: &pyret_attempt2::Import) -> Value {
+    use pyret_attempt2::Import;
+    match import {
+        Import::SInclude { import, .. } => {
+            json!({
+                "type": "s-include",
+                "import-type": import_type_to_pyret_json(import)
+            })
+        }
+        Import::SIncludeFrom { import, names, .. } => {
+            json!({
+                "type": "s-include-from",
+                "import-type": import_type_to_pyret_json(import),
+                "names": names.iter().map(|n| include_spec_to_pyret_json(n)).collect::<Vec<_>>()
+            })
+        }
+        Import::SImport { import, name, .. } => {
+            json!({
+                "type": "s-import",
+                "import-type": import_type_to_pyret_json(import),
+                "name": name_to_pyret_json(name)
+            })
+        }
+        Import::SImportFields { fields, import, .. } => {
+            json!({
+                "type": "s-import-fields",
+                "fields": fields.iter().map(|f| name_to_pyret_json(f)).collect::<Vec<_>>(),
+                "import-type": import_type_to_pyret_json(import)
+            })
+        }
+        Import::SImportTypes { import, types, name, .. } => {
+            json!({
+                "type": "s-import-types",
+                "import-type": import_type_to_pyret_json(import),
+                "types": types.iter().map(|t| name_to_pyret_json(t)).collect::<Vec<_>>(),
+                "name": name_to_pyret_json(name)
+            })
+        }
+    }
+}
+
+fn import_type_to_pyret_json(import_type: &pyret_attempt2::ImportType) -> Value {
+    use pyret_attempt2::ImportType;
+    match import_type {
+        ImportType::SConstImport { module, .. } => {
+            json!({
+                "type": "s-const-import",
+                "mod": module
+            })
+        }
+        ImportType::SSpecialImport { kind, args, .. } => {
+            json!({
+                "type": "s-special-import",
+                "kind": kind,
+                "args": args
+            })
+        }
+    }
+}
+
+fn include_spec_to_pyret_json(spec: &pyret_attempt2::IncludeSpec) -> Value {
+    use pyret_attempt2::IncludeSpec;
+    match spec {
+        IncludeSpec::SIncludeName { name, .. } => {
+            json!({
+                "type": "s-include-name",
+                "name": name_spec_to_pyret_json(name)
+            })
+        }
+        IncludeSpec::SIncludeType { name, .. } => {
+            json!({
+                "type": "s-include-type",
+                "name": name_to_pyret_json(name)
+            })
+        }
+        IncludeSpec::SIncludeData { name, .. } => {
+            json!({
+                "type": "s-include-data",
+                "name": name_to_pyret_json(name)
+            })
+        }
+        IncludeSpec::SIncludeModule { name, .. } => {
+            json!({
+                "type": "s-include-module",
+                "name": name_to_pyret_json(name)
+            })
+        }
+    }
+}
+
+fn name_spec_to_pyret_json(name_spec: &pyret_attempt2::NameSpec) -> Value {
+    use pyret_attempt2::NameSpec;
+    match name_spec {
+        NameSpec::SStar { .. } => {
+            json!({
+                "type": "s-star"
+            })
+        }
+        NameSpec::SModuleRef { name, .. } => {
+            json!({
+                "type": "s-module-ref",
+                "name": name_to_pyret_json(name)
+            })
+        }
+        NameSpec::SRemoteRef { uri, name, .. } => {
+            json!({
+                "type": "s-remote-ref",
+                "uri": uri,
+                "name": name_to_pyret_json(name)
+            })
+        }
+        NameSpec::SLocalRef { name, .. } => {
+            json!({
+                "type": "s-local-ref",
+                "name": name_to_pyret_json(name)
+            })
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

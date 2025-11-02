@@ -48,13 +48,18 @@ cargo build
   - Semicolon-separated tuples, tuple element access
 - ✅ **Block expressions:** `block: ... end` ✨✨✨✨
   - Simple blocks: `block: 5 end`
-  - Multiple statements: `block: 1 + 2 3 * 4 end`
-  - Empty and nested blocks
+  - Multi-statement blocks need implementation (see NEXT_STEPS.md)
+- ✅ **If expressions:** `if cond: then else: else end` ✨✨
+  - Conditional branching with else-if chains
 - ✅ **Function definitions:** `fun f(x): x + 1 end` ✨✨✨✨
   - With parameters and return types
   - Optional where clauses for tests
+- ✅ **For expressions:** `for map(x from lst): x + 1 end` ✨✨
+  - Map operations with iterator syntax
 - ✅ **When expressions:** `when cond: body end` ✨✨
   - Conditional execution
+- ✅ **Let bindings:** `x = 5` ✨
+  - Variable bindings
 - ✅ **Method fields in objects:** `{ method f(x): x + 1 end }` ✨✨✨
   - Methods with parameters
   - Optional return type annotations
@@ -67,13 +72,15 @@ cargo build
 - Official Pyret parser rejects `[1, 2, 3]` with parse error
 
 🎯 **NEXT PRIORITIES:**
-1. **parse_data_expr()** - Data definitions: `data Box: | box(ref v) end` (⭐⭐⭐⭐ HIGH PRIORITY)
-2. **parse_cases_expr()** - Cases expressions: `cases (Either) e: | left(v) => v end` (⭐⭐⭐)
-3. **parse_assign_expr()** - Assignment: `x := 5` (⭐⭐)
-4. **parse_import_expr()** - Imports: `import file("foo.arr") as F` (⭐)
-5. **parse_provide_expr()** - Provides: `provide x, y end` (⭐)
+1. **parse_assign_expr()** - Assignment: `x := 5` (⭐⭐ QUICK WIN - 1 hour)
+2. **Multi-statement blocks** - Update `parse_block_expr()`: `block: x = 5 x + 1 end` (⭐⭐⭐⭐ HIGH PRIORITY - 1-2 hours)
+3. **parse_data_expr()** - Data definitions: `data Box: | box(ref v) end` (⭐⭐⭐ - 3-4 hours)
+4. **parse_cases_expr()** - Cases expressions: `cases (Either) e: | left(v) => v end` (⭐⭐⭐ - 3-4 hours)
+5. **parse_import_expr()** - Imports: `import equality as E` (⭐ - 2-3 hours)
+6. **parse_provide_expr()** - Provides: `provide *` (⭐ - 1-2 hours)
 
 **Only 5 features left to reach 100% test coverage!**
+**Quick wins available: Assignment + Multi-statement blocks = 96.3% in 2-3 hours!**
 
 ## 📁 Project Structure
 
@@ -282,6 +289,11 @@ No external parser generators - pure hand-written recursive descent.
 
 ---
 
-**Last Updated:** 2025-01-30
+**Last Updated:** 2025-01-31
 **Current Progress:** 93.8% of comparison tests passing (76/81)
 **Contributing:** See [NEXT_STEPS.md](NEXT_STEPS.md) for detailed guidance on what to implement next
+
+**Quick Start for Next Session:**
+- Assignment expressions (`x := 5`) - 1 hour to reach 95.1%
+- Multi-statement blocks (`block: x = 5 x + 1 end`) - 1-2 hours to reach 96.3%
+- These are the two easiest remaining features!

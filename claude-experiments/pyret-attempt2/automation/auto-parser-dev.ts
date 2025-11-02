@@ -426,43 +426,62 @@ Please fix all compilation errors. Do not remove or modify tests - only fix the 
     // Step 6: Run tests again and verify
     const afterResults = runTests();
 
-    // Step 7: Check for failing tests
+    // Step 7: Check for failing tests (retry up to 3 times)
     if (afterResults.failed > 0) {
-      log(`\n⚠️  ${afterResults.failed} tests are failing! Asking Claude to fix...`, colors.red);
+      log(`\n⚠️  ${afterResults.failed} tests are failing! Attempting to fix...`, colors.red);
 
-      try {
-        await askClaude(`CRITICAL: ${afterResults.failed} tests are now failing that were not failing before.
+      let fixAttempt = 0;
+      const maxFixAttempts = 3;
+      let currentResults = afterResults;
+
+      while (currentResults.failed > 0 && fixAttempt < maxFixAttempts) {
+        fixAttempt++;
+        log(`\n🔄 Fix attempt ${fixAttempt}/${maxFixAttempts} for ${currentResults.failed} failing tests...`, colors.yellow);
+
+        try {
+          await askClaude(`CRITICAL: ${currentResults.failed} tests are failing.
 Current test status:
-- Total: ${afterResults.total}
-- Passing: ${afterResults.passing}
-- Failed: ${afterResults.failed}
-- Ignored: ${afterResults.ignored}
+- Total: ${currentResults.total}
+- Passing: ${currentResults.passing}
+- Failed: ${currentResults.failed}
+- Ignored: ${currentResults.ignored}
 
 Please run the tests to see which ones are failing and fix them. Do not remove or ignore failing tests - fix the code so they pass.`);
 
-        // Re-run tests after fix attempt
-        const retryResults = runTests();
+          // Re-run tests after fix attempt
+          const retryResults = runTests();
 
-        if (retryResults.failed > 0) {
-          log(`\n❌ ABORTED: ${retryResults.failed} tests still failing after fix attempt`, colors.red);
-          iterations.push({
-            iteration: i,
-            before: beforeResults,
-            after: retryResults,
-            success: false,
-            message: 'Failing tests could not be fixed'
-          });
+          if (retryResults.failed === 0) {
+            log(`\n✓ All failing tests fixed after ${fixAttempt} attempt(s)!`, colors.green);
+            // Update afterResults to the fixed version
+            afterResults.total = retryResults.total;
+            afterResults.passing = retryResults.passing;
+            afterResults.ignored = retryResults.ignored;
+            afterResults.failed = retryResults.failed;
+            break;
+          } else if (retryResults.failed < currentResults.failed) {
+            log(`   Progress: ${currentResults.failed - retryResults.failed} fewer failing tests`, colors.cyan);
+            currentResults = retryResults;
+          } else {
+            log(`   No improvement (still ${retryResults.failed} failing)`, colors.yellow);
+            currentResults = retryResults;
+          }
+        } catch (error) {
+          log(`\n❌ Error during fix attempt ${fixAttempt}`, colors.red);
           break;
         }
+      }
 
-        log(`\n✓ Failing tests fixed!`, colors.green);
-        // Update afterResults to the fixed version
-        afterResults.total = retryResults.total;
-        afterResults.passing = retryResults.passing;
-        afterResults.ignored = retryResults.ignored;
-        afterResults.failed = retryResults.failed;
-      } catch (error) {
-        log(`\n❌ Failed to fix failing tests`, colors.red);
+      // Check if we still have failing tests after all attempts
+      if (currentResults.failed > 0) {
+        log(`\n❌ ABORTED: ${currentResults.failed} tests still failing after ${fixAttempt} fix attempts`, colors.red);
+        iterations.push({
+          iteration: i,
+          before: beforeResults,
+          after: currentResults,
+          success: false,
+          message: `Failing tests could not be fixed after ${fixAttempt} attempts`
+        });
         break;
       }
     }
