@@ -1,8 +1,7 @@
 #!/usr/bin/env tsx
 
-import Anthropic from '@anthropic-ai/sdk';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import { execSync } from 'child_process';
-import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import * as dotenv from 'dotenv';
 
@@ -12,7 +11,6 @@ dotenv.config();
 // Configuration
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const MAX_ITERATIONS = parseInt(process.env.MAX_ITERATIONS || '30');
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
 const PROJECT_ROOT = join(process.cwd(), '..');
 const DRY_RUN = process.argv.includes('--dry-run') || process.argv.includes('-d');
 
@@ -52,7 +50,24 @@ if (!DRY_RUN && !ANTHROPIC_API_KEY) {
   process.exit(1);
 }
 
-const client = DRY_RUN ? null : new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+// Handle Ctrl+C gracefully
+let isShuttingDown = false;
+
+process.on('SIGINT', () => {
+  if (isShuttingDown) {
+    log('\n\n💥 Force quit!', colors.red);
+    process.exit(1);
+  }
+
+  isShuttingDown = true;
+  log('\n\n⚠️  Interrupted! Cleaning up... (Press Ctrl+C again to force quit)', colors.yellow);
+
+  // Give a moment for cleanup, then exit
+  setTimeout(() => {
+    log('\n👋 Exiting gracefully', colors.cyan);
+    process.exit(0);
+  }, 1000);
+});
 
 // Helper functions
 function log(message: string, color: string = colors.reset) {
@@ -156,7 +171,7 @@ function gitCommit(message: string = 'Changes') {
   }
 }
 
-async function askClaude(prompt: string, conversationHistory: any[] = []): Promise<string> {
+async function askClaude(prompt: string): Promise<string> {
   log('\n🤖 Asking Claude...', colors.magenta);
 
   if (DRY_RUN) {
@@ -166,19 +181,52 @@ async function askClaude(prompt: string, conversationHistory: any[] = []): Promi
   }
 
   try {
-    const response = await client!.messages.create({
-      model: CLAUDE_MODEL,
-      max_tokens: 8000,
-      messages: [
-        ...conversationHistory,
-        { role: 'user', content: prompt }
-      ],
+    // Use the Agent SDK's query() function
+    const result = query({
+      prompt,
+      options: {
+        cwd: PROJECT_ROOT,
+        permissionMode: 'acceptEdits', // Auto-approve file edits
+        maxTurns: 50, // Allow multiple turns for complex tasks
+      }
     });
 
-    const textContent = response.content.find(block => block.type === 'text');
-    return textContent ? (textContent as any).text : '';
+    let response = '';
+    let messageCount = 0;
+
+    // Stream messages and collect the response
+    for await (const message of result) {
+      messageCount++;
+
+      // Debug: log message types
+      if (process.env.DEBUG) {
+        log(`   [DEBUG] Message ${messageCount}: ${message.type}`, colors.yellow);
+      }
+
+      if (message.type === 'assistant') {
+        // Collect text content from assistant messages
+        const content = (message as any).message?.content || [];
+        for (const item of content) {
+          if (item.type === 'text') {
+            response += item.text;
+          }
+        }
+      } else if (message.type === 'result') {
+        // Final message with result
+        const usage = (message as any).usage || {};
+        log(`   ✓ Completed (${messageCount} messages, ${usage.output_tokens || 0} tokens, $${((message as any).total_cost_usd || 0).toFixed(4)})`, colors.green);
+      }
+    }
+
+    if (!response || response.trim().length === 0) {
+      log(`   ⚠ Warning: Claude returned empty response after ${messageCount} messages`, colors.yellow);
+      return '[No response from Claude]';
+    }
+
+    return response;
   } catch (error: any) {
-    log(`   ❌ Error calling Claude API: ${error.message}`, colors.red);
+    log(`   ❌ Error calling Claude via Agent SDK: ${error.message}`, colors.red);
+    console.error(error);
     throw error;
   }
 }
@@ -247,12 +295,17 @@ async function mainLoop() {
   log(`${colors.bright}╚════════════════════════════════════════════╝${colors.reset}`);
 
   const iterations: IterationResult[] = [];
-  let conversationHistory: any[] = [];
 
   // In dry-run mode, only do 1-2 iterations to test the flow
   const iterationLimit = DRY_RUN ? 2 : MAX_ITERATIONS;
 
   for (let i = 1; i <= iterationLimit; i++) {
+    // Check if we're shutting down
+    if (isShuttingDown) {
+      log('\n⚠️  Stopping due to interruption...', colors.yellow);
+      break;
+    }
+
     log(`\n${colors.bright}${'='.repeat(50)}${colors.reset}`);
     log(`${colors.bright}Iteration ${i}/${iterationLimit}${colors.reset}`);
     log(`${colors.bright}${'='.repeat(50)}${colors.reset}`);
@@ -281,11 +334,7 @@ Focus on implementing the features needed for the ignored tests.`;
 
     // Step 3: Ask Claude to work on the parser
     try {
-      const claudeResponse = await askClaude(prompt, conversationHistory);
-      conversationHistory.push(
-        { role: 'user', content: prompt },
-        { role: 'assistant', content: claudeResponse }
-      );
+      const claudeResponse = await askClaude(prompt);
 
       log(`\n📝 Claude's response (first 200 chars):`, colors.cyan);
       log(`   ${claudeResponse.substring(0, 200)}...`);
@@ -336,7 +385,7 @@ Focus on implementing the features needed for the ignored tests.`;
     // Step 7: Update documentation
     log('\n📚 Updating documentation...', colors.cyan);
     try {
-      await askClaude('Please update the documentation for what to work on next', conversationHistory);
+      await askClaude('Please update the documentation for what to work on next');
     } catch (error) {
       log('   ⚠ Failed to update documentation', colors.yellow);
     }
