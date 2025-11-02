@@ -92,6 +92,20 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "fields": fields.iter().map(|f| member_to_pyret_json(f)).collect::<Vec<_>>()
             })
         }
+        Expr::SFun { name, params, args, ann, doc, body, check, check_loc, blocky, .. } => {
+            json!({
+                "type": "s-fun",
+                "name": name,
+                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
+                "args": args.iter().map(|a| bind_to_pyret_json(a)).collect::<Vec<_>>(),
+                "ann": ann_to_pyret_json(ann),
+                "doc": doc,
+                "body": expr_to_pyret_json(body),
+                "check": check.as_ref().map(|c| expr_to_pyret_json(c)),
+                "check-loc": check_loc,
+                "blocky": blocky
+            })
+        }
         Expr::SLam { name, params, args, ann, doc, body, check, check_loc, blocky, .. } => {
             json!({
                 "type": "s-lam",
@@ -153,6 +167,25 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "bindings": bindings.iter().map(|b| for_bind_to_pyret_json(b)).collect::<Vec<_>>(),
                 "ann": ann_to_pyret_json(ann),
                 "body": expr_to_pyret_json(body),
+                "blocky": blocky
+            })
+        }
+        Expr::SCases { typ, val, branches, blocky, .. } => {
+            json!({
+                "type": "s-cases",
+                "typ": ann_to_pyret_json(typ),
+                "val": expr_to_pyret_json(val),
+                "branches": branches.iter().map(|b| cases_branch_to_pyret_json(b)).collect::<Vec<_>>(),
+                "blocky": blocky
+            })
+        }
+        Expr::SCasesElse { typ, val, branches, _else, blocky, .. } => {
+            json!({
+                "type": "s-cases-else",
+                "typ": ann_to_pyret_json(typ),
+                "val": expr_to_pyret_json(val),
+                "branches": branches.iter().map(|b| cases_branch_to_pyret_json(b)).collect::<Vec<_>>(),
+                "else": expr_to_pyret_json(_else),
                 "blocky": blocky
             })
         }
@@ -253,6 +286,10 @@ fn ann_to_pyret_json(ann: &pyret_attempt2::Ann) -> Value {
     use pyret_attempt2::Ann;
     match ann {
         Ann::ABlank => json!({"type": "a-blank"}),
+        Ann::AName { id, .. } => json!({
+            "type": "a-name",
+            "id": name_to_pyret_json(id)
+        }),
         _ => json!({
             "type": "UNSUPPORTED",
             "debug": format!("{:?}", ann)
@@ -363,6 +400,38 @@ fn for_bind_to_pyret_json(for_bind: &pyret_attempt2::ForBind) -> Value {
         "type": "s-for-bind",
         "bind": bind_to_pyret_json(&for_bind.bind),
         "value": expr_to_pyret_json(&for_bind.value)
+    })
+}
+
+fn cases_branch_to_pyret_json(branch: &pyret_attempt2::CasesBranch) -> Value {
+    use pyret_attempt2::CasesBranch;
+    match branch {
+        CasesBranch::SCasesBranch { name, args, body, .. } => {
+            json!({
+                "type": "s-cases-branch",
+                "name": name,
+                "args": args.iter().map(|a| cases_bind_to_pyret_json(a)).collect::<Vec<_>>(),
+                "body": expr_to_pyret_json(body)
+            })
+        }
+        CasesBranch::SSingletonCasesBranch { name, body, .. } => {
+            json!({
+                "type": "s-singleton-cases-branch",
+                "name": name,
+                "body": expr_to_pyret_json(body)
+            })
+        }
+    }
+}
+
+fn cases_bind_to_pyret_json(cases_bind: &pyret_attempt2::CasesBind) -> Value {
+    json!({
+        "type": "s-cases-bind",
+        "field-type": format!("s-cases-bind-{}", match cases_bind.field_type {
+            pyret_attempt2::CasesBindType::SNormal => "normal",
+            pyret_attempt2::CasesBindType::SMutable => "mutable",
+        }),
+        "bind": bind_to_pyret_json(&cases_bind.bind)
     })
 }
 

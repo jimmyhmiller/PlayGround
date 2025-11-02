@@ -516,7 +516,23 @@ impl Parser {
 impl Parser {
     /// ann: name-ann | record-ann | arrow-ann | ...
     fn parse_ann(&mut self) -> ParseResult<Ann> {
-        todo!("Implement parse_ann")
+        // For now, just handle simple name annotations like "Either", "Number", etc.
+        // Full implementation would handle arrows, records, tuples, etc.
+        if self.matches(&TokenType::Name) {
+            let name_token = self.advance().clone();
+            let loc = self.make_loc(&name_token, &name_token);
+            let name = Name::SName {
+                l: loc.clone(),
+                s: name_token.value.clone(),
+            };
+            Ok(Ann::AName {
+                l: loc,
+                id: name,
+            })
+        } else {
+            // Default to blank annotation
+            Ok(Ann::ABlank)
+        }
     }
 
     /// arrow-ann: (args -> ret)
@@ -1770,14 +1786,44 @@ impl Parser {
 impl Parser {
     /// block-expr: BLOCK COLON stmts END
     /// Parses user-defined block expressions like: block: 5 end, block: x = 1 x + 2 end
+    /// NOTE: "block:" is tokenized as a single Block token that includes the colon
     fn parse_block_expr(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::Block)?;
-        self.expect(TokenType::Colon)?;
+        // No need to expect Colon - it's included in the Block token
 
         // Parse statements until we hit 'end'
         let mut stmts = Vec::new();
         while !self.matches(&TokenType::End) && !self.is_at_end() {
-            let stmt = self.parse_expr()?;
+            // Use the same statement parsing logic as parse_block()
+            let stmt = if self.matches(&TokenType::Let) {
+                // Explicit let binding: let x = 5
+                self.parse_let_expr()?
+            } else if self.matches(&TokenType::Var) {
+                // Var binding: var x := 5
+                self.parse_var_expr()?
+            } else if self.matches(&TokenType::Name) {
+                // Check if this is an implicit let binding: x = value
+                // Look ahead to see if there's an = or := after the name
+                let checkpoint = self.checkpoint();
+                let _name = self.advance(); // Consume the name
+
+                if self.matches(&TokenType::Equals) {
+                    // Implicit let binding: x = value
+                    self.restore(checkpoint);
+                    self.parse_implicit_let_expr()?
+                } else if self.matches(&TokenType::ColonEquals) {
+                    // Implicit var binding: x := value
+                    self.restore(checkpoint);
+                    self.parse_implicit_var_expr()?
+                } else {
+                    // Not a binding, restore and parse as expression
+                    self.restore(checkpoint);
+                    self.parse_expr()?
+                }
+            } else {
+                // Default: try to parse as expression
+                self.parse_expr()?
+            };
             stmts.push(Box::new(stmt));
         }
 
@@ -2203,8 +2249,11 @@ impl Parser {
     fn parse_cases_expr(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::Cases)?;
 
-        // Expect opening paren
-        self.expect(TokenType::LParen)?;
+        // Expect opening paren (ParenSpace because cases sets paren_is_for_exp)
+        if !self.matches(&TokenType::LParen) && !self.matches(&TokenType::ParenSpace) {
+            return Err(ParseError::expected(TokenType::LParen, self.peek().clone()));
+        }
+        self.advance(); // consume the paren
 
         // Parse type annotation
         let typ = self.parse_ann()?;

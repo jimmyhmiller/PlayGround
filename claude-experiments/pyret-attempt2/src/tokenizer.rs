@@ -805,7 +805,7 @@ impl Tokenizer {
             "ascending" => TokenType::Ascending,
             "ask" => { self.paren_is_for_exp = true; TokenType::Ask },
             "by" => TokenType::By,
-            "cases" => TokenType::Cases,
+            "cases" => { self.paren_is_for_exp = true; TokenType::Cases },
             "check" => TokenType::Check,
             "data" => TokenType::Data,
             "descending" => TokenType::Descending,
