@@ -109,7 +109,7 @@ pub const Tokenizer = struct {
             else => {
                 if (self.isDigit(c) or (c == '-' and self.peek() != 0 and self.isDigit(self.peek()))) {
                     return self.scanNumber();
-                } else if (self.isAlpha(c) or c == '_') {
+                } else if (self.isIdentifierStart(c)) {
                     return self.scanIdentifier();
                 } else {
                     self.error_line = self.line;
@@ -456,9 +456,23 @@ pub const Tokenizer = struct {
         return self.isAlpha(c) or self.isDigit(c);
     }
 
+    /// Check if character can start an identifier
+    /// Grammar: [A-Za-z_+*/<>=?&|-]
+    /// Note: %, ^, @, !, #, : are reserved prefixes handled separately
+    fn isIdentifierStart(self: *const Tokenizer, c: u8) bool {
+        return self.isAlpha(c) or c == '_' or
+               c == '+' or c == '*' or c == '/' or
+               c == '<' or c == '>' or c == '=' or
+               c == '?' or c == '&' or c == '|' or c == '-';
+    }
+
+    /// Check if character can continue an identifier
+    /// Grammar: [A-Za-z0-9_.$:+*/<>=?&|-]
     fn isIdentifierChar(self: *const Tokenizer, c: u8) bool {
         _ = self;
-        // From grammar: [A-Za-z_][A-Za-z0-9_.$:-]*
-        return c == '_' or c == '.' or c == '$' or c == ':' or c == '-';
+        return c == '_' or c == '.' or c == '$' or c == ':' or
+               c == '+' or c == '*' or c == '/' or
+               c == '<' or c == '>' or c == '=' or
+               c == '?' or c == '&' or c == '|' or c == '-';
     }
 };

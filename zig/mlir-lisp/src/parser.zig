@@ -258,16 +258,26 @@ pub const Parser = struct {
 
     /// Parse top-level MLIR module
     pub fn parseModule(self: *Parser, value: *Value) ParseError!MlirModule {
-        // Expect (mlir (TYPE_ALIAS | OPERATION)*)
+        // Accept either (mlir ...) or unwrapped (TYPE_ALIAS | OPERATION)*
         if (value.type != .list) return error.ExpectedList;
 
         const list = value.data.list;
         if (list.isEmpty()) return error.UnexpectedStructure;
 
+        // Check if there's an optional 'mlir' wrapper or if this is a direct operation/alias
+        var start_index: usize = 0;
+        var parse_single_item = false;
         const first = list.at(0);
-        if (first.type != .identifier) return error.ExpectedIdentifier;
-        if (!std.mem.eql(u8, first.data.atom, "mlir")) {
-            return error.UnexpectedStructure;
+        if (first.type == .identifier) {
+            if (std.mem.eql(u8, first.data.atom, "mlir")) {
+                // Has mlir wrapper - skip it
+                start_index = 1;
+            } else if (std.mem.eql(u8, first.data.atom, "operation") or
+                      std.mem.eql(u8, first.data.atom, "type-alias") or
+                      std.mem.eql(u8, first.data.atom, "attribute-alias")) {
+                // This is a single operation/alias, not a list of them
+                parse_single_item = true;
+            }
         }
 
         // Parse type aliases, attribute aliases, and operations
@@ -295,7 +305,28 @@ pub const Parser = struct {
             operations.deinit(self.allocator);
         }
 
-        var i: usize = 1;
+        // If this is a single item (not wrapped), parse it directly
+        if (parse_single_item) {
+            if (std.mem.eql(u8, first.data.atom, "operation")) {
+                const op = try self.parseOperation(value);
+                try operations.append(self.allocator, op);
+            } else if (std.mem.eql(u8, first.data.atom, "type-alias")) {
+                const alias = try self.parseTypeAlias(value);
+                try type_aliases.append(self.allocator, alias);
+            } else if (std.mem.eql(u8, first.data.atom, "attribute-alias")) {
+                const alias = try self.parseAttributeAlias(value);
+                try attribute_aliases.append(self.allocator, alias);
+            }
+
+            return MlirModule{
+                .type_aliases = try type_aliases.toOwnedSlice(self.allocator),
+                .attribute_aliases = try attribute_aliases.toOwnedSlice(self.allocator),
+                .operations = try operations.toOwnedSlice(self.allocator),
+                .allocator = self.allocator,
+            };
+        }
+
+        var i: usize = start_index;
         while (i < list.len()) : (i += 1) {
             const item = list.at(i);
             if (item.type != .list) continue;

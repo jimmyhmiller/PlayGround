@@ -509,6 +509,16 @@ pub enum Expr {
         right: Box<Expr>,
     },
 
+    /// Unary operation
+    #[serde(rename = "s-unary-op")]
+    SUnaryOp {
+        l: Loc,
+        #[serde(rename = "op-l")]
+        op_l: Loc,
+        op: String,
+        arg: Box<Expr>,
+    },
+
     // ========== Primitives ==========
 
     /// Number literal

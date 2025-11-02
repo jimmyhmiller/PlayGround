@@ -8,7 +8,11 @@
 ;----------------------------------------
 ; 0) Lexical tokens (opaque, dialect-agnostic)
 ;----------------------------------------
-IDENT      ::= /[A-Za-z_][A-Za-z0-9_.$:-]*/
+IDENT      ::= /[A-Za-z_+*/<>=!?&|-][A-Za-z0-9_.$:+*/<>=!?&|-]*/
+               ; Identifiers support Lisp-style operators as names
+               ; Start: letters, underscore, or operators (+, -, *, /, <, >, =, !, ?, &, |)
+               ; Continue: alphanumeric, underscore, dot, dollar, colon, or operators
+               ; Note: %, ^, @, #, and ! at start are reserved for MLIR syntax
 SUFFIX_ID  ::= /[0-9]+/ | IDENT      ; pure digits OR named identifier
 NUMBER     ::= integer | float | hex | binary
 STRING     ::= "…"

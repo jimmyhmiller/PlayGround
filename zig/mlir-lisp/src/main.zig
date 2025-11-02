@@ -2,12 +2,24 @@ const std = @import("std");
 const mlir_lisp = @import("mlir_lisp");
 const mlir = mlir_lisp.mlir;
 const Reader = mlir_lisp.Reader;
+const Value = mlir_lisp.Value;
+const PersistentVector = mlir_lisp.PersistentVector;
 const Parser = mlir_lisp.Parser;
 const Builder = mlir_lisp.Builder;
 const Executor = mlir_lisp.Executor;
 const Repl = mlir_lisp.Repl;
 const MacroExpander = mlir_lisp.MacroExpander;
 const builtin_macros = mlir_lisp.builtin_macros;
+
+/// Helper function to wrap multiple top-level forms in an implicit list
+fn createImplicitList(allocator: std.mem.Allocator, forms: PersistentVector(*Value)) !*Value {
+    const value = try allocator.create(Value);
+    value.* = Value{
+        .type = .list,
+        .data = .{ .list = forms },
+    };
+    return value;
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -121,12 +133,18 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
         printErrorLocation(source, pos.line, pos.column);
         return err;
     };
-    const value = reader.read() catch |err| {
+    // Read all top-level forms
+    const forms = reader.readAll() catch |err| {
         const pos = tok.getPosition();
         std.debug.print("\nerror: {} at line {}, column {}\n", .{ err, pos.line, pos.column });
         printErrorLocation(source, pos.line, pos.column);
         return err;
     };
+    // If there's only one form, use it directly; otherwise wrap in a list
+    const value = if (forms.len() == 1)
+        forms.at(0)
+    else
+        try createImplicitList(allocator, forms);
     // No need to manually free - arena handles it
 
     // Macro expansion
@@ -137,9 +155,15 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
 
     const expanded_value = try macro_expander.expandAll(value);
 
+    // Operation flattening (convert nested operations to flat SSA form)
+    std.debug.print("Flattening operations...\n", .{});
+    const OperationFlattener = mlir_lisp.OperationFlattener;
+    var flattener = OperationFlattener.init(allocator);
+    const flattened_value = try flattener.flattenModule(expanded_value);
+
     // Parse to AST
     var parser = Parser.init(allocator, source);
-    var parsed_module = try parser.parseModule(expanded_value);
+    var parsed_module = try parser.parseModule(flattened_value);
     defer parsed_module.deinit();
 
     // Build MLIR IR
