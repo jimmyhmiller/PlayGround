@@ -394,12 +394,13 @@ pub const Builder = struct {
 
         // Special handling for unit attributes - when value is just 'true'
         // These are attributes like 'constant', 'dso_local', 'no_unwind' that are just flags
-        if (attr.value.value.type == .true_lit) {
+        // BUT NOT for 'value' attribute which is used for constants like llvm.mlir.constant with value=true
+        if (attr.value.value.type == .true_lit and !std.mem.eql(u8, attr.key, "value")) {
             const attr_value = mlir.c.mlirUnitAttrGet(self.ctx.ctx);
             return mlir.namedAttribute(self.ctx, attr.key, attr_value);
         }
 
-        const attr_value = try self.buildAttributeValue(&attr.value);
+        const attr_value = try self.buildAttributeValue(&attr.value, attr.key);
         return mlir.namedAttribute(self.ctx, attr.key, attr_value);
     }
 
@@ -507,7 +508,7 @@ pub const Builder = struct {
     }
 
     /// Build an attribute value
-    fn buildAttributeValue(self: *Builder, attr_expr: *const parser.AttrExpr) BuildError!mlir.MlirAttribute {
+    fn buildAttributeValue(self: *Builder, attr_expr: *const parser.AttrExpr, attr_key: []const u8) BuildError!mlir.MlirAttribute {
         const value = attr_expr.value;
 
         // Handle typed literals: (: value type)
@@ -517,21 +518,30 @@ pub const Builder = struct {
 
             // The type should be a type or function_type wrapper
             if (type_val.type != .type and type_val.type != .function_type) {
+                std.debug.print("ERROR: Invalid attribute - expected type or function_type, got: {s}\n", .{@tagName(type_val.type)});
+                std.debug.print("Attribute key: {s}\n", .{attr_key});
                 return error.InvalidAttribute;
             }
 
             // Build the type from the type Value
             const mlir_type = try self.buildTypeFromValue(type_val);
 
-            // Extract the integer value
-            if (val.type != .number) {
-                return error.InvalidAttribute;
+            // Handle integer values specially for typed integer attributes
+            if (val.type == .number) {
+                const int_val = std.fmt.parseInt(i64, val.data.atom, 10) catch |err| {
+                    std.debug.print("ERROR: Invalid attribute - failed to parse integer: {s}\n", .{val.data.atom});
+                    std.debug.print("Attribute key: {s}\n", .{attr_key});
+                    std.debug.print("Parse error: {any}\n", .{err});
+                    return error.InvalidAttribute;
+                };
+
+                // Create a typed integer attribute
+                return mlir.c.mlirIntegerAttrGet(mlir_type, int_val);
             }
 
-            const int_val = std.fmt.parseInt(i64, val.data.atom, 10) catch return error.InvalidAttribute;
-
-            // Create a typed integer attribute
-            return mlir.c.mlirIntegerAttrGet(mlir_type, int_val);
+            // For other typed values (like dense<...> : tensor<...>), serialize the entire
+            // typed expression and parse it through MLIR's parser
+            // Fall through to the general serialization path below
         }
 
         // Serialize the attribute expression to MLIR syntax
@@ -543,7 +553,13 @@ pub const Builder = struct {
         defer self.allocator.free(resolved_attr_str);
 
         // Use MLIR's built-in attribute parser
-        return mlir.Attribute.parse(self.ctx, resolved_attr_str) catch error.InvalidAttribute;
+        return mlir.Attribute.parse(self.ctx, resolved_attr_str) catch {
+            std.debug.print("ERROR: Failed to parse attribute\n", .{});
+            std.debug.print("Attribute key: {s}\n", .{attr_key});
+            std.debug.print("Serialized value: {s}\n", .{attr_str});
+            std.debug.print("Resolved value: {s}\n", .{resolved_attr_str});
+            return error.InvalidAttribute;
+        };
     }
 
     /// Resolve attribute alias references in a string

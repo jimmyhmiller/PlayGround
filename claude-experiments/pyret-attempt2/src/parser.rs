@@ -191,17 +191,81 @@ impl Parser {
 impl Parser {
     /// program: prelude block
     pub fn parse_program(&mut self) -> ParseResult<Program> {
-        todo!("Implement parse_program")
+        let start = self.peek().clone();
+
+        // For now, parse empty prelude (no imports/provides)
+        // TODO: Implement full prelude parsing when needed
+        let _use = None;
+        let _provide = Provide::SProvideNone {
+            l: self.current_loc(),
+        };
+        let provided_types = ProvideTypes::SProvideTypesNone {
+            l: self.current_loc(),
+        };
+        let provides = Vec::new();
+        let imports = Vec::new();
+
+        // Parse program body (statement block)
+        let body = self.parse_block()?;
+
+        // Ensure we've consumed all tokens
+        if !self.is_at_end() {
+            return Err(ParseError::general(
+                self.peek(),
+                "Unexpected tokens after program end",
+            ));
+        }
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        Ok(Program::new(
+            self.make_loc(&start, &end),
+            _use,
+            _provide,
+            provided_types,
+            provides,
+            imports,
+            body,
+        ))
     }
 
     /// prelude: [use-stmt] (provide-stmt|import-stmt)*
     fn parse_prelude(&mut self) -> ParseResult<()> {
-        todo!("Implement parse_prelude")
+        // TODO: Implement full prelude parsing
+        // For now, just return Ok since we're skipping prelude
+        Ok(())
     }
 
     /// block: stmt*
+    /// Parses a sequence of statements and returns an SBlock expression
     fn parse_block(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_block")
+        let start = self.peek().clone();
+        let mut stmts = Vec::new();
+
+        // Parse statements until EOF or until we can't parse any more
+        while !self.is_at_end() {
+            // Try to parse a statement (for now, just expressions)
+            // TODO: Add support for let-bindings, var, fun, data, etc.
+            match self.parse_expr() {
+                Ok(expr) => stmts.push(Box::new(expr)),
+                Err(_) => break, // Stop if we can't parse
+            }
+        }
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        Ok(Expr::SBlock {
+            l: self.make_loc(&start, &end),
+            stmts,
+        })
     }
 }
 

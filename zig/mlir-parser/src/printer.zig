@@ -268,7 +268,22 @@ pub const Printer = struct {
         switch (attr) {
             .integer => |val| try self.writer.print("{d}", .{val}),
             .float => |val| try self.writer.print("{d}", .{val}),
-            .string => |str| try self.writer.writeAll(str),
+            .string => |str| {
+                // Check if this is a typed attribute (contains " : ")
+                if (std.mem.indexOf(u8, str, " : ")) |colon_idx| {
+                    // Split into value and type parts
+                    const value_part = str[0..colon_idx];
+                    const type_part = str[colon_idx + 3..]; // Skip " : "
+                    // Wrap in (: value type) form for Lisp
+                    try self.writer.writeAll("(: ");
+                    try self.writer.writeAll(value_part);
+                    try self.writer.writeByte(' ');
+                    try self.writer.writeAll(type_part);
+                    try self.writer.writeByte(')');
+                } else {
+                    try self.writer.writeAll(str);
+                }
+            },
             .boolean => |val| try self.writer.writeAll(if (val) "true" else "false"),
             .array => |arr| {
                 try self.writer.writeByte('[');

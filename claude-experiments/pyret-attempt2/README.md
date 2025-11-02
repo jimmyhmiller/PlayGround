@@ -20,7 +20,16 @@ cargo build
 
 ## 📊 Current Status
 
-**Phase 3 - Expressions:** Advanced features (68/81 comparison tests passing - 84.0%)
+**🚨 CRITICAL: Must implement full program parsing NOW! 🚨**
+
+**Current Problem:** We only parse expressions. Comparison tests extract `stmts[0]` from Pyret's output - this is a HACK that must be removed. We need to parse complete `.arr` files and compare full program ASTs.
+
+**Phase 4 - Program Structure (TOP PRIORITY):**
+- ❌ `parse_program()` - Parse complete Pyret programs (MUST DO NOW)
+- ❌ `parse_block()` - Parse statement sequences (MUST DO NOW)
+- ⚠️ Comparison infrastructure needs fixing
+
+**Phase 3 - Expressions:** Advanced features (69/81 comparison tests passing - 85.2%)
 
 ✅ **Working & Verified:**
 - ✅ All primitive expressions (numbers, strings, booleans, identifiers)
@@ -58,10 +67,15 @@ cargo build
 - Must use construct expressions: `[list: 1, 2, 3]`
 - Official Pyret parser rejects `[1, 2, 3]` with parse error
 
-🎯 **Next Up (Priority Order):**
-- If expressions `if cond: ... end` (1 test) - HIGHEST PRIORITY
+🎯 **IMMEDIATE PRIORITIES (MUST DO NOW):**
+1. **parse_program()** - Parse full Pyret programs (⭐⭐⭐⭐⭐ CRITICAL)
+2. **parse_block()** - Parse statement sequences (⭐⭐⭐⭐⭐ CRITICAL)
+3. **Fix comparison infrastructure** - Output/compare full programs (⭐⭐⭐⭐⭐ CRITICAL)
+
+**Then:**
 - For expressions `for map(x from lst): ... end` (2 tests)
-- Let bindings `x = value` (needed for block_multiple_stmts test)
+- Let bindings `x = value` (needed for multi-statement programs)
+- Method fields in objects
 
 ## 📁 Project Structure
 

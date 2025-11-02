@@ -322,22 +322,24 @@ pub const LispPrinter = struct {
                     .dictionary => |dict| try self.printNestedDictionaryAttribute(dict),
                     .string => |raw_value| {
                         // Legacy handling for raw strings
-                        // Try to detect typed integer literals: "42 : i32"
-                        if (std.mem.indexOf(u8, raw_value, " : ")) |colon_pos| {
-                            const value_part = std.mem.trim(u8, raw_value[0..colon_pos], " \t");
-                            const type_part = std.mem.trim(u8, raw_value[colon_pos + 3..], " \t");
+                        // Try to detect typed attributes: "value : type"
+                        // But skip dialect attributes (starting with #) which may contain : internally
+                        const trimmed = std.mem.trim(u8, raw_value, " \t");
+                        const is_dialect_attr = trimmed.len > 0 and trimmed[0] == '#';
 
-                            // Check if value is an integer
-                            if (std.fmt.parseInt(i64, value_part, 0)) |int_val| {
-                                // Typed literal: (: value type)
+                        if (!is_dialect_attr) {
+                            if (std.mem.indexOf(u8, raw_value, " : ")) |colon_pos| {
+                                const value_part = std.mem.trim(u8, raw_value[0..colon_pos], " \t");
+                                const type_part = std.mem.trim(u8, raw_value[colon_pos + 3..], " \t");
+
+                                // Wrap typed attributes in (: value type) form
+                                // This handles integers, floats, dense arrays, etc.
                                 try self.writer.writeAll("(: ");
-                                try self.writer.print("{d}", .{int_val});
+                                try self.writer.writeAll(value_part);
                                 try self.writer.writeByte(' ');
                                 try self.writer.writeAll(type_part);
                                 try self.writer.writeByte(')');
                                 return;
-                            } else |_| {
-                                // Not an integer, fall through
                             }
                         }
 
@@ -345,13 +347,13 @@ pub const LispPrinter = struct {
                         if (std.mem.eql(u8, entry.name, "sym_name") or
                             std.mem.eql(u8, entry.name, "callee")) {
                             // Symbol reference: @name
-                            const trimmed = std.mem.trim(u8, raw_value, "\" \t");
+                            const symbol_name = std.mem.trim(u8, raw_value, "\" \t");
                             // Check if it already starts with @
-                            if (trimmed.len > 0 and trimmed[0] == '@') {
-                                try self.writer.writeAll(trimmed);
+                            if (symbol_name.len > 0 and symbol_name[0] == '@') {
+                                try self.writer.writeAll(symbol_name);
                             } else {
                                 try self.writer.writeByte('@');
-                                try self.writer.writeAll(trimmed);
+                                try self.writer.writeAll(symbol_name);
                             }
                             return;
                         }

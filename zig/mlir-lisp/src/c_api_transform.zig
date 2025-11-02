@@ -48,15 +48,16 @@ const CValueType = enum(c_int) {
 };
 
 // Transform (call @test i64) => (operation (name func.call) ...)
-fn transformCallToOperation(allocator: ?*anyopaque, call_expr: ?*anyopaque) !?*anyopaque {
+// Returns null on error (C-compatible calling convention)
+export fn transformCallToOperation(allocator: ?*anyopaque, call_expr: ?*anyopaque) ?*anyopaque {
     if (allocator == null or call_expr == null) return null;
 
     // Get the list elements from (call @test i64)
-    const call_list = value_get_list(allocator, call_expr) orelse return error.NotAList;
+    const call_list = value_get_list(allocator, call_expr) orelse return null;
     defer vector_value_destroy(allocator, call_list);
 
     const list_len = vector_value_len(call_list);
-    if (list_len < 3) return error.InvalidCallForm; // Need at least (call <symbol> <type>)
+    if (list_len < 3) return null; // Need at least (call <symbol> <type>)
 
     // Extract: call, @test, i64
     const call_ident = vector_value_at(call_list, 0); // "call"
@@ -71,90 +72,90 @@ fn transformCallToOperation(allocator: ?*anyopaque, call_expr: ?*anyopaque) !?*a
     // Build result: (operation (name func.call) (result-bindings [%gensym]) (result-types i64) (attributes { :callee @test }))
 
     // Create "operation" identifier
-    const operation_ident = value_create_identifier(allocator, "operation") orelse return error.AllocationFailed;
+    const operation_ident = value_create_identifier(allocator, "operation") orelse return null;
 
     // Create (name func.call)
-    const name_ident = value_create_identifier(allocator, "name") orelse return error.AllocationFailed;
-    const func_call_ident = value_create_identifier(allocator, "func.call") orelse return error.AllocationFailed;
+    const name_ident = value_create_identifier(allocator, "name") orelse return null;
+    const func_call_ident = value_create_identifier(allocator, "func.call") orelse return null;
 
-    const name_list_vec = vector_value_create(allocator) orelse return error.AllocationFailed;
-    const name_vec_1 = vector_value_push(allocator, name_list_vec, name_ident) orelse return error.AllocationFailed;
+    const name_list_vec = vector_value_create(allocator) orelse return null;
+    const name_vec_1 = vector_value_push(allocator, name_list_vec, name_ident) orelse return null;
     vector_value_destroy(allocator, name_list_vec);
-    const name_vec_2 = vector_value_push(allocator, name_vec_1, func_call_ident) orelse return error.AllocationFailed;
+    const name_vec_2 = vector_value_push(allocator, name_vec_1, func_call_ident) orelse return null;
     vector_value_destroy(allocator, name_vec_1);
 
-    const name_clause = value_create_list(allocator, name_vec_2) orelse return error.AllocationFailed;
+    const name_clause = value_create_list(allocator, name_vec_2) orelse return null;
     // Note: name_vec_2 is now owned by name_clause
 
     // Create (result-bindings [%some_gensym])
-    const result_bindings_ident = value_create_identifier(allocator, "result-bindings") orelse return error.AllocationFailed;
-    const gensym_value_id = value_create_identifier(allocator, "%result0") orelse return error.AllocationFailed; // Using %result0 as gensym
+    const result_bindings_ident = value_create_identifier(allocator, "result-bindings") orelse return null;
+    const gensym_value_id = value_create_identifier(allocator, "%result0") orelse return null; // Using %result0 as gensym
 
-    const gensym_vec = vector_value_create(allocator) orelse return error.AllocationFailed;
-    const gensym_vec_1 = vector_value_push(allocator, gensym_vec, gensym_value_id) orelse return error.AllocationFailed;
+    const gensym_vec = vector_value_create(allocator) orelse return null;
+    const gensym_vec_1 = vector_value_push(allocator, gensym_vec, gensym_value_id) orelse return null;
     vector_value_destroy(allocator, gensym_vec);
 
     // Note: In the real API, we'd create a vector value type, but for now using list
-    const bindings_vector = value_create_list(allocator, gensym_vec_1) orelse return error.AllocationFailed;
+    const bindings_vector = value_create_list(allocator, gensym_vec_1) orelse return null;
 
-    const bindings_vec = vector_value_create(allocator) orelse return error.AllocationFailed;
-    const bindings_vec_1 = vector_value_push(allocator, bindings_vec, result_bindings_ident) orelse return error.AllocationFailed;
+    const bindings_vec = vector_value_create(allocator) orelse return null;
+    const bindings_vec_1 = vector_value_push(allocator, bindings_vec, result_bindings_ident) orelse return null;
     vector_value_destroy(allocator, bindings_vec);
-    const bindings_vec_2 = vector_value_push(allocator, bindings_vec_1, bindings_vector) orelse return error.AllocationFailed;
+    const bindings_vec_2 = vector_value_push(allocator, bindings_vec_1, bindings_vector) orelse return null;
     vector_value_destroy(allocator, bindings_vec_1);
 
-    const bindings_clause = value_create_list(allocator, bindings_vec_2) orelse return error.AllocationFailed;
+    const bindings_clause = value_create_list(allocator, bindings_vec_2) orelse return null;
 
     // Create (result-types i64)
-    const result_types_ident = value_create_identifier(allocator, "result-types") orelse return error.AllocationFailed;
+    const result_types_ident = value_create_identifier(allocator, "result-types") orelse return null;
 
     // Create type expression i64 from the return_type
-    const type_expr = value_create_type_expr(allocator, return_type) orelse return error.AllocationFailed;
+    const type_expr = value_create_type_expr(allocator, return_type) orelse return null;
 
-    const types_vec = vector_value_create(allocator) orelse return error.AllocationFailed;
-    const types_vec_1 = vector_value_push(allocator, types_vec, result_types_ident) orelse return error.AllocationFailed;
+    const types_vec = vector_value_create(allocator) orelse return null;
+    const types_vec_1 = vector_value_push(allocator, types_vec, result_types_ident) orelse return null;
     vector_value_destroy(allocator, types_vec);
-    const types_vec_2 = vector_value_push(allocator, types_vec_1, type_expr) orelse return error.AllocationFailed;
+    const types_vec_2 = vector_value_push(allocator, types_vec_1, type_expr) orelse return null;
     vector_value_destroy(allocator, types_vec_1);
 
-    const types_clause = value_create_list(allocator, types_vec_2) orelse return error.AllocationFailed;
+    const types_clause = value_create_list(allocator, types_vec_2) orelse return null;
 
     // Create (attributes { :callee @test })
-    const attributes_ident = value_create_identifier(allocator, "attributes") orelse return error.AllocationFailed;
+    const attributes_ident = value_create_identifier(allocator, "attributes") orelse return null;
 
     // Create map { :callee @test } - map is a flat vector of key-value pairs
-    const callee_keyword = value_create_keyword(allocator, ":callee") orelse return error.AllocationFailed;
+    const callee_keyword = value_create_keyword(allocator, ":callee") orelse return null;
 
-    const map_vec = vector_value_create(allocator) orelse return error.AllocationFailed;
-    const map_vec_1 = vector_value_push(allocator, map_vec, callee_keyword) orelse return error.AllocationFailed;
+    const map_vec = vector_value_create(allocator) orelse return null;
+    const map_vec_1 = vector_value_push(allocator, map_vec, callee_keyword) orelse return null;
     vector_value_destroy(allocator, map_vec);
-    const map_vec_2 = vector_value_push(allocator, map_vec_1, callee_symbol) orelse return error.AllocationFailed;
+    const map_vec_2 = vector_value_push(allocator, map_vec_1, callee_symbol) orelse return null;
     vector_value_destroy(allocator, map_vec_1);
 
-    const attributes_map = value_create_map(allocator, map_vec_2) orelse return error.AllocationFailed;
+    const attributes_map = value_create_map(allocator, map_vec_2) orelse return null;
 
-    const attrs_vec = vector_value_create(allocator) orelse return error.AllocationFailed;
-    const attrs_vec_1 = vector_value_push(allocator, attrs_vec, attributes_ident) orelse return error.AllocationFailed;
+    const attrs_vec = vector_value_create(allocator) orelse return null;
+    const attrs_vec_1 = vector_value_push(allocator, attrs_vec, attributes_ident) orelse return null;
     vector_value_destroy(allocator, attrs_vec);
-    const attrs_vec_2 = vector_value_push(allocator, attrs_vec_1, attributes_map) orelse return error.AllocationFailed;
+    const attrs_vec_2 = vector_value_push(allocator, attrs_vec_1, attributes_map) orelse return null;
     vector_value_destroy(allocator, attrs_vec_1);
 
-    const attrs_clause = value_create_list(allocator, attrs_vec_2) orelse return error.AllocationFailed;
+    const attrs_clause = value_create_list(allocator, attrs_vec_2) orelse return null;
 
     // Build the final operation list: (operation <name> <bindings> <types> <attrs>)
-    const op_vec = vector_value_create(allocator) orelse return error.AllocationFailed;
-    const op_vec_1 = vector_value_push(allocator, op_vec, operation_ident) orelse return error.AllocationFailed;
+    const op_vec = vector_value_create(allocator) orelse return null;
+    const op_vec_1 = vector_value_push(allocator, op_vec, operation_ident) orelse return null;
     vector_value_destroy(allocator, op_vec);
-    const op_vec_2 = vector_value_push(allocator, op_vec_1, name_clause) orelse return error.AllocationFailed;
+    const op_vec_2 = vector_value_push(allocator, op_vec_1, name_clause) orelse return null;
     vector_value_destroy(allocator, op_vec_1);
-    const op_vec_3 = vector_value_push(allocator, op_vec_2, bindings_clause) orelse return error.AllocationFailed;
+    const op_vec_3 = vector_value_push(allocator, op_vec_2, bindings_clause) orelse return null;
     vector_value_destroy(allocator, op_vec_2);
-    const op_vec_4 = vector_value_push(allocator, op_vec_3, types_clause) orelse return error.AllocationFailed;
+    const op_vec_4 = vector_value_push(allocator, op_vec_3, types_clause) orelse return null;
     vector_value_destroy(allocator, op_vec_3);
-    const op_vec_5 = vector_value_push(allocator, op_vec_4, attrs_clause) orelse return error.AllocationFailed;
+    const op_vec_5 = vector_value_push(allocator, op_vec_4, attrs_clause) orelse return null;
     vector_value_destroy(allocator, op_vec_4);
 
-    const operation = value_create_list(allocator, op_vec_5) orelse return error.AllocationFailed;
+    const operation = value_create_list(allocator, op_vec_5) orelse return null;
 
     return operation;
 }
@@ -188,7 +189,7 @@ export fn exampleTransformCallToOperation() ?*anyopaque {
     const call_expr = value_create_list(allocator, input_vec_3) orelse return null;
 
     // Transform
-    const operation = transformCallToOperation(allocator, call_expr) catch return null;
+    const operation = transformCallToOperation(allocator, call_expr) orelse return null;
 
     // Clean up input
     value_destroy(allocator, call_expr);
