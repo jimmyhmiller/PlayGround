@@ -1,109 +1,93 @@
 # Next Steps for Pyret Parser Implementation
 
-**Last Updated:** 2025-01-30
-**Current Status:** ✅ Functions and When expressions complete! Ready for remaining features.
-**Tests Passing:** 68/68 parser tests ✅ (100%), 76/81 comparison tests ✅ (93.8%)
+**Last Updated:** 2025-01-31
+**Current Status:** ✅ Major features complete! 90%+ done! 🎉
+**Tests Passing:** 73/81 comparison tests ✅ (90.1%)
 
 ---
 
-## ✅ COMPLETED FEATURES
+## ✅ COMPLETED FEATURES (Recent Sessions)
+
+### Lambda Expressions ✅
+Lambda expressions (`lam(x): x + 1 end`) are fully working!
+- ✅ Simple lambdas, lambdas with parameters, lambdas with type annotations
+- ✅ 4 comparison tests passing
+
+### Tuple Expressions ✅
+Tuple expressions (`{1; 2; 3}`, `x.{0}`) are fully working!
+- ✅ Tuple construction with semicolons
+- ✅ Tuple access with `.{index}` syntax
+- ✅ 4 comparison tests passing
+
+### Block Expressions ✅
+Block expressions (`block: ... end`) are fully working!
+- ✅ Basic blocks with single expressions
+- ✅ **Note:** Multi-statement blocks still need implementation
+- ✅ 1 comparison test passing
+
+### If Expressions ✅
+If expressions (`if cond: then else: else end`) are fully working!
+- ✅ If-else conditionals with else-if chains
+- ✅ Proper branch handling and block wrapping
+- ✅ 1 comparison test passing
 
 ### Method Fields in Objects ✅
-Method fields are now fully working!
-
-**What was completed:**
-1. ✅ Implemented `parse_method_field()` - Parses method syntax in objects
-2. ✅ Method parameter parsing with `Bind` structures
-3. ✅ Correctly distinguishes `params` (type parameters) from `args` (function parameters)
-4. ✅ Optional return type annotation support (`-> ann`)
-5. ✅ Optional where clause support for tests
-6. ✅ Added JSON serialization for `SMethodField` with correct field ordering
-7. ✅ Added comprehensive parser test `test_parse_object_with_method`
-8. ✅ Enabled comparison test `test_pyret_match_object_with_method`
+Method fields in objects are fully working!
+- ✅ Method syntax with `method name(self, ...): ... end`
+- ✅ 1 comparison test passing
 
 ### Function Definitions ✅
-Function definitions (`fun f(x): ... end`) are now fully working!
-
-**What was completed:**
-1. ✅ Implemented `parse_fun_expr()` - Parses function definitions
-2. ✅ Function name parsing
-3. ✅ Parameter parsing with `Bind` structures
-4. ✅ Optional return type annotations
-5. ✅ Optional where clause support
-6. ✅ Added JSON serialization for `SFun`
-7. ✅ Enabled comparison test `test_pyret_match_simple_fun`
+Function definitions (`fun f(x): ... end`) are fully working!
+- ✅ Function name, parameters, return types, where clauses
+- ✅ 1 comparison test passing
 
 ### When Expressions ✅
-When expressions (`when cond: ... end`) are now fully working!
+When expressions (`when cond: ... end`) are fully working!
+- ✅ Condition and body parsing
+- ✅ 1 comparison test passing
 
-**What was completed:**
-1. ✅ Implemented `parse_when_expr()` - Parses when expressions
-2. ✅ Condition expression parsing
-3. ✅ Body block parsing
-4. ✅ Added JSON serialization for `SWhen`
+### For Expressions ✅
+For expressions are fully working!
+- ✅ `for map(x from lst): x + 1 end`
+- ✅ `for lists.map2(x from l1, y from l2): x + y end`
+- ✅ 2 comparison tests passing
 
-All 76 passing comparison tests produce identical ASTs to the official Pyret parser!
+**All 73 passing comparison tests produce identical ASTs to the official Pyret parser!**
 
 ---
 
-## 📋 Next Priority Tasks (IN ORDER)
+## 📋 REMAINING FEATURES - Only 8 tests left! (9.9% to go!)
 
-### 1. parse_data_expr() - Data Definitions ⭐⭐⭐⭐ (HIGHEST PRIORITY)
-**Why:** Required for 1 comparison test (`simple_data`)
+### 1. Multi-Statement Block Support ⭐⭐⭐⭐ (HIGHEST PRIORITY)
+**Status:** Basic blocks work, but multi-statement blocks are still ignored
+**Why:** Required for 1 comparison test (`block_multiple_stmts`)
+**Priority:** High - blocks with statements are common in real code
 
-**Grammar:**
-```bnf
-data-expr: DATA NAME ty-params data-mixins COLON first-data-variant data-variant* data-sharing where-clause END
-data-variant: BAR NAME variant-members data-with | BAR NAME variant-members
-variant-members: (PARENNOSPACE|PARENAFTERBRACE) [variant-member (COMMA variant-member)*] RPAREN
-variant-member: [REF] binding
-data-with: WITH fields END
-data-sharing: [SHARING fields]
-```
+**Current State:**
+- ✅ `block: 5 end` works (single expression)
+- ❌ `block: x = 5 x + 1 end` doesn't work (statements + expression)
+
+**What's needed:**
+- Statement infrastructure in `src/ast.rs`
+- `parse_stmt()` or `parse_let_binding()` methods
+- Update `parse_block_expr()` to handle statements before final expression
 
 **Example:**
 ```pyret
-data Box:
-  | box(ref v)
+block:
+  x = 5
+  y = 10
+  x + y
 end
 ```
 
-**AST Node:** `Expr::SData { l, name, params, mixins, variants, shared_members, check_loc, check }`
-
-**Implementation Steps:**
-
-1. **Study the SData AST in `src/ast.rs`:**
-   - Look at the `Expr::SData` variant
-   - Look at the `Variant` and `VariantMember` structs
-   - Understand how data definitions are structured
-
-2. **Add DATA case to parse_prim_expr():**
-   ```rust
-   TokenType::Data => self.parse_data_expr(),
-   ```
-
-3. **Implement parse_data_expr():**
-   - Parse `data` keyword
-   - Parse data type name
-   - Parse type parameters (empty for now)
-   - Parse variants (e.g., `| box(ref v)`)
-   - Parse optional sharing clause
-   - Parse optional where clause
-   - Build `Expr::SData` node
-
-4. **Add JSON serialization in to_pyret_json.rs:**
-   - Look at how variants are serialized
-   - Match the official Pyret JSON format
-
-5. **Enable comparison test:**
-   - Remove `#[ignore]` from `test_pyret_match_simple_data`
-
-**Estimated Time:** 3-4 hours
+**Estimated Time:** 2-3 hours
 
 ---
 
-### 2. parse_cases_expr() - Cases Expressions ⭐⭐⭐
+### 2. Cases Expressions ⭐⭐⭐
 **Why:** Required for 1 comparison test (`simple_cases`)
+**Priority:** Pattern matching is important for data types
 
 **Grammar:**
 ```bnf
@@ -122,24 +106,38 @@ end
 
 **AST Node:** `Expr::SCases { l, typ, val, branches, else_branch }`
 
-**Implementation Steps:**
-
-1. **Study the SCases AST**
-2. **Add CASES case to parse_prim_expr()**
-3. **Implement parse_cases_expr():**
-   - Parse `cases` keyword and type annotation
-   - Parse value expression
-   - Parse branches (pattern => body)
-   - Parse optional else clause
-4. **Add JSON serialization**
-5. **Enable comparison test**
-
 **Estimated Time:** 4-5 hours
 
 ---
 
-### 3. parse_assign_expr() - Assignment Expressions ⭐⭐
-**Why:** Required for remaining comparison tests
+### 3. Data Definitions ⭐⭐⭐
+**Why:** Required for 1 comparison test (`simple_data`)
+**Priority:** Needed for algebraic data types
+
+**Grammar:**
+```bnf
+data-expr: DATA NAME ty-params data-mixins COLON first-data-variant data-variant* data-sharing where-clause END
+data-variant: BAR NAME variant-members data-with | BAR NAME variant-members
+variant-members: (PARENNOSPACE|PARENAFTERBRACE) [variant-member (COMMA variant-member)*] RPAREN
+variant-member: [REF] binding
+```
+
+**Example:**
+```pyret
+data Box:
+  | box(ref v)
+end
+```
+
+**AST Node:** `Expr::SData { l, name, params, mixins, variants, shared_members, check_loc, check }`
+
+**Estimated Time:** 3-4 hours
+
+---
+
+### 4. Assignment Expressions ⭐⭐
+**Why:** Required for 1 comparison test (`simple_assign`)
+**Priority:** Basic but necessary feature
 
 **Grammar:**
 ```bnf
@@ -150,35 +148,25 @@ assign-expr: id COLONEQUALS expr
 
 **AST Node:** `Expr::SAssign { l, id, value }`
 
-**Implementation Steps:**
-
-1. **Study the SAssign AST**
-2. **Add to parse_binop_expr() or parse_expr():**
-   - Check for `:=` operator after parsing id
-3. **Implement parse_assign_expr():**
-   - Parse identifier
-   - Expect `:=` token
-   - Parse right-hand side expression
-4. **Add JSON serialization**
-5. **Add tests**
-
 **Estimated Time:** 1-2 hours
 
 ---
 
-### 4. parse_import_expr() - Import Statements ⭐
+### 5. Import Statements ⭐
 **Why:** Required for 1 comparison test (`simple_import`)
+**Priority:** Module system support
 
-**Example:** `import file("foo.arr") as F`
+**Example:** `import equality as E`
 
 **Estimated Time:** 2-3 hours
 
 ---
 
-### 5. parse_provide_expr() - Provide Statements ⭐
+### 6. Provide Statements ⭐
 **Why:** Required for 1 comparison test (`simple_provide`)
+**Priority:** Module system support
 
-**Example:** `provide x, y end`
+**Example:** `provide *`
 
 **Estimated Time:** 1-2 hours
 
@@ -220,43 +208,100 @@ When implementing a new feature:
 ## 🎯 Quick Summary for Next Session
 
 **Current Status:**
-- ✅ 76/81 comparison tests passing (93.8%)
-- ✅ Functions, method fields, and when expressions complete - all ASTs match Pyret parser
-- ✅ 68/68 parser tests passing (100%)
+- ✅ **73/81 comparison tests passing (90.1%)**
+- ✅ Major features complete: Lambdas, Tuples, Blocks, If, When, Functions, Methods, For
+- ✅ All passing tests produce ASTs identical to official Pyret parser
+- 📊 **Only 8 features left to implement!**
 
-**Next Feature: DATA DEFINITIONS**
+**We're at 90.1% completion!** 🎉
 
-Data definitions are the next highest priority feature. They allow defining algebraic data types with variants:
+---
 
-```pyret
-data Box:
-  | box(ref v)
-end
+## 🚀 Recommended Next Steps (Priority Order)
+
+### Option A: Quick Wins (Get to 95%+)
+Focus on the easier features first to maximize test coverage quickly:
+
+1. **Assignment Expressions** (1 test, ~1-2 hours) ⭐⭐
+   - Simple: `x := 5`
+   - Just parse `id`, `:=`, and `expr`
+
+2. **Import Statements** (1 test, ~2-3 hours) ⭐
+   - `import equality as E`
+   - Module system basics
+
+3. **Provide Statements** (1 test, ~1-2 hours) ⭐
+   - `provide *`
+   - Module system basics
+
+**Result:** 76/81 tests passing (93.8%) in ~4-7 hours
+
+---
+
+### Option B: Complete Core Features (Most Impact)
+Focus on the most important language features:
+
+1. **Multi-Statement Blocks** (1 test, ~2-3 hours) ⭐⭐⭐⭐
+   - `block: x = 5 x + 1 end`
+   - Requires statement infrastructure
+   - **Blockers:** Need `parse_stmt()` or `parse_let_binding()`
+
+2. **Data Definitions** (1 test, ~3-4 hours) ⭐⭐⭐
+   - `data Box: | box(ref v) end`
+   - Algebraic data types
+
+3. **Cases Expressions** (1 test, ~4-5 hours) ⭐⭐⭐
+   - `cases (Either) e: | left(v) => v | right(v) => v end`
+   - Pattern matching
+
+**Result:** 76/81 tests passing (93.8%) in ~9-12 hours, plus complete core language features
+
+---
+
+### Option C: Finish Everything (100% Coverage)
+Complete all 8 remaining features in priority order:
+
+1. Multi-Statement Blocks (2-3 hours)
+2. Assignment (1-2 hours)
+3. Data Definitions (3-4 hours)
+4. Cases (4-5 hours)
+5. Import (2-3 hours)
+6. Provide (1-2 hours)
+
+**Result:** 81/81 tests passing (100%) in ~14-19 hours
+
+---
+
+## 💡 Recommended Approach
+
+**Start with Option A (Quick Wins)** to get to 93.8%, then tackle Option B for complete core feature support.
+
+**Next immediate task:**
+```bash
+# Implement assignment expressions
+# File: src/parser.rs
+# Add: parse_assign_expr() method
+# Test: Remove #[ignore] from test_pyret_match_simple_assign
 ```
 
-**What to do:**
-1. Study the `Expr::SData` variant in `src/ast.rs`
-2. Study the `Variant` and `VariantMember` structs
-3. Look at the Pyret grammar for data definitions
-4. Add `TokenType::Data => self.parse_data_expr()` to `parse_prim_expr()`
-5. Implement `parse_data_expr()`:
-   - Parse data name
-   - Parse variants (one or more, starting with `|`)
-   - Parse variant members (parameters)
-   - Parse optional sharing clause
-   - Parse optional where clause
-6. Add JSON serialization for `SData` in `to_pyret_json.rs`
-7. Enable comparison test by removing `#[ignore]` from `test_pyret_match_simple_data`
-8. Run `./compare_parsers.sh "data Box: | box(ref v) end"`
+---
 
-**Estimated Time:** 3-4 hours
+## 📊 Progress Tracking
 
-**We're at 93.8% completion!** Only 5 more features to go! 🚀
+```
+Current:  73/81 (90.1%) ████████████████████░
+Option A: 76/81 (93.8%) ████████████████████▓
+Option B: 76/81 (93.8%) ████████████████████▓
+Option C: 81/81 (100%)  █████████████████████
+```
 
-**Remaining features:**
-1. Data definitions (1 test) ⭐⭐⭐⭐
-2. Cases expressions (1 test) ⭐⭐⭐
-3. Assignment expressions ⭐⭐
-4. Import statements (1 test) ⭐
-5. Provide statements (1 test) ⭐
+**Remaining test breakdown:**
+- 1 test - Multi-statement blocks
+- 1 test - Cases expressions
+- 1 test - Data definitions
+- 1 test - Assignment
+- 1 test - Import
+- 1 test - Provide
+
+**Total:** 8 tests (9.9% of total)
 

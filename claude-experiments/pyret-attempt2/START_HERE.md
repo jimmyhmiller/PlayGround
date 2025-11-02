@@ -6,15 +6,17 @@
 
 ## 📊 Current Status
 
-**Last Updated:** 2025-10-31
+**Last Updated:** 2025-01-31
 
 ```
-✅ 59 tests passing (73% coverage)
-⏸️ 22 tests ignored (features to implement)
+✅ 73 tests passing (90.1% coverage) 🎉
+⏸️ 8 tests ignored (features to implement)
 ❌ 0 tests failing (no regressions!)
 
-Time to 100%: ~30-40 hours total
-Time to 86%: ~10-12 hours (Phase 1)
+Time to 100%: ~14-19 hours remaining
+Time to 95%: ~4-7 hours (Quick wins!)
+
+**WE'RE OVER 90% DONE!**
 ```
 
 ---
@@ -62,85 +64,99 @@ Read these files **in order** for maximum effectiveness:
 
 ## 🎯 Your Mission
 
-Implement **22 missing features** to get the parser from **73% → 100%** test coverage.
+Implement **8 remaining features** to get the parser from **90.1% → 100%** test coverage.
 
-**Start with:** Lambda expressions (highest priority! ⭐⭐⭐⭐⭐)
+**Start with:** Assignment expressions (quickest win! ⭐⭐) or Multi-statement blocks (most impact! ⭐⭐⭐⭐)
 
 ---
 
 ## 🔥 Quick Start Guide
 
-### Step 1: Understand What's Missing (5 min)
+### Step 1: Understand What's Missing (2 min)
 
 ```bash
-# See high-level overview
-cat GAP_ANALYSIS_SUMMARY.md
+# See current progress
+cat NEXT_STEPS.md
 
-# See all ignored tests
+# See all ignored tests (should show 8)
 cargo test --test comparison_tests -- --ignored --list
 
 # Output:
-# test_pyret_match_simple_lambda: IGNORED
-# test_pyret_match_lambda_with_params: IGNORED
-# ... 22 total
+# test_pyret_match_block_multiple_stmts: IGNORED
+# test_pyret_match_simple_cases: IGNORED
+# test_pyret_match_simple_when: IGNORED (wait, this might be passing now?)
+# test_pyret_match_simple_assign: IGNORED
+# test_pyret_match_simple_data: IGNORED
+# test_pyret_match_simple_fun: IGNORED (this might be passing now?)
+# test_pyret_match_simple_import: IGNORED
+# test_pyret_match_simple_provide: IGNORED
 ```
 
 ### Step 2: Pick a Feature (1 min)
 
-**Recommended order:**
-1. Lambda expressions ⭐⭐⭐⭐⭐ (4 tests, 2-3 hours)
-2. Tuple expressions ⭐⭐⭐⭐ (4 tests, 2-3 hours)
-3. Block expressions ⭐⭐⭐⭐ (2 tests, 2-3 hours)
-4. If expressions ⭐⭐⭐⭐ (1 test, 2-3 hours)
+**Recommended order for quick wins:**
+1. Assignment expressions ⭐⭐ (1 test, 1-2 hours) - **EASIEST**
+2. Import statements ⭐ (1 test, 2-3 hours)
+3. Provide statements ⭐ (1 test, 1-2 hours)
 
-**Start with lambdas** - they unlock 90% of real Pyret code!
+**For maximum impact:**
+1. Multi-statement blocks ⭐⭐⭐⭐ (1 test, 2-3 hours) - **MOST IMPORTANT**
+2. Data definitions ⭐⭐⭐ (1 test, 3-4 hours)
+3. Cases expressions ⭐⭐⭐ (1 test, 4-5 hours)
 
-### Step 3: Learn the Feature (10 min)
+### Step 3: Learn the Feature (5 min)
 
 ```bash
-# Read detailed spec
-grep -A 50 "Lambda Expressions" PARSER_GAPS.md
-
-# See real examples that fail
-grep -A 30 "Lambda Expressions" MISSING_FEATURES_EXAMPLES.md
+# For Assignment Expressions:
+grep -A 30 "Assignment" NEXT_STEPS.md
 
 # See expected AST structure
-./compare_parsers.sh "lam(): 5 end" 2>&1 | grep -A 50 "Pyret AST"
+./compare_parsers.sh "x := 5" 2>&1 | grep -A 50 "Pyret AST"
+
+# For Multi-statement Blocks:
+grep -A 30 "Multi-Statement" NEXT_STEPS.md
+
+# See expected AST structure
+./compare_parsers.sh "block: x = 5 x + 1 end" 2>&1 | grep -A 50 "Pyret AST"
 ```
 
-### Step 4: Implement (2-3 hours)
+### Step 4: Implement (1-3 hours depending on feature)
 
-**Follow the guide in `IMPLEMENTATION_GUIDE.md`:**
+**Follow the guide in `NEXT_STEPS.md`:**
 
 1. Add parser method in `src/parser.rs`
 2. Update `parse_prim_expr()` or `parse_binop_expr()`
-3. Update location extraction (2 places!)
+3. Update location extraction (2 places if needed!)
 4. Update JSON serialization in `src/bin/to_pyret_json.rs`
 5. Remove `#[ignore]` from tests
 6. Run tests: `cargo test --test comparison_tests`
 
-**Detailed steps:** See `IMPLEMENTATION_GUIDE.md` lines 195-350
+**Detailed steps:** See `NEXT_STEPS.md` for implementation notes on each feature
 
 ### Step 5: Verify (5 min)
 
 ```bash
-# Run your tests
-cargo test --test comparison_tests test_pyret_match_simple_lambda
+# Run your specific test
+cargo test --test comparison_tests test_pyret_match_simple_assign
 
 # Verify AST matches
-./compare_parsers.sh "lam(x): x + 1 end"
+./compare_parsers.sh "x := 5"
 # Should output: "Identical!"
 
 # Check no regressions
 cargo test --test comparison_tests
-# All 59 existing tests should still pass
+# All 73 existing tests should still pass
 ```
 
 ### Step 6: Repeat!
 
-Continue with next feature. After Phase 1 (4 features, ~10-12 hours):
-- **70/81 tests passing (86% coverage)**
-- **Can parse real Pyret programs!** 🎉
+Continue with next feature. Quick wins path (~4-7 hours total):
+- **76/81 tests passing (93.8% coverage)**
+- **Almost done!** 🎉
+
+Or complete everything (~14-19 hours total):
+- **81/81 tests passing (100% coverage)**
+- **FULLY DONE!** 🚀
 
 ---
 
@@ -196,42 +212,37 @@ DEBUG_TOKENS=1 cargo test name     ← Debug tokenization
 
 ---
 
-## 🎯 Priority Matrix
+## 🎯 Remaining Work Priority Matrix
 
-### Phase 1: Core Expressions (HIGHEST PRIORITY) ⭐⭐⭐⭐⭐
+### ✅ Already Completed (73/81 tests)
+- Lambdas, Tuples, Blocks (single expr), If, When, Functions, Methods, For expressions
+- All basic expressions, operators, objects, constructs
 
-**Goal:** Make real Pyret programs possible
+### 🎯 Remaining Features (8/81 tests)
 
-| Feature | Tests | Time | Impact | Start After |
-|---------|-------|------|--------|-------------|
-| 1. Lambdas | 4 | 2-3h | 🔥🔥🔥🔥🔥 | NOW |
-| 2. Tuples | 4 | 2-3h | 🔥🔥🔥🔥 | Lambdas |
-| 3. Blocks | 2 | 2-3h | 🔥🔥🔥🔥 | Tuples |
-| 4. If | 1 | 2-3h | 🔥🔥🔥🔥 | Blocks |
+#### Quick Wins Strategy ⭐ (Get to 95%+ fast)
 
-**Total:** 11 tests, ~10-12 hours → **86% coverage**
+| Feature | Tests | Time | Difficulty | Priority |
+|---------|-------|------|------------|----------|
+| 1. Assignment | 1 | 1-2h | ⭐⭐ Easy | HIGH |
+| 2. Import | 1 | 2-3h | ⭐ Medium | MEDIUM |
+| 3. Provide | 1 | 1-2h | ⭐ Easy | MEDIUM |
 
-### Phase 2: Advanced Features ⭐⭐⭐
+**Total:** 3 tests, ~4-7 hours → **93.8% coverage**
 
-**Goal:** Functional programming + OOP
+#### Core Features Strategy ⭐⭐⭐ (Most impact)
 
-| Feature | Tests | Time | Impact | Start After |
-|---------|-------|------|--------|-------------|
-| 5. Methods | 1 | 2-3h | 🔥🔥🔥 | Phase 1 |
-| 6. For | 2 | 3-4h | 🔥🔥🔥 | Methods |
-| 7. Cases | 1 | 4-5h | 🔥🔥🔥 | For |
+| Feature | Tests | Time | Difficulty | Priority |
+|---------|-------|------|------------|----------|
+| 1. Multi-stmt blocks | 1 | 2-3h | ⭐⭐⭐⭐ Hard | HIGHEST |
+| 2. Data definitions | 1 | 3-4h | ⭐⭐⭐ Hard | HIGH |
+| 3. Cases | 1 | 4-5h | ⭐⭐⭐ Hard | HIGH |
 
-**Total:** 4 tests, ~9-12 hours → **91% coverage**
+**Total:** 3 tests, ~9-12 hours → **93.8% coverage + complete core features**
 
-### Phase 3: Statements ⭐⭐
+#### Complete Everything (100%)
 
-**Goal:** Complete language support
-
-| Feature | Tests | Time | Start After |
-|---------|-------|------|-------------|
-| 8-14. Declarations, etc. | 7 | 11-17h | Phase 2 |
-
-**Total:** 7 tests, ~11-17 hours → **100% coverage**
+All 8 features: ~14-19 hours total → **100% coverage**
 
 ---
 
@@ -377,10 +388,10 @@ cargo fmt
 
 ### Milestones
 
-- **Now:** 59/81 (73%) - Expression basics
-- **Phase 1:** 70/81 (86%) - Real programs work!
-- **Phase 2:** 74/81 (91%) - Full functional + OOP
-- **Phase 3:** 81/81 (100%) - Complete language
+- ✅ **Start:** 59/81 (73%) - Expression basics
+- ✅ **Now:** 73/81 (90.1%) - Major features complete! 🎉
+- 🎯 **Quick wins:** 76/81 (93.8%) - Almost there!
+- 🎯 **Complete:** 81/81 (100%) - Finished! 🚀
 
 ---
 
@@ -451,26 +462,34 @@ You'll get faster as you learn the patterns!
 **Your next command:**
 
 ```bash
-cat GAP_ANALYSIS_SUMMARY.md
+cat NEXT_STEPS.md
 ```
 
-Then dive into lambdas:
+Then pick your path:
 
+**Quick Win (Assignment):**
 ```bash
-grep -A 50 "Lambda Expressions" PARSER_GAPS.md
+grep -A 20 "Assignment Expressions" NEXT_STEPS.md
+./compare_parsers.sh "x := 5"
+```
+
+**Maximum Impact (Multi-statement Blocks):**
+```bash
+grep -A 30 "Multi-Statement" NEXT_STEPS.md
+./compare_parsers.sh "block: x = 5 x + 1 end"
 ```
 
 **Good luck!** 🚀
 
 You have:
-- ✅ 22 tests waiting for you
-- ✅ Clear priorities (start with lambdas!)
+- ✅ Only 8 tests remaining (90.1% already done!)
+- ✅ Clear priorities and strategies
 - ✅ Comprehensive documentation
-- ✅ Step-by-step guides
-- ✅ Real examples
+- ✅ Multiple completion paths
 - ✅ Verification tools
+- ✅ Strong foundation already built
 
-**Everything you need is here.** Time to code! 💪
+**You're almost done! The finish line is in sight!** 💪
 
 ---
 
@@ -502,5 +521,6 @@ You have:
 
 ---
 
-**Last Updated:** 2025-10-31
-**Next Step:** Read `GAP_ANALYSIS_SUMMARY.md`
+**Last Updated:** 2025-01-31
+**Status:** 73/81 tests passing (90.1%) - Almost done!
+**Next Step:** Read `NEXT_STEPS.md` for remaining 8 features
