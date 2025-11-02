@@ -8,136 +8,184 @@ A hand-written recursive descent parser for the [Pyret programming language](htt
 # Run all tests
 cargo test
 
-# Run only parser tests
-cargo test --test parser_tests
+# Run only comparison tests (81 passing, 47 ignored)
+cargo test --test comparison_tests
 
 # Run with debug output
-DEBUG_TOKENS=1 cargo test
+DEBUG_TOKENS=1 cargo test test_name
+
+# Compare with official Pyret parser
+./compare_parsers.sh "your pyret code here"
 
 # Build
 cargo build
 ```
 
-## 📊 Current Status
+## 📊 Current Status (Updated: 2025-11-02)
 
-**Phase 3 - Expressions:** Advanced features (76/81 comparison tests passing - 93.8%)
+**Test Results: 81/128 tests passing (63.3%)**
+- ✅ **81 tests PASSING** - All produce byte-for-byte identical ASTs!
+- ⏸️ **47 tests IGNORED** - Advanced features not yet implemented
+- ❌ **0 tests FAILING**
 
-✅ **Working & Verified:**
-- ✅ All primitive expressions (numbers, strings, booleans, identifiers)
-- ✅ Binary operators (15 operators, left-associative, NO precedence)
-- ✅ Parenthesized expressions: `(1 + 2)`
-- ✅ Function application: `f(x, y, z)` with multiple arguments
-- ✅ Chained calls: `f(x)(y)(z)`, `f()(g())`
-- ✅ **Whitespace-sensitive parsing** - FIXED! ✨
-  - `f(x)` = function call
-  - `f (x)` = two separate expressions (stops at `f`)
-- ✅ **Dot access:** `obj.field`, `obj.field1.field2`
-  - Including keywords as field names: `obj.method()` ✨
-- ✅ **Bracket access:** `arr[0]`, `matrix[i][j]`
-- ✅ **Construct expressions:** `[list: 1, 2, 3]`, `[set: x, y]`
-- ✅ **Check operators:** `is`, `raises`, `satisfies`, `violates` ✨
-  - All 11 variants: is, is-roughly, is-not, satisfies, violates, raises, etc.
-- ✅ **Object expressions:** `{ x: 1, y: 2 }` ✨
-  - Data fields, mutable fields (ref), trailing commas
-- ✅ **Lambda expressions:** `lam(x): x + 1 end` ✨✨✨
-  - Simple lambdas: `lam(): 5 end`
-  - With parameters: `lam(x): x + 1 end`, `lam(n, m): n > m end`
-  - In function calls: `filter(lam(e): e > 5 end, [list: -1, 1])`
-  - Optional type annotations: `lam(x :: Number): x + 1 end`
-- ✅ **Tuple expressions:** `{1; 2; 3}`, `x.{2}` ✨✨
-  - Semicolon-separated tuples, tuple element access
-- ✅ **Block expressions:** `block: ... end` ✨✨✨✨
-  - Simple blocks: `block: 5 end`
-  - Multi-statement blocks need implementation (see NEXT_STEPS.md)
-- ✅ **If expressions:** `if cond: then else: else end` ✨✨
-  - Conditional branching with else-if chains
-- ✅ **Function definitions:** `fun f(x): x + 1 end` ✨✨✨✨
-  - With parameters and return types
-  - Optional where clauses for tests
-- ✅ **For expressions:** `for map(x from lst): x + 1 end` ✨✨
-  - Map operations with iterator syntax
-- ✅ **When expressions:** `when cond: body end` ✨✨
-  - Conditional execution
-- ✅ **Let bindings:** `x = 5` ✨
-  - Variable bindings
-- ✅ **Method fields in objects:** `{ method f(x): x + 1 end }` ✨✨✨
-  - Methods with parameters
-  - Optional return type annotations
-- ✅ **Chained postfix operators:** `obj.foo().bar().baz()`
-- ✅ **Ultra-complex expressions:** All features work together perfectly!
+### Recent Discovery: More Complete Than Documented! 🎉
 
-⚠️ **Important Discovery:**
-- Pyret does NOT support `[1, 2, 3]` array syntax!
-- Must use construct expressions: `[list: 1, 2, 3]`
-- Official Pyret parser rejects `[1, 2, 3]` with parse error
+The parser is **more feature-complete than previously documented**. The following major features are fully working:
 
-🎯 **NEXT PRIORITIES:**
-1. **parse_assign_expr()** - Assignment: `x := 5` (⭐⭐ QUICK WIN - 1 hour)
-2. **Multi-statement blocks** - Update `parse_block_expr()`: `block: x = 5 x + 1 end` (⭐⭐⭐⭐ HIGH PRIORITY - 1-2 hours)
-3. **parse_data_expr()** - Data definitions: `data Box: | box(ref v) end` (⭐⭐⭐ - 3-4 hours)
-4. **parse_cases_expr()** - Cases expressions: `cases (Either) e: | left(v) => v end` (⭐⭐⭐ - 3-4 hours)
-5. **parse_import_expr()** - Imports: `import equality as E` (⭐ - 2-3 hours)
-6. **parse_provide_expr()** - Provides: `provide *` (⭐ - 1-2 hours)
+**Core Language (90% complete):**
+- ✅ All primitive expressions and operators
+- ✅ Function definitions `fun f(x): body end`
+- ✅ Data declarations `data T: | variant end`
+- ✅ Pattern matching `cases(T) e: | v => body end`
+- ✅ Control flow (if, when, for, blocks)
+- ✅ Lambda expressions `lam(x): x + 1 end`
+- ✅ Object expressions with methods
+- ✅ Let/var bindings and assignments
+- ✅ Import/provide statements
 
-**Only 5 features left to reach 100% test coverage!**
-**Quick wins available: Assignment + Multi-statement blocks = 96.3% in 2-3 hours!**
+**Advanced Features (35% complete):**
+- ⚠️ Type annotations (partial)
+- ❌ Where clauses (missing)
+- ❌ String interpolation (missing)
+- ❌ Unary operators (missing)
+- ❌ Generic types (missing)
+- ❌ Table expressions (missing)
+- ❌ Check blocks (missing)
+
+**Overall Completion: ~63% (core language very solid!)**
+
+## ✅ Fully Implemented Features
+
+<details>
+<summary><b>Click to expand complete feature list</b></summary>
+
+### Core Expressions
+- Numbers, strings, booleans, identifiers
+- Binary operators (15 operators, left-associative, NO precedence)
+- Parenthesized expressions `(1 + 2)`
+- Function calls `f(x, y)` with multiple arguments
+- Chained calls `f(x)(y)(z)`
+- Whitespace-sensitive parsing: `f(x)` vs `f (x)`
+
+### Data Access
+- Dot access `obj.field.subfield`
+- Bracket access `arr[0]`, `matrix[i][j]`
+- Tuple access `x.{2}`
+- Keywords as field names `obj.method()`
+
+### Data Structures
+- Construct expressions `[list: 1, 2, 3]`, `[set: x, y]`
+- Object expressions `{ x: 1, y: 2 }`
+  - Data fields, mutable fields (`ref`), method fields
+- Tuple expressions `{1; 2; 3}` (semicolon-separated)
+
+### Control Flow
+- Block expressions `block: ... end`
+- If expressions `if c: a else: b end` with else-if chains
+- When expressions `when c: body end`
+- For expressions `for map(x from lst): x + 1 end`
+- Cases expressions `cases(T) e: | variant => body end` (pattern matching)
+
+### Functions & Bindings
+- Lambda expressions `lam(x): x + 1 end`
+- Function definitions `fun f(x): body end`
+- Let bindings `x = 5`, `let x = 5`
+- Var bindings `var x = 5`
+- Assignment expressions `x := 5`
+
+### Data & Types
+- Data declarations `data T: | variant end`
+- Check operators `is`, `raises`, `satisfies`, `violates`
+
+### Modules
+- Import statements `import mod as M`
+- Provide statements `provide *`
+
+### Advanced
+- Chained postfix operators `obj.foo().bar().baz()`
+- Ultra-complex nested expressions
+- Program structure with prelude and body
+
+</details>
+
+## 🔴 Features Not Yet Implemented
+
+See [TEST_STATUS_REPORT.md](TEST_STATUS_REPORT.md) for detailed analysis.
+
+**47 features still need implementation:**
+- Advanced block features (multi-statement blocks with scoping)
+- Where clauses for testing
+- Rest parameters in functions
+- Generic/parameterized types
+- String interpolation
+- Unary operators (`not`, `-`)
+- Advanced for variants (filter, fold)
+- Sharing clauses on data types
+- Table expressions
+- Check blocks
+- Advanced import/export patterns
+- Object extension/refinement
+- And more...
 
 ## 📁 Project Structure
 
 ```
-compare_parsers.sh - Validate against official Pyret parser
+compare_parsers.sh       - Validate against official Pyret parser
 
 src/
-├── ast.rs          (1,350 lines)  - All AST node types
-├── parser.rs       (~1,380 lines) - Parser implementation (+30 for blocks)
-├── tokenizer.rs    (~1,390 lines) - Complete tokenizer (+44 for keyword-colon fix)
+├── parser.rs       (~2,000 lines) - Parser implementation
+├── ast.rs          (~1,350 lines) - All AST node types
+├── tokenizer.rs    (~1,390 lines) - Complete tokenizer
 ├── error.rs        (73 lines)     - Error types
-├── lib.rs          - Library exports
+├── lib.rs                         - Library exports
 └── bin/
-    ├── to_json.rs          - Output full AST as JSON
-    └── to_pyret_json.rs    (~265 lines) - Pyret-compatible JSON (updated for blocks)
+    ├── to_json.rs                 - Output full AST as JSON
+    └── to_pyret_json.rs (~400)    - Pyret-compatible JSON
 
 tests/
-├── parser_tests.rs      (~1,340 lines) - 68 tests, all passing ✅
-└── comparison_tests.rs  (~700 lines)   - 76/81 passing ✅ (93.8%, 5 ignored)
+├── parser_tests.rs      (~1,540 lines) - 68 unit tests, all passing ✅
+└── comparison_tests.rs  (~1,360 lines) - 128 integration tests
+    ├── 81 passing (basic + working features) ✅
+    └── 47 ignored (advanced features not yet implemented) ⏸️
 
 docs/
+├── TEST_STATUS_REPORT.md               - 📊 Current status & analysis ⭐
+├── NEXT_STEPS.md                       - Implementation guide
 ├── PARSER_PLAN.md                      - Overall project plan
-├── PHASE1_COMPLETE.md                  - Foundation complete
-├── PHASE2_COMPLETE.md                  - Primitives & operators complete
-├── PHASE3_PARENS_AND_APPS_COMPLETE.md - Latest work
-├── NEXT_STEPS.md                       - 👈 START HERE for next tasks
-├── OPERATOR_PRECEDENCE.md              - Important: Pyret has NO precedence!
-└── PARSER_COMPARISON.md                - 🆕 Tools for validating against official parser
+├── PHASE1_COMPLETE.md                  - Foundation
+├── PHASE2_COMPLETE.md                  - Primitives & operators
+├── PHASE3_PARENS_AND_APPS_COMPLETE.md - Parens & function calls
+└── OPERATOR_PRECEDENCE.md              - Pyret has NO precedence!
 ```
 
 ## 🎯 For Contributors
 
 **New to this project?** Start here:
-1. Read [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) - Quick reference for what to build next ⭐
-2. Read [COMPREHENSIVE_GAP_ANALYSIS.md](COMPREHENSIVE_GAP_ANALYSIS.md) - Full analysis of incomplete features
-3. Read [NEXT_STEPS.md](NEXT_STEPS.md) - Detailed implementation guides
-4. Look at `tests/comprehensive_gap_tests.rs` - See 50+ real Pyret code examples
-5. Check `src/parser.rs` - Expression parsing patterns
+
+1. **Read [TEST_STATUS_REPORT.md](TEST_STATUS_REPORT.md)** - See exactly what's working and what needs work ⭐⭐⭐
+2. **Read [NEXT_STEPS.md](NEXT_STEPS.md)** - Implementation guides with examples
+3. **Look at `tests/comparison_tests.rs`** - Lines 700-1364 show the 47 gap tests
+4. **Check `src/parser.rs`** - See patterns for expression/statement parsing
 
 **Quick contribution guide:**
 ```bash
 # 1. See what needs to be done
-cargo test --test comprehensive_gap_tests -- --ignored --list
+cargo test --test comparison_tests -- --ignored --list
 
-# 2. Pick a feature (start with data definitions!)
+# 2. Pick a feature (unary operators are a good start!)
 # 3. Read the test to understand expected behavior
 # 4. Add parser method in src/parser.rs
 # 5. Add JSON serialization in src/bin/to_pyret_json.rs
 # 6. Remove #[ignore] from test
-# 7. Run: cargo test --test comprehensive_gap_tests test_name
+# 7. Run: cargo test --test comparison_tests test_name
 # 8. Validate: ./compare_parsers.sh "your code"
 ```
 
-**📊 Current Test Coverage:**
-- ✅ 76/81 basic comparison tests (93.8%)
-- ⏳ 50+ advanced feature tests (all marked `#[ignore]`)
-- 🎯 Combined: ~60% of production-ready parser complete
+**Recommended first features to implement:**
+1. **Unary operators** (`not`, `-`) - 3 tests, ~2-3 hours, very common
+2. **Type annotations on bindings** - 3 tests, ~2-3 hours
+3. **Advanced blocks** - 4 tests, ~3-4 hours
+4. **Where clauses** - 4 tests, ~3-4 hours
 
 ## 🧪 Testing
 
@@ -145,17 +193,17 @@ cargo test --test comprehensive_gap_tests -- --ignored --list
 # All tests
 cargo test
 
-# Basic comparison tests (76/81 passing - 93.8%)
+# Comparison tests (81 passing, 47 ignored)
 cargo test --test comparison_tests
 
-# Comprehensive gap analysis tests (50+ tests, all currently ignored)
-cargo test --test comprehensive_gap_tests -- --ignored
+# See what needs implementation
+cargo test --test comparison_tests -- --ignored --list
 
-# Just parser tests
+# Unit tests
 cargo test --test parser_tests
 
 # Specific test
-cargo test test_parse_simple_function_call
+cargo test test_pyret_match_simple_fun
 
 # With token debug output
 DEBUG_TOKENS=1 cargo test test_name
@@ -163,29 +211,26 @@ DEBUG_TOKENS=1 cargo test test_name
 
 ### Test Suites
 
-1. **`parser_tests.rs`** - Unit tests for parser components
-2. **`comparison_tests.rs`** - 81 tests comparing with official Pyret parser (76 passing)
-3. **`comprehensive_gap_tests.rs`** - 50+ advanced tests for incomplete features (all ignored)
-
-See `COMPREHENSIVE_GAP_ANALYSIS.md` for details on gap tests.
+1. **`parser_tests.rs`** - 68 unit tests for parser components (all passing)
+2. **`comparison_tests.rs`** - 128 integration tests comparing with official Pyret parser
+   - 81 tests passing (basic features + core language)
+   - 47 tests ignored (advanced features not yet implemented)
 
 ## 🔍 Parser Validation
 
-We've built tools to verify our parser produces **identical ASTs** to the official Pyret parser:
+We validate that our parser produces **identical ASTs** to the official Pyret parser:
 
 ```bash
 # Compare any expression
 ./compare_parsers.sh "2 + 3"
-./compare_parsers.sh "f(x).result"
-./compare_parsers.sh "obj.foo.bar"
+./compare_parsers.sh "fun f(x): x + 1 end"
+./compare_parsers.sh "data Box: | box(ref v) end"
 
 # Output JSON from Rust parser
 echo "2 + 3" | cargo run --bin to_pyret_json
 ```
 
-**Status**: All implemented syntax verified identical! ✅
-
-See [PARSER_COMPARISON.md](PARSER_COMPARISON.md) for full documentation.
+**Status**: All 81 passing tests verified byte-for-byte identical! ✅
 
 ## 📚 Key Features
 
@@ -195,7 +240,7 @@ Pyret distinguishes function calls from parenthesized expressions by whitespace:
 
 ```pyret
 f(x)    // Function application: f called with argument x
-f (x)   // Function f applied to parenthesized expression (x)
+f (x)   // Two separate expressions: f, then (x)
 ```
 
 The tokenizer produces different tokens (`ParenNoSpace` vs `ParenSpace`) and the parser handles them correctly.
@@ -209,7 +254,7 @@ Pyret has **NO operator precedence**. All binary operators have equal precedence
              // NOT as 2 + (3 * 4) = 14
 ```
 
-Users must use explicit parentheses to control evaluation order.
+Users must use explicit parentheses to control evaluation order. See [OPERATOR_PRECEDENCE.md](OPERATOR_PRECEDENCE.md).
 
 ### Exact AST Matching
 
@@ -218,10 +263,9 @@ The parser generates JSON that matches the reference Pyret implementation exactl
 ```json
 {
   "type": "s-app",
-  "l": { ... },
-  "_fun": { "type": "s-id", "id": { "type": "s-name", "s": "f" } },
+  "fun": { "type": "s-id", "id": { "type": "s-name", "name": "f" } },
   "args": [
-    { "type": "s-num", "n": 42 }
+    { "type": "s-num", "value": "42" }
   ]
 }
 ```
@@ -234,20 +278,20 @@ The parser generates JSON that matches the reference Pyret implementation exactl
 
 ## 📋 Implementation Progress
 
-| Phase | Status | Progress |
-|-------|--------|----------|
-| 1. Foundation | ✅ Complete | 100% |
-| 2. Parser Core | ✅ Complete | 100% |
-| 3. Expressions | 🚧 In Progress | 35% |
-| 4. Control Flow | ⏳ Pending | 0% |
-| 5. Functions & Bindings | ⏳ Pending | 0% |
-| 6. Data Definitions | ⏳ Pending | 0% |
-| 7. Type System | ⏳ Pending | 0% |
-| 8. Imports/Exports | ⏳ Pending | 0% |
-| 9. Tables | ⏳ Pending | 0% |
-| 10. Testing & Reactors | ⏳ Pending | 0% |
+| Category | Status | Progress |
+|----------|--------|----------|
+| Core Expressions | ✅ Complete | 100% |
+| Data Structures | ✅ Complete | 100% |
+| Control Flow | ✅ Complete | 90% |
+| Functions & Bindings | ✅ Complete | 90% |
+| Data Definitions | ✅ Basic | 60% |
+| Pattern Matching | ✅ Basic | 60% |
+| Type System | ⚠️ Partial | 30% |
+| Imports/Exports | ✅ Basic | 60% |
+| Advanced Features | ⚠️ Partial | 35% |
 
-See [PARSER_PLAN.md](PARSER_PLAN.md) for detailed roadmap.
+**Overall: 63.3% complete** (81/128 tests passing)
+**Core language: ~90% complete** ✅
 
 ## 💡 Examples
 
@@ -256,48 +300,51 @@ See [PARSER_PLAN.md](PARSER_PLAN.md) for detailed roadmap.
 1 + 2
 ```
 ```rust
-SOp {
+Expr::SOp {
     op: "op+",
-    left: SNum { n: 1.0 },
-    right: SNum { n: 2.0 }
+    left: Box::new(Expr::SNum { n: 1.0 }),
+    right: Box::new(Expr::SNum { n: 2.0 })
 }
 ```
 
-### Function Call
+### Function Definition
 ```pyret
-f(x, y)
+fun f(x): x + 1 end
 ```
 ```rust
-SApp {
-    _fun: SId { id: SName { s: "f" } },
-    args: [
-        SId { id: SName { s: "x" } },
-        SId { id: SName { s: "y" } }
+Stmt::SFun {
+    name: "f",
+    args: vec![Bind { name: "x", ann: ABlank }],
+    body: SBlock { stmts: [...] }
+}
+```
+
+### Pattern Matching
+```pyret
+cases(Either) e:
+  | left(v) => v
+  | right(v) => v
+end
+```
+```rust
+Expr::SCases {
+    typ: AName { id: "Either" },
+    val: SId { id: "e" },
+    branches: vec![
+        CasesBranch { name: "left", args: [...], body: [...] },
+        CasesBranch { name: "right", args: [...], body: [...] }
     ]
-}
-```
-
-### Chained Calls
-```pyret
-f(x)(y)
-```
-```rust
-SApp {
-    _fun: SApp {
-        _fun: SId { s: "f" },
-        args: [SId { s: "x" }]
-    },
-    args: [SId { s: "y" }]
 }
 ```
 
 ## 🐛 Known Limitations
 
-- Rational number parsing incomplete (numerator/denominator not extracted)
-- Only basic expressions implemented so far
-- No control flow yet (if, cases, for, when)
-- No function definitions yet
-- No type annotations yet
+- Rational number parsing incomplete (stores as floats, not numerator/denominator)
+- 47 advanced features not yet implemented (see TEST_STATUS_REPORT.md)
+- Type annotations partially implemented
+- Where clauses not yet implemented
+- String interpolation not yet implemented
+- Generic types not yet implemented
 
 ## 🛠️ Development
 
@@ -314,11 +361,11 @@ No external parser generators - pure hand-written recursive descent.
 
 ---
 
-**Last Updated:** 2025-01-31
-**Current Progress:** 93.8% of comparison tests passing (76/81)
+**Last Updated:** 2025-11-02
+**Current Progress:** 63.3% overall (81/128 tests), ~90% core language complete
 **Contributing:** See [NEXT_STEPS.md](NEXT_STEPS.md) for detailed guidance on what to implement next
 
-**Quick Start for Next Session:**
-- Assignment expressions (`x := 5`) - 1 hour to reach 95.1%
-- Multi-statement blocks (`block: x = 5 x + 1 end`) - 1-2 hours to reach 96.3%
-- These are the two easiest remaining features!
+**Quick wins for next session:**
+- Unary operators (`not`, `-`) - 3 tests, ~2-3 hours
+- Type annotations on bindings - 3 tests, ~2-3 hours
+- Advanced block features - 4 tests, ~3-4 hours
