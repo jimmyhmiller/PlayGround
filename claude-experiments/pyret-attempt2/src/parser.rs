@@ -1772,6 +1772,7 @@ impl Parser {
     /// Parses user-defined block expressions like: block: 5 end, block: x = 1 x + 2 end
     fn parse_block_expr(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::Block)?;
+        self.expect(TokenType::Colon)?;
 
         // Parse statements until we hit 'end'
         let mut stmts = Vec::new();
