@@ -1,0 +1,19 @@
+(mlir
+  (operation
+    (name func.func)
+    (attributes {
+      :sym_name @main
+      :function_type (!function (inputs) (results i64))
+    })
+    (regions
+      (region
+        (block
+          (arguments [])
+          (operation
+            (name arith.constant)
+            (result-bindings [%result])
+            (result-types i64)
+            (attributes { :value (: 42 i64) }))
+          (operation
+            (name func.return)
+            (operands %result)))))))
