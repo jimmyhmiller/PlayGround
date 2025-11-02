@@ -179,6 +179,21 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "value": expr_to_pyret_json(value)
             })
         }
+        Expr::SAssign { id, value, .. } => {
+            json!({
+                "type": "s-assign",
+                "id": name_to_pyret_json(id),
+                "value": expr_to_pyret_json(value)
+            })
+        }
+        Expr::SWhen { test, block, blocky, .. } => {
+            json!({
+                "type": "s-when",
+                "test": expr_to_pyret_json(test),
+                "block": expr_to_pyret_json(block),
+                "blocky": blocky
+            })
+        }
         _ => {
             json!({
                 "type": "UNSUPPORTED",

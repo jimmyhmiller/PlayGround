@@ -497,10 +497,12 @@ impl Parser {
                         Expr::SUserBlock { l, .. } => l.clone(),
                         Expr::SIf { l, .. } => l.clone(),
                         Expr::SIfElse { l, .. } => l.clone(),
+                        Expr::SWhen { l, .. } => l.clone(),
                         Expr::SFor { l, .. } => l.clone(),
                         Expr::SLetExpr { l, .. } => l.clone(),
                 Expr::SLet { l, .. } => l.clone(),
                 Expr::SVar { l, .. } => l.clone(),
+                Expr::SAssign { l, .. } => l.clone(),
                         _ => self.current_loc(),
                     };
 
@@ -541,10 +543,12 @@ impl Parser {
                         Expr::SUserBlock { l, .. } => l.clone(),
                         Expr::SIf { l, .. } => l.clone(),
                         Expr::SIfElse { l, .. } => l.clone(),
+                        Expr::SWhen { l, .. } => l.clone(),
                         Expr::SFor { l, .. } => l.clone(),
                         Expr::SLetExpr { l, .. } => l.clone(),
                 Expr::SLet { l, .. } => l.clone(),
                 Expr::SVar { l, .. } => l.clone(),
+                Expr::SAssign { l, .. } => l.clone(),
                         _ => self.current_loc(),
                     };
 
@@ -717,10 +721,12 @@ impl Parser {
                 Expr::SUserBlock { l, .. } => l.clone(),
                 Expr::SIf { l, .. } => l.clone(),
                 Expr::SIfElse { l, .. } => l.clone(),
+                Expr::SWhen { l, .. } => l.clone(),
                 Expr::SFor { l, .. } => l.clone(),
                 Expr::SLetExpr { l, .. } => l.clone(),
                 Expr::SLet { l, .. } => l.clone(),
                 Expr::SVar { l, .. } => l.clone(),
+                Expr::SAssign { l, .. } => l.clone(),
                 _ => self.current_loc(),
             };
 
@@ -808,6 +814,7 @@ impl Parser {
             TokenType::Lam => self.parse_lambda_expr(),
             TokenType::Block => self.parse_block_expr(),
             TokenType::If => self.parse_if_expr(),
+            TokenType::When => self.parse_when_expr(),
             TokenType::For => self.parse_for_expr(),
             TokenType::Let => self.parse_let_expr(),
             TokenType::Var => self.parse_var_expr(),
@@ -1516,10 +1523,12 @@ impl Parser {
             Expr::SUserBlock { l, .. } => l.clone(),
             Expr::SIf { l, .. } => l.clone(),
             Expr::SIfElse { l, .. } => l.clone(),
+            Expr::SWhen { l, .. } => l.clone(),
             Expr::SFor { l, .. } => l.clone(),
                         Expr::SLetExpr { l, .. } => l.clone(),
                 Expr::SLet { l, .. } => l.clone(),
                 Expr::SVar { l, .. } => l.clone(),
+                Expr::SAssign { l, .. } => l.clone(),
             _ => self.current_loc(),
         };
 
@@ -1919,12 +1928,12 @@ impl Parser {
     }
 
     /// Implicit var binding: x := value (no "var" keyword)
-    /// Creates an s-var statement
+    /// This is actually an assignment (s-assign), not a var declaration
     fn parse_implicit_var_expr(&mut self) -> ParseResult<Expr> {
         let start = self.peek().clone();
 
-        // Parse binding: name [:: type]
-        let bind = self.parse_bind()?;
+        // Parse name (just the identifier, no type annotation)
+        let name = self.parse_name()?;
 
         // Expect :=
         self.expect(TokenType::ColonEquals)?;
@@ -1938,9 +1947,10 @@ impl Parser {
             start.clone()
         };
 
-        Ok(Expr::SVar {
+        // This is an assignment, not a var declaration
+        Ok(Expr::SAssign {
             l: self.make_loc(&start, &end),
-            name: bind,
+            id: name,
             value: Box::new(value),
         })
     }
@@ -1951,8 +1961,38 @@ impl Parser {
     }
 
     /// when-expr: WHEN expr: block END
+    /// Parses when expressions like: when true: print("yes") end
     fn parse_when_expr(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_when_expr")
+        let start = self.expect(TokenType::When)?;
+
+        // Parse the test expression
+        let test = self.parse_expr()?;
+
+        // Expect colon
+        self.expect(TokenType::Colon)?;
+
+        // Parse the block (statements until end)
+        let mut block_stmts = Vec::new();
+        while !self.matches(&TokenType::End) && !self.is_at_end() {
+            let stmt = self.parse_expr()?;
+            block_stmts.push(Box::new(stmt));
+        }
+
+        let end = self.expect(TokenType::End)?;
+        let loc = self.make_loc(&start, &end);
+
+        // Create the block
+        let block = Expr::SBlock {
+            l: self.current_loc(),
+            stmts: block_stmts,
+        };
+
+        Ok(Expr::SWhen {
+            l: loc,
+            test: Box::new(test),
+            block: Box::new(block),
+            blocky: false,
+        })
     }
 }
 

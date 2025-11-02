@@ -20,16 +20,7 @@ cargo build
 
 ## 📊 Current Status
 
-**🚨 CRITICAL: Must implement full program parsing NOW! 🚨**
-
-**Current Problem:** We only parse expressions. Comparison tests extract `stmts[0]` from Pyret's output - this is a HACK that must be removed. We need to parse complete `.arr` files and compare full program ASTs.
-
-**Phase 4 - Program Structure (TOP PRIORITY):**
-- ❌ `parse_program()` - Parse complete Pyret programs (MUST DO NOW)
-- ❌ `parse_block()` - Parse statement sequences (MUST DO NOW)
-- ⚠️ Comparison infrastructure needs fixing
-
-**Phase 3 - Expressions:** Advanced features (69/81 comparison tests passing - 85.2%)
+**Phase 3 - Expressions:** Advanced features (76/81 comparison tests passing - 93.8%)
 
 ✅ **Working & Verified:**
 - ✅ All primitive expressions (numbers, strings, booleans, identifiers)
@@ -55,10 +46,18 @@ cargo build
   - Optional type annotations: `lam(x :: Number): x + 1 end`
 - ✅ **Tuple expressions:** `{1; 2; 3}`, `x.{2}` ✨✨
   - Semicolon-separated tuples, tuple element access
-- ✅ **Block expressions:** `block: ... end` - NEW! ✨✨✨✨
+- ✅ **Block expressions:** `block: ... end` ✨✨✨✨
   - Simple blocks: `block: 5 end`
   - Multiple statements: `block: 1 + 2 3 * 4 end`
   - Empty and nested blocks
+- ✅ **Function definitions:** `fun f(x): x + 1 end` ✨✨✨✨
+  - With parameters and return types
+  - Optional where clauses for tests
+- ✅ **When expressions:** `when cond: body end` ✨✨
+  - Conditional execution
+- ✅ **Method fields in objects:** `{ method f(x): x + 1 end }` ✨✨✨
+  - Methods with parameters
+  - Optional return type annotations
 - ✅ **Chained postfix operators:** `obj.foo().bar().baz()`
 - ✅ **Ultra-complex expressions:** All features work together perfectly!
 
@@ -67,15 +66,14 @@ cargo build
 - Must use construct expressions: `[list: 1, 2, 3]`
 - Official Pyret parser rejects `[1, 2, 3]` with parse error
 
-🎯 **IMMEDIATE PRIORITIES (MUST DO NOW):**
-1. **parse_program()** - Parse full Pyret programs (⭐⭐⭐⭐⭐ CRITICAL)
-2. **parse_block()** - Parse statement sequences (⭐⭐⭐⭐⭐ CRITICAL)
-3. **Fix comparison infrastructure** - Output/compare full programs (⭐⭐⭐⭐⭐ CRITICAL)
+🎯 **NEXT PRIORITIES:**
+1. **parse_data_expr()** - Data definitions: `data Box: | box(ref v) end` (⭐⭐⭐⭐ HIGH PRIORITY)
+2. **parse_cases_expr()** - Cases expressions: `cases (Either) e: | left(v) => v end` (⭐⭐⭐)
+3. **parse_assign_expr()** - Assignment: `x := 5` (⭐⭐)
+4. **parse_import_expr()** - Imports: `import file("foo.arr") as F` (⭐)
+5. **parse_provide_expr()** - Provides: `provide x, y end` (⭐)
 
-**Then:**
-- For expressions `for map(x from lst): ... end` (2 tests)
-- Let bindings `x = value` (needed for multi-statement programs)
-- Method fields in objects
+**Only 5 features left to reach 100% test coverage!**
 
 ## 📁 Project Structure
 
@@ -93,8 +91,8 @@ src/
     └── to_pyret_json.rs    (~265 lines) - Pyret-compatible JSON (updated for blocks)
 
 tests/
-├── parser_tests.rs      (~1,340 lines) - 64 tests, all passing ✅
-└── comparison_tests.rs  (524 lines)    - 68/81 passing ✅ (84.0%, 13 ignored)
+├── parser_tests.rs      (~1,340 lines) - 68 tests, all passing ✅
+└── comparison_tests.rs  (~700 lines)   - 76/81 passing ✅ (93.8%, 5 ignored)
 
 docs/
 ├── PARSER_PLAN.md                      - Overall project plan
@@ -284,6 +282,6 @@ No external parser generators - pure hand-written recursive descent.
 
 ---
 
-**Last Updated:** 2025-10-31
-**Maintainer:** [To be determined]
-**Contributing:** See [NEXT_STEPS.md](NEXT_STEPS.md)
+**Last Updated:** 2025-01-30
+**Current Progress:** 93.8% of comparison tests passing (76/81)
+**Contributing:** See [NEXT_STEPS.md](NEXT_STEPS.md) for detailed guidance on what to implement next

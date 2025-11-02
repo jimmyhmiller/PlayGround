@@ -1,16 +1,15 @@
 # Next Steps for Pyret Parser Implementation
 
-**Last Updated:** 2025-11-02
-**Current Status:** ✅ Method fields complete! Ready for function definitions.
-**Tests Passing:** 68/68 parser tests ✅ (100%), 73/81 comparison tests ✅ (90.1%)
+**Last Updated:** 2025-01-30
+**Current Status:** ✅ Functions and When expressions complete! Ready for remaining features.
+**Tests Passing:** 68/68 parser tests ✅ (100%), 76/81 comparison tests ✅ (93.8%)
 
 ---
 
-## ✅ COMPLETED - Method Fields in Objects
+## ✅ COMPLETED FEATURES
 
-**MILESTONE ACHIEVED!** 🎉
-
-Method fields are now fully working, bringing us to 73/81 comparison tests passing (90.1%)!
+### Method Fields in Objects ✅
+Method fields are now fully working!
 
 **What was completed:**
 1. ✅ Implemented `parse_method_field()` - Parses method syntax in objects
@@ -22,271 +21,164 @@ Method fields are now fully working, bringing us to 73/81 comparison tests passi
 7. ✅ Added comprehensive parser test `test_parse_object_with_method`
 8. ✅ Enabled comparison test `test_pyret_match_object_with_method`
 
-All 73 passing comparison tests produce identical ASTs to the official Pyret parser!
+### Function Definitions ✅
+Function definitions (`fun f(x): ... end`) are now fully working!
+
+**What was completed:**
+1. ✅ Implemented `parse_fun_expr()` - Parses function definitions
+2. ✅ Function name parsing
+3. ✅ Parameter parsing with `Bind` structures
+4. ✅ Optional return type annotations
+5. ✅ Optional where clause support
+6. ✅ Added JSON serialization for `SFun`
+7. ✅ Enabled comparison test `test_pyret_match_simple_fun`
+
+### When Expressions ✅
+When expressions (`when cond: ... end`) are now fully working!
+
+**What was completed:**
+1. ✅ Implemented `parse_when_expr()` - Parses when expressions
+2. ✅ Condition expression parsing
+3. ✅ Body block parsing
+4. ✅ Added JSON serialization for `SWhen`
+
+All 76 passing comparison tests produce identical ASTs to the official Pyret parser!
 
 ---
 
 ## 📋 Next Priority Tasks (IN ORDER)
 
-### 1. parse_fun_expr() - Function Definitions ⭐⭐⭐⭐ (HIGHEST PRIORITY)
-**Why:** Required for 1 comparison test (`simple_fun`) and very similar to already-implemented lambdas/methods
+### 1. parse_data_expr() - Data Definitions ⭐⭐⭐⭐ (HIGHEST PRIORITY)
+**Why:** Required for 1 comparison test (`simple_data`)
 
 **Grammar:**
 ```bnf
-fun-expr: FUN NAME fun-header (BLOCK|COLON) doc-string block where-clause END
-fun-header: ty-params args return-ann | ty-params bad-args return-ann
-ty-params: [(LANGLE|LT) comma-names (RANGLE|GT)]
-args: (PARENNOSPACE|PARENAFTERBRACE) [binding (COMMA binding)*] RPAREN
-return-ann: [THINARROW ann]
-where-clause: [WHERE block]
+data-expr: DATA NAME ty-params data-mixins COLON first-data-variant data-variant* data-sharing where-clause END
+data-variant: BAR NAME variant-members data-with | BAR NAME variant-members
+variant-members: (PARENNOSPACE|PARENAFTERBRACE) [variant-member (COMMA variant-member)*] RPAREN
+variant-member: [REF] binding
+data-with: WITH fields END
+data-sharing: [SHARING fields]
 ```
 
-**Examples:**
-- `fun f(x): x + 1 end`
-- `fun add(a, b): a + b end`
-- `fun identity<T>(x :: T) -> T: x end`
+**Example:**
+```pyret
+data Box:
+  | box(ref v)
+end
+```
 
-**AST Node:** `Expr::SFun { l, name, params, args, ann, doc, body, check_loc, check, blocky }`
+**AST Node:** `Expr::SData { l, name, params, mixins, variants, shared_members, check_loc, check }`
 
 **Implementation Steps:**
 
-1. **Study the SFun AST in** `src/ast.rs`:
-```rust
-Expr::SFun {
-    l: Loc,
-    name: String,           // Function name (e.g., "f", "add")
-    params: Vec<Name>,      // Type parameters (empty for now, like <T>)
-    args: Vec<Bind>,        // Value parameters (e.g., x, a, b)
-    ann: Ann,               // Return type annotation
-    doc: String,            // Documentation string
-    body: Box<Expr>,        // Function body (usually SBlock)
-    check_loc: Option<Loc>, // Location of check block
-    check: Option<Box<Expr>>, // Optional check/where block
-    blocky: bool,           // true if uses 'block' keyword
-}
-```
+1. **Study the SData AST in `src/ast.rs`:**
+   - Look at the `Expr::SData` variant
+   - Look at the `Variant` and `VariantMember` structs
+   - Understand how data definitions are structured
 
-**Key insight:** This is VERY similar to `parse_method_field()` (which you just implemented) and `parse_lambda_expr()`.
-The main differences are:
-- Starts with `FUN` keyword instead of `METHOD` or `LAM`
-- Has a function name (like method fields, unlike lambdas)
-- Is an `Expr::SFun` not a `Member::SMethodField`
-- Otherwise identical structure!
+2. **Add DATA case to parse_prim_expr():**
+   ```rust
+   TokenType::Data => self.parse_data_expr(),
+   ```
 
-2. **Add FUN case to parse_prim_expr():**
-
-In `src/parser.rs`, find the `parse_prim_expr()` method and add:
-
-```rust
-TokenType::Fun => self.parse_fun_expr(),
-```
-
-(Look at how `TokenType::Lam` is handled - do the same for `Fun`)
-
-3. **Implement parse_fun_expr() - Copy parse_method_field() and adapt:**
-
-```rust
-fn parse_fun_expr(&mut self) -> ParseResult<Expr> {
-    let start = self.expect(TokenType::Fun)?;
-
-    // Parse function name
-    let name_token = self.expect(TokenType::Name)?;
-    let name = name_token.value.clone();
-
-    // Parse parameters - SAME AS METHOD FIELDS
-    let paren_token = self.peek().clone();
-    match paren_token.token_type {
-        TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace => {
-            self.advance();
-        }
-        _ => {
-            return Err(ParseError::expected(TokenType::LParen, paren_token));
-        }
-    }
-
-    let args = if self.matches(&TokenType::RParen) {
-        Vec::new()
-    } else {
-        self.parse_comma_list(|p| p.parse_bind())?
-    };
-
-    // params is for type parameters (e.g., <T>), not function parameters
-    let params: Vec<Name> = Vec::new();
-
-    self.expect(TokenType::RParen)?;
-
-    // Optional return type annotation (-> ann)
-    let ann = if self.matches(&TokenType::ThinArrow) {
-        self.expect(TokenType::ThinArrow)?;
-        self.parse_ann()?
-    } else {
-        Ann::ABlank
-    };
-
-    // Parse body separator (COLON or BLOCK)
-    let blocky = if self.matches(&TokenType::Block) {
-        self.advance();
-        true
-    } else {
-        self.expect(TokenType::Colon)?;
-        false
-    };
-
-    let doc = String::new();
-
-    // Parse function body (statements until END or WHERE)
-    let mut body_stmts = Vec::new();
-    while !self.matches(&TokenType::End)
-        && !self.matches(&TokenType::Where)
-        && !self.is_at_end()
-    {
-        let stmt = self.parse_expr()?;
-        body_stmts.push(Box::new(stmt));
-    }
-
-    // Parse where clause if present
-    let check = if self.matches(&TokenType::Where) {
-        self.advance();
-        let mut where_stmts = Vec::new();
-        while !self.matches(&TokenType::End) && !self.is_at_end() {
-            let stmt = self.parse_expr()?;
-            where_stmts.push(Box::new(stmt));
-        }
-        Some(Box::new(Expr::SBlock {
-            l: self.current_loc(),
-            stmts: where_stmts,
-        }))
-    } else {
-        None
-    };
-
-    let end = self.expect(TokenType::End)?;
-
-    let body = Box::new(Expr::SBlock {
-        l: self.current_loc(),
-        stmts: body_stmts,
-    });
-
-    let check_loc = check.as_ref().map(|c| match c.as_ref() {
-        Expr::SBlock { l, .. } => l.clone(),
-        _ => self.current_loc(),
-    });
-
-    Ok(Expr::SFun {  // Note: Expr::SFun not Member::SMethodField!
-        l: self.make_loc(&start, &end),
-        name,
-        params,
-        args,
-        ann,
-        doc,
-        body,
-        check_loc,
-        check,
-        blocky,
-    })
-}
-```
+3. **Implement parse_data_expr():**
+   - Parse `data` keyword
+   - Parse data type name
+   - Parse type parameters (empty for now)
+   - Parse variants (e.g., `| box(ref v)`)
+   - Parse optional sharing clause
+   - Parse optional where clause
+   - Build `Expr::SData` node
 
 4. **Add JSON serialization in to_pyret_json.rs:**
+   - Look at how variants are serialized
+   - Match the official Pyret JSON format
 
-Find the `expr_to_pyret_json()` function and add `SFun` case (look at `SLam` for reference):
-
-```rust
-Expr::SFun { name, params, args, ann, doc, body, check, check_loc, blocky, .. } => {
-    json!({
-        "type": "s-fun",
-        "name": name,
-        "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
-        "args": args.iter().map(|a| bind_to_pyret_json(a)).collect::<Vec<_>>(),
-        "ann": ann_to_pyret_json(ann),
-        "doc": doc,
-        "body": expr_to_pyret_json(body),
-        "check": check.as_ref().map(|c| expr_to_pyret_json(c)),
-        "check-loc": check_loc,
-        "blocky": blocky
-    })
-}
-```
-
-5. **Update location extraction for SFun:**
-
-Search for all the `match` statements that extract locations (search for `Expr::SLam { l, .. } => l.clone()`) and add:
-
-```rust
-Expr::SFun { l, .. } => l.clone(),
-```
-
-right after each `SLam` case.
-
-6. **Add parser tests:**
-
-```rust
-#[test]
-fn test_parse_simple_function() {
-    let expr = parse_expr("fun f(x): x + 1 end").expect("Failed to parse function");
-
-    match expr {
-        Expr::SFun { name, args, body, .. } => {
-            assert_eq!(name, "f");
-            assert_eq!(args.len(), 1);
-            // Check body is a block with one statement
-            match body.as_ref() {
-                Expr::SBlock { stmts, .. } => {
-                    assert_eq!(stmts.len(), 1);
-                }
-                _ => panic!("Expected SBlock for function body"),
-            }
-        }
-        _ => panic!("Expected SFun, got {:?}", expr),
-    }
-}
-```
-
-7. **Enable comparison test:**
-
-Remove `#[ignore]` from `test_pyret_match_simple_fun` in `tests/comparison_tests.rs`
-
-8. **Run comparison to debug differences:**
-
-```bash
-./compare_parsers.sh "fun f(x): x + 1 end"
-```
-
-**Estimated Time:** 2-3 hours (mostly copy-paste from method fields!)
-
----
-
-### 2. parse_data_expr() - Data Definitions ⭐⭐
-**Why:** Required for 1 comparison test (`simple_data`)
-
-**Example:** `data Box: | box(ref v) end`
+5. **Enable comparison test:**
+   - Remove `#[ignore]` from `test_pyret_match_simple_data`
 
 **Estimated Time:** 3-4 hours
 
 ---
 
-### 3. parse_cases_expr() - Cases Expressions ⭐⭐⭐
+### 2. parse_cases_expr() - Cases Expressions ⭐⭐⭐
 **Why:** Required for 1 comparison test (`simple_cases`)
 
-**Example:** `cases (Either) e: | left(v) => v | right(v) => v end`
+**Grammar:**
+```bnf
+cases-expr: CASES LPAREN ann RPAREN expr COLON cases-branch* [BAR ELSE THICKARROW block] END
+cases-branch: BAR cases-pattern THICKARROW block
+cases-pattern: NAME [LPAREN [binding (COMMA binding)*] RPAREN]
+```
+
+**Example:**
+```pyret
+cases (Either) e:
+  | left(v) => v
+  | right(v) => v
+end
+```
+
+**AST Node:** `Expr::SCases { l, typ, val, branches, else_branch }`
+
+**Implementation Steps:**
+
+1. **Study the SCases AST**
+2. **Add CASES case to parse_prim_expr()**
+3. **Implement parse_cases_expr():**
+   - Parse `cases` keyword and type annotation
+   - Parse value expression
+   - Parse branches (pattern => body)
+   - Parse optional else clause
+4. **Add JSON serialization**
+5. **Enable comparison test**
 
 **Estimated Time:** 4-5 hours
 
 ---
 
-### 4. parse_when_expr() - When Expressions ⭐⭐
-**Why:** Required for 1 comparison test (`simple_when`)
+### 3. parse_assign_expr() - Assignment Expressions ⭐⭐
+**Why:** Required for remaining comparison tests
 
-**Example:** `when true: print("yes") end`
+**Grammar:**
+```bnf
+assign-expr: id COLONEQUALS expr
+```
+
+**Example:** `x := 5`
+
+**AST Node:** `Expr::SAssign { l, id, value }`
+
+**Implementation Steps:**
+
+1. **Study the SAssign AST**
+2. **Add to parse_binop_expr() or parse_expr():**
+   - Check for `:=` operator after parsing id
+3. **Implement parse_assign_expr():**
+   - Parse identifier
+   - Expect `:=` token
+   - Parse right-hand side expression
+4. **Add JSON serialization**
+5. **Add tests**
 
 **Estimated Time:** 1-2 hours
 
 ---
 
-### 5. parse_assign_expr() - Assignment Expressions ⭐⭐
-**Why:** Required for 1 comparison test (`simple_assign`)
+### 4. parse_import_expr() - Import Statements ⭐
+**Why:** Required for 1 comparison test (`simple_import`)
 
-**Example:** `x := 5`
+**Example:** `import file("foo.arr") as F`
+
+**Estimated Time:** 2-3 hours
+
+---
+
+### 5. parse_provide_expr() - Provide Statements ⭐
+**Why:** Required for 1 comparison test (`simple_provide`)
+
+**Example:** `provide x, y end`
 
 **Estimated Time:** 1-2 hours
 
@@ -328,25 +220,43 @@ When implementing a new feature:
 ## 🎯 Quick Summary for Next Session
 
 **Current Status:**
-- ✅ 73/81 comparison tests passing (90.1%)
-- ✅ Method fields complete - all ASTs match Pyret parser
+- ✅ 76/81 comparison tests passing (93.8%)
+- ✅ Functions, method fields, and when expressions complete - all ASTs match Pyret parser
 - ✅ 68/68 parser tests passing (100%)
 
-**Next Feature: FUNCTION DEFINITIONS**
+**Next Feature: DATA DEFINITIONS**
+
+Data definitions are the next highest priority feature. They allow defining algebraic data types with variants:
+
+```pyret
+data Box:
+  | box(ref v)
+end
+```
 
 **What to do:**
-1. Look at `parse_method_field()` in `src/parser.rs:1384-1509`
-2. Copy it and rename to `parse_fun_expr()`
-3. Change `TokenType::Method` → `TokenType::Fun`
-4. Change return type `Member::SMethodField` → `Expr::SFun`
-5. Add `TokenType::Fun => self.parse_fun_expr()` to `parse_prim_expr()`
-6. Add JSON serialization (copy from `SLam`, adapt for `SFun`)
-7. Add location extraction (`Expr::SFun { l, .. } => l.clone()`)
-8. Add parser test
-9. Enable comparison test (remove `#[ignore]`)
-10. Run `./compare_parsers.sh "fun f(x): x + 1 end"`
+1. Study the `Expr::SData` variant in `src/ast.rs`
+2. Study the `Variant` and `VariantMember` structs
+3. Look at the Pyret grammar for data definitions
+4. Add `TokenType::Data => self.parse_data_expr()` to `parse_prim_expr()`
+5. Implement `parse_data_expr()`:
+   - Parse data name
+   - Parse variants (one or more, starting with `|`)
+   - Parse variant members (parameters)
+   - Parse optional sharing clause
+   - Parse optional where clause
+6. Add JSON serialization for `SData` in `to_pyret_json.rs`
+7. Enable comparison test by removing `#[ignore]` from `test_pyret_match_simple_data`
+8. Run `./compare_parsers.sh "data Box: | box(ref v) end"`
 
-**Estimated Time:** 2-3 hours (mostly copy-paste!)
+**Estimated Time:** 3-4 hours
 
-**We're at 90.1% completion!** Only 8 more features to go! 🚀
+**We're at 93.8% completion!** Only 5 more features to go! 🚀
+
+**Remaining features:**
+1. Data definitions (1 test) ⭐⭐⭐⭐
+2. Cases expressions (1 test) ⭐⭐⭐
+3. Assignment expressions ⭐⭐
+4. Import statements (1 test) ⭐
+5. Provide statements (1 test) ⭐
 

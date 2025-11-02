@@ -1,6 +1,8 @@
 # Pyret Parser Development Automation
 
-This directory contains an automated workflow script that uses the Claude API to iteratively develop the Pyret parser until all tests pass.
+This directory contains an automated workflow script that uses the **Claude Agent SDK** to iteratively develop the Pyret parser until all tests pass.
+
+The script uses your Anthropic API key (which will bill against your existing subscription) to access Claude via the Agent SDK.
 
 ## 🎯 What It Does
 
@@ -197,6 +199,12 @@ Make sure you:
 1. Created `.env` file (copy from `.env.example`)
 2. Added your API key to `.env`
 3. API key starts with `sk-ant-api03-`
+4. The API key will use your existing Anthropic subscription
+
+**Note:** Run with `--dry-run` flag to test without using API credits:
+```bash
+npm start -- --dry-run
+```
 
 ### "Tests were deleted"
 
@@ -227,12 +235,12 @@ auto-parser-dev.ts
 ├── Configuration Loading (.env)
 ├── Helper Functions
 │   ├── runCommand() - Execute shell commands
-│   ├── parseTestResults() - Parse cargo test output
+│   ├── parseTestResults() - Parse cargo test output (handles multiple test files)
 │   ├── runTests() - Run comparison tests
 │   ├── verifyNoTestDeletion() - Check test count
 │   ├── checkProgress() - Detect improvements
 │   ├── gitCommit() - Commit changes
-│   └── askClaude() - Call Anthropic API
+│   └── askClaude() - Call Claude via Agent SDK query()
 ├── Error Handlers
 │   ├── handleTestDeletion() - Restore deleted tests
 │   └── handleRegression() - Fix failing tests
@@ -241,6 +249,29 @@ auto-parser-dev.ts
 └── Summary
     └── printSummary() - Display final report
 ```
+
+## 🔧 Technical Details
+
+### Claude Agent SDK Integration
+
+The script uses the `@anthropic-ai/claude-agent-sdk` package with the following configuration:
+
+```typescript
+query({
+  prompt: "Your task",
+  options: {
+    cwd: PROJECT_ROOT,              // Work in project directory
+    permissionMode: 'acceptEdits',  // Auto-approve file edits
+    maxTurns: 1                     // Single turn per request
+  }
+})
+```
+
+This gives Claude full access to:
+- Read/write files in the project
+- Run commands (via Bash tool)
+- Access project documentation (CLAUDE.md)
+- Make edits without requiring manual approval
 
 ## 🔄 Integration with Existing Workflow
 
