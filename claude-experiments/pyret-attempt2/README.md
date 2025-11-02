@@ -114,27 +114,44 @@ docs/
 ## 🎯 For Contributors
 
 **New to this project?** Start here:
-1. Read [NEXT_STEPS.md](NEXT_STEPS.md) - comprehensive guide for next tasks
-2. Read [PHASE3_PARENS_AND_APPS_COMPLETE.md](PHASE3_PARENS_AND_APPS_COMPLETE.md) - latest changes
-3. Look at `tests/parser_tests.rs` - see working examples
-4. Check `src/parser.rs` Section 6 - expression parsing patterns
+1. Read [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) - Quick reference for what to build next ⭐
+2. Read [COMPREHENSIVE_GAP_ANALYSIS.md](COMPREHENSIVE_GAP_ANALYSIS.md) - Full analysis of incomplete features
+3. Read [NEXT_STEPS.md](NEXT_STEPS.md) - Detailed implementation guides
+4. Look at `tests/comprehensive_gap_tests.rs` - See 50+ real Pyret code examples
+5. Check `src/parser.rs` - Expression parsing patterns
 
 **Quick contribution guide:**
 ```bash
-# 1. Pick a task from NEXT_STEPS.md
-# 2. Add parser method in src/parser.rs Section 6
-# 3. Update parse_prim_expr() or parse_binop_expr()
-# 4. Add tests in tests/parser_tests.rs
-# 5. Run tests: cargo test
+# 1. See what needs to be done
+cargo test --test comprehensive_gap_tests -- --ignored --list
+
+# 2. Pick a feature (start with data definitions!)
+# 3. Read the test to understand expected behavior
+# 4. Add parser method in src/parser.rs
+# 5. Add JSON serialization in src/bin/to_pyret_json.rs
+# 6. Remove #[ignore] from test
+# 7. Run: cargo test --test comprehensive_gap_tests test_name
+# 8. Validate: ./compare_parsers.sh "your code"
 ```
+
+**📊 Current Test Coverage:**
+- ✅ 76/81 basic comparison tests (93.8%)
+- ⏳ 50+ advanced feature tests (all marked `#[ignore]`)
+- 🎯 Combined: ~60% of production-ready parser complete
 
 ## 🧪 Testing
 
 ```bash
-# All tests (35 passing)
+# All tests
 cargo test
 
-# Just parser tests (24 passing)
+# Basic comparison tests (76/81 passing - 93.8%)
+cargo test --test comparison_tests
+
+# Comprehensive gap analysis tests (50+ tests, all currently ignored)
+cargo test --test comprehensive_gap_tests -- --ignored
+
+# Just parser tests
 cargo test --test parser_tests
 
 # Specific test
@@ -143,6 +160,14 @@ cargo test test_parse_simple_function_call
 # With token debug output
 DEBUG_TOKENS=1 cargo test test_name
 ```
+
+### Test Suites
+
+1. **`parser_tests.rs`** - Unit tests for parser components
+2. **`comparison_tests.rs`** - 81 tests comparing with official Pyret parser (76 passing)
+3. **`comprehensive_gap_tests.rs`** - 50+ advanced tests for incomplete features (all ignored)
+
+See `COMPREHENSIVE_GAP_ANALYSIS.md` for details on gap tests.
 
 ## 🔍 Parser Validation
 
