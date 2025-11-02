@@ -206,10 +206,29 @@ fn member_to_pyret_json(member: &pyret_attempt2::Member) -> Value {
                 "value": expr_to_pyret_json(value)
             })
         }
-        Member::SMethodField { .. } => {
+        Member::SMethodField {
+            name,
+            params,
+            args,
+            ann,
+            doc,
+            body,
+            check_loc,
+            check,
+            blocky,
+            ..
+        } => {
             json!({
-                "type": "UNSUPPORTED",
-                "debug": "Method fields not yet implemented"
+                "type": "s-method-field",
+                "ann": ann_to_pyret_json(ann),
+                "args": args.iter().map(|a| bind_to_pyret_json(a)).collect::<Vec<_>>(),
+                "blocky": blocky,
+                "body": expr_to_pyret_json(body),
+                "check": check.as_ref().map(|c| expr_to_pyret_json(c)),
+                "check-loc": check_loc,
+                "doc": doc,
+                "name": name,
+                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>()
             })
         }
     }

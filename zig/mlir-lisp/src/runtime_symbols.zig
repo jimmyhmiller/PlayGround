@@ -5,6 +5,7 @@
 const std = @import("std");
 const Executor = @import("executor.zig").Executor;
 const c_api = @import("collections/c_api.zig");
+const c_api_macro = @import("c_api_macro.zig");
 
 /// Register all runtime symbols with the execution engine
 /// This includes:
@@ -75,4 +76,43 @@ pub fn registerAllRuntimeSymbols(executor: *Executor) void {
     // Value API - Memory management
     executor.registerSymbol("value_destroy", @ptrCast(@constCast(&c_api.value_destroy)));
     executor.registerSymbol("value_free_atom", @ptrCast(@constCast(&c_api.value_free_atom)));
+
+    // ========================================================================
+    // Macro System API
+    // ========================================================================
+
+    // MacroExpander Lifecycle
+    executor.registerSymbol("macro_expander_create", @ptrCast(@constCast(&c_api_macro.macro_expander_create)));
+    executor.registerSymbol("macro_expander_destroy", @ptrCast(@constCast(&c_api_macro.macro_expander_destroy)));
+    executor.registerSymbol("macro_expander_set_max_iterations", @ptrCast(@constCast(&c_api_macro.macro_expander_set_max_iterations)));
+    executor.registerSymbol("macro_expander_get_max_iterations", @ptrCast(@constCast(&c_api_macro.macro_expander_get_max_iterations)));
+
+    // Macro Registration
+    executor.registerSymbol("macro_expander_register", @ptrCast(@constCast(&c_api_macro.macro_expander_register)));
+
+    // Expansion API
+    executor.registerSymbol("macro_expander_expand_all", @ptrCast(@constCast(&c_api_macro.macro_expander_expand_all)));
+    executor.registerSymbol("macro_expander_expand_once", @ptrCast(@constCast(&c_api_macro.macro_expander_expand_once)));
+
+    // Gensym API
+    executor.registerSymbol("macro_expander_gensym", @ptrCast(@constCast(&c_api_macro.macro_expander_gensym)));
+    executor.registerSymbol("macro_expander_make_gensym_value", @ptrCast(@constCast(&c_api_macro.macro_expander_make_gensym_value)));
+
+    // Macro Argument Access Helpers
+    executor.registerSymbol("macro_args_len", @ptrCast(@constCast(&c_api_macro.macro_args_len)));
+    executor.registerSymbol("macro_args_nth", @ptrCast(@constCast(&c_api_macro.macro_args_nth)));
+    executor.registerSymbol("macro_args_iterator", @ptrCast(@constCast(&c_api_macro.macro_args_iterator)));
+    executor.registerSymbol("macro_iterator_next", @ptrCast(@constCast(&c_api_macro.macro_iterator_next)));
+    executor.registerSymbol("macro_iterator_peek", @ptrCast(@constCast(&c_api_macro.macro_iterator_peek)));
+    executor.registerSymbol("macro_iterator_destroy", @ptrCast(@constCast(&c_api_macro.macro_iterator_destroy)));
+
+    // Linked List Construction API
+    executor.registerSymbol("linked_list_value_create", @ptrCast(@constCast(&c_api_macro.linked_list_value_create)));
+    executor.registerSymbol("linked_list_value_cons", @ptrCast(@constCast(&c_api_macro.linked_list_value_cons)));
+    executor.registerSymbol("linked_list_value_push", @ptrCast(@constCast(&c_api_macro.linked_list_value_push)));
+    executor.registerSymbol("linked_list_value_pop", @ptrCast(@constCast(&c_api_macro.linked_list_value_pop)));
+    executor.registerSymbol("linked_list_value_is_empty", @ptrCast(@constCast(&c_api_macro.linked_list_value_is_empty)));
+    executor.registerSymbol("linked_list_value_len", @ptrCast(@constCast(&c_api_macro.linked_list_value_len)));
+    executor.registerSymbol("linked_list_to_value_list", @ptrCast(@constCast(&c_api_macro.linked_list_to_value_list)));
+    executor.registerSymbol("value_list_to_linked_list", @ptrCast(@constCast(&c_api_macro.value_list_to_linked_list)));
 }

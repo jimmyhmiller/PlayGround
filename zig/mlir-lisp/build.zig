@@ -461,6 +461,22 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the macro expansion test executable.
     const run_macro_expansion_tests = fixRpathForTest(b, macro_expansion_tests, target, mlir_lib_path);
 
+    // Creates a test executable for macro system
+    const macro_system_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/macro_system_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(macro_system_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the macro system test executable.
+    const run_macro_system_tests = fixRpathForTest(b, macro_system_tests, target, mlir_lib_path);
+
     // Creates an executable to test the printer manually
     const test_printer_exe = b.addExecutable(.{
         .name = "test_printer",
@@ -625,6 +641,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_reader_roundtrip_tests.step);
     test_step.dependOn(&run_tokenizer_tests.step);
     test_step.dependOn(&run_macro_expansion_tests.step);
+    test_step.dependOn(&run_macro_system_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

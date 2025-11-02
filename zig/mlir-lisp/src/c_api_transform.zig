@@ -49,7 +49,7 @@ const CValueType = enum(c_int) {
 
 // Transform (call @test i64) => (operation (name func.call) ...)
 // Returns null on error (C-compatible calling convention)
-export fn transformCallToOperation(allocator: ?*anyopaque, call_expr: ?*anyopaque) ?*anyopaque {
+pub export fn transformCallToOperation(allocator: ?*anyopaque, call_expr: ?*anyopaque) ?*anyopaque {
     if (allocator == null or call_expr == null) return null;
 
     // Get the list elements from (call @test i64)

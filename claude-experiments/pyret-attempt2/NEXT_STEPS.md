@@ -1,97 +1,124 @@
 # Next Steps for Pyret Parser Implementation
 
-**Last Updated:** 2025-11-01
-**Current Status:** ✅ For expressions complete! Ready for method fields.
-**Tests Passing:** 67/67 parser tests ✅ (100%), 72/81 comparison tests ✅ (88.9%)
+**Last Updated:** 2025-11-02
+**Current Status:** ✅ Method fields complete! Ready for function definitions.
+**Tests Passing:** 68/68 parser tests ✅ (100%), 73/81 comparison tests ✅ (90.1%)
 
 ---
 
-## ✅ COMPLETED - For Expressions
+## ✅ COMPLETED - Method Fields in Objects
 
 **MILESTONE ACHIEVED!** 🎉
 
-For expressions are now fully working, bringing us to 72/81 comparison tests passing (88.9%)!
+Method fields are now fully working, bringing us to 73/81 comparison tests passing (90.1%)!
 
 **What was completed:**
-1. ✅ Implemented `parse_for_expr()` - Parses for expressions with iterator and bindings
-2. ✅ Iterator expression parsing with dot access support (`lists.map2`)
-3. ✅ For-bindings with `FROM` keyword (`x from lst`)
-4. ✅ Added `ForBind` structures with proper `Bind` and value expressions
-5. ✅ Added JSON serialization for `SFor` and `ForBind`
-6. ✅ Updated location extraction for `SFor` expressions (5 locations)
-7. ✅ Added 2 comprehensive parser tests (simple, dot access)
-8. ✅ Enabled 2 comparison tests (`test_pyret_match_for_map`, `test_pyret_match_for_map2`)
+1. ✅ Implemented `parse_method_field()` - Parses method syntax in objects
+2. ✅ Method parameter parsing with `Bind` structures
+3. ✅ Correctly distinguishes `params` (type parameters) from `args` (function parameters)
+4. ✅ Optional return type annotation support (`-> ann`)
+5. ✅ Optional where clause support for tests
+6. ✅ Added JSON serialization for `SMethodField` with correct field ordering
+7. ✅ Added comprehensive parser test `test_parse_object_with_method`
+8. ✅ Enabled comparison test `test_pyret_match_object_with_method`
 
-All 72 passing comparison tests produce identical ASTs to the official Pyret parser!
+All 73 passing comparison tests produce identical ASTs to the official Pyret parser!
 
 ---
 
 ## 📋 Next Priority Tasks (IN ORDER)
 
-### 1. parse_method_field() - Method Fields in Objects ⭐⭐⭐⭐ (HIGHEST PRIORITY)
-**Why:** Required for 1 comparison test (`object_with_method`) and completes object expression support
+### 1. parse_fun_expr() - Function Definitions ⭐⭐⭐⭐ (HIGHEST PRIORITY)
+**Why:** Required for 1 comparison test (`simple_fun`) and very similar to already-implemented lambdas/methods
 
 **Grammar:**
 ```bnf
-obj-field: NAME COLON expr                  # data field
-         | REF NAME ann COLON expr          # mutable field
-         | METHOD NAME params ann COLON doc body WHERE bindings END  # method field
+fun-expr: FUN NAME fun-header (BLOCK|COLON) doc-string block where-clause END
+fun-header: ty-params args return-ann | ty-params bad-args return-ann
+ty-params: [(LANGLE|LT) comma-names (RANGLE|GT)]
+args: (PARENNOSPACE|PARENAFTERBRACE) [binding (COMMA binding)*] RPAREN
+return-ann: [THINARROW ann]
+where-clause: [WHERE block]
 ```
 
 **Examples:**
-- `{ method _plus(self, other): self.x + other.x end }`
-- `{ x: 5, method double(self): self.x * 2 end }`
+- `fun f(x): x + 1 end`
+- `fun add(a, b): a + b end`
+- `fun identity<T>(x :: T) -> T: x end`
 
-**AST Node:** `Member::SMethodField { l, name, params, ann, doc, body, blocky }`
+**AST Node:** `Expr::SFun { l, name, params, args, ann, doc, body, check_loc, check, blocky }`
 
 **Implementation Steps:**
 
-1. **Study the Member AST in** `src/ast.rs`:
+1. **Study the SFun AST in** `src/ast.rs`:
 ```rust
-Member::SMethodField {
+Expr::SFun {
     l: Loc,
-    name: String,       // Method name (e.g., "_plus", "double")
-    params: Vec<Bind>,  // Parameters including 'self'
-    ann: Ann,           // Return type annotation
-    doc: String,        // Documentation string
-    body: Box<Expr>,    // Method body (usually SBlock)
-    _check: Option<Box<Expr>>,  // Optional check block
-    blocky: bool,       // true if uses 'block' keyword
+    name: String,           // Function name (e.g., "f", "add")
+    params: Vec<Name>,      // Type parameters (empty for now, like <T>)
+    args: Vec<Bind>,        // Value parameters (e.g., x, a, b)
+    ann: Ann,               // Return type annotation
+    doc: String,            // Documentation string
+    body: Box<Expr>,        // Function body (usually SBlock)
+    check_loc: Option<Loc>, // Location of check block
+    check: Option<Box<Expr>>, // Optional check/where block
+    blocky: bool,           // true if uses 'block' keyword
 }
 ```
 
-2. **Update parse_obj_field() to handle METHOD keyword:**
+**Key insight:** This is VERY similar to `parse_method_field()` (which you just implemented) and `parse_lambda_expr()`.
+The main differences are:
+- Starts with `FUN` keyword instead of `METHOD` or `LAM`
+- Has a function name (like method fields, unlike lambdas)
+- Is an `Expr::SFun` not a `Member::SMethodField`
+- Otherwise identical structure!
+
+2. **Add FUN case to parse_prim_expr():**
+
+In `src/parser.rs`, find the `parse_prim_expr()` method and add:
+
 ```rust
-fn parse_obj_field(&mut self) -> ParseResult<Member> {
-    if self.matches(&TokenType::Method) {
-        return self.parse_method_field();
-    }
-    // ... existing ref/data field logic ...
-}
+TokenType::Fun => self.parse_fun_expr(),
 ```
 
-3. **Implement parse_method_field():**
-```rust
-fn parse_method_field(&mut self) -> ParseResult<Member> {
-    let start = self.expect(TokenType::Method)?;
+(Look at how `TokenType::Lam` is handled - do the same for `Fun`)
 
-    // Parse method name
+3. **Implement parse_fun_expr() - Copy parse_method_field() and adapt:**
+
+```rust
+fn parse_fun_expr(&mut self) -> ParseResult<Expr> {
+    let start = self.expect(TokenType::Fun)?;
+
+    // Parse function name
     let name_token = self.expect(TokenType::Name)?;
     let name = name_token.value.clone();
 
-    // Parse parameters (like lambda)
-    self.expect(TokenType::ParenSpace)?;  // or LParen
-    let params = if self.matches(&TokenType::RParen) {
+    // Parse parameters - SAME AS METHOD FIELDS
+    let paren_token = self.peek().clone();
+    match paren_token.token_type {
+        TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace => {
+            self.advance();
+        }
+        _ => {
+            return Err(ParseError::expected(TokenType::LParen, paren_token));
+        }
+    }
+
+    let args = if self.matches(&TokenType::RParen) {
         Vec::new()
     } else {
         self.parse_comma_list(|p| p.parse_bind())?
     };
+
+    // params is for type parameters (e.g., <T>), not function parameters
+    let params: Vec<Name> = Vec::new();
+
     self.expect(TokenType::RParen)?;
 
-    // Optional type annotation
-    let ann = if self.matches(&TokenType::ColonColon) {
-        self.advance();
-        self.parse_ann()?  // Parse type annotation
+    // Optional return type annotation (-> ann)
+    let ann = if self.matches(&TokenType::ThinArrow) {
+        self.expect(TokenType::ThinArrow)?;
+        self.parse_ann()?
     } else {
         Ann::ABlank
     };
@@ -105,219 +132,221 @@ fn parse_method_field(&mut self) -> ParseResult<Member> {
         false
     };
 
-    // Parse doc string (usually empty)
     let doc = String::new();
 
-    // Parse method body (statements until END)
+    // Parse function body (statements until END or WHERE)
     let mut body_stmts = Vec::new();
-    while !self.matches(&TokenType::End) && !self.is_at_end() {
+    while !self.matches(&TokenType::End)
+        && !self.matches(&TokenType::Where)
+        && !self.is_at_end()
+    {
         let stmt = self.parse_expr()?;
         body_stmts.push(Box::new(stmt));
     }
+
+    // Parse where clause if present
+    let check = if self.matches(&TokenType::Where) {
+        self.advance();
+        let mut where_stmts = Vec::new();
+        while !self.matches(&TokenType::End) && !self.is_at_end() {
+            let stmt = self.parse_expr()?;
+            where_stmts.push(Box::new(stmt));
+        }
+        Some(Box::new(Expr::SBlock {
+            l: self.current_loc(),
+            stmts: where_stmts,
+        }))
+    } else {
+        None
+    };
+
+    let end = self.expect(TokenType::End)?;
 
     let body = Box::new(Expr::SBlock {
         l: self.current_loc(),
         stmts: body_stmts,
     });
 
-    let end = self.expect(TokenType::End)?;
+    let check_loc = check.as_ref().map(|c| match c.as_ref() {
+        Expr::SBlock { l, .. } => l.clone(),
+        _ => self.current_loc(),
+    });
 
-    Ok(Member::SMethodField {
+    Ok(Expr::SFun {  // Note: Expr::SFun not Member::SMethodField!
         l: self.make_loc(&start, &end),
         name,
         params,
+        args,
         ann,
         doc,
         body,
-        _check: None,
+        check_loc,
+        check,
         blocky,
     })
 }
 ```
 
 4. **Add JSON serialization in to_pyret_json.rs:**
+
+Find the `expr_to_pyret_json()` function and add `SFun` case (look at `SLam` for reference):
+
 ```rust
-Member::SMethodField { name, params, ann, doc, body, blocky, .. } => {
+Expr::SFun { name, params, args, ann, doc, body, check, check_loc, blocky, .. } => {
     json!({
-        "type": "s-method-field",
+        "type": "s-fun",
         "name": name,
-        "params": params.iter().map(|p| bind_to_pyret_json(p)).collect::<Vec<_>>(),
+        "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
+        "args": args.iter().map(|a| bind_to_pyret_json(a)).collect::<Vec<_>>(),
         "ann": ann_to_pyret_json(ann),
         "doc": doc,
         "body": expr_to_pyret_json(body),
-        "check": null,  // _check field
+        "check": check.as_ref().map(|c| expr_to_pyret_json(c)),
+        "check-loc": check_loc,
         "blocky": blocky
     })
 }
 ```
 
-**Estimated Time:** 2-3 hours
+5. **Update location extraction for SFun:**
+
+Search for all the `match` statements that extract locations (search for `Expr::SLam { l, .. } => l.clone()`) and add:
+
+```rust
+Expr::SFun { l, .. } => l.clone(),
+```
+
+right after each `SLam` case.
+
+6. **Add parser tests:**
+
+```rust
+#[test]
+fn test_parse_simple_function() {
+    let expr = parse_expr("fun f(x): x + 1 end").expect("Failed to parse function");
+
+    match expr {
+        Expr::SFun { name, args, body, .. } => {
+            assert_eq!(name, "f");
+            assert_eq!(args.len(), 1);
+            // Check body is a block with one statement
+            match body.as_ref() {
+                Expr::SBlock { stmts, .. } => {
+                    assert_eq!(stmts.len(), 1);
+                }
+                _ => panic!("Expected SBlock for function body"),
+            }
+        }
+        _ => panic!("Expected SFun, got {:?}", expr),
+    }
+}
+```
+
+7. **Enable comparison test:**
+
+Remove `#[ignore]` from `test_pyret_match_simple_fun` in `tests/comparison_tests.rs`
+
+8. **Run comparison to debug differences:**
+
+```bash
+./compare_parsers.sh "fun f(x): x + 1 end"
+```
+
+**Estimated Time:** 2-3 hours (mostly copy-paste from method fields!)
 
 ---
 
-### 2. parse_fun_expr() - Function Definitions ⭐⭐⭐⭐ (HIGH PRIORITY)
-**Why:** Required for 1 comparison test (`simple_fun`)
+### 2. parse_data_expr() - Data Definitions ⭐⭐
+**Why:** Required for 1 comparison test (`simple_data`)
+
+**Example:** `data Box: | box(ref v) end`
+
+**Estimated Time:** 3-4 hours
 
 ---
 
-### 4. Fix compare_parsers.sh ⭐⭐⭐⭐⭐
-**Why:** Remove the stmts[0] hack and compare full programs
+### 3. parse_cases_expr() - Cases Expressions ⭐⭐⭐
+**Why:** Required for 1 comparison test (`simple_cases`)
 
-**Implementation Steps:**
+**Example:** `cases (Either) e: | left(v) => v | right(v) => v end`
 
-1. **Remove the extraction logic** (lines 32-42):
-```bash
-# DELETE THIS SECTION:
-# Extract just the expression from Pyret's output (first statement in body)
-python3 -c "
-import json, sys
-with open('$PYRET_JSON') as f:
-    data = json.load(f)
-if 'body' in data and 'stmts' in data['body'] and len(data['body']['stmts']) > 0:
-    with open('$PYRET_EXPR', 'w') as out:
-        json.dump(data['body']['stmts'][0], out, indent=2)
-else:
-    print('ERROR: No expression found in Pyret output', file=sys.stderr)
-    sys.exit(1)
-"
-```
+**Estimated Time:** 4-5 hours
 
-2. **Compare full programs directly:**
-```bash
-# Parse with Pyret's official parser
-echo "=== Pyret Parser ==="
-cd /Users/jimmyhmiller/Documents/Code/open-source/pyret-lang
-node ast-to-json.jarr "$TEMP_FILE" "$PYRET_JSON" 2>&1 | grep "JSON written" || true
-cat "$PYRET_JSON"
+---
 
-# Parse with our Rust parser
-echo "=== Rust Parser ==="
-cd /Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/pyret-attempt2
-cargo run --bin to_pyret_json "$TEMP_FILE" 2>/dev/null > "$RUST_JSON"
-cat "$RUST_JSON"
+### 4. parse_when_expr() - When Expressions ⭐⭐
+**Why:** Required for 1 comparison test (`simple_when`)
 
-# Compare the two JSON outputs
-echo "=== Comparison ==="
-python3 << 'EOF'
-import json
-import sys
+**Example:** `when true: print("yes") end`
 
-with open('/tmp/pyret_output.json') as f:
-    pyret = json.load(f)
+**Estimated Time:** 1-2 hours
 
-with open('/tmp/rust_output.json') as f:
-    rust = json.load(f)
+---
 
-# Compare full programs
-if normalize_json(pyret) == normalize_json(rust):
-    print("✅ IDENTICAL")
-    sys.exit(0)
-else:
-    print("❌ DIFFERENT")
-    # Print diffs
-    sys.exit(1)
-EOF
-```
+### 5. parse_assign_expr() - Assignment Expressions ⭐⭐
+**Why:** Required for 1 comparison test (`simple_assign`)
 
-**Estimated Time:** 30 minutes
+**Example:** `x := 5`
+
+**Estimated Time:** 1-2 hours
 
 ---
 
 ## 🧪 Testing Strategy
 
-1. **Start simple** - Test with single-expression programs:
-   - `42`
-   - `2 + 3`
-   - `f(x)`
+When implementing a new feature:
 
-2. **Add multi-statement programs:**
-   - `1\n2\n3` (three expressions)
-   - Mixed statements
-
-3. **Run comparison tests:**
-```bash
-./compare_parsers.sh "42"
-./compare_parsers.sh "2 + 3"
-```
-
-4. **Update comparison_tests.rs** to stop using expression-only parsing
+1. **Read the comparison test** to see what syntax is expected
+2. **Check the Pyret grammar** in `/Users/jimmyhmiller/Documents/Code/open-source/pyret-lang/src/js/base/pyret-grammar.bnf`
+3. **Look at similar features** already implemented (lambdas, methods, etc.)
+4. **Implement parsing** - copy-paste similar code and adapt
+5. **Add JSON serialization** - look at similar AST nodes
+6. **Update location extraction** - add new Expr types to all match statements
+7. **Add parser tests** - test the basic functionality
+8. **Enable comparison test** - remove `#[ignore]`
+9. **Run comparison** - `./compare_parsers.sh "your code here"`
+10. **Debug differences** - adjust JSON field names/order to match
 
 ---
 
-## 📝 Key Points
+## 📝 Key Insights
 
-1. **parse_block() vs parse_block_expr():**
-   - `parse_block_expr()` parses `block: ... end` (expression form)
-   - `parse_block()` parses statement sequences (for program bodies)
-   - These are DIFFERENT!
+**Similarities between features:**
+- `SFun`, `SLam`, and `SMethodField` are almost identical
+- All use `params` (type parameters) and `args` (value parameters)
+- All support optional return types, doc strings, where clauses
+- Copy-paste is your friend!
 
-2. **Statement termination:**
-   - Need to understand when one statement ends
-   - Likely newline-based (check Pyret grammar)
-   - May need to handle implicit statement separators
-
-3. **Keep it simple first:**
-   - Start with single-expression programs
-   - Add multi-statement support incrementally
-   - Don't implement all statement types at once
-
-4. **The goal:**
-   - Parse complete `.arr` files
-   - Compare full Program ASTs
-   - Remove the stmts[0] hack forever
-
----
-
-## ⏭️ After Program Parsing Works
-
-Once parse_program() and parse_block() are working:
-
-1. **For expressions** - List comprehensions
-2. **Let bindings** - Variable bindings
-3. **Function definitions** - Top-level functions
-4. **Data definitions** - Custom types
-5. **Import/provide statements** - Module system
-
-But FIRST: **GET PROGRAM PARSING WORKING!**
-
----
-
-**Estimated Total Time:** 4-5 hours
-**Priority:** 🚨 CRITICAL - Drop everything else and do this first!
+**Important patterns:**
+- `params` = type parameters (like `<T>`) - always empty for now
+- `args` = value parameters (like `x, y, z`)
+- `check` / `check_loc` = where clause for tests
+- `blocky` = true if uses `block:` instead of `:`
 
 ---
 
 ## 🎯 Quick Summary for Next Session
 
 **Current Status:**
-- ✅ 72/81 comparison tests passing (88.9%)
-- ✅ For expressions fully working
-- ✅ All control flow and statement parsing infrastructure in place
+- ✅ 73/81 comparison tests passing (90.1%)
+- ✅ Method fields complete - all ASTs match Pyret parser
+- ✅ 68/68 parser tests passing (100%)
 
-**Next Feature to Implement: METHOD FIELDS IN OBJECTS**
+**Next Feature: FUNCTION DEFINITIONS**
 
 **What to do:**
-1. Check the ignored comparison tests to see what features are needed
-2. Look at `test_pyret_match_object_with_method`
-3. Study `Member::SMethodField` AST structure in `src/ast.rs`
-4. Update `parse_obj_field()` to handle `METHOD` keyword
-5. Implement `parse_method_field()` (similar to lambda parsing)
-6. Add JSON serialization in `to_pyret_json.rs`
-7. Add parser tests
-8. Enable comparison test
+1. Look at `parse_method_field()` in `src/parser.rs:1384-1509`
+2. Copy it and rename to `parse_fun_expr()`
+3. Change `TokenType::Method` → `TokenType::Fun`
+4. Change return type `Member::SMethodField` → `Expr::SFun`
+5. Add `TokenType::Fun => self.parse_fun_expr()` to `parse_prim_expr()`
+6. Add JSON serialization (copy from `SLam`, adapt for `SFun`)
+7. Add location extraction (`Expr::SFun { l, .. } => l.clone()`)
+8. Add parser test
+9. Enable comparison test (remove `#[ignore]`)
+10. Run `./compare_parsers.sh "fun f(x): x + 1 end"`
 
-**Reference:**
-- Grammar: `/Users/jimmyhmiller/Documents/Code/open-source/pyret-lang/src/js/base/pyret-grammar.bnf`
-- Look for: `obj-field` and `method-field` in the grammar
-- Similar to: lambda expressions (already implemented)
+**Estimated Time:** 2-3 hours (mostly copy-paste!)
 
-**Estimated Time:** 2-3 hours for full implementation
-
-**After that:**
-- Function definitions (`fun f(x): ... end`) - 1 test waiting
-- Cases expressions (`cases (Type) expr: ... end`) - 1 test waiting
-- Data definitions (`data Point: point(x, y) end`) - 1 test waiting
-- When expressions (`when expr: ... end`) - 1 test waiting
-
-**We're at 88.9% test coverage!** 🚀 Only 9 more tests to go!
+**We're at 90.1% completion!** Only 8 more features to go! 🚀
 

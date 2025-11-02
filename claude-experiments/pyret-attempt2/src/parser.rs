@@ -1362,13 +1362,7 @@ impl Parser {
             }
             TokenType::Method => {
                 // Method field: METHOD key fun-header (BLOCK|COLON) doc-string block where-clause END
-                // For now, we'll implement a simplified version that just parses data fields
-                // Full method parsing requires implementing fun-header, doc-string, block, etc.
-                return Err(ParseError::invalid(
-                    "object field",
-                    &token,
-                    "Method fields not yet implemented",
-                ));
+                self.parse_method_field()
             }
             TokenType::Name => {
                 // Data field: key COLON binop-expr
@@ -1385,6 +1379,118 @@ impl Parser {
             }
             _ => Err(ParseError::unexpected(token)),
         }
+    }
+
+    /// method-field: METHOD key fun-header (BLOCK|COLON) doc-string block where-clause END
+    /// Parse a method field in an object
+    /// Example: method _plus(self, other): self.arr end
+    fn parse_method_field(&mut self) -> ParseResult<Member> {
+        let start = self.expect(TokenType::Method)?;
+
+        // Parse method name
+        let name_token = self.expect(TokenType::Name)?;
+        let name = name_token.value.clone();
+
+        // Parse fun-header: ty-params args return-ann
+        // For simplicity, we skip ty-params (type parameters) for now
+
+        // Expect opening paren (can be LParen or ParenSpace or ParenNoSpace)
+        let paren_token = self.peek().clone();
+        match paren_token.token_type {
+            TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace => {
+                self.advance();
+            }
+            _ => {
+                return Err(ParseError::expected(TokenType::LParen, paren_token));
+            }
+        }
+
+        // Parse parameters (comma-separated bindings)
+        let args = if self.matches(&TokenType::RParen) {
+            Vec::new()
+        } else {
+            self.parse_comma_list(|p| p.parse_bind())?
+        };
+
+        // params is for type parameters (e.g., <T, U>), not function parameters
+        // We don't parse type parameters yet, so this is always empty
+        let params: Vec<Name> = Vec::new();
+
+        // Expect closing paren
+        self.expect(TokenType::RParen)?;
+
+        // Optional type annotation: -> ann
+        let ann = if self.matches(&TokenType::ThinArrow) {
+            self.expect(TokenType::ThinArrow)?;
+            self.parse_ann()?
+        } else {
+            Ann::ABlank
+        };
+
+        // Parse body separator (COLON or BLOCK)
+        let blocky = if self.matches(&TokenType::Block) {
+            self.advance();
+            true
+        } else {
+            self.expect(TokenType::Colon)?;
+            false
+        };
+
+        // Parse doc string (usually empty, skip for now)
+        let doc = String::new();
+
+        // Parse method body (statements until END or WHERE)
+        let mut body_stmts = Vec::new();
+        while !self.matches(&TokenType::End)
+            && !self.matches(&TokenType::Where)
+            && !self.is_at_end()
+        {
+            let stmt = self.parse_expr()?;
+            body_stmts.push(Box::new(stmt));
+        }
+
+        // Skip where clause if present
+        let check = if self.matches(&TokenType::Where) {
+            self.advance();
+            // Parse where clause body
+            let mut where_stmts = Vec::new();
+            while !self.matches(&TokenType::End) && !self.is_at_end() {
+                let stmt = self.parse_expr()?;
+                where_stmts.push(Box::new(stmt));
+            }
+            Some(Box::new(Expr::SBlock {
+                l: self.current_loc(),
+                stmts: where_stmts,
+            }))
+        } else {
+            None
+        };
+
+        let end = self.expect(TokenType::End)?;
+
+        // Wrap body in SBlock
+        let body = Box::new(Expr::SBlock {
+            l: self.current_loc(),
+            stmts: body_stmts,
+        });
+
+        let check_loc = check.as_ref().map(|c| match c.as_ref() {
+            Expr::SBlock { l, .. } => l.clone(),
+            _ => self.current_loc(),
+        });
+
+        Ok(Member::SMethodField {
+            l: self.make_loc(&start, &end),
+            name,
+            params,
+            args,
+            ann,
+            doc,
+            body,
+            check_loc,
+            check,
+            blocky,
+        })
     }
 
     /// app-expr: expr PARENNOSPACE (expr COMMA)* RPAREN

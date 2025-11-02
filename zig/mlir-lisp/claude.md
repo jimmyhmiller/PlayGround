@@ -7,6 +7,73 @@ We are building a low-level, statically typed lisp. Our lisp is a bit different.
 
 * see grammar.md in docs for details on what the language looks like
 
+# Important Zig 0.15.1 Notes
+
+## ArrayList Usage
+
+**CRITICAL:** In Zig 0.15.1, `ArrayList` does NOT have an `.init()` method and does NOT store the allocator as a field.
+
+### Correct Pattern
+
+```zig
+// Initialize with empty struct literal
+var list = std.ArrayList(i32){};
+defer list.deinit(allocator);
+
+// Pass allocator to EVERY method call
+try list.append(allocator, 42);
+try list.appendSlice(allocator, &[_]i32{1, 2, 3});
+try list.resize(allocator, 10);
+try list.ensureTotalCapacity(allocator, 100);
+
+// Converting to owned slice
+const owned = try list.toOwnedSlice(allocator);
+defer allocator.free(owned);
+```
+
+### WRONG Patterns (DO NOT USE)
+
+```zig
+// WRONG: No .init() method exists
+var list = std.ArrayList(i32).init(allocator); // COMPILE ERROR
+
+// WRONG: No allocator field exists
+var list = std.ArrayList(i32){};
+list.allocator = allocator; // COMPILE ERROR
+
+// WRONG: Methods require allocator parameter
+try list.append(42); // COMPILE ERROR - missing allocator
+```
+
+### Common Operations
+
+```zig
+const allocator = std.testing.allocator;
+
+// Create
+var list = std.ArrayList(i32){};
+defer list.deinit(allocator);
+
+// Add items
+try list.append(allocator, 10);
+try list.appendSlice(allocator, &[_]i32{20, 30});
+
+// Access
+const len = list.items.len;
+const first = list.items[0];
+
+// Clear
+list.clearRetainingCapacity(); // keeps memory allocated
+list.clearAndFree(allocator);  // frees memory
+
+// Convert to slice
+const owned = try list.toOwnedSlice(allocator);
+defer allocator.free(owned);
+// Note: Don't call deinit after toOwnedSlice
+```
+
+See `/Users/jimmyhmiller/Documents/Code/PlayGround/zig/mlir-lisp/test/arraylist_usage_test.zig` for comprehensive examples and patterns.
+
 # Tools
 
 

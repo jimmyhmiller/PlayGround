@@ -1077,6 +1077,65 @@ fn test_parse_object_trailing_comma() {
     }
 }
 
+#[test]
+fn test_parse_object_with_method() {
+    let expr = parse_expr("{ method _plus(self, other): self.arr end }").expect("Failed to parse object with method");
+
+    match expr {
+        Expr::SObj { fields, .. } => {
+            assert_eq!(fields.len(), 1, "Object should have 1 method field");
+
+            match &fields[0] {
+                Member::SMethodField { name, args, body, .. } => {
+                    assert_eq!(name, "_plus", "Method name should be _plus");
+                    assert_eq!(args.len(), 2, "Method should have 2 parameters");
+
+                    // Check parameter names
+                    match &args[0] {
+                        Bind::SBind { id, .. } => match id {
+                            Name::SName { s, .. } => assert_eq!(s, "self"),
+                            _ => panic!("Expected SName for first parameter"),
+                        },
+                        _ => panic!("Expected SBind for first parameter"),
+                    }
+
+                    match &args[1] {
+                        Bind::SBind { id, .. } => match id {
+                            Name::SName { s, .. } => assert_eq!(s, "other"),
+                            _ => panic!("Expected SName for second parameter"),
+                        },
+                        _ => panic!("Expected SBind for second parameter"),
+                    }
+
+                    // Check body is a block with one statement
+                    match body.as_ref() {
+                        Expr::SBlock { stmts, .. } => {
+                            assert_eq!(stmts.len(), 1, "Method body should have 1 statement");
+                            // The statement should be a dot access (self.arr)
+                            match stmts[0].as_ref() {
+                                Expr::SDot { obj, field, .. } => {
+                                    match obj.as_ref() {
+                                        Expr::SId { id, .. } => match id {
+                                            Name::SName { s, .. } => assert_eq!(s, "self"),
+                                            _ => panic!("Expected SName for object"),
+                                        },
+                                        _ => panic!("Expected SId for object"),
+                                    }
+                                    assert_eq!(field, "arr");
+                                }
+                                _ => panic!("Expected SDot for method body statement"),
+                            }
+                        }
+                        _ => panic!("Expected SBlock for method body"),
+                    }
+                }
+                _ => panic!("Expected SMethodField, got {:?}", fields[0]),
+            }
+        }
+        _ => panic!("Expected SObj, got {:?}", expr),
+    }
+}
+
 // ============================================================================
 // Bug Fix Tests - Trailing Token Detection
 // ============================================================================

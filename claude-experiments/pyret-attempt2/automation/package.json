@@ -1,0 +1,28 @@
+{
+  "name": "pyret-parser-automation",
+  "version": "1.0.0",
+  "description": "Automated parser development workflow using Claude Code SDK",
+  "type": "module",
+  "scripts": {
+    "start": "tsx auto-parser-dev.ts",
+    "dev": "tsx auto-parser-dev.ts",
+    "build": "tsc"
+  },
+  "keywords": [
+    "automation",
+    "parser",
+    "pyret",
+    "claude"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.1",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.19",
+    "tsx": "^4.7.1",
+    "typescript": "^5.3.3"
+  }
+}
