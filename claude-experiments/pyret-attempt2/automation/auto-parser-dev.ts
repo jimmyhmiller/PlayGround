@@ -3,13 +3,8 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { execSync } from 'child_process';
 import { join } from 'path';
-import * as dotenv from 'dotenv';
-
-// Load environment variables
-dotenv.config();
 
 // Configuration
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const MAX_ITERATIONS = parseInt(process.env.MAX_ITERATIONS || '30');
 const PROJECT_ROOT = join(process.cwd(), '..');
 const DRY_RUN = process.argv.includes('--dry-run') || process.argv.includes('-d');
@@ -41,13 +36,6 @@ interface IterationResult {
   after: TestResults;
   success: boolean;
   message: string;
-}
-
-// Validate setup (skip in dry-run mode)
-if (!DRY_RUN && !ANTHROPIC_API_KEY) {
-  console.error(`${colors.red}Error: ANTHROPIC_API_KEY not found in environment${colors.reset}`);
-  console.error('Please copy .env.example to .env and add your API key');
-  process.exit(1);
 }
 
 // Handle Ctrl+C gracefully

@@ -1406,7 +1406,6 @@ fn test_parse_nested_blocks() {
 // NOTE: Let bindings only work in blocks, not as standalone expressions
 
 #[test]
-#[ignore] // Let bindings only work in blocks
 fn test_parse_simple_let() {
     // x = 5
     let expr = parse_expr("x = 5").expect("Failed to parse");
@@ -1482,7 +1481,6 @@ fn test_parse_var_binding() {
 }
 
 #[test]
-#[ignore] // Let bindings only work in blocks
 fn test_parse_let_with_expression() {
     // y = 2 + 3
     let expr = parse_expr("y = 2 + 3").expect("Failed to parse");
@@ -1505,7 +1503,7 @@ fn test_parse_let_with_expression() {
 
                     // Value should be SOp (2 + 3)
                     match **value {
-                        Expr::SOp { ref op, .. } => assert_eq!(op, "+"),
+                        Expr::SOp { ref op, .. } => assert_eq!(op, "op+"),
                         _ => panic!("Expected SOp"),
                     }
                 }

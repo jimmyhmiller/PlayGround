@@ -2,8 +2,6 @@
 
 This directory contains an automated workflow script that uses the **Claude Agent SDK** to iteratively develop the Pyret parser until all tests pass.
 
-The script uses your Anthropic API key (which will bill against your existing subscription) to access Claude via the Agent SDK.
-
 ## 🎯 What It Does
 
 The automation script implements your development loop:
@@ -27,20 +25,6 @@ cd automation
 npm install
 ```
 
-### Configuration
-
-1. Copy the example environment file:
-```bash
-cp .env.example .env
-```
-
-2. Edit `.env` and add your Anthropic API key:
-```bash
-ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
-```
-
-Get your API key from: https://console.anthropic.com/settings/keys
-
 ### Running
 
 ```bash
@@ -54,17 +38,11 @@ npx tsx auto-parser-dev.ts
 
 ## ⚙️ Configuration Options
 
-Edit `.env` to customize:
+Set environment variables to customize:
 
 ```bash
-# Required: Your Anthropic API key
-ANTHROPIC_API_KEY=sk-ant-api03-...
-
 # Optional: Maximum iterations before stopping (default: 30)
-MAX_ITERATIONS=30
-
-# Optional: Claude model to use (default: claude-sonnet-4-5-20250929)
-CLAUDE_MODEL=claude-sonnet-4-5-20250929
+MAX_ITERATIONS=30 npm start
 ```
 
 ## 📊 How It Works
@@ -207,15 +185,9 @@ Iteration 2/30
 
 ## 🐛 Troubleshooting
 
-### "ANTHROPIC_API_KEY not found"
+### Dry Run Mode
 
-Make sure you:
-1. Created `.env` file (copy from `.env.example`)
-2. Added your API key to `.env`
-3. API key starts with `sk-ant-api03-`
-4. The API key will use your existing Anthropic subscription
-
-**Note:** Run with `--dry-run` flag to test without using API credits:
+Test the script without making actual API calls:
 ```bash
 npm start -- --dry-run
 ```
@@ -235,18 +207,18 @@ Tests that were passing started failing:
 3. Check git log: `git log --oneline`
 4. Revert if needed: `git reset --hard HEAD~1`
 
-### High API Costs
+### Limiting Iterations
 
-Each iteration makes 2-3 API calls to Claude. To reduce costs:
-- Decrease `MAX_ITERATIONS` in `.env`
-- Run manually instead: ask Claude directly
-- Monitor usage at https://console.anthropic.com/
+To reduce the number of iterations:
+```bash
+MAX_ITERATIONS=10 npm start
+```
 
 ## 📚 Architecture
 
 ```
 auto-parser-dev.ts
-├── Configuration Loading (.env)
+├── Configuration Loading
 ├── Helper Functions
 │   ├── runCommand() - Execute shell commands
 │   ├── parseTestResults() - Parse cargo test output (handles multiple test files)
