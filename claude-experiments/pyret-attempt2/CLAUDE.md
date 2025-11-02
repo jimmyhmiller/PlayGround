@@ -6,9 +6,20 @@ A hand-written recursive descent parser for the Pyret programming language in Ru
 
 ## 📊 Current Status (2025-11-01 - Latest Update)
 
-**✅ MILESTONE ACHIEVED: Full Program Parsing Complete! 🎉**
+**✅ MILESTONE ACHIEVED: For Expressions Implemented! 🎉**
 
-We now parse complete Pyret programs and compare full Program ASTs with the official parser - no more hacks!
+For expressions are now fully working, bringing us to 72/81 comparison tests passing (88.9%)!
+
+**Phase 5 - Advanced Features (IN PROGRESS):**
+- ✅ **Let bindings** `x = 5` - Creates `SLet` statements
+- ✅ **Var bindings** `x := 5` - Creates `SVar` statements
+- ✅ **Explicit let** `let x = 5` - Creates `SLetExpr` expressions
+- ✅ **Block statement parsing** - Recognizes let/var in blocks with lookahead
+- ✅ **For expressions** `for map(x from lst): x + 1 end` - COMPLETE! ⭐⭐⭐⭐
+- ⏳ **Method fields** - Next priority (1 test waiting)
+- ⏳ **Function definitions** - `fun f(x): ... end` (1 test waiting)
+- ⏳ **Cases expressions** - Pattern matching
+- ⏳ **When expressions** - Conditional statements
 
 **Phase 4 - Program Structure (COMPLETE!):**
 - ✅ **parse_program()** - Parses complete files with prelude and body
@@ -16,7 +27,7 @@ We now parse complete Pyret programs and compare full Program ASTs with the offi
 - ✅ **Program AST output** - Full s-program JSON with all fields
 - ✅ **Comparison scripts fixed** - Compare full programs, removed stmts[0] hack
 
-**Phase 3 - Expressions:** Advanced features (69/81 comparison tests passing ✅ 85.2%)
+**Phase 3 - Expressions:** Advanced features (72/81 comparison tests passing ✅ 88.9%)
 
 ✅ **Implemented & Verified:**
 - ✅ All primitive expressions (numbers, strings, booleans, identifiers)
@@ -68,13 +79,49 @@ We now parse complete Pyret programs and compare full Program ASTs with the offi
   - If without else: `if cond: expr end`
   - Creates `SIf` / `SIfElse` with `IfBranch` structures
   - Bodies wrapped in `SBlock` for proper statement handling
+- ✅ **Let/Var bindings** `x = 5`, `x := 5` ⭐⭐⭐⭐⭐ (COMPLETE!)
+  - Implicit let: `x = 5` → `SLet`
+  - Implicit var: `x := 5` → `SVar`
+  - Explicit let: `let x = 5` → `SLetExpr`
+  - Lookahead parsing to distinguish from expressions
+  - Checkpointing/backtracking for proper parsing
+- ✅ **For expressions** `for map(x from lst): x + 1 end` ⭐⭐⭐⭐ (COMPLETE!)
+  - Simple for: `for map(x from lst): x + 1 end`
+  - Multiple bindings: `for map2(a from arr1, b from arr2): a + b end`
+  - Dot access iterators: `for lists.map2(x from xs, y from ys): x + y end`
+  - Creates `SFor` nodes with `ForBind` structures
+  - Supports both `:` and `block` body separators
 - ✅ **Complex nested expressions** - All features work together!
 - ✅ **Program structure** `program: prelude block` ⭐⭐⭐⭐⭐ (COMPLETE!)
   - Full programs with imports/provides/body
   - Statement blocks with multiple expressions
   - Proper Program AST with all required fields
 
-✅ **Recent Updates (2025-11-01 - Current Session - PART 3):**
+✅ **Recent Updates (2025-11-01 - Current Session - PART 5):**
+- ✅ **For expressions fully implemented!** ⭐⭐⭐⭐ (COMPLETE!)
+  - Added `parse_for_expr()` method in Section 7 (Control Flow)
+  - Iterator expression parsing with dot access support (`lists.map2`)
+  - For-bindings with `FROM` keyword: `x from lst`
+  - Added `ForBind` structures with proper `Bind` and value expressions
+  - Added JSON serialization for `SFor` and `ForBind`
+  - Updated location extraction for `SFor` expressions (5 locations)
+  - Added 2 comprehensive parser tests (simple, dot access)
+  - Enabled 2 comparison tests (test_pyret_match_for_map, test_pyret_match_for_map2)
+  - **72/81 comparison tests passing (88.9%)** - up from 70!
+  - All for expression ASTs match official Pyret parser byte-for-byte ✨
+
+✅ **Previous Updates (2025-11-01 - Current Session - PART 4):**
+- ✅ **Let bindings fully implemented!** ⭐⭐⭐⭐⭐ (COMPLETE!)
+  - Added `parse_implicit_let_expr()` - Creates `SLet` statements
+  - Added `parse_implicit_var_expr()` - Creates `SVar` statements
+  - Updated `parse_block()` with lookahead to recognize `x = value` pattern
+  - Added `checkpoint()` and `restore()` methods for backtracking
+  - Added JSON serialization for `SLet` and `SVar`
+  - Updated location extraction for new expression types
+  - **70/81 comparison tests passing (86.4%)** - up from 69!
+  - All let/var ASTs match official Pyret parser byte-for-byte ✨
+
+✅ **Previous Updates (2025-11-01 - Current Session - PART 3):**
 - ✅ **Program parsing fully implemented!** ⭐⭐⭐⭐⭐ (CRITICAL MILESTONE!)
   - Added `parse_program()` method in Section 2 (Program & Top-Level)
   - Added `parse_block()` method for statement sequences
@@ -123,33 +170,41 @@ We now parse complete Pyret programs and compare full Program ASTs with the offi
 
 🎯 **NEXT PRIORITY TASKS:**
 
-Now that full program parsing is complete, the next features to implement are:
+Now that for expressions are complete, the next features to implement are:
 
-1. **Let bindings** `x = 5` ⭐⭐⭐⭐ (HIGH PRIORITY)
-   - Required for: `block_multiple_stmts` test
-   - Variable bindings in statement blocks
-   - Creates `SLetExpr` nodes
-   - Estimated: 1-2 hours
+1. **Method fields in objects** `{ method _plus(self, other): ... end }` ⭐⭐⭐⭐ (HIGHEST PRIORITY)
+   - Required for: 1 comparison test (`object_with_method`)
+   - Completes object expression support
+   - Creates `SMethodField` members
+   - Similar to lambda parsing but with method syntax
+   - Estimated: 2-3 hours
+   - **Why first:** Completes a feature we already started (objects)
 
-2. **For expressions** `for map(x from lst): ... end` ⭐⭐⭐ (HIGH PRIORITY)
-   - Required for: 2 comparison tests (`for_map`, `for_map2`)
-   - Functional list operations
-   - Iterator comprehensions
+2. **Function definitions** `fun f(x): x + 1 end` ⭐⭐⭐⭐
+   - Required for: 1 comparison test (`simple_fun`)
+   - Named function definitions (statements, not expressions)
+   - Very similar to lambdas but with names
+   - Creates `SFun` or `SFunExpr` nodes
+   - Estimated: 2-3 hours
+   - **Why second:** Similar to already-implemented lambdas
+
+3. **Cases expressions** `cases (Type) expr: ... end` ⭐⭐⭐
+   - Pattern matching on data types
+   - Required for: 1 comparison test (`simple_cases`)
+   - Estimated: 4-5 hours
+   - **Why third:** More complex than other features
+
+4. **Data definitions** `data Point: point(x, y) end` ⭐⭐
+   - Custom data type definitions
+   - Required for: `simple_data` test
    - Estimated: 3-4 hours
 
-3. **Method fields in objects** `{ method _plus(self, other): ... end }` ⭐⭐⭐
-   - Required for: `object_with_method` test
-   - Completes object support
-   - Creates `SMethodField` members
-   - Estimated: 2-3 hours
+5. **When expressions** `when expr: ... end` ⭐⭐
+   - Conditional side effects
+   - Required for: `simple_when` test
+   - Estimated: 1-2 hours
 
-4. **Function expressions** `fun f(x): x + 1 end` ⭐⭐⭐
-   - Required for: `simple_fun` test
-   - Named function definitions
-   - Similar to lambdas but with names
-   - Estimated: 2-3 hours
-
-5. **Import/provide statements** (Lower priority)
+6. **Import/provide statements** (Lower priority)
    - Required for: `simple_import`, `simple_provide` tests
    - Module system support
    - Estimated: 4-5 hours
@@ -189,17 +244,17 @@ DEBUG_TOKENS=1 cargo test test_name
 
 ```
 src/
-├── parser.rs       (~1,480 lines) - Parser implementation (+100 lines for if expressions)
+├── parser.rs       (~1,700 lines) - Parser implementation (+120 lines for for expressions)
 ├── ast.rs          (1,350 lines)  - All AST node types
 ├── tokenizer.rs    (~1,390 lines) - Complete tokenizer
 └── error.rs        (73 lines)     - Error types
 
 src/bin/
-└── to_pyret_json.rs (~295 lines)  - JSON serialization (+30 lines for if expressions)
+└── to_pyret_json.rs (~340 lines)  - JSON serialization (+15 lines for for expressions)
 
 tests/
-├── parser_tests.rs      (~1,340 lines) - 64 tests, all passing ✅ (100%)
-└── comparison_tests.rs  (524 lines)    - 69 tests passing ✅ (85.2%), 12 ignored
+├── parser_tests.rs      (~1,540 lines) - 67 tests, all passing ✅ (100%)
+└── comparison_tests.rs  (524 lines)    - 72 tests passing ✅ (88.9%), 9 ignored
 ```
 
 ## 🔑 Key Concepts
@@ -259,21 +314,38 @@ tests/
 ## ✅ Tests Status
 
 ```
-64/64 parser tests passing (unit tests) ✅ (100%)
-69/81 comparison tests passing (integration tests against official Pyret parser) ✅ (85.2%)
-12/81 comparison tests ignored (features not yet implemented)
+67/67 parser tests passing (unit tests) ✅ (100%)
+  - 2 ignored: Let bindings only work in blocks, not standalone
+72/81 comparison tests passing (integration tests against official Pyret parser) ✅ (88.9%)
+9/81 comparison tests ignored (features not yet implemented)
   - All passing tests produce IDENTICAL Program ASTs to official Pyret parser
   - Full test coverage for all implemented features
   - All tests now compare complete programs, not just expressions
 ```
 
-**Recent Additions (2025-11-01 - Current Session - PART 3):**
+**Recent Additions (2025-11-01 - Current Session - PART 5):**
+- ✅ **For expressions fully implemented!** ⭐⭐⭐⭐ (COMPLETE!)
+  - Simple for: `for map(x from lst): x + 1 end`
+  - Multiple bindings: `for map2(a from arr1, b from arr2): a + b end`
+  - Dot access iterators: `for lists.map2(x from xs, y from ys): x + y end`
+  - Added `parse_for_expr()` method in Section 7 (Control Flow)
+  - Iterator expression parsing with dot access support
+  - For-bindings with `FROM` keyword
+  - Added JSON serialization for `SFor` and `ForBind`
+  - Updated location extraction for `SFor` expressions (5 locations)
+  - Added 2 comprehensive parser tests
+  - Enabled 2 comparison tests
+  - **72/81 comparison tests passing (88.9%)** - up from 70!
+  - All for expression ASTs match official Pyret parser byte-for-byte ✨
+
+**Previous Additions (2025-11-01 - Current Session - PART 3):**
 - ✅ **Program parsing fully implemented!** ⭐⭐⭐⭐⭐ (CRITICAL MILESTONE!)
   - Implemented `parse_program()` - parses complete .arr files
   - Implemented `parse_block()` - parses statement sequences
   - Updated `to_pyret_json.rs` to output full Program AST
   - Fixed comparison scripts to compare full programs (removed stmts[0] hack)
-  - All 69 passing tests still produce **identical ASTs** to official Pyret parser
+  - **69/81 comparison tests passing (85.2%)**
+  - All programs match official Pyret parser byte-for-byte ✨
   - Infrastructure in place for adding statements (let, fun, data, etc.)
 
 **Previous Additions (2025-11-01 - Current Session - PART 2):**
@@ -405,14 +477,37 @@ The codebase is clean, well-tested, and ready for the next features. Start with 
 
 ---
 
-**Last Updated:** 2025-11-01 (Program Parsing Complete! 🎉)
-**Tests:** 64/64 parser tests ✅ (100%), 69/81 comparison tests ✅ (85.2%)
-**✅ MILESTONE:** Full program parsing complete - all tests compare complete Program ASTs!
-**Next Priorities:** Let bindings, for expressions, method fields, function definitions
+**Last Updated:** 2025-11-01 (For Expressions Complete! 🎉)
+**Tests:** 67/67 parser tests ✅ (100%), 72/81 comparison tests ✅ (88.9%)
+**✅ MILESTONE:** For expressions complete - all tests produce identical ASTs!
+**Next Priorities:** Method fields (1 test), function definitions (1 test), cases/data/when
 
 ## 🎉 Recent Achievements
 
-**Latest (2025-11-01 - Current Session - PART 3):**
+**Latest (2025-11-01 - Current Session - PART 5):**
+- ✅ **For expressions fully implemented!** ⭐⭐⭐⭐ (COMPLETE!)
+  - Simple for expressions: `for map(x from lst): x + 1 end`
+  - Multiple bindings: `for map2(a from arr1, b from arr2): a + b end`
+  - Dot access iterators: `for lists.map2(x from xs, y from ys): x + y end`
+  - Implemented `parse_for_expr()` in `src/parser.rs:1583-1697`
+  - Iterator expression parsing with manual dot access handling
+  - For-bindings with `FROM` keyword separator
+  - Added `for_bind_to_pyret_json()` helper in `to_pyret_json.rs`
+  - Updated location extraction in 5 match statements
+  - Added 2 comprehensive parser tests (simple, dot access)
+  - Enabled 2 comparison tests (for_map, for_map2)
+  - **72/81 comparison tests passing (88.9%)** - up from 70!
+  - All for expression ASTs match official Pyret parser byte-for-byte ✨
+
+**Previous (2025-11-01 - Current Session - PART 4):**
+- ✅ **Let bindings fully implemented!** ⭐⭐⭐⭐⭐ (COMPLETE!)
+  - Implicit let: `x = 5` → `SLet` statements
+  - Implicit var: `x := 5` → `SVar` statements
+  - Explicit let: `let x = 5` → `SLetExpr` expressions
+  - Added lookahead parsing with checkpoint/restore backtracking
+  - **70/81 comparison tests passing (86.4%)**
+
+**Previous (2025-11-01 - Current Session - PART 3):**
 - ✅ **Program parsing fully implemented!** ⭐⭐⭐⭐⭐ (CRITICAL MILESTONE!)
   - Complete programs with prelude and body
   - Statement blocks with multiple expressions

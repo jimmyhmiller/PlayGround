@@ -75,6 +75,17 @@ impl Parser {
         self.peek().token_type == TokenType::Eof
     }
 
+    // ========== Checkpointing for Backtracking ==========
+
+    fn checkpoint(&self) -> usize {
+        self.current
+    }
+
+    fn restore(&mut self, checkpoint: usize) {
+        self.current = checkpoint;
+        self.position = checkpoint;
+    }
+
     // ========== Location Helpers ==========
 
     fn current_loc(&self) -> Loc {
@@ -248,12 +259,43 @@ impl Parser {
 
         // Parse statements until EOF or until we can't parse any more
         while !self.is_at_end() {
-            // Try to parse a statement (for now, just expressions)
-            // TODO: Add support for let-bindings, var, fun, data, etc.
-            match self.parse_expr() {
-                Ok(expr) => stmts.push(Box::new(expr)),
-                Err(_) => break, // Stop if we can't parse
-            }
+            // Try to parse different statement types
+            let stmt = if self.matches(&TokenType::Let) {
+                // Explicit let binding: let x = 5
+                self.parse_let_expr()?
+            } else if self.matches(&TokenType::Var) {
+                // Var binding: var x := 5
+                self.parse_var_expr()?
+            } else if self.matches(&TokenType::Name) {
+                // Check if this is an implicit let binding: x = value
+                // Look ahead to see if there's an = or := after the name
+                let checkpoint = self.checkpoint();
+                let _name = self.advance(); // Consume the name
+
+                if self.matches(&TokenType::Equals) {
+                    // Implicit let binding: x = value
+                    self.restore(checkpoint);
+                    self.parse_implicit_let_expr()?
+                } else if self.matches(&TokenType::ColonEquals) {
+                    // Implicit var binding: x := value
+                    self.restore(checkpoint);
+                    self.parse_implicit_var_expr()?
+                } else {
+                    // Not a binding, restore and parse as expression
+                    self.restore(checkpoint);
+                    match self.parse_expr() {
+                        Ok(expr) => expr,
+                        Err(_) => break,
+                    }
+                }
+            } else {
+                // Default: try to parse as expression
+                match self.parse_expr() {
+                    Ok(expr) => expr,
+                    Err(_) => break, // Stop if we can't parse
+                }
+            };
+            stmts.push(Box::new(stmt));
         }
 
         let end = if self.current > 0 {
@@ -455,6 +497,10 @@ impl Parser {
                         Expr::SUserBlock { l, .. } => l.clone(),
                         Expr::SIf { l, .. } => l.clone(),
                         Expr::SIfElse { l, .. } => l.clone(),
+                        Expr::SFor { l, .. } => l.clone(),
+                        Expr::SLetExpr { l, .. } => l.clone(),
+                Expr::SLet { l, .. } => l.clone(),
+                Expr::SVar { l, .. } => l.clone(),
                         _ => self.current_loc(),
                     };
 
@@ -495,6 +541,10 @@ impl Parser {
                         Expr::SUserBlock { l, .. } => l.clone(),
                         Expr::SIf { l, .. } => l.clone(),
                         Expr::SIfElse { l, .. } => l.clone(),
+                        Expr::SFor { l, .. } => l.clone(),
+                        Expr::SLetExpr { l, .. } => l.clone(),
+                Expr::SLet { l, .. } => l.clone(),
+                Expr::SVar { l, .. } => l.clone(),
                         _ => self.current_loc(),
                     };
 
@@ -667,6 +717,10 @@ impl Parser {
                 Expr::SUserBlock { l, .. } => l.clone(),
                 Expr::SIf { l, .. } => l.clone(),
                 Expr::SIfElse { l, .. } => l.clone(),
+                Expr::SFor { l, .. } => l.clone(),
+                Expr::SLetExpr { l, .. } => l.clone(),
+                Expr::SLet { l, .. } => l.clone(),
+                Expr::SVar { l, .. } => l.clone(),
                 _ => self.current_loc(),
             };
 
@@ -689,6 +743,10 @@ impl Parser {
                     Expr::SLam { l, .. } => l.clone(),
                     Expr::SBlock { l, .. } => l.clone(),
                     Expr::SUserBlock { l, .. } => l.clone(),
+                    Expr::SFor { l, .. } => l.clone(),
+                    Expr::SLetExpr { l, .. } => l.clone(),
+                Expr::SLet { l, .. } => l.clone(),
+                Expr::SVar { l, .. } => l.clone(),
                     _ => self.current_loc(),
                 }
             } else {
@@ -750,6 +808,9 @@ impl Parser {
             TokenType::Lam => self.parse_lambda_expr(),
             TokenType::Block => self.parse_block_expr(),
             TokenType::If => self.parse_if_expr(),
+            TokenType::For => self.parse_for_expr(),
+            TokenType::Let => self.parse_let_expr(),
+            TokenType::Var => self.parse_var_expr(),
             _ => Err(ParseError::unexpected(token)),
         }
     }
@@ -1349,6 +1410,10 @@ impl Parser {
             Expr::SUserBlock { l, .. } => l.clone(),
             Expr::SIf { l, .. } => l.clone(),
             Expr::SIfElse { l, .. } => l.clone(),
+            Expr::SFor { l, .. } => l.clone(),
+                        Expr::SLetExpr { l, .. } => l.clone(),
+                Expr::SLet { l, .. } => l.clone(),
+                Expr::SVar { l, .. } => l.clone(),
             _ => self.current_loc(),
         };
 
@@ -1512,6 +1577,268 @@ impl Parser {
         }
     }
 
+    /// for-expr: FOR expr PARENNOSPACE [for-bind (COMMA for-bind)*] RPAREN return-ann (BLOCK|COLON) block END
+    /// for-bind: binding FROM binop-expr
+    /// Parses for expressions like: for map(x from lst): x + 1 end
+    fn parse_for_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::For)?;
+
+        // Parse the iterator expression (e.g., "map" or "lists.map2")
+        // This needs to be a full expression to handle dot access
+        // We'll manually parse just enough to get the iterator before the paren
+        let mut iterator = self.parse_prim_expr()?;
+
+        // Handle dot access for things like lists.map2
+        while self.matches(&TokenType::Dot) {
+            self.advance();
+            let field_token = self.parse_field_name()?;
+
+            let start_loc = match &iterator {
+                Expr::SId { l, .. } => l.clone(),
+                Expr::SDot { l, .. } => l.clone(),
+                _ => self.current_loc(),
+            };
+
+            iterator = Expr::SDot {
+                l: Loc::new(
+                    self.file_name.clone(),
+                    start_loc.start_line,
+                    start_loc.start_column,
+                    start_loc.start_char,
+                    field_token.location.end_line,
+                    field_token.location.end_col,
+                    field_token.location.end_pos,
+                ),
+                obj: Box::new(iterator),
+                field: field_token.value.clone(),
+            };
+        }
+
+        // Expect opening paren (no space)
+        self.expect(TokenType::ParenNoSpace)?;
+
+        // Parse for-bindings: binding FROM expr (COMMA binding FROM expr)*
+        let mut bindings = Vec::new();
+
+        if !self.matches(&TokenType::RParen) {
+            loop {
+                // Parse the binding (name with optional type annotation)
+                let bind = self.parse_bind()?;
+
+                // Expect FROM keyword
+                self.expect(TokenType::From)?;
+
+                // Parse the value expression
+                let value = Box::new(self.parse_expr()?);
+
+                // Create ForBind
+                bindings.push(ForBind {
+                    node_type: "s-for-bind".to_string(),
+                    l: self.current_loc(), // TODO: proper location from bind to value
+                    bind,
+                    value,
+                });
+
+                // Check for comma (more bindings) or close paren
+                if self.matches(&TokenType::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Expect closing paren
+        self.expect(TokenType::RParen)?;
+
+        // Parse optional return annotation (for now, we'll use a-blank)
+        let ann = Ann::ABlank;
+
+        // Parse body separator (COLON or BLOCK)
+        let blocky = if self.matches(&TokenType::Block) {
+            self.advance();
+            true
+        } else {
+            self.expect(TokenType::Colon)?;
+            false
+        };
+
+        // Parse the body (statements until END)
+        let mut body_stmts = Vec::new();
+        while !self.matches(&TokenType::End) && !self.is_at_end() {
+            let stmt = self.parse_expr()?;
+            body_stmts.push(Box::new(stmt));
+        }
+
+        // Create the body as an SBlock
+        let body = Box::new(Expr::SBlock {
+            l: self.current_loc(), // TODO: proper location
+            stmts: body_stmts,
+        });
+
+        let end = self.expect(TokenType::End)?;
+        let loc = self.make_loc(&start, &end);
+
+        Ok(Expr::SFor {
+            l: loc,
+            iterator: Box::new(iterator),
+            bindings,
+            ann,
+            body,
+            blocky,
+        })
+    }
+
+    /// let-expr: LET bind = expr
+    ///          | LET bind = expr BLOCK body END
+    /// Parses let bindings: x = 5
+    fn parse_let_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::Let)?;
+
+        // Parse binding: name [:: type]
+        let bind = self.parse_bind()?;
+
+        // Expect =
+        self.expect(TokenType::Equals)?;
+
+        // Parse value expression
+        let value = self.parse_expr()?;
+
+        // Create LetBind
+        let let_bind = LetBind::SLetBind {
+            l: self.current_loc(),
+            b: bind.clone(),
+            value: Box::new(value.clone()),
+        };
+
+        // Check if there's a block body
+        let body = if self.matches(&TokenType::Block) {
+            self.expect(TokenType::Block)?;
+            self.expect(TokenType::Colon)?;
+
+            // Parse block body
+            let mut body_stmts = Vec::new();
+            while !self.matches(&TokenType::End) && !self.is_at_end() {
+                let stmt = self.parse_expr()?;
+                body_stmts.push(Box::new(stmt));
+            }
+
+            self.expect(TokenType::End)?;
+
+            Expr::SBlock {
+                l: self.current_loc(),
+                stmts: body_stmts,
+            }
+        } else {
+            // No explicit body, just use the value
+            value.clone()
+        };
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        Ok(Expr::SLetExpr {
+            l: self.make_loc(&start, &end),
+            binds: vec![let_bind],
+            body: Box::new(body),
+            blocky: false,
+        })
+    }
+
+    /// var-expr: VAR bind := expr
+    /// Parses mutable variable bindings: var x := 5
+    fn parse_var_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::Var)?;
+
+        // Parse binding: name [:: type]
+        let bind = self.parse_bind()?;
+
+        // Expect :=
+        self.expect(TokenType::ColonEquals)?;
+
+        // Parse value expression
+        let value = self.parse_expr()?;
+
+        // Create VarBind
+        let var_bind = LetBind::SVarBind {
+            l: self.current_loc(),
+            b: bind.clone(),
+            value: Box::new(value.clone()),
+        };
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        // Var expressions are represented as SLetExpr with SVarBind
+        Ok(Expr::SLetExpr {
+            l: self.make_loc(&start, &end),
+            binds: vec![var_bind],
+            body: Box::new(value), // Use the value as the body
+            blocky: false,
+        })
+    }
+
+    /// Implicit let binding: x = value (no "let" keyword)
+    /// Creates an s-let statement (not s-let-expr)
+    fn parse_implicit_let_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.peek().clone();
+
+        // Parse binding: name [:: type]
+        let bind = self.parse_bind()?;
+
+        // Expect =
+        self.expect(TokenType::Equals)?;
+
+        // Parse value expression
+        let value = self.parse_expr()?;
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        Ok(Expr::SLet {
+            l: self.make_loc(&start, &end),
+            name: bind,
+            value: Box::new(value),
+            keyword_val: false,
+        })
+    }
+
+    /// Implicit var binding: x := value (no "var" keyword)
+    /// Creates an s-var statement
+    fn parse_implicit_var_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.peek().clone();
+
+        // Parse binding: name [:: type]
+        let bind = self.parse_bind()?;
+
+        // Expect :=
+        self.expect(TokenType::ColonEquals)?;
+
+        // Parse value expression
+        let value = self.parse_expr()?;
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        Ok(Expr::SVar {
+            l: self.make_loc(&start, &end),
+            name: bind,
+            value: Box::new(value),
+        })
+    }
+
     /// cases-expr: CASES (type) expr: branches ... END
     fn parse_cases_expr(&mut self) -> ParseResult<Expr> {
         todo!("Implement parse_cases_expr")
@@ -1520,11 +1847,6 @@ impl Parser {
     /// when-expr: WHEN expr: block END
     fn parse_when_expr(&mut self) -> ParseResult<Expr> {
         todo!("Implement parse_when_expr")
-    }
-
-    /// for-expr: FOR expr(bindings) ann: body END
-    fn parse_for_expr(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_for_expr")
     }
 }
 

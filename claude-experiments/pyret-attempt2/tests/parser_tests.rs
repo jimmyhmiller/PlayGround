@@ -1,4 +1,4 @@
-use pyret_attempt2::{Parser, Expr, Member, Name, ConstructModifier};
+use pyret_attempt2::{Parser, Expr, Member, Name, ConstructModifier, LetBind, Bind, ForBind};
 use pyret_attempt2::tokenizer::Tokenizer;
 
 /// Helper to parse a string into an expression
@@ -1338,5 +1338,204 @@ fn test_parse_nested_blocks() {
             }
         }
         _ => panic!("Expected SUserBlock, got {:?}", expr),
+    }
+}
+
+// ============================================================================
+// ===== Let Expression Tests =====
+// ============================================================================
+// NOTE: Let bindings only work in blocks, not as standalone expressions
+
+#[test]
+#[ignore] // Let bindings only work in blocks
+fn test_parse_simple_let() {
+    // x = 5
+    let expr = parse_expr("x = 5").expect("Failed to parse");
+
+    match expr {
+        Expr::SLetExpr { binds, body, blocky, .. } => {
+            assert_eq!(binds.len(), 1);
+            assert_eq!(blocky, false);
+
+            // Check bind
+            match &binds[0] {
+                LetBind::SLetBind { b, value, .. } => {
+                    match b {
+                        Bind::SBind { id, .. } => {
+                            match id {
+                                Name::SName { s, .. } => assert_eq!(s, "x"),
+                                _ => panic!("Expected SName"),
+                            }
+                        }
+                        _ => panic!("Expected SBind"),
+                    }
+
+                    // Check value
+                    match **value {
+                        Expr::SNum { n, .. } => assert_eq!(n, 5.0),
+                        _ => panic!("Expected SNum"),
+                    }
+                }
+                _ => panic!("Expected SLetBind"),
+            }
+
+            // Check body (should be the value)
+            match *body {
+                Expr::SNum { n, .. } => assert_eq!(n, 5.0),
+                _ => panic!("Expected SNum as body"),
+            }
+        }
+        _ => panic!("Expected SLetExpr, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_var_binding() {
+    // var x := 5
+    let expr = parse_expr("var x := 5").expect("Failed to parse");
+
+    match expr {
+        Expr::SLetExpr { binds, .. } => {
+            assert_eq!(binds.len(), 1);
+
+            match &binds[0] {
+                LetBind::SVarBind { b, value, .. } => {
+                    match b {
+                        Bind::SBind { id, .. } => {
+                            match id {
+                                Name::SName { s, .. } => assert_eq!(s, "x"),
+                                _ => panic!("Expected SName"),
+                            }
+                        }
+                        _ => panic!("Expected SBind"),
+                    }
+
+                    match **value {
+                        Expr::SNum { n, .. } => assert_eq!(n, 5.0),
+                        _ => panic!("Expected SNum"),
+                    }
+                }
+                _ => panic!("Expected SVarBind"),
+            }
+        }
+        _ => panic!("Expected SLetExpr with SVarBind"),
+    }
+}
+
+#[test]
+#[ignore] // Let bindings only work in blocks
+fn test_parse_let_with_expression() {
+    // y = 2 + 3
+    let expr = parse_expr("y = 2 + 3").expect("Failed to parse");
+
+    match expr {
+        Expr::SLetExpr { binds, .. } => {
+            assert_eq!(binds.len(), 1);
+
+            match &binds[0] {
+                LetBind::SLetBind { b, value, .. } => {
+                    match b {
+                        Bind::SBind { id, .. } => {
+                            match id {
+                                Name::SName { s, .. } => assert_eq!(s, "y"),
+                                _ => panic!("Expected SName"),
+                            }
+                        }
+                        _ => panic!("Expected SBind"),
+                    }
+
+                    // Value should be SOp (2 + 3)
+                    match **value {
+                        Expr::SOp { ref op, .. } => assert_eq!(op, "+"),
+                        _ => panic!("Expected SOp"),
+                    }
+                }
+                _ => panic!("Expected SLetBind"),
+            }
+        }
+        _ => panic!("Expected SLetExpr"),
+    }
+}
+
+// ============================================================================
+// ===== For Expression Tests =====
+// ============================================================================
+
+#[test]
+fn test_parse_simple_for() {
+    // for map(x from lst): x + 1 end
+    let expr = parse_expr("for map(x from lst): x + 1 end").expect("Failed to parse");
+
+    match expr {
+        Expr::SFor { iterator, bindings, body, blocky, .. } => {
+            assert_eq!(blocky, false);
+
+            // Check iterator is SId(map)
+            match *iterator {
+                Expr::SId { ref id, .. } => {
+                    match id {
+                        Name::SName { s, .. } => assert_eq!(s, "map"),
+                        _ => panic!("Expected SName for iterator"),
+                    }
+                }
+                _ => panic!("Expected SId for iterator"),
+            }
+
+            // Check bindings
+            assert_eq!(bindings.len(), 1);
+            match &bindings[0].bind {
+                Bind::SBind { id, .. } => {
+                    match id {
+                        Name::SName { s, .. } => assert_eq!(s, "x"),
+                        _ => panic!("Expected SName for binding"),
+                    }
+                }
+                _ => panic!("Expected SBind"),
+            }
+
+            // Check body is SBlock with one SOp statement
+            match *body {
+                Expr::SBlock { ref stmts, .. } => {
+                    assert_eq!(stmts.len(), 1);
+                    match stmts[0].as_ref() {
+                        Expr::SOp { op, .. } => assert_eq!(op, "op+"),
+                        _ => panic!("Expected SOp in body"),
+                    }
+                }
+                _ => panic!("Expected SBlock for body"),
+            }
+        }
+        _ => panic!("Expected SFor, got {:?}", expr),
+    }
+}
+
+#[test]
+fn test_parse_for_with_dot_access() {
+    // for lists.map2(a1 from arr1, a2 from arr2): a1 + a2 end
+    let expr = parse_expr("for lists.map2(a1 from arr1, a2 from arr2): a1 + a2 end").expect("Failed to parse");
+
+    match expr {
+        Expr::SFor { iterator, bindings, .. } => {
+            // Check iterator is SDot(lists, map2)
+            match *iterator {
+                Expr::SDot { ref obj, ref field, .. } => {
+                    match **obj {
+                        Expr::SId { ref id, .. } => {
+                            match id {
+                                Name::SName { s, .. } => assert_eq!(s, "lists"),
+                                _ => panic!("Expected SName for object"),
+                            }
+                        }
+                        _ => panic!("Expected SId for object"),
+                    }
+                    assert_eq!(field, "map2");
+                }
+                _ => panic!("Expected SDot for iterator"),
+            }
+
+            // Check bindings
+            assert_eq!(bindings.len(), 2);
+        }
+        _ => panic!("Expected SFor"),
     }
 }
