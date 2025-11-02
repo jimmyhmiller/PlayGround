@@ -524,7 +524,7 @@ fn test_pyret_match_lambda_in_call() {
 }
 
 // ============================================================================
-// Tuple Expressions (NOT YET IMPLEMENTED - Expected to Fail)
+// Tuple Expressions ✅ IMPLEMENTED
 // ============================================================================
 
 #[test]
@@ -552,7 +552,7 @@ fn test_pyret_match_tuple_access() {
 }
 
 // ============================================================================
-// Block Expressions (NOT YET IMPLEMENTED - Expected to Fail)
+// Block Expressions ✅ IMPLEMENTED
 // ============================================================================
 
 #[test]
@@ -568,7 +568,7 @@ fn test_pyret_match_block_multiple_stmts() {
 }
 
 // ============================================================================
-// For Expressions (NOT YET IMPLEMENTED - Expected to Fail)
+// For Expressions ✅ IMPLEMENTED
 // ============================================================================
 
 #[test]
@@ -584,7 +584,7 @@ fn test_pyret_match_for_map2() {
 }
 
 // ============================================================================
-// Method Fields in Objects (NOT YET IMPLEMENTED - Expected to Fail)
+// Method Fields in Objects ✅ IMPLEMENTED
 // ============================================================================
 
 #[test]
@@ -594,7 +594,7 @@ fn test_pyret_match_object_with_method() {
 }
 
 // ============================================================================
-// Cases Expressions (NOT YET IMPLEMENTED - Expected to Fail)
+// Cases Expressions ✅ IMPLEMENTED
 // ============================================================================
 
 #[test]
@@ -614,7 +614,7 @@ fn test_pyret_match_simple_if() {
 }
 
 // ============================================================================
-// When Expressions (NOT YET IMPLEMENTED - Expected to Fail)
+// When Expressions ✅ IMPLEMENTED
 // ============================================================================
 
 #[test]
@@ -624,7 +624,7 @@ fn test_pyret_match_simple_when() {
 }
 
 // ============================================================================
-// Assignment Expressions (NOT YET IMPLEMENTED - Expected to Fail)
+// Assignment Expressions ✅ IMPLEMENTED
 // ============================================================================
 
 #[test]
@@ -645,7 +645,7 @@ fn test_pyret_match_simple_let() {
 }
 
 // ============================================================================
-// Data Declarations (NOT YET IMPLEMENTED - Expected to Fail)
+// Data Declarations ✅ IMPLEMENTED
 // ============================================================================
 
 #[test]
@@ -655,7 +655,7 @@ fn test_pyret_match_simple_data() {
 }
 
 // ============================================================================
-// Function Declarations (NOT YET IMPLEMENTED - Expected to Fail)
+// Function Declarations ✅ IMPLEMENTED
 // ============================================================================
 
 #[test]
@@ -665,7 +665,7 @@ fn test_pyret_match_simple_fun() {
 }
 
 // ============================================================================
-// Import Statements (NOT YET IMPLEMENTED - Expected to Fail)
+// Import Statements ✅ IMPLEMENTED
 // ============================================================================
 
 #[test]

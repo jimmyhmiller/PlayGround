@@ -531,7 +531,71 @@ Please run the tests to see which ones are failing and fix them. Do not remove o
       }
     }
 
-    // Step 10: Update documentation
+    // Step 10: Check if we made any progress
+    const madeProgress = checkProgress(beforeResults, afterResults);
+
+    if (!madeProgress) {
+      log('\n⚠️  No progress made this iteration!', colors.yellow);
+      log(`   Before: ${beforeResults.passing} passing, ${beforeResults.ignored} ignored`, colors.yellow);
+      log(`   After:  ${afterResults.passing} passing, ${afterResults.ignored} ignored`, colors.yellow);
+
+      // Check if we've had multiple iterations with no progress
+      const recentNoProgressCount = iterations.filter(it => !it.success).length;
+
+      if (recentNoProgressCount >= 2) {
+        log(`\n❌ ABORTED: No progress made in ${recentNoProgressCount + 1} consecutive iterations`, colors.red);
+        log(`   The agent is unable to make progress on the remaining ignored tests.`, colors.yellow);
+        iterations.push({
+          iteration: i,
+          before: beforeResults,
+          after: afterResults,
+          success: false,
+          message: 'No progress made - aborting'
+        });
+        break;
+      }
+
+      // Ask Claude to try a different approach
+      log(`\n🔄 Asking Claude to try a different approach (attempt ${recentNoProgressCount + 1}/3)...`, colors.cyan);
+
+      try {
+        await askClaude(`CRITICAL: You made NO PROGRESS in the last iteration.
+
+Previous state:
+- Passing: ${beforeResults.passing}
+- Ignored: ${beforeResults.ignored}
+
+Current state:
+- Passing: ${afterResults.passing}
+- Ignored: ${afterResults.ignored}
+
+The test counts are identical - no tests moved from ignored to passing, and no new tests were added.
+
+Please:
+1. Check what you attempted in the previous iteration and why it didn't work
+2. Try a DIFFERENT approach or work on a DIFFERENT ignored test
+3. Make sure your changes actually implement the missing functionality
+4. Verify tests pass after your changes
+
+You must make measurable progress (more passing tests or new ignored tests added).`);
+
+        iterations.push({
+          iteration: i,
+          before: beforeResults,
+          after: afterResults,
+          success: false,
+          message: 'No progress - asked for different approach'
+        });
+
+        // Continue to next iteration to try again
+        continue;
+      } catch (error) {
+        log(`\n❌ Failed to ask Claude for different approach`, colors.red);
+        break;
+      }
+    }
+
+    // Step 11: Update documentation (only if progress was made)
     log('\n📚 Updating documentation...', colors.cyan);
     try {
       await askClaude('Please update the documentation for what to work on next');
@@ -539,17 +603,16 @@ Please run the tests to see which ones are failing and fix them. Do not remove o
       log('   ⚠ Failed to update documentation', colors.yellow);
     }
 
-    // Step 11: Commit changes
+    // Step 12: Commit changes (only if progress was made)
     gitCommit('Changes');
 
     // Record iteration results
-    const madeProgress = checkProgress(beforeResults, afterResults);
     iterations.push({
       iteration: i,
       before: beforeResults,
       after: afterResults,
-      success: madeProgress,
-      message: madeProgress ? 'Progress made' : 'No progress'
+      success: true,
+      message: 'Progress made'
     });
 
     // Step 9: Check if we're done
