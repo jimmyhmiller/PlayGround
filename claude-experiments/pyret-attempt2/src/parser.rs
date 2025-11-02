@@ -613,7 +613,7 @@ impl Parser {
             return self.parse_var_expr();
         }
 
-        // Check for implicit let binding: name = value
+        // Check for implicit let binding or assignment: name = value or name := value
         // We need to look ahead to distinguish from other expressions
         if self.matches(&TokenType::Name) {
             let checkpoint = self.checkpoint();
@@ -623,6 +623,10 @@ impl Parser {
                 // This is a let binding: x = value
                 self.restore(checkpoint);
                 return self.parse_standalone_let_expr();
+            } else if self.matches(&TokenType::ColonEquals) {
+                // This is an assignment: x := value
+                self.restore(checkpoint);
+                return self.parse_implicit_var_expr();
             } else {
                 // Not a binding, restore and continue with normal parsing
                 self.restore(checkpoint);
@@ -1013,6 +1017,7 @@ impl Parser {
             TokenType::Fun => self.parse_fun_expr(),
             TokenType::Block => self.parse_block_expr(),
             TokenType::If => self.parse_if_expr(),
+            TokenType::Cases => self.parse_cases_expr(),
             TokenType::When => self.parse_when_expr(),
             TokenType::For => self.parse_for_expr(),
             TokenType::Let => self.parse_let_expr(),
@@ -2193,8 +2198,150 @@ impl Parser {
     }
 
     /// cases-expr: CASES (type) expr: branches ... END
+    /// Parses cases expressions like: cases(Either) e: | left(v) => v | right(v) => v end
     fn parse_cases_expr(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_cases_expr")
+        let start = self.expect(TokenType::Cases)?;
+
+        // Expect opening paren
+        self.expect(TokenType::LParen)?;
+
+        // Parse type annotation
+        let typ = self.parse_ann()?;
+
+        // Expect closing paren
+        self.expect(TokenType::RParen)?;
+
+        // Parse value expression
+        let val = self.parse_expr()?;
+
+        // Expect colon or block
+        let blocky = if self.matches(&TokenType::Block) {
+            self.advance();
+            true
+        } else {
+            self.expect(TokenType::Colon)?;
+            false
+        };
+
+        // Parse branches (each starts with |)
+        let mut branches = Vec::new();
+        let mut else_branch: Option<Box<Expr>> = None;
+
+        while self.matches(&TokenType::Bar) {
+            self.advance(); // consume |
+
+            // Check for else branch (| else => expr)
+            if self.matches(&TokenType::Else) {
+                self.advance();
+                self.expect(TokenType::ThickArrow)?;
+
+                // Parse else body (statements until end)
+                let mut else_stmts = Vec::new();
+                while !self.matches(&TokenType::End) && !self.is_at_end() {
+                    let stmt = self.parse_expr()?;
+                    else_stmts.push(Box::new(stmt));
+                }
+
+                else_branch = Some(Box::new(Expr::SBlock {
+                    l: self.current_loc(),
+                    stmts: else_stmts,
+                }));
+                break;
+            }
+
+            // Parse branch pattern name
+            let pattern_start = self.peek().clone();
+            let name_token = self.expect(TokenType::Name)?;
+            let name = name_token.value.clone();
+            let pattern_loc = self.make_loc(&pattern_start, &name_token);
+
+            // Check for arguments: name(args)
+            let args = if self.matches(&TokenType::LParen) || self.matches(&TokenType::ParenNoSpace) {
+                self.advance(); // consume (
+
+                let args = if self.matches(&TokenType::RParen) {
+                    Vec::new()
+                } else {
+                    // Parse comma-separated bindings
+                    self.parse_comma_list(|p| {
+                        let bind = p.parse_bind()?;
+                        let l = match &bind {
+                            Bind::SBind { l, .. } => l.clone(),
+                            Bind::STupleBind { l, .. } => l.clone(),
+                        };
+                        Ok(CasesBind {
+                            node_type: "s-cases-bind".to_string(),
+                            l,
+                            field_type: CasesBindType::SNormal,
+                            bind,
+                        })
+                    })?
+                };
+
+                self.expect(TokenType::RParen)?;
+                args
+            } else {
+                Vec::new()
+            };
+
+            // Expect =>
+            self.expect(TokenType::ThickArrow)?;
+
+            // Parse body (statements until next | or end)
+            let mut body_stmts = Vec::new();
+            while !self.matches(&TokenType::Bar) && !self.matches(&TokenType::End) && !self.is_at_end() {
+                let stmt = self.parse_expr()?;
+                body_stmts.push(Box::new(stmt));
+            }
+
+            let body = Box::new(Expr::SBlock {
+                l: self.current_loc(),
+                stmts: body_stmts,
+            });
+
+            // Create the appropriate branch type
+            let branch = if args.is_empty() {
+                CasesBranch::SSingletonCasesBranch {
+                    l: self.current_loc(),
+                    pattern_loc,
+                    name,
+                    body,
+                }
+            } else {
+                CasesBranch::SCasesBranch {
+                    l: self.current_loc(),
+                    pattern_loc,
+                    name,
+                    args,
+                    body,
+                }
+            };
+
+            branches.push(branch);
+        }
+
+        let end = self.expect(TokenType::End)?;
+        let loc = self.make_loc(&start, &end);
+
+        // Return the appropriate cases expression type
+        if let Some(else_expr) = else_branch {
+            Ok(Expr::SCasesElse {
+                l: loc,
+                typ,
+                val: Box::new(val),
+                branches,
+                _else: else_expr,
+                blocky,
+            })
+        } else {
+            Ok(Expr::SCases {
+                l: loc,
+                typ,
+                val: Box::new(val),
+                branches,
+                blocky,
+            })
+        }
     }
 
     /// when-expr: WHEN expr: block END
