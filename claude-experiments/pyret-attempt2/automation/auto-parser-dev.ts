@@ -3,11 +3,17 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { execSync } from 'child_process';
 import { join } from 'path';
+import { appendFileSync, writeFileSync } from 'fs';
 
 // Configuration
 const MAX_ITERATIONS = parseInt(process.env.MAX_ITERATIONS || '30');
 const PROJECT_ROOT = join(process.cwd(), '..');
 const DRY_RUN = process.argv.includes('--dry-run') || process.argv.includes('-d');
+const LOG_FILE = join(process.cwd(), 'automation.log');
+
+// Initialize log file
+const startTime = new Date().toISOString();
+writeFileSync(LOG_FILE, `=== Automation started at ${startTime} ===\n\n`);
 
 // ANSI color codes
 const colors = {
@@ -60,6 +66,11 @@ process.on('SIGINT', () => {
 // Helper functions
 function log(message: string, color: string = colors.reset) {
   console.log(`${color}${message}${colors.reset}`);
+}
+
+function logToFile(message: string) {
+  const timestamp = new Date().toISOString();
+  appendFileSync(LOG_FILE, `[${timestamp}] ${message}\n`);
 }
 
 function runCommand(command: string, cwd: string = PROJECT_ROOT): string {
@@ -138,6 +149,7 @@ function runTests(): TestResults {
   const results = parseTestResults(output);
 
   log(`   Total: ${results.total} | Passing: ${colors.green}${results.passing}${colors.reset} | Ignored: ${colors.yellow}${results.ignored}${colors.reset} | Failed: ${colors.red}${results.failed}${colors.reset}`);
+  logToFile(`TEST RESULTS: Total=${results.total}, Passing=${results.passing}, Ignored=${results.ignored}, Failed=${results.failed}`);
 
   return results;
 }
@@ -180,6 +192,10 @@ function gitCommit(message: string = 'Changes') {
 
 async function askClaude(prompt: string): Promise<string> {
   log('\n🤖 Asking Claude...', colors.magenta);
+  logToFile(`\n${'='.repeat(80)}`);
+  logToFile('PROMPT TO CLAUDE:');
+  logToFile(prompt);
+  logToFile('='.repeat(80));
 
   if (DRY_RUN) {
     log(`   [DRY-RUN] Would send prompt (first 200 chars):`, colors.yellow);
@@ -200,6 +216,7 @@ async function askClaude(prompt: string): Promise<string> {
 
     let response = '';
     let messageCount = 0;
+    const toolUses: string[] = [];
 
     // Stream messages and collect the response
     for await (const message of result) {
@@ -216,23 +233,37 @@ async function askClaude(prompt: string): Promise<string> {
         for (const item of content) {
           if (item.type === 'text') {
             response += item.text;
+          } else if (item.type === 'tool_use') {
+            // Log tool usage
+            const toolName = item.name || 'unknown';
+            const toolInput = JSON.stringify(item.input || {}).substring(0, 100);
+            toolUses.push(`${toolName}: ${toolInput}...`);
+            logToFile(`TOOL USE: ${toolName} - ${toolInput}...`);
           }
         }
       } else if (message.type === 'result') {
         // Final message with result
         const usage = (message as any).usage || {};
         log(`   ✓ Completed (${messageCount} messages, ${usage.output_tokens || 0} tokens, $${((message as any).total_cost_usd || 0).toFixed(4)})`, colors.green);
+        logToFile(`Completed: ${messageCount} messages, ${usage.output_tokens || 0} tokens, cost: $${((message as any).total_cost_usd || 0).toFixed(4)}`);
+        logToFile(`Tools used: ${toolUses.length > 0 ? toolUses.join(', ') : 'none'}`);
       }
     }
 
+    logToFile('\nCLAUDE RESPONSE:');
+    logToFile(response.substring(0, 500) + (response.length > 500 ? '...' : ''));
+    logToFile('='.repeat(80));
+
     if (!response || response.trim().length === 0) {
       log(`   ⚠ Warning: Claude returned empty response after ${messageCount} messages`, colors.yellow);
+      logToFile('WARNING: Empty response from Claude');
       return '[No response from Claude]';
     }
 
     return response;
   } catch (error: any) {
     log(`   ❌ Error calling Claude via Agent SDK: ${error.message}`, colors.red);
+    logToFile(`ERROR: ${error.message}`);
     console.error(error);
     throw error;
   }
@@ -310,12 +341,17 @@ async function mainLoop() {
     // Check if we're shutting down
     if (isShuttingDown) {
       log('\n⚠️  Stopping due to interruption...', colors.yellow);
+      logToFile('Stopped due to user interruption');
       break;
     }
 
     log(`\n${colors.bright}${'='.repeat(50)}${colors.reset}`);
     log(`${colors.bright}Iteration ${i}/${iterationLimit}${colors.reset}`);
     log(`${colors.bright}${'='.repeat(50)}${colors.reset}`);
+
+    logToFile(`\n\n${'#'.repeat(80)}`);
+    logToFile(`ITERATION ${i}/${iterationLimit}`);
+    logToFile('#'.repeat(80));
 
     // Step 1: Check compilation before running tests
     const initialCompileCheck = checkCompilation();

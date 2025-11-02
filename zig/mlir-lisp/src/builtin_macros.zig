@@ -27,6 +27,17 @@ pub fn registerBuiltinMacros(expander: *MacroExpander) !void {
         "call",
         c_api_macro.wrapCTransformAsMacro(&callTransformWrapper),
     );
+
+    // Register arithmetic macros
+    try expander.registerMacro("+", addMacro);
+    try expander.registerMacro("*", mulMacro);
+    try expander.registerMacro("constant", constantMacro);
+
+    // Register control flow macros
+    try expander.registerMacro("return", returnMacro);
+
+    // Register function definition macros
+    try expander.registerMacro("defn", defnMacro);
 }
 
 // ============================================================================
@@ -38,6 +49,16 @@ fn createIdentifier(allocator: std.mem.Allocator, name: []const u8) !*Value {
     const value = try allocator.create(Value);
     value.* = Value{
         .type = .identifier,
+        .data = .{ .atom = name },
+    };
+    return value;
+}
+
+/// Create a keyword Value
+fn createKeyword(allocator: std.mem.Allocator, name: []const u8) !*Value {
+    const value = try allocator.create(Value);
+    value.* = Value{
+        .type = .keyword,
         .data = .{ .atom = name },
     };
     return value;
@@ -264,4 +285,439 @@ fn unlessMacro(
     result_vec = try result_vec.push(else_region);
 
     return try createList(allocator, result_vec);
+}
+
+/// + macro: (+ (: type) operand1 operand2)
+/// Expands to: (operation (name arith.addi) (result-types type) (operands operand1 operand2))
+fn addMacro(
+    allocator: std.mem.Allocator,
+    args: *const PersistentLinkedList(*Value),
+) !*Value {
+    // Validate: need exactly 3 args ((: type), operand1, operand2)
+    if (args.len() != 3) {
+        std.debug.print("+ macro requires 3 arguments ((: type) operand1 operand2), got {}\n", .{args.len()});
+        return error.InvalidMacroArgs;
+    }
+
+    // Extract arguments
+    var iter = args.iterator();
+    const type_expr = iter.next() orelse return error.InvalidMacroArgs;
+    const operand1 = iter.next() orelse return error.InvalidMacroArgs;
+    const operand2 = iter.next() orelse return error.InvalidMacroArgs;
+
+    // Extract type from (: type) expression
+    // Should be a list with 2 elements: : and the type
+    if (type_expr.type != .list) {
+        std.debug.print("+ macro first argument must be (: type)\n", .{});
+        return error.InvalidMacroArgs;
+    }
+
+    const type_list = type_expr.data.list;
+    if (type_list.len() != 2) {
+        std.debug.print("+ macro first argument must be (: type), got {} elements\n", .{type_list.len()});
+        return error.InvalidMacroArgs;
+    }
+
+    const colon = type_list.at(0);
+    if (colon.type != .identifier or !std.mem.eql(u8, colon.data.atom, ":")) {
+        std.debug.print("+ macro first argument must start with :\n", .{});
+        return error.InvalidMacroArgs;
+    }
+
+    const result_type = type_list.at(1);
+
+    // Build operation structure:
+    // (operation
+    //   (name arith.addi)
+    //   (result-types type)
+    //   (operands operand1 operand2))
+
+    var op_vec = PersistentVector(*Value).init(allocator, null);
+
+    // Add "operation" identifier
+    op_vec = try op_vec.push(try createIdentifier(allocator, "operation"));
+
+    // Add (name arith.addi)
+    var name_vec = PersistentVector(*Value).init(allocator, null);
+    name_vec = try name_vec.push(try createIdentifier(allocator, "name"));
+    name_vec = try name_vec.push(try createIdentifier(allocator, "arith.addi"));
+    op_vec = try op_vec.push(try createList(allocator, name_vec));
+
+    // Add (result-types type)
+    var types_vec = PersistentVector(*Value).init(allocator, null);
+    types_vec = try types_vec.push(try createIdentifier(allocator, "result-types"));
+    types_vec = try types_vec.push(result_type);
+    op_vec = try op_vec.push(try createList(allocator, types_vec));
+
+    // Add (operands operand1 operand2)
+    var operands_vec = PersistentVector(*Value).init(allocator, null);
+    operands_vec = try operands_vec.push(try createIdentifier(allocator, "operands"));
+    operands_vec = try operands_vec.push(operand1);
+    operands_vec = try operands_vec.push(operand2);
+    op_vec = try op_vec.push(try createList(allocator, operands_vec));
+
+    return try createList(allocator, op_vec);
+}
+
+/// * macro: (* (: type) operand1 operand2)
+/// Expands to: (operation (name arith.muli) (result-types type) (operands operand1 operand2))
+fn mulMacro(
+    allocator: std.mem.Allocator,
+    args: *const PersistentLinkedList(*Value),
+) !*Value {
+    // Validate: need exactly 3 args ((: type), operand1, operand2)
+    if (args.len() != 3) {
+        std.debug.print("* macro requires 3 arguments ((: type) operand1 operand2), got {}\n", .{args.len()});
+        return error.InvalidMacroArgs;
+    }
+
+    // Extract arguments
+    var iter = args.iterator();
+    const type_expr = iter.next() orelse return error.InvalidMacroArgs;
+    const operand1 = iter.next() orelse return error.InvalidMacroArgs;
+    const operand2 = iter.next() orelse return error.InvalidMacroArgs;
+
+    // Extract type from (: type) expression
+    // Should be a list with 2 elements: : and the type
+    if (type_expr.type != .list) {
+        std.debug.print("* macro first argument must be (: type)\n", .{});
+        return error.InvalidMacroArgs;
+    }
+
+    const type_list = type_expr.data.list;
+    if (type_list.len() != 2) {
+        std.debug.print("* macro first argument must be (: type), got {} elements\n", .{type_list.len()});
+        return error.InvalidMacroArgs;
+    }
+
+    const colon = type_list.at(0);
+    if (colon.type != .identifier or !std.mem.eql(u8, colon.data.atom, ":")) {
+        std.debug.print("* macro first argument must start with :\n", .{});
+        return error.InvalidMacroArgs;
+    }
+
+    const result_type = type_list.at(1);
+
+    // Build operation structure:
+    // (operation
+    //   (name arith.muli)
+    //   (result-types type)
+    //   (operands operand1 operand2))
+
+    var op_vec = PersistentVector(*Value).init(allocator, null);
+
+    // Add "operation" identifier
+    op_vec = try op_vec.push(try createIdentifier(allocator, "operation"));
+
+    // Add (name arith.muli)
+    var name_vec = PersistentVector(*Value).init(allocator, null);
+    name_vec = try name_vec.push(try createIdentifier(allocator, "name"));
+    name_vec = try name_vec.push(try createIdentifier(allocator, "arith.muli"));
+    op_vec = try op_vec.push(try createList(allocator, name_vec));
+
+    // Add (result-types type)
+    var types_vec = PersistentVector(*Value).init(allocator, null);
+    types_vec = try types_vec.push(try createIdentifier(allocator, "result-types"));
+    types_vec = try types_vec.push(result_type);
+    op_vec = try op_vec.push(try createList(allocator, types_vec));
+
+    // Add (operands operand1 operand2)
+    var operands_vec = PersistentVector(*Value).init(allocator, null);
+    operands_vec = try operands_vec.push(try createIdentifier(allocator, "operands"));
+    operands_vec = try operands_vec.push(operand1);
+    operands_vec = try operands_vec.push(operand2);
+    op_vec = try op_vec.push(try createList(allocator, operands_vec));
+
+    return try createList(allocator, op_vec);
+}
+
+/// return macro: (return operand)
+/// Expands to: (operation (name func.return) (operands operand))
+fn returnMacro(
+    allocator: std.mem.Allocator,
+    args: *const PersistentLinkedList(*Value),
+) !*Value {
+    // Validate: need exactly 1 arg (the return value)
+    if (args.len() != 1) {
+        std.debug.print("return macro requires 1 argument (operand), got {}\n", .{args.len()});
+        return error.InvalidMacroArgs;
+    }
+
+    // Extract the operand
+    var iter = args.iterator();
+    const operand = iter.next() orelse return error.InvalidMacroArgs;
+
+    // Build operation structure:
+    // (operation
+    //   (name func.return)
+    //   (operands operand))
+
+    var op_vec = PersistentVector(*Value).init(allocator, null);
+
+    // Add "operation" identifier
+    op_vec = try op_vec.push(try createIdentifier(allocator, "operation"));
+
+    // Add (name func.return)
+    var name_vec = PersistentVector(*Value).init(allocator, null);
+    name_vec = try name_vec.push(try createIdentifier(allocator, "name"));
+    name_vec = try name_vec.push(try createIdentifier(allocator, "func.return"));
+    op_vec = try op_vec.push(try createList(allocator, name_vec));
+
+    // Add (operands operand)
+    var operands_vec = PersistentVector(*Value).init(allocator, null);
+    operands_vec = try operands_vec.push(try createIdentifier(allocator, "operands"));
+    operands_vec = try operands_vec.push(operand);
+    op_vec = try op_vec.push(try createList(allocator, operands_vec));
+
+    return try createList(allocator, op_vec);
+}
+
+/// constant macro: (constant (: value type))
+/// Expands to: (operation (name arith.constant) (result-types type) (attributes { :value (: value type) }))
+fn constantMacro(
+    allocator: std.mem.Allocator,
+    args: *const PersistentLinkedList(*Value),
+) !*Value {
+    // Validate: need exactly 1 arg (the typed value)
+    if (args.len() != 1) {
+        std.debug.print("constant macro requires 1 argument ((: value type)), got {}\n", .{args.len()});
+        return error.InvalidMacroArgs;
+    }
+
+    // Extract the argument
+    var iter = args.iterator();
+    const typed_value = iter.next() orelse return error.InvalidMacroArgs;
+
+    // Validate it's a has_type value
+    if (typed_value.type != .has_type) {
+        std.debug.print("constant macro argument must be a typed value (: value type)\n", .{});
+        return error.InvalidMacroArgs;
+    }
+
+    // Extract the type from has_type
+    const value_type = typed_value.data.has_type.type_expr;
+
+    // Build operation structure:
+    // (operation
+    //   (name arith.constant)
+    //   (result-types type)
+    //   (attributes { :value (: value type) }))
+
+    var op_vec = PersistentVector(*Value).init(allocator, null);
+
+    // Add "operation" identifier
+    op_vec = try op_vec.push(try createIdentifier(allocator, "operation"));
+
+    // Add (name arith.constant)
+    var name_vec = PersistentVector(*Value).init(allocator, null);
+    name_vec = try name_vec.push(try createIdentifier(allocator, "name"));
+    name_vec = try name_vec.push(try createIdentifier(allocator, "arith.constant"));
+    op_vec = try op_vec.push(try createList(allocator, name_vec));
+
+    // Add (result-types type)
+    var types_vec = PersistentVector(*Value).init(allocator, null);
+    types_vec = try types_vec.push(try createIdentifier(allocator, "result-types"));
+    types_vec = try types_vec.push(value_type);
+    op_vec = try op_vec.push(try createList(allocator, types_vec));
+
+    // Add (attributes { :value (: value type) })
+    // Build the map: { :value (: value type) }
+    var attrs_map = PersistentVector(*Value).init(allocator, null);
+    attrs_map = try attrs_map.push(try createKeyword(allocator, ":value"));
+    attrs_map = try attrs_map.push(typed_value);
+
+    const attrs_map_val = try allocator.create(Value);
+    attrs_map_val.* = Value{
+        .type = .map,
+        .data = .{ .map = attrs_map },
+    };
+
+    var attributes_vec = PersistentVector(*Value).init(allocator, null);
+    attributes_vec = try attributes_vec.push(try createIdentifier(allocator, "attributes"));
+    attributes_vec = try attributes_vec.push(attrs_map_val);
+    op_vec = try op_vec.push(try createList(allocator, attributes_vec));
+
+    return try createList(allocator, op_vec);
+}
+
+/// defn macro: (defn name [(: arg1 type1) (: arg2 type2) ...] return_type body...)
+/// Expands to: (operation (name func.func) (attributes ...) (regions ...))
+fn defnMacro(
+    allocator: std.mem.Allocator,
+    args: *const PersistentLinkedList(*Value),
+) !*Value {
+    // Validate: need at least 4 args (name, args-vector, return-type, body...)
+    if (args.len() < 4) {
+        std.debug.print("defn macro requires at least 4 arguments (name args return-type body...), got {}\n", .{args.len()});
+        return error.InvalidMacroArgs;
+    }
+
+    // Extract arguments
+    var iter = args.iterator();
+    const name_val = iter.next() orelse return error.InvalidMacroArgs;
+    const args_vec_val = iter.next() orelse return error.InvalidMacroArgs;
+    const return_type_val = iter.next() orelse return error.InvalidMacroArgs;
+
+    // Validate function name is an identifier
+    if (name_val.type != .identifier) {
+        std.debug.print("defn macro first argument must be a function name\n", .{});
+        return error.InvalidMacroArgs;
+    }
+    const func_name = name_val.data.atom;
+
+    // Validate args is a vector
+    if (args_vec_val.type != .vector) {
+        std.debug.print("defn macro second argument must be a vector of arguments\n", .{});
+        return error.InvalidMacroArgs;
+    }
+    const args_vec = args_vec_val.data.vector;
+
+    // Parse argument list to extract names and types
+    var arg_names = std.ArrayList(*Value){};
+    defer arg_names.deinit(allocator);
+    var arg_types = std.ArrayList(*Value){};
+    defer arg_types.deinit(allocator);
+
+    for (args_vec.slice()) |arg| {
+        // Each arg should be (: name type)
+        if (arg.type != .has_type) {
+            std.debug.print("defn macro arguments must be (: name type)\n", .{});
+            return error.InvalidMacroArgs;
+        }
+
+        // has_type has .value and .type_expr fields
+        const param_name = arg.data.has_type.value;
+        const param_type = arg.data.has_type.type_expr;
+
+        // param_name should be a value_id (e.g., %a, %b)
+        if (param_name.type != .value_id) {
+            std.debug.print("defn macro parameter name must be a value_id (e.g., %a)\n", .{});
+            return error.InvalidMacroArgs;
+        }
+
+        // Use the value_id directly
+        try arg_names.append(allocator, param_name);
+        try arg_types.append(allocator, param_type);
+    }
+
+    // Collect body expressions (remaining arguments)
+    var body_exprs = std.ArrayList(*Value){};
+    defer body_exprs.deinit(allocator);
+    while (iter.next()) |expr| {
+        try body_exprs.append(allocator, expr);
+    }
+
+    // Build function type: direct .function_type value with inputs and results
+    var inputs_vec = PersistentVector(*Value).init(allocator, null);
+    for (arg_types.items) |arg_type| {
+        inputs_vec = try inputs_vec.push(arg_type);
+    }
+
+    var results_vec = PersistentVector(*Value).init(allocator, null);
+    results_vec = try results_vec.push(return_type_val);
+
+    const func_type = try allocator.create(Value);
+    func_type.* = Value{
+        .type = .function_type,
+        .data = .{ .function_type = .{
+            .inputs = inputs_vec,
+            .results = results_vec,
+        } },
+    };
+
+    // Build symbol name: @func_name
+    const symbol_name = try std.fmt.allocPrint(allocator, "@{s}", .{func_name});
+    const symbol = try allocator.create(Value);
+    symbol.* = Value{
+        .type = .symbol,
+        .data = .{ .atom = symbol_name },
+    };
+
+    // Build attributes: { :sym_name @name :function_type (!function ...) }
+    var attrs_map = PersistentVector(*Value).init(allocator, null);
+    // :sym_name
+    attrs_map = try attrs_map.push(try createKeyword(allocator, ":sym_name"));
+    attrs_map = try attrs_map.push(symbol);
+    // :function_type
+    attrs_map = try attrs_map.push(try createKeyword(allocator, ":function_type"));
+    attrs_map = try attrs_map.push(func_type);
+
+    const attrs_map_val = try allocator.create(Value);
+    attrs_map_val.* = Value{
+        .type = .map,
+        .data = .{ .map = attrs_map },
+    };
+
+    var attrs_vec = PersistentVector(*Value).init(allocator, null);
+    attrs_vec = try attrs_vec.push(try createIdentifier(allocator, "attributes"));
+    attrs_vec = try attrs_vec.push(attrs_map_val);
+    const attributes = try createList(allocator, attrs_vec);
+
+    // Build block arguments: [[%arg1 type1] [%arg2 type2] ...]
+    var block_args_vec = PersistentVector(*Value).init(allocator, null);
+    for (arg_names.items, arg_types.items) |name, type_val| {
+        var arg_pair = PersistentVector(*Value).init(allocator, null);
+        arg_pair = try arg_pair.push(name);
+        arg_pair = try arg_pair.push(type_val);
+        const arg_vec = try createVector(allocator, arg_pair);
+        block_args_vec = try block_args_vec.push(arg_vec);
+    }
+    const block_args = try createVector(allocator, block_args_vec);
+
+    // Build (arguments [...])
+    var arguments_vec = PersistentVector(*Value).init(allocator, null);
+    arguments_vec = try arguments_vec.push(try createIdentifier(allocator, "arguments"));
+    arguments_vec = try arguments_vec.push(block_args);
+    const arguments = try createList(allocator, arguments_vec);
+
+    // Build block: (block [^entry] (arguments ...) body...)
+    var block_vec = PersistentVector(*Value).init(allocator, null);
+    block_vec = try block_vec.push(try createIdentifier(allocator, "block"));
+    
+    // Add block label [^entry]
+    var label_vec = PersistentVector(*Value).init(allocator, null);
+    const entry_label = try allocator.create(Value);
+    entry_label.* = Value{
+        .type = .block_id,
+        .data = .{ .atom = "^entry" },
+    };
+    label_vec = try label_vec.push(entry_label);
+    block_vec = try block_vec.push(try createVector(allocator, label_vec));
+    
+    // Add arguments
+    block_vec = try block_vec.push(arguments);
+    
+    // Add body expressions
+    for (body_exprs.items) |body_expr| {
+        block_vec = try block_vec.push(body_expr);
+    }
+    const block = try createList(allocator, block_vec);
+
+    // Build region: (region block)
+    var region_vec = PersistentVector(*Value).init(allocator, null);
+    region_vec = try region_vec.push(try createIdentifier(allocator, "region"));
+    region_vec = try region_vec.push(block);
+    const region = try createList(allocator, region_vec);
+
+    // Build regions: (regions region)
+    var regions_vec = PersistentVector(*Value).init(allocator, null);
+    regions_vec = try regions_vec.push(try createIdentifier(allocator, "regions"));
+    regions_vec = try regions_vec.push(region);
+    const regions = try createList(allocator, regions_vec);
+
+    // Build complete operation
+    var op_vec = PersistentVector(*Value).init(allocator, null);
+    op_vec = try op_vec.push(try createIdentifier(allocator, "operation"));
+    
+    // (name func.func)
+    var name_vec = PersistentVector(*Value).init(allocator, null);
+    name_vec = try name_vec.push(try createIdentifier(allocator, "name"));
+    name_vec = try name_vec.push(try createIdentifier(allocator, "func.func"));
+    op_vec = try op_vec.push(try createList(allocator, name_vec));
+    
+    // Add attributes and regions
+    op_vec = try op_vec.push(attributes);
+    op_vec = try op_vec.push(regions);
+
+    return try createList(allocator, op_vec);
 }

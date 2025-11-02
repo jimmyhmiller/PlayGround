@@ -45,25 +45,30 @@ pub const Printer = struct {
     /// Print a module
     pub fn printModule(self: *Printer, module: *const MlirModule) PrintError!void {
         const writer = self.buffer.writer(self.allocator);
-        try writer.writeAll("(mlir");
-        self.indent_level += 1;
+
+        const total_items = module.type_aliases.len + module.operations.len;
+        const needs_wrapper = total_items > 1;
+
+        // Wrap in a list if there are multiple items
+        if (needs_wrapper) {
+            try writer.writeAll("(");
+        }
 
         // Print type aliases first
-        for (module.type_aliases) |*alias| {
-            try writer.writeAll("\n");
-            try self.writeIndent();
+        for (module.type_aliases, 0..) |*alias, idx| {
+            if (idx > 0 and needs_wrapper) try writer.writeAll("\n ");
             try self.printTypeAlias(alias);
         }
 
         // Then print operations
-        for (module.operations) |*op| {
-            try writer.writeAll("\n");
-            try self.writeIndent();
+        for (module.operations, 0..) |*op, idx| {
+            if ((idx > 0 or module.type_aliases.len > 0) and needs_wrapper) try writer.writeAll("\n ");
             try self.printOperation(op);
         }
 
-        self.indent_level -= 1;
-        try writer.writeAll(")");
+        if (needs_wrapper) {
+            try writer.writeAll(")");
+        }
     }
 
     /// Print a type alias

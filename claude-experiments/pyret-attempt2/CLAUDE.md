@@ -6,10 +6,11 @@ A hand-written recursive descent parser for the Pyret programming language in Ru
 
 ## 📊 Current Status (2025-11-02 - UPDATED)
 
-**Test Results: 81/128 tests passing (63.3%)**
-- ✅ **81 tests PASSING** (63.3%)
-- ⏸️ **47 tests IGNORED** (features not yet implemented)
+**Test Results: 81/126 tests passing (64.3%)**
+- ✅ **81 tests PASSING** (64.3%)
+- ⏸️ **45 tests IGNORED** (features not yet implemented)
 - ❌ **0 tests FAILING**
+- 🗑️ **2 tests DELETED** (invalid Pyret syntax - unary operators)
 
 **All passing tests produce byte-for-byte identical ASTs to the official Pyret parser!** ✨
 
@@ -31,7 +32,7 @@ cd /Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/pyret-attemp
 # Run all tests
 cargo test
 
-# Run comparison tests only (81 passing, 47 ignored)
+# Run comparison tests only (81 passing, 45 ignored)
 cargo test --test comparison_tests
 
 # Run ignored tests to see what needs work
@@ -70,9 +71,9 @@ src/bin/
 
 tests/
 ├── parser_tests.rs      (~1,540 lines) - 68 unit tests, all passing ✅
-└── comparison_tests.rs  (~1,360 lines) - 128 integration tests
+└── comparison_tests.rs  (~1,360 lines) - 126 integration tests
     ├── 81 passing (basic + working features) ✅
-    └── 47 ignored (advanced features not yet implemented)
+    └── 45 ignored (advanced features not yet implemented)
 ```
 
 ## ✅ Fully Implemented Features (All produce identical ASTs!)
@@ -124,7 +125,14 @@ tests/
 - Ultra-complex nested expressions
 - Program structure with prelude and body
 
-## 🔴 Features Not Yet Implemented (47 Ignored Tests)
+## 🔴 Features Not Yet Implemented (45 Ignored Tests)
+
+### ⚠️ Important: Unary Operators DO NOT Exist in Pyret!
+Pyret does **not** have unary operators like traditional languages:
+- ❌ `not x` is invalid - use `not(x)` (function call)
+- ❌ `-x` is invalid - use `0 - x` (binary operation)
+- The `SUnaryOp` AST node exists but is never used by the Pyret parser
+- 2 tests for unary operators were removed as they tested invalid syntax
 
 ### Advanced Block Features (4 tests)
 - Multi-statement blocks with multiple let bindings
@@ -132,7 +140,7 @@ tests/
 - Type annotations on let bindings in blocks
 
 ### Advanced Function Features (4 tests)
-- Where clauses with multiple test cases
+- **Where clauses** with multiple test cases (PARTIALLY IMPLEMENTED - needs refinement)
 - Rest parameters (`...args`)
 - Complex recursive patterns
 
@@ -161,11 +169,10 @@ tests/
 - String interpolation (`` `Hello $(name)` ``)
 - Complex expressions in interpolation
 
-### Other Advanced Features (20 tests)
+### Other Advanced Features (18 tests)
 - Table expressions (2 tests)
 - Check blocks (2 tests)
 - Advanced import/export (4 tests)
-- Unary operators (`not`, `-`) (3 tests)
 - Object extension/refinement (3 tests)
 - List comprehensions with guards (1 test)
 - Spy expressions (1 test)
@@ -175,26 +182,48 @@ tests/
 
 ## 🎯 Next Priority Tasks
 
-Based on the 47 ignored tests, here are the highest-value features to implement:
+Based on the 45 ignored tests, here are the highest-value features to implement:
 
-### Priority 1: High-Value Quick Wins (5-8 hours)
-1. **Unary operators** (`not`, `-`) - 3 tests, common in real code
-2. **Advanced block features** - 4 tests, multi-statement blocks
-3. **Where clauses** - 4 tests, testing infrastructure
-4. **Type annotations on bindings** - 3 tests, improves type safety
+### 🔥 Priority 1: Where Clauses (RECOMMENDED NEXT)
+**Status:** Partially implemented, needs refinement to match official parser
+- Parser already recognizes WHERE keyword and populates check field
+- AST support exists (SFun.check field)
+- Official Pyret parser confirmed this is a real feature
+- Used for testing functions inline
 
-### Priority 2: Medium-Value Features (10-15 hours)
-1. **String interpolation** - 2 tests, very common in practice
-2. **Advanced for variants** (filter, fold) - 4 tests
-3. **Advanced data features** (sharing, generics) - 6 tests
-4. **Advanced import/export** - 4 tests
+**Example:**
+```pyret
+fun factorial(n):
+  if n == 0: 1
+  else: n * factorial(n - 1)
+  end
+where:
+  factorial(0) is 1
+  factorial(5) is 120
+end
+```
 
-### Priority 3: Advanced Features (20+ hours)
+**What's needed:**
+- Minor refinements to match official parser output exactly
+- Ensure check-test nodes are created correctly
+- Test with all where clause test cases
+
+### Priority 2: High-Value Quick Wins (5-8 hours)
+1. **Advanced block features** - 4 tests, multi-statement blocks
+2. **Type annotations on bindings** - 3 tests, improves type safety
+3. **String interpolation** - 2 tests, very common in practice
+
+### Priority 3: Medium-Value Features (10-15 hours)
+1. **Advanced for variants** (filter, fold) - 4 tests
+2. **Advanced data features** (sharing, generics) - 6 tests
+3. **Advanced import/export** - 4 tests
+4. **Advanced cases patterns** - 4 tests
+
+### Priority 4: Advanced Features (20+ hours)
 1. **Table expressions** - 2 tests
 2. **Check blocks** - 2 tests
-3. **Advanced cases patterns** - 4 tests
-4. **Object refinement** - 3 tests
-5. **Complex patterns** - remaining tests
+3. **Object refinement** - 3 tests
+4. **Complex patterns** - remaining tests
 
 ## 🔑 Key Concepts
 
@@ -221,7 +250,7 @@ Based on the 47 ignored tests, here are the highest-value features to implement:
 ```bash
 # Run all comparison tests
 cargo test --test comparison_tests
-# Result: 81 passed, 47 ignored, 0 failed
+# Result: 81 passed, 45 ignored, 0 failed
 
 # See what needs implementation
 cargo test --test comparison_tests -- --ignored --list
@@ -231,16 +260,16 @@ cargo test --test comparison_tests -- --ignored --list
 ```
 
 **68/68 parser unit tests passing** ✅ (100%)
-**81/128 comparison integration tests passing** ✅ (63.3%)
+**81/126 comparison integration tests passing** ✅ (64.3%)
 
 ## 💡 Quick Tips
 
 ### First Time Here?
 1. Read [TEST_STATUS_REPORT.md](TEST_STATUS_REPORT.md) - See exactly what's working
 2. Read [NEXT_STEPS.md](NEXT_STEPS.md) - Implementation guides
-3. Look at `tests/comparison_tests.rs` - See test patterns (lines 700-1364 show gap tests)
-4. Look at `src/parser.rs` - See recent implementations
-5. Pick a feature from the 47 ignored tests
+3. Look at `tests/comparison_tests.rs` - See test patterns
+4. Look at `src/parser.rs` - See recent implementations (where clauses partially done!)
+5. **Recommended:** Start with where clauses (already 80% complete)
 
 ### Debugging
 ```bash
@@ -303,35 +332,39 @@ let items = self.parse_comma_list(|p| p.parse_expr())?;
 - Pattern matching (basic) ✅
 - Import/export (basic) ✅
 
-**Advanced Features: ~35% Complete** ⚠️
+**Advanced Features: ~40% Complete** ⚠️
 - Type annotations (partial)
-- Where clauses (missing)
+- Where clauses (PARTIAL - 80% done, needs refinement)
 - String interpolation (missing)
-- Unary operators (missing)
 - Generic types (missing)
 - Table expressions (missing)
 - Check blocks (missing)
+- ⚠️ Unary operators (DO NOT EXIST in Pyret)
 
-**Overall: 63.3% Complete** (81/128 tests passing)
+**Overall: 64.3% Complete** (81/126 tests passing)
 
 ## 🎉 Ready to Code!
 
 The codebase is clean, well-tested, and ready for the next features:
 
 1. Start with [TEST_STATUS_REPORT.md](TEST_STATUS_REPORT.md) to see the big picture
-2. Pick a feature from the Priority 1 list above
+2. **RECOMMENDED:** Start with where clauses (80% complete, just needs refinement)
 3. Look at the ignored test to understand what's needed
 4. Follow the implementation pattern
 5. Run tests and validate with `./compare_parsers.sh`
 
-**Quick wins available:**
-- Unary operators: 3 tests, ~2-3 hours
+**Best next steps:**
+- ⭐ **Where clauses:** Partially done, ~1-2 hours to complete
 - Type annotations on bindings: 3 tests, ~2-3 hours
 - Advanced blocks: 4 tests, ~3-4 hours
+- String interpolation: 2 tests, ~3-4 hours
 
 ---
 
-**Last Updated:** 2025-11-02
-**Tests:** 68/68 parser tests ✅ (100%), 81/128 comparison tests ✅ (63.3%)
-**Recent Change:** Merged comprehensive gap tests into comparison_tests.rs, discovered 6 undocumented working features
-**Next Session:** Pick any feature from the 47 ignored tests - see TEST_STATUS_REPORT.md for recommendations
+**Last Updated:** 2025-11-02 (Evening)
+**Tests:** 68/68 parser tests ✅ (100%), 81/126 comparison tests ✅ (64.3%)
+**Recent Change:**
+- Investigated and deleted invalid unary operator tests (Pyret doesn't have unary operators!)
+- Verified where clauses are real and partially implemented
+- Updated priorities to focus on where clauses next
+**Next Session:** Complete where clause implementation (see Priority 1 above)

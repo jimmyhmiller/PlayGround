@@ -77,6 +77,7 @@ pub enum TokenType {
     Method,
     Module,
     Newtype,
+    Not,
     Of,
     Or,
     Provide,

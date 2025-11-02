@@ -68,8 +68,9 @@ fn createMap(allocator: std.mem.Allocator, vec: PersistentVector(*Value)) !*Valu
     return value;
 }
 
-// Transform (@test i64) => (operation (name func.call) ...)
+// Transform (@test %arg1 %arg2 i64) => (operation (name func.call) ...)
 // Takes args-only (without the "call" identifier) for use as a macro
+// Syntax: (@callee operand1 operand2 ... return_type)
 // Returns null on error (C-compatible calling convention)
 pub export fn transformCallToOperation(allocator_ptr: ?*anyopaque, call_args: ?*anyopaque) ?*anyopaque {
     if (allocator_ptr == null or call_args == null) return null;
@@ -78,19 +79,26 @@ pub export fn transformCallToOperation(allocator_ptr: ?*anyopaque, call_args: ?*
     const allocator = alloc_ptr.*;
     const args_value: *Value = @ptrCast(@alignCast(call_args));
 
-    // Expect a list containing (@test i64)
+    // Expect a list containing (@callee operand1 operand2 ... return_type)
     if (args_value.type != .list) return null;
     const args_vec = args_value.data.list;
 
-    if (args_vec.len() < 2) return null; // Need at least (<symbol> <type>)
+    if (args_vec.len() < 2) return null; // Need at least (callee return_type)
 
-    // Extract: @test, i64
+    // Extract: @callee is first, return_type is last, operands are in between
     const callee_symbol = args_vec.at(0);
-    const return_type = args_vec.at(1);
+    const return_type = args_vec.at(args_vec.len() - 1);
 
-    // Build result: (operation (name func.call) (result-bindings [%result0]) (result-types i64) (attributes { :callee @test }))
+    // Extract operands (everything between callee and return_type)
+    var operands = PersistentVector(*Value).init(allocator, null);
+    var i: usize = 1;
+    while (i < args_vec.len() - 1) : (i += 1) {
+        operands = operands.push(args_vec.at(i)) catch return null;
+    }
 
-    const result = transformCallToOperationInner(allocator, callee_symbol, return_type) catch return null;
+    // Build result: (operation (name func.call) (result-bindings [%result0]) (result-types i64) (operands ...) (attributes { :callee @test }))
+
+    const result = transformCallToOperationInner(allocator, callee_symbol, return_type, operands) catch return null;
     return @ptrCast(result);
 }
 
@@ -98,6 +106,7 @@ fn transformCallToOperationInner(
     allocator: std.mem.Allocator,
     callee_symbol: *Value,
     return_type: *Value,
+    operands: PersistentVector(*Value),
 ) !*Value {
     // Create "operation" identifier
     const operation_ident = try createIdentifier(allocator, "operation");
@@ -124,6 +133,18 @@ fn transformCallToOperationInner(
     types_vec = try types_vec.push(return_type);
     const types_clause = try createList(allocator, types_vec);
 
+    // Create (operands %arg1 %arg2 ...) if operands provided
+    var operands_clause: ?*Value = null;
+    if (operands.len() > 0) {
+        var operands_vec = PersistentVector(*Value).init(allocator, null);
+        operands_vec = try operands_vec.push(try createIdentifier(allocator, "operands"));
+        // Add all operands
+        for (operands.slice()) |operand| {
+            operands_vec = try operands_vec.push(operand);
+        }
+        operands_clause = try createList(allocator, operands_vec);
+    }
+
     // Create (attributes { :callee @test })
     // Map is a flat vector of key-value pairs
     var map_vec = PersistentVector(*Value).init(allocator, null);
@@ -136,12 +157,15 @@ fn transformCallToOperationInner(
     attrs_vec = try attrs_vec.push(attributes_map);
     const attrs_clause = try createList(allocator, attrs_vec);
 
-    // Build the final operation list: (operation <name> <bindings> <types> <attrs>)
+    // Build the final operation list: (operation <name> <bindings> <types> [<operands>] <attrs>)
     var op_vec = PersistentVector(*Value).init(allocator, null);
     op_vec = try op_vec.push(operation_ident);
     op_vec = try op_vec.push(name_clause);
     op_vec = try op_vec.push(bindings_clause);
     op_vec = try op_vec.push(types_clause);
+    if (operands_clause) |ops| {
+        op_vec = try op_vec.push(ops);
+    }
     op_vec = try op_vec.push(attrs_clause);
 
     return try createList(allocator, op_vec);

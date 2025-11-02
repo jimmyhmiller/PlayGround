@@ -1,16 +1,29 @@
 # Pyret Parser - Comprehensive Test Status Report
 
-**Generated:** 2025-11-02
-**After merging:** comprehensive_gap_tests.rs → comparison_tests.rs
+**Generated:** 2025-11-02 (Evening Update)
+**After cleanup:** Removed invalid unary operator tests
 
 ## 📊 Executive Summary
 
-**Total Tests: 128**
-- ✅ **81 tests PASSING** (63.3%)
-- ⏸️ **47 tests IGNORED** (36.7%)
+**Total Tests: 126** (was 128, removed 2 invalid tests)
+- ✅ **81 tests PASSING** (64.3%)
+- ⏸️ **45 tests IGNORED** (35.7%)
 - ❌ **0 tests FAILING**
+- 🗑️ **2 tests DELETED** (tested invalid Pyret syntax)
 
 The parser is **significantly more complete** than previously documented!
+
+## ⚠️ IMPORTANT: Unary Operators Do NOT Exist in Pyret
+
+**Finding:** The 2 "unary operator" tests have been deleted because they tested **invalid Pyret syntax**.
+
+Pyret does NOT have traditional unary operators:
+- ❌ `not x` is invalid → use `not(x)` (function call)
+- ❌ `-x` is invalid → use `0 - x` (binary operation)
+- The `SUnaryOp` AST node exists in our code but is **never used** by the official Pyret parser
+- Pyret requires whitespace around all operators
+
+This was verified by testing with the official Pyret parser.
 
 ## 🎉 Newly Discovered Working Features
 
@@ -156,16 +169,17 @@ import equality as E
 - Computed property names
 - Object update syntax
 
-### Other Advanced Features
+### Other Advanced Features (18 tests, was 20)
 - **Table expressions** (2 tests)
 - **Check blocks** (standalone) (2 tests)
 - Advanced import/export (4 tests)
-- **Unary operators** (`not`, `-`) (3 tests)
 - Comprehensions with guards (1 test)
 - **Spy expressions** (debugging) (1 test)
 - **Contracts** (1 test)
 - Complex real-world patterns (2 tests)
 - Gradual typing (`Any` type) (1 test)
+- Object extension/refinement (3 tests)
+- List comprehensions (1 test)
 
 ## 🎯 Parser Completion Analysis
 
@@ -178,18 +192,18 @@ import equality as E
 - ✅ Import/export (basic)
 - ✅ Control flow (if, when, for, cases)
 
-### Advanced Features: ~35% Complete ⚠️
+### Advanced Features: ~40% Complete ⚠️
 - ❌ Type annotations (partial)
-- ❌ Where clauses (missing)
+- ⚠️ Where clauses (PARTIAL - 80% implemented, needs refinement)
 - ❌ Complex pattern matching (partial)
 - ❌ String interpolation (missing)
 - ❌ Contracts (missing)
 - ❌ Tables (missing)
-- ❌ Unary operators (missing)
 - ❌ Generic types (missing)
 - ❌ Sharing clauses (missing)
+- ⚠️ Unary operators (DO NOT EXIST in Pyret - deleted tests)
 
-### Overall Completion: ~63% (81/128 tests)
+### Overall Completion: ~64% (81/126 tests)
 
 ## 📝 Documentation Issues Found
 
@@ -199,39 +213,53 @@ import equality as E
 
 ## 🚀 Recommended Next Steps
 
-### Priority 1: High-Value Features (8-10 tests)
-1. **Where clauses** for functions - enables comprehensive testing
-2. **Unary operators** (`not`, `-`) - common in real code
-3. **Type annotations on bindings** - improves type safety
-4. **Advanced data features** (sharing clauses, multiple variants)
+### 🔥 Priority 1: Where Clauses (RECOMMENDED - 80% Complete!)
+**Status:** Partially implemented, just needs refinement
+- Parser already handles WHERE keyword (parser.rs:2508-2522)
+- AST support exists (SFun.check field)
+- Creates s-block with check-test nodes
+- Just needs minor fixes to match official parser exactly
+- **Estimated time:** 1-2 hours
 
-### Priority 2: Medium-Value Features (10-15 tests)
-1. **String interpolation** - very common in practice
-2. **Advanced for expressions** (filter, fold variants)
-3. **Advanced import/export** (file imports, selective exports)
-4. **Generic type parameters**
+### Priority 2: High-Value Features (6-8 tests)
+1. **Type annotations on bindings** - improves type safety (3 tests)
+2. **Advanced block features** - multi-statement blocks (4 tests)
+3. **String interpolation** - very common in practice (2 tests)
 
-### Priority 3: Lower-Value Features (remaining ~20 tests)
-1. **Table expressions** - specialized feature
-2. **Check blocks** - testing infrastructure
-3. **Spy expressions** - debugging feature
-4. **Contracts** - advanced type system feature
-5. **Complex edge cases** - nested patterns, etc.
+### Priority 3: Medium-Value Features (10-15 tests)
+1. **Advanced data features** (sharing clauses, multiple variants) (6 tests)
+2. **Advanced for expressions** (filter, fold variants) (4 tests)
+3. **Advanced import/export** (file imports, selective exports) (4 tests)
+4. **Generic type parameters** (3 tests)
+
+### Priority 4: Lower-Value Features (remaining ~18 tests)
+1. **Table expressions** - specialized feature (2 tests)
+2. **Check blocks** - testing infrastructure (2 tests)
+3. **Advanced cases patterns** (4 tests)
+4. **Object refinement** (3 tests)
+5. **Spy expressions** - debugging feature (1 test)
+6. **Contracts** - advanced type system feature (1 test)
+7. **Complex edge cases** - nested patterns, etc. (5 tests)
 
 ## ✅ Action Items
 
 1. ✅ **DONE:** Merged comprehensive_gap_tests.rs into comparison_tests.rs
-2. **TODO:** Update CLAUDE.md with correct completion rate (63%, not 90%)
-3. **TODO:** Document all newly discovered working features
-4. **TODO:** Remove "NOT YET IMPLEMENTED" comments from passing tests
-5. **TODO:** Update priority list based on 47 actual missing features
+2. ✅ **DONE:** Updated CLAUDE.md with correct completion rate (64.3%)
+3. ✅ **DONE:** Documented all newly discovered working features
+4. ✅ **DONE:** Investigated and removed invalid unary operator tests
+5. ✅ **DONE:** Verified where clauses are real and partially implemented
+6. ✅ **DONE:** Updated priority list based on 45 actual missing features
+7. **TODO:** Complete where clause implementation (next session)
 
-## 🎉 Key Insight
+## 🎉 Key Insights
 
-**The parser is more complete than documented!** 6 major features (fun, when, assign, data, cases, import) were already working but not properly documented. The test suite now provides an accurate picture of what remains to be implemented.
+1. **The parser is more complete than documented!** 6 major features (fun, when, assign, data, cases, import) were already working but not properly documented.
+2. **Unary operators don't exist in Pyret!** The language uses functions (`not(x)`) and binary operations (`0 - x`) instead.
+3. **Where clauses are 80% done!** Just need minor refinements to match the official parser - great next task.
 
 ---
 
-**Run tests:** `cargo test --test comparison_tests`
-**View ignored tests:** `cargo test --test comparison_tests -- --ignored`
+**Run tests:** `cargo test --test comparison_tests` (81/126 passing)
+**View ignored tests:** `cargo test --test comparison_tests -- --ignored` (45 tests)
 **Compare specific code:** `./compare_parsers.sh "your code here"`
+**Next recommended work:** Complete where clause implementation

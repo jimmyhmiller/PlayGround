@@ -38,7 +38,6 @@ test "printer - simple constant round-trip" {
     const output = pr.getOutput();
 
     // Verify we have the expected structure
-    try testing.expect(std.mem.indexOf(u8, output, "(mlir") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(operation") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(name arith.constant)") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(result-bindings [%c0])") != null);

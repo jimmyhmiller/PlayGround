@@ -44,6 +44,9 @@ pub const MacroFn = macro_expander.MacroFn;
 pub const c_api_macro = @import("c_api_macro.zig");
 pub const builtin_macros = @import("builtin_macros.zig");
 
+// Export the operation flattener module
+pub const OperationFlattener = @import("operation_flattener.zig").OperationFlattener;
+
 // Export the MLIR module
 pub const mlir = @import("mlir/c.zig");
 

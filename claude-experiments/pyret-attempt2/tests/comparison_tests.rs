@@ -1208,24 +1208,6 @@ x._plus(y)
 "#);
 }
 
-#[test]
-#[ignore] // TODO: Unary operators
-fn test_unary_not() {
-    // Real pattern: logical negation
-    assert_matches_pyret(r#"
-not true
-"#);
-}
-
-#[test]
-#[ignore] // TODO: Unary minus
-fn test_unary_minus() {
-    // Real pattern: negation
-    assert_matches_pyret(r#"
--(5 + 3)
-"#);
-}
-
 // ============================================================================
 // CATEGORY: Comprehensions and Advanced List Operations
 // ============================================================================
