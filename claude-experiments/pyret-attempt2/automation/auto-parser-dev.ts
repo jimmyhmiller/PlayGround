@@ -362,7 +362,16 @@ Please fix all compilation errors. Do not remove or modify tests - only fix the 
     if (beforeResults.passing === beforeResults.total && beforeResults.ignored === 0) {
       // All tests passing, no ignored tests - time to generate new tests
       log('\n🎉 All tests passing! Asking Claude to generate new tests...', colors.green);
-      prompt = `You are a testing expert, we have a working parser, but we need to find areas that aren't complete with some comparison tests to actual pyret. Be sure to use real code. Once these tests are in place and failing, please update them to be ignored and update the documentation to tell people what work to do next`;
+      prompt = `You are a testing expert. We have a working parser, but we need to find areas that aren't complete with comparison tests to actual Pyret.
+
+CRITICAL REQUIREMENTS:
+1. Add new tests to tests/comparison_tests.rs (NOT parser_tests.rs)
+2. Use the assert_matches_pyret!() macro that compares against the official Pyret parser
+3. Use real, meaningful Pyret code examples
+4. Once tests are added and failing, mark them as #[ignore]
+5. Update the documentation (CLAUDE.md) to explain what features are missing and what work needs to be done next
+
+The goal is to identify gaps in parser coverage by adding comparison tests that will initially fail, showing us what features still need implementation.`;
     } else {
       // There are ignored tests - work on implementing features
       log(`\n🔧 Working on parser (${beforeResults.ignored} ignored tests remaining)...`, colors.blue);
