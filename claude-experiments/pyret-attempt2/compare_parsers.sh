@@ -48,13 +48,23 @@ echo "=== Comparison ==="
 python3 << 'EOF'
 import json
 import sys
+import re
+
+def normalize_srcloc(text):
+    """Normalize srcloc strings to ignore filename differences"""
+    if isinstance(text, str):
+        # Replace any filename in srcloc(...) with "file.arr"
+        return re.sub(r'srcloc\("([^"]+)"', 'srcloc("file.arr"', text)
+    return text
 
 def normalize_json(obj):
-    """Recursively sort dictionaries for consistent comparison"""
+    """Recursively sort dictionaries and normalize srcloc strings"""
     if isinstance(obj, dict):
         return {k: normalize_json(v) for k, v in sorted(obj.items())}
     elif isinstance(obj, list):
         return [normalize_json(item) for item in obj]
+    elif isinstance(obj, str):
+        return normalize_srcloc(obj)
     else:
         return obj
 

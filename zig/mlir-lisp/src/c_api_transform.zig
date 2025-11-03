@@ -117,21 +117,30 @@ fn transformCallToOperationInner(
     name_vec = try name_vec.push(try createIdentifier(allocator, "func.call"));
     const name_clause = try createList(allocator, name_vec);
 
-    // Create (result-bindings [%result0])
-    var gensym_vec = PersistentVector(*Value).init(allocator, null);
-    gensym_vec = try gensym_vec.push(try createValueId(allocator, "%result0"));
-    const bindings_vector = try createVector(allocator, gensym_vec);
+    // Check if return type is void (empty list ())
+    const is_void = return_type.type == .list and return_type.data.list.len() == 0;
 
-    var bindings_vec = PersistentVector(*Value).init(allocator, null);
-    bindings_vec = try bindings_vec.push(try createIdentifier(allocator, "result-bindings"));
-    bindings_vec = try bindings_vec.push(bindings_vector);
-    const bindings_clause = try createList(allocator, bindings_vec);
+    // Create (result-bindings [%result0]) and (result-types return_type) only if not void
+    var bindings_clause: ?*Value = null;
+    var types_clause: ?*Value = null;
 
-    // Create (result-types i64)
-    var types_vec = PersistentVector(*Value).init(allocator, null);
-    types_vec = try types_vec.push(try createIdentifier(allocator, "result-types"));
-    types_vec = try types_vec.push(return_type);
-    const types_clause = try createList(allocator, types_vec);
+    if (!is_void) {
+        // Create (result-bindings [%result0])
+        var gensym_vec = PersistentVector(*Value).init(allocator, null);
+        gensym_vec = try gensym_vec.push(try createValueId(allocator, "%result0"));
+        const bindings_vector = try createVector(allocator, gensym_vec);
+
+        var bindings_vec = PersistentVector(*Value).init(allocator, null);
+        bindings_vec = try bindings_vec.push(try createIdentifier(allocator, "result-bindings"));
+        bindings_vec = try bindings_vec.push(bindings_vector);
+        bindings_clause = try createList(allocator, bindings_vec);
+
+        // Create (result-types i64)
+        var types_vec = PersistentVector(*Value).init(allocator, null);
+        types_vec = try types_vec.push(try createIdentifier(allocator, "result-types"));
+        types_vec = try types_vec.push(return_type);
+        types_clause = try createList(allocator, types_vec);
+    }
 
     // Create (operands %arg1 %arg2 ...) if operands provided
     var operands_clause: ?*Value = null;
@@ -157,12 +166,16 @@ fn transformCallToOperationInner(
     attrs_vec = try attrs_vec.push(attributes_map);
     const attrs_clause = try createList(allocator, attrs_vec);
 
-    // Build the final operation list: (operation <name> <bindings> <types> [<operands>] <attrs>)
+    // Build the final operation list: (operation <name> [<bindings>] [<types>] [<operands>] <attrs>)
     var op_vec = PersistentVector(*Value).init(allocator, null);
     op_vec = try op_vec.push(operation_ident);
     op_vec = try op_vec.push(name_clause);
-    op_vec = try op_vec.push(bindings_clause);
-    op_vec = try op_vec.push(types_clause);
+    if (bindings_clause) |bindings| {
+        op_vec = try op_vec.push(bindings);
+    }
+    if (types_clause) |types| {
+        op_vec = try op_vec.push(types);
+    }
     if (operands_clause) |ops| {
         op_vec = try op_vec.push(ops);
     }

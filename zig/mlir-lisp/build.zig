@@ -493,6 +493,22 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the operation flattener test executable.
     const run_operation_flattener_tests = fixRpathForTest(b, operation_flattener_tests, target, mlir_lib_path);
 
+    // Creates a test executable for op macro
+    const op_macro_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/op_macro_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(op_macro_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the op macro test executable.
+    const run_op_macro_tests = fixRpathForTest(b, op_macro_tests, target, mlir_lib_path);
+
     // Creates an executable to test the printer manually
     const test_printer_exe = b.addExecutable(.{
         .name = "test_printer",
@@ -659,6 +675,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_macro_expansion_tests.step);
     test_step.dependOn(&run_macro_system_tests.step);
     test_step.dependOn(&run_operation_flattener_tests.step);
+    test_step.dependOn(&run_op_macro_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

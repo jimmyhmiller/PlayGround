@@ -69,7 +69,8 @@ pub const Executor = struct {
         // Must be null-terminated for C API
         // Added convert-scf-to-cf to support structured control flow (scf.if, scf.while, etc.)
         // Added convert-cf-to-llvm to convert control flow to LLVM
-        const pipeline: [:0]const u8 = "builtin.module(func.func(convert-scf-to-cf,convert-arith-to-llvm),convert-cf-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)";
+        // Added finalize-memref-to-llvm to convert memref operations to LLVM
+        const pipeline: [:0]const u8 = "builtin.module(func.func(convert-scf-to-cf,convert-arith-to-llvm),convert-cf-to-llvm,finalize-memref-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)";
 
         try pm.addPipeline(pipeline);
 

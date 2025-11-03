@@ -701,7 +701,6 @@ fn test_pyret_match_simple_provide() {
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Multi-statement blocks with let bindings
 fn test_block_with_multiple_let_bindings() {
     // Real pattern: local variable scoping in blocks
     assert_matches_pyret(r#"
@@ -715,7 +714,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Var bindings not implemented
 fn test_block_with_var_binding() {
     // Real pattern: mutable variables
     assert_matches_pyret(r#"
@@ -728,7 +726,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Type annotations on let bindings
 fn test_block_with_typed_bindings() {
     // Real pattern: typed local variables
     assert_matches_pyret(r#"
@@ -740,7 +737,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Shadowing and scope rules
 fn test_nested_blocks_with_shadowing() {
     // Real pattern: nested scopes
     assert_matches_pyret(r#"
@@ -759,7 +755,6 @@ end
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Where clauses with multiple checks
 fn test_function_with_multiple_where_clauses() {
     // Real pattern: comprehensive testing
     assert_matches_pyret(r#"
@@ -820,7 +815,6 @@ end
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Data definitions not implemented
 fn test_simple_data_definition() {
     // Real pattern: basic algebraic data type
     assert_matches_pyret(r#"
@@ -833,7 +827,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Data with fields
 fn test_data_with_fields() {
     // Real pattern: data with constructor parameters
     assert_matches_pyret(r#"
@@ -844,7 +837,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Data with ref fields
 fn test_data_with_mutable_fields() {
     // Real pattern: mutable state in data structures
     assert_matches_pyret(r#"
@@ -855,7 +847,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Multiple variants with fields
 fn test_data_with_multiple_variants() {
     // Real pattern: sum types
     assert_matches_pyret(r#"
@@ -867,7 +858,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Data with sharing clause
 fn test_data_with_shared_methods() {
     // Real pattern: methods shared across variants
     assert_matches_pyret(r#"
@@ -902,7 +892,6 @@ end
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Cases with multiple branches
 fn test_cases_with_wildcard() {
     // Real pattern: catch-all case
     assert_matches_pyret(r#"
@@ -914,7 +903,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Cases with else branch
 fn test_cases_with_else() {
     // Real pattern: default case
     assert_matches_pyret(r#"
@@ -926,7 +914,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Nested cases
 fn test_nested_cases() {
     // Real pattern: nested pattern matching
     assert_matches_pyret(r#"
@@ -942,7 +929,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Cases in function
 fn test_cases_in_function_body() {
     // Real pattern: dispatch on type
     assert_matches_pyret(r#"
@@ -960,7 +946,6 @@ end
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: For with multiple generators
 fn test_for_with_cartesian_product() {
     // Real pattern: nested iteration
     assert_matches_pyret(r#"
@@ -971,7 +956,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: For fold with complex accumulator
 fn test_for_fold_with_tuple_accumulator() {
     // Real pattern: accumulating multiple values
     assert_matches_pyret(r#"
@@ -982,7 +966,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: For filter
 fn test_for_filter() {
     // Real pattern: filtering with for
     assert_matches_pyret(r#"
@@ -993,7 +976,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Nested for expressions
 fn test_nested_for_expressions() {
     // Real pattern: matrix operations
     assert_matches_pyret(r#"
