@@ -1,9 +1,23 @@
-use pyret_attempt2::{Parser, Expr, Program};
+use pyret_attempt2::{Parser, Expr, Program, Loc};
 use pyret_attempt2::tokenizer::Tokenizer;
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::io::{self, Read};
+
+/// Convert a Loc to Pyret's srcloc string representation
+fn loc_to_srcloc_string(loc: &Loc) -> String {
+    format!(
+        "srcloc(\"{}\", {}, {}, {}, {}, {}, {})",
+        loc.source,
+        loc.start_line,
+        loc.start_column,
+        loc.start_char,
+        loc.end_line,
+        loc.end_column,
+        loc.end_char
+    )
+}
 
 /// Convert our AST to Pyret's JSON format (no locations, specific field names)
 fn expr_to_pyret_json(expr: &Expr) -> Value {
@@ -102,7 +116,7 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "doc": doc,
                 "body": expr_to_pyret_json(body),
                 "check": check.as_ref().map(|c| expr_to_pyret_json(c)),
-                "check-loc": check_loc,
+                "check-loc": check_loc.as_ref().map(|loc| loc_to_srcloc_string(loc)),
                 "blocky": blocky
             })
         }
@@ -116,7 +130,7 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "doc": doc,
                 "body": expr_to_pyret_json(body),
                 "check": check.as_ref().map(|c| expr_to_pyret_json(c)),
-                "check-loc": check_loc,
+                "check-loc": check_loc.as_ref().map(|loc| loc_to_srcloc_string(loc)),
                 "blocky": blocky
             })
         }
@@ -227,7 +241,7 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "blocky": blocky
             })
         }
-        Expr::SDataExpr { name, params, mixins, variants, shared_members, check_loc, check, .. } => {
+        Expr::SData { name, params, mixins, variants, shared_members, check_loc, check, .. } => {
             json!({
                 "type": "s-data",
                 "name": name,
@@ -235,7 +249,19 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "mixins": mixins.iter().map(|m| expr_to_pyret_json(m)).collect::<Vec<_>>(),
                 "variants": variants.iter().map(|v| variant_to_pyret_json(v)).collect::<Vec<_>>(),
                 "shared-members": shared_members.iter().map(|m| member_to_pyret_json(m)).collect::<Vec<_>>(),
-                "check-loc": check_loc,
+                "check-loc": check_loc.as_ref().map(|loc| loc_to_srcloc_string(loc)),
+                "check": check.as_ref().map(|c| expr_to_pyret_json(c))
+            })
+        }
+        Expr::SDataExpr { name, params, mixins, variants, shared_members, check_loc, check, .. } => {
+            json!({
+                "type": "s-data-expr",
+                "name": name,
+                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
+                "mixins": mixins.iter().map(|m| expr_to_pyret_json(m)).collect::<Vec<_>>(),
+                "variants": variants.iter().map(|v| variant_to_pyret_json(v)).collect::<Vec<_>>(),
+                "shared-members": shared_members.iter().map(|m| member_to_pyret_json(m)).collect::<Vec<_>>(),
+                "check-loc": check_loc.as_ref().map(|loc| loc_to_srcloc_string(loc)),
                 "check": check.as_ref().map(|c| expr_to_pyret_json(c))
             })
         }
@@ -285,7 +311,7 @@ fn member_to_pyret_json(member: &pyret_attempt2::Member) -> Value {
                 "blocky": blocky,
                 "body": expr_to_pyret_json(body),
                 "check": check.as_ref().map(|c| expr_to_pyret_json(c)),
-                "check-loc": check_loc,
+                "check-loc": check_loc.as_ref().map(|loc| loc_to_srcloc_string(loc)),
                 "doc": doc,
                 "name": name,
                 "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>()

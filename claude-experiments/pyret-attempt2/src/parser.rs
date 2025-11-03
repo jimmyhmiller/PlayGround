@@ -286,12 +286,17 @@ impl Parser {
                 // Var binding: var x := 5
                 self.parse_var_expr()?
             } else if self.matches(&TokenType::Name) {
-                // Check if this is an implicit let binding: x = value
-                // Look ahead to see if there's an = or := after the name
+                // Check if this is an implicit let binding: x = value or x :: Type = value
+                // Look ahead to see if there's a :: or = or := after the name
                 let checkpoint = self.checkpoint();
                 let _name = self.advance(); // Consume the name
 
-                if self.matches(&TokenType::Equals) {
+                // Check for type annotation first
+                if self.matches(&TokenType::ColonColon) {
+                    // Has type annotation - must be a let or var binding
+                    self.restore(checkpoint);
+                    self.parse_implicit_let_expr()?
+                } else if self.matches(&TokenType::Equals) {
                     // Implicit let binding: x = value
                     self.restore(checkpoint);
                     self.parse_implicit_let_expr()?
@@ -562,18 +567,32 @@ impl Parser {
         let name_token = self.expect(TokenType::Name)?;
         let name_str = name_token.value.clone();
 
-        // Create Name node
-        let name = Name::SName {
-            l: Loc::new(
-                self.file_name.clone(),
-                name_token.location.start_line,
-                name_token.location.start_col,
-                name_token.location.start_pos,
-                name_token.location.end_line,
-                name_token.location.end_col,
-                name_token.location.end_pos,
-            ),
-            s: name_str,
+        // Create Name node - use SUnderscore for "_"
+        let name = if name_str == "_" {
+            Name::SUnderscore {
+                l: Loc::new(
+                    self.file_name.clone(),
+                    name_token.location.start_line,
+                    name_token.location.start_col,
+                    name_token.location.start_pos,
+                    name_token.location.end_line,
+                    name_token.location.end_col,
+                    name_token.location.end_pos,
+                ),
+            }
+        } else {
+            Name::SName {
+                l: Loc::new(
+                    self.file_name.clone(),
+                    name_token.location.start_line,
+                    name_token.location.start_col,
+                    name_token.location.start_pos,
+                    name_token.location.end_line,
+                    name_token.location.end_col,
+                    name_token.location.end_pos,
+                ),
+                s: name_str,
+            }
         };
 
         // Optional type annotation: :: ann
@@ -1682,21 +1701,23 @@ impl Parser {
             body_stmts.push(Box::new(stmt));
         }
 
-        // Skip where clause if present
-        let check = if self.matches(&TokenType::Where) {
-            self.advance();
-            // Parse where clause body
+        // Parse optional where clause
+        let (check, check_loc) = if self.matches(&TokenType::Where) {
+            let where_token = self.advance().clone();
+            // The check-loc should just point to the WHERE keyword itself
+            let check_loc = self.make_loc(&where_token, &where_token);
             let mut where_stmts = Vec::new();
             while !self.matches(&TokenType::End) && !self.is_at_end() {
                 let stmt = self.parse_expr()?;
                 where_stmts.push(Box::new(stmt));
             }
-            Some(Box::new(Expr::SBlock {
-                l: self.current_loc(),
+            let check_block = Box::new(Expr::SBlock {
+                l: check_loc.clone(),
                 stmts: where_stmts,
-            }))
+            });
+            (Some(check_block), Some(check_loc))
         } else {
-            None
+            (None, None)
         };
 
         let end = self.expect(TokenType::End)?;
@@ -1705,11 +1726,6 @@ impl Parser {
         let body = Box::new(Expr::SBlock {
             l: self.current_loc(),
             stmts: body_stmts,
-        });
-
-        let check_loc = check.as_ref().map(|c| match c.as_ref() {
-            Expr::SBlock { l, .. } => l.clone(),
-            _ => self.current_loc(),
         });
 
         Ok(Member::SMethodField {
@@ -1808,12 +1824,17 @@ impl Parser {
                 // Var binding: var x := 5
                 self.parse_var_expr()?
             } else if self.matches(&TokenType::Name) {
-                // Check if this is an implicit let binding: x = value
-                // Look ahead to see if there's an = or := after the name
+                // Check if this is an implicit let binding: x = value or x :: Type = value
+                // Look ahead to see if there's a :: or = or := after the name
                 let checkpoint = self.checkpoint();
                 let _name = self.advance(); // Consume the name
 
-                if self.matches(&TokenType::Equals) {
+                // Check for type annotation first
+                if self.matches(&TokenType::ColonColon) {
+                    // Has type annotation - must be a let or var binding
+                    self.restore(checkpoint);
+                    self.parse_implicit_let_expr()?
+                } else if self.matches(&TokenType::Equals) {
                     // Implicit let binding: x = value
                     self.restore(checkpoint);
                     self.parse_implicit_let_expr()?
@@ -2120,26 +2141,19 @@ impl Parser {
         })
     }
 
-    /// var-expr: VAR bind := expr
-    /// Parses mutable variable bindings: var x := 5
+    /// var-expr: VAR bind = expr
+    /// Parses mutable variable bindings: var x = 5
     fn parse_var_expr(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::Var)?;
 
         // Parse binding: name [:: type]
         let bind = self.parse_bind()?;
 
-        // Expect :=
-        self.expect(TokenType::ColonEquals)?;
+        // Expect =
+        self.expect(TokenType::Equals)?;
 
         // Parse value expression
         let value = self.parse_expr()?;
-
-        // Create VarBind
-        let var_bind = LetBind::SVarBind {
-            l: self.current_loc(),
-            b: bind.clone(),
-            value: Box::new(value.clone()),
-        };
 
         let end = if self.current > 0 {
             self.tokens[self.current - 1].clone()
@@ -2147,12 +2161,11 @@ impl Parser {
             start.clone()
         };
 
-        // Var expressions are represented as SLetExpr with SVarBind
-        Ok(Expr::SLetExpr {
+        // Var bindings are s-var statements
+        Ok(Expr::SVar {
             l: self.make_loc(&start, &end),
-            binds: vec![var_bind],
-            body: Box::new(value), // Use the value as the body
-            blocky: false,
+            name: bind,
+            value: Box::new(value),
         })
     }
 
@@ -2506,19 +2519,22 @@ impl Parser {
         }
 
         // Parse optional where clause
-        let check = if self.matches(&TokenType::Where) {
-            self.advance();
+        let (check, check_loc) = if self.matches(&TokenType::Where) {
+            let where_token = self.advance().clone();
+            // The check-loc should just point to the WHERE keyword itself
+            let check_loc = self.make_loc(&where_token, &where_token);
             let mut where_stmts = Vec::new();
             while !self.matches(&TokenType::End) && !self.is_at_end() {
                 let stmt = self.parse_expr()?;
                 where_stmts.push(Box::new(stmt));
             }
-            Some(Box::new(Expr::SBlock {
-                l: self.current_loc(),
+            let check_block = Box::new(Expr::SBlock {
+                l: check_loc.clone(),
                 stmts: where_stmts,
-            }))
+            });
+            (Some(check_block), Some(check_loc))
         } else {
-            None
+            (None, None)
         };
 
         let end = self.expect(TokenType::End)?;
@@ -2527,11 +2543,6 @@ impl Parser {
         let body = Box::new(Expr::SBlock {
             l: self.current_loc(),
             stmts: body_stmts,
-        });
-
-        let check_loc = check.as_ref().map(|c| match c.as_ref() {
-            Expr::SBlock { l, .. } => l.clone(),
-            _ => self.current_loc(),
         });
 
         Ok(Expr::SFun {
@@ -2670,52 +2681,52 @@ impl Parser {
             }
         }
 
-        // Parse optional with clause
-        let with_members = if self.matches(&TokenType::With) {
-            self.parse_data_with()?
-        } else {
-            Vec::new()
-        };
-
         // Parse optional sharing clause
-        let mixins = if self.matches(&TokenType::Sharing) {
-            self.advance();
-            // Parse sharing expressions (comma-separated)
-            self.parse_comma_list(|p| p.parse_expr().map(Box::new))?
+        let (shared_members, mixins) = if self.matches(&TokenType::Sharing) {
+            self.advance(); // consume "sharing:"
+
+            // Parse shared members (method/field definitions)
+            let mut members = Vec::new();
+            while !self.matches(&TokenType::End) && !self.matches(&TokenType::Where) && !self.is_at_end() {
+                members.push(self.parse_member()?);
+            }
+            (members, Vec::new())
+        } else if self.matches(&TokenType::With) {
+            // Parse optional with clause
+            let with_members = self.parse_data_with()?;
+            (with_members, Vec::new())
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
 
-        // Parse optional where clause (check block)
-        let check = if self.matches(&TokenType::Where) {
-            self.advance();
+        // Parse optional where clause
+        let (check, check_loc) = if self.matches(&TokenType::Where) {
+            let where_token = self.advance().clone();
+            // The check-loc should just point to the WHERE keyword itself
+            let check_loc = self.make_loc(&where_token, &where_token);
             let mut where_stmts = Vec::new();
             while !self.matches(&TokenType::End) && !self.is_at_end() {
                 let stmt = self.parse_expr()?;
                 where_stmts.push(Box::new(stmt));
             }
-            Some(Box::new(Expr::SBlock {
-                l: self.current_loc(),
+            let check_block = Box::new(Expr::SBlock {
+                l: check_loc.clone(),
                 stmts: where_stmts,
-            }))
+            });
+            (Some(check_block), Some(check_loc))
         } else {
-            None
+            (None, None)
         };
 
         let end = self.expect(TokenType::End)?;
 
-        let check_loc = check.as_ref().map(|c| match c.as_ref() {
-            Expr::SBlock { l, .. } => l.clone(),
-            _ => self.current_loc(),
-        });
-
-        Ok(Expr::SDataExpr {
+        Ok(Expr::SData {
             l: self.make_loc(&start, &end),
             name,
             params,
             mixins,
             variants,
-            shared_members: with_members,
+            shared_members,
             check_loc,
             check,
         })

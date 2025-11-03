@@ -38,6 +38,9 @@ pub fn registerBuiltinMacros(expander: *MacroExpander) !void {
 
     // Register function definition macros
     try expander.registerMacro("defn", defnMacro);
+
+    // Register general operation macro
+    try expander.registerMacro("op", opMacro);
 }
 
 // ============================================================================
@@ -472,25 +475,48 @@ fn returnMacro(
     return try createList(allocator, op_vec);
 }
 
-/// constant macro: (constant (: value type))
-/// Expands to: (operation (name arith.constant) (result-types type) (attributes { :value (: value type) }))
+/// constant macro: (constant (: value type)) or (constant %name (: value type))
+/// Expands to: (operation (name arith.constant) [result-bindings] (result-types type) (attributes { :value (: value type) }))
 fn constantMacro(
     allocator: std.mem.Allocator,
     args: *const PersistentLinkedList(*Value),
 ) !*Value {
-    // Validate: need exactly 1 arg (the typed value)
-    if (args.len() != 1) {
-        std.debug.print("constant macro requires 1 argument ((: value type)), got {}\n", .{args.len()});
+    // Validate: need 1 or 2 args
+    if (args.len() < 1 or args.len() > 2) {
+        std.debug.print("constant macro requires 1 or 2 arguments, got {}\n", .{args.len()});
         return error.InvalidMacroArgs;
     }
 
-    // Extract the argument
     var iter = args.iterator();
-    const typed_value = iter.next() orelse return error.InvalidMacroArgs;
+    const first_arg = iter.next() orelse return error.InvalidMacroArgs;
 
-    // Validate it's a has_type value
-    if (typed_value.type != .has_type) {
-        std.debug.print("constant macro argument must be a typed value (: value type)\n", .{});
+    var binding_name: ?*Value = null;
+    var typed_value: *Value = undefined;
+
+    // Check if first arg is a value_id (binding form)
+    if (first_arg.type == .value_id) {
+        // Form: (constant %name (: value type))
+        if (args.len() != 2) {
+            std.debug.print("constant macro with binding requires 2 arguments (%name (: value type)), got {}\n", .{args.len()});
+            return error.InvalidMacroArgs;
+        }
+        binding_name = first_arg;
+        typed_value = iter.next() orelse return error.InvalidMacroArgs;
+
+        // Validate second arg is has_type
+        if (typed_value.type != .has_type) {
+            std.debug.print("constant macro second argument must be (: value type)\n", .{});
+            return error.InvalidMacroArgs;
+        }
+    } else if (first_arg.type == .has_type) {
+        // Form: (constant (: value type))
+        if (args.len() != 1) {
+            std.debug.print("constant macro without binding requires 1 argument ((: value type)), got {}\n", .{args.len()});
+            return error.InvalidMacroArgs;
+        }
+        typed_value = first_arg;
+    } else {
+        std.debug.print("constant macro first argument must be %name or (: value type)\n", .{});
         return error.InvalidMacroArgs;
     }
 
@@ -500,6 +526,7 @@ fn constantMacro(
     // Build operation structure:
     // (operation
     //   (name arith.constant)
+    //   [(result-bindings [%name])]  ; optional
     //   (result-types type)
     //   (attributes { :value (: value type) }))
 
@@ -513,6 +540,18 @@ fn constantMacro(
     name_vec = try name_vec.push(try createIdentifier(allocator, "name"));
     name_vec = try name_vec.push(try createIdentifier(allocator, "arith.constant"));
     op_vec = try op_vec.push(try createList(allocator, name_vec));
+
+    // Add (result-bindings [%name]) if binding provided
+    if (binding_name) |name| {
+        var gensym_vec = PersistentVector(*Value).init(allocator, null);
+        gensym_vec = try gensym_vec.push(name);
+        const bindings_vector = try createVector(allocator, gensym_vec);
+
+        var bindings_vec = PersistentVector(*Value).init(allocator, null);
+        bindings_vec = try bindings_vec.push(try createIdentifier(allocator, "result-bindings"));
+        bindings_vec = try bindings_vec.push(bindings_vector);
+        op_vec = try op_vec.push(try createList(allocator, bindings_vec));
+    }
 
     // Add (result-types type)
     var types_vec = PersistentVector(*Value).init(allocator, null);
@@ -536,6 +575,161 @@ fn constantMacro(
     attributes_vec = try attributes_vec.push(try createIdentifier(allocator, "attributes"));
     attributes_vec = try attributes_vec.push(attrs_map_val);
     op_vec = try op_vec.push(try createList(allocator, attributes_vec));
+
+    return try createList(allocator, op_vec);
+}
+
+/// op macro: General-purpose operation macro
+/// Forms:
+///   (op %N (: index) (memref.dim [%B %c1]))
+///   (op (: index) (memref.dim [%B %c1]))
+///   (op (memref.store [%value %C %i %j]))
+///   (op %result (: i32) (scf.if %cond) (region ...) (region ...))
+/// Expands to: (operation (name ...) [result-bindings] [result-types] (operands ...) [regions])
+fn opMacro(
+    allocator: std.mem.Allocator,
+    args: *const PersistentLinkedList(*Value),
+) !*Value {
+    // Need at least 1 argument (the operation call)
+    if (args.len() < 1) {
+        std.debug.print("op macro requires at least 1 argument, got {}\n", .{args.len()});
+        return error.InvalidMacroArgs;
+    }
+
+    var iter = args.iterator();
+    var current_arg = iter.next() orelse return error.InvalidMacroArgs;
+
+    // Parse optional binding: %N
+    var binding_name: ?*Value = null;
+    if (current_arg.type == .value_id) {
+        binding_name = current_arg;
+        current_arg = iter.next() orelse {
+            std.debug.print("op macro: expected more arguments after binding\n", .{});
+            return error.InvalidMacroArgs;
+        };
+    }
+
+    // Parse optional type annotation: (: type)
+    var result_type: ?*Value = null;
+    if (current_arg.type == .has_type) {
+        // has_type form: (: value type) -> extract type
+        result_type = current_arg.data.has_type.type_expr;
+        current_arg = iter.next() orelse {
+            std.debug.print("op macro: expected operation call after type annotation\n", .{});
+            return error.InvalidMacroArgs;
+        };
+    } else if (current_arg.type == .list) {
+        // Check if it's a list starting with ":"
+        const list_vec = current_arg.data.list;
+        if (list_vec.len() >= 2) {
+            const first_elem = list_vec.at(0);
+            if (first_elem.type == .identifier and std.mem.eql(u8, first_elem.data.atom, ":")) {
+                // It's a (: type) form
+                result_type = list_vec.at(1);
+                current_arg = iter.next() orelse {
+                    std.debug.print("op macro: expected operation call after type annotation\n", .{});
+                    return error.InvalidMacroArgs;
+                };
+            }
+        }
+    }
+
+    // Parse operation call: (op-name [operands...])
+    if (current_arg.type != .list) {
+        std.debug.print("op macro: operation call must be a list, got {}\n", .{current_arg.type});
+        return error.InvalidMacroArgs;
+    }
+
+    const op_call = current_arg.data.list;
+    if (op_call.len() < 1) {
+        std.debug.print("op macro: operation call must have at least operation name\n", .{});
+        return error.InvalidMacroArgs;
+    }
+
+    // Extract operation name
+    const op_name = op_call.at(0);
+    if (op_name.type != .identifier) {
+        std.debug.print("op macro: operation name must be an identifier\n", .{});
+        return error.InvalidMacroArgs;
+    }
+
+    // Extract operands - second element should be a vector [operands...]
+    var operands_vec = PersistentVector(*Value).init(allocator, null);
+    if (op_call.len() >= 2) {
+        const operands_arg = op_call.at(1);
+        if (operands_arg.type == .vector) {
+            // Copy operands from the vector
+            for (operands_arg.data.vector.slice()) |operand| {
+                operands_vec = try operands_vec.push(operand);
+            }
+        } else {
+            std.debug.print("op macro: operands must be in a vector [...]\n", .{});
+            return error.InvalidMacroArgs;
+        }
+    }
+
+    // Extract regions from the operation call (3rd element onwards)
+    var regions = std.ArrayList(*Value){};
+    defer regions.deinit(allocator);
+    if (op_call.len() >= 3) {
+        var i: usize = 2;
+        while (i < op_call.len()) : (i += 1) {
+            try regions.append(allocator, op_call.at(i));
+        }
+    }
+
+    // Build operation structure
+    var op_vec = PersistentVector(*Value).init(allocator, null);
+
+    // Add "operation" identifier
+    op_vec = try op_vec.push(try createIdentifier(allocator, "operation"));
+
+    // Add (name operation-name)
+    var name_vec = PersistentVector(*Value).init(allocator, null);
+    name_vec = try name_vec.push(try createIdentifier(allocator, "name"));
+    name_vec = try name_vec.push(op_name);
+    op_vec = try op_vec.push(try createList(allocator, name_vec));
+
+    // Add (result-bindings [%name]) if binding provided
+    if (binding_name) |name| {
+        var bindings_vec_inner = PersistentVector(*Value).init(allocator, null);
+        bindings_vec_inner = try bindings_vec_inner.push(name);
+        const bindings_vector = try createVector(allocator, bindings_vec_inner);
+
+        var bindings_vec = PersistentVector(*Value).init(allocator, null);
+        bindings_vec = try bindings_vec.push(try createIdentifier(allocator, "result-bindings"));
+        bindings_vec = try bindings_vec.push(bindings_vector);
+        op_vec = try op_vec.push(try createList(allocator, bindings_vec));
+    }
+
+    // Add (result-types type) if type provided
+    if (result_type) |rtype| {
+        var types_vec = PersistentVector(*Value).init(allocator, null);
+        types_vec = try types_vec.push(try createIdentifier(allocator, "result-types"));
+        types_vec = try types_vec.push(rtype);
+        op_vec = try op_vec.push(try createList(allocator, types_vec));
+    }
+
+    // Add (operands ...) if there are operands
+    if (operands_vec.len() > 0) {
+        var ops_vec = PersistentVector(*Value).init(allocator, null);
+        ops_vec = try ops_vec.push(try createIdentifier(allocator, "operands"));
+        for (operands_vec.slice()) |operand| {
+            ops_vec = try ops_vec.push(operand);
+        }
+        op_vec = try op_vec.push(try createList(allocator, ops_vec));
+    }
+
+    // Handle regions - they should be (region ...) forms from the operation call
+    if (regions.items.len > 0) {
+        // Wrap all regions in a (regions ...) form
+        var regions_vec = PersistentVector(*Value).init(allocator, null);
+        regions_vec = try regions_vec.push(try createIdentifier(allocator, "regions"));
+        for (regions.items) |region| {
+            regions_vec = try regions_vec.push(region);
+        }
+        op_vec = try op_vec.push(try createList(allocator, regions_vec));
+    }
 
     return try createList(allocator, op_vec);
 }

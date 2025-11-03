@@ -122,6 +122,8 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
     try ctx.getOrLoadDialect("func");
     try ctx.getOrLoadDialect("arith");
     try ctx.getOrLoadDialect("scf");
+    try ctx.getOrLoadDialect("memref");
+    try ctx.getOrLoadDialect("affine");
     try ctx.getOrLoadDialect("cf");
 
     // Parse the program

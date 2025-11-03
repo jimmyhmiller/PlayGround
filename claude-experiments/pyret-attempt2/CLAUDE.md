@@ -4,20 +4,34 @@
 
 A hand-written recursive descent parser for the Pyret programming language in Rust.
 
-## 📊 Current Status (2025-11-02 - UPDATED)
+## 📊 Current Status (2025-11-03 - EARLY MORNING UPDATE)
 
-**Test Results: 81/126 tests passing (64.3%)**
-- ✅ **81 tests PASSING** (64.3%)
-- ⏸️ **45 tests IGNORED** (features not yet implemented)
+**Test Results: 99/126 tests passing (78.6%)**
+- ✅ **99 tests PASSING** (78.6%) - **+9 since last session!**
+- ⏸️ **27 tests IGNORED** (features not yet implemented)
 - ❌ **0 tests FAILING**
 - 🗑️ **2 tests DELETED** (invalid Pyret syntax - unary operators)
 
 **All passing tests produce byte-for-byte identical ASTs to the official Pyret parser!** ✨
 
-### Recent Discovery: More Features Working Than Documented! 🎉
+### Latest Completions: Advanced Pattern Matching & Data Sharing! ✅
 
-The following features were already implemented but not documented:
+**Session achievements (9 new tests enabled):**
+1. ✅ **Underscore wildcards** - `_` in pattern matching (`cases(List) x: | link(_, _) => ...`)
+2. ✅ **Cases-else** - Default branches in cases expressions
+3. ✅ **Nested cases** - Cases expressions inside cases branches
+4. ✅ **Cases in functions** - Pattern matching in function bodies
+5. ✅ **For-filter** - `for filter(x from list): predicate end`
+6. ✅ **For-fold** - `for fold(acc from init, x from list): body end`
+7. ✅ **For cartesian product** - Multiple generators `for map(x from l1, y from l2): ...`
+8. ✅ **Nested for expressions** - For loops inside for loops
+9. ✅ **Data sharing clauses** - `data Tree: ... sharing: method size(self): ... end`
+
+### Fully Implemented Features
+
+The following features were already implemented:
 - ✅ **Function definitions** `fun f(x): x + 1 end`
+- ✅ **Where clauses** `fun f(x): body where: f(1) is 2 end` **[JUST COMPLETED]**
 - ✅ **When expressions** `when cond: body end`
 - ✅ **Assignment expressions** `x := 5`
 - ✅ **Data declarations** `data Box: | box(ref v) end`
@@ -32,7 +46,7 @@ cd /Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/pyret-attemp
 # Run all tests
 cargo test
 
-# Run comparison tests only (81 passing, 45 ignored)
+# Run comparison tests only (99 passing, 27 ignored)
 cargo test --test comparison_tests
 
 # Run ignored tests to see what needs work
@@ -70,10 +84,10 @@ src/bin/
 └── to_pyret_json.rs (~400 lines) - JSON serialization
 
 tests/
-├── parser_tests.rs      (~1,540 lines) - 68 unit tests, all passing ✅
+├── parser_tests.rs      (~1,540 lines) - 72 unit tests, all passing ✅
 └── comparison_tests.rs  (~1,360 lines) - 126 integration tests
-    ├── 81 passing (basic + working features) ✅
-    └── 45 ignored (advanced features not yet implemented)
+    ├── 99 passing (basic + working features) ✅
+    └── 27 ignored (advanced features not yet implemented)
 ```
 
 ## ✅ Fully Implemented Features (All produce identical ASTs!)
@@ -102,18 +116,36 @@ tests/
 - Block expressions `block: ... end`
 - If expressions `if c: a else: b end` with else-if chains
 - When expressions `when c: body end`
-- For expressions `for map(x from lst): x + 1 end`
-- Cases expressions `cases(T) e: | variant => body end`
+- For expressions:
+  - ✅ `for map(x from lst): x + 1 end`
+  - ✅ **For-filter** `for filter(x from lst): x > 2 end` ✨ **[NEW!]**
+  - ✅ **For-fold** `for fold(acc from 0, x from lst): acc + x end` ✨ **[NEW!]**
+  - ✅ **Multiple generators** `for map(x from l1, y from l2): {x; y} end` ✨ **[NEW!]**
+  - ✅ **Nested for** ✨ **[NEW!]**
+- Cases expressions:
+  - ✅ `cases(T) e: | variant => body end`
+  - ✅ **Cases-else** `cases(T) e: | v1 => a | else => b end` ✨ **[NEW!]**
+  - ✅ **Underscore wildcards** `| link(_, _) => ...` ✨ **[NEW!]**
+  - ✅ **Nested cases** ✨ **[NEW!]**
 
 ### Functions & Bindings ✅
 - Lambda expressions `lam(x): x + 1 end`
 - Function definitions `fun f(x): body end`
+- Where clauses `fun f(x): body where: test end`
 - Let bindings `x = 5`, `let x = 5`
-- Var bindings `var x = 5`
+- **Var bindings** `var x = 5` ✨ **[NEW!]**
+- **Type annotations** `x :: Number = 42` ✨ **[NEW!]**
 - Assignment expressions `x := 5`
+- **Multi-statement blocks** ✨ **[NEW!]**
+- **Nested blocks with shadowing** ✨ **[NEW!]**
 
 ### Data & Types ✅
-- Data declarations `data T: | variant end`
+- **Simple data declarations** `data Color: | red | green | blue end`
+- **Data with typed fields** `data Point: | point(x :: Number, y) end`
+- **Data with mutable fields** `data Box: | box(ref v) end`
+- **Data with multiple variants** `data Either: | left(v) | right(v) end`
+- **Data with sharing clauses** `sharing: method size(self): ... end` ✨ **[NEW!]**
+- Data with where clauses
 - Check operators `is`, `raises`, `satisfies`, `violates`
 
 ### Modules ✅
@@ -125,7 +157,7 @@ tests/
 - Ultra-complex nested expressions
 - Program structure with prelude and body
 
-## 🔴 Features Not Yet Implemented (45 Ignored Tests)
+## 🔴 Features Not Yet Implemented (27 Ignored Tests)
 
 ### ⚠️ Important: Unary Operators DO NOT Exist in Pyret!
 Pyret does **not** have unary operators like traditional languages:
@@ -134,31 +166,13 @@ Pyret does **not** have unary operators like traditional languages:
 - The `SUnaryOp` AST node exists but is never used by the Pyret parser
 - 2 tests for unary operators were removed as they tested invalid syntax
 
-### Advanced Block Features (4 tests)
-- Multi-statement blocks with multiple let bindings
-- Complex scoping and shadowing rules
-- Type annotations on let bindings in blocks
-
-### Advanced Function Features (4 tests)
-- **Where clauses** with multiple test cases (PARTIALLY IMPLEMENTED - needs refinement)
+### Advanced Function Features (3 tests)
 - Rest parameters (`...args`)
 - Complex recursive patterns
+- Function-returning-function patterns
 
-### Advanced Data Features (6 tests)
-- Data with sharing clauses (shared methods across variants)
+### Advanced Data Features (1 test)
 - Parameterized/generic data types (`data List<T>`)
-- Complex variant patterns
-
-### Advanced Cases Features (4 tests)
-- Cases with else branches
-- Nested cases expressions
-- Complex pattern matching
-
-### Advanced For Features (4 tests)
-- For with multiple generators (cartesian product)
-- For fold with complex accumulators
-- For filter variant
-- Nested for expressions
 
 ### Type System (3 tests)
 - Function type annotations with arrow (`->`)
@@ -169,7 +183,7 @@ Pyret does **not** have unary operators like traditional languages:
 - String interpolation (`` `Hello $(name)` ``)
 - Complex expressions in interpolation
 
-### Other Advanced Features (18 tests)
+### Other Advanced Features (15 tests)
 - Table expressions (2 tests)
 - Check blocks (2 tests)
 - Advanced import/export (4 tests)
@@ -177,53 +191,39 @@ Pyret does **not** have unary operators like traditional languages:
 - List comprehensions with guards (1 test)
 - Spy expressions (1 test)
 - Contracts (1 test)
-- Complex real-world patterns (2 tests)
 - Gradual typing (1 test)
 
 ## 🎯 Next Priority Tasks
 
-Based on the 45 ignored tests, here are the highest-value features to implement:
+Based on the 27 remaining ignored tests, here are the highest-value features to implement:
 
-### 🔥 Priority 1: Where Clauses (RECOMMENDED NEXT)
-**Status:** Partially implemented, needs refinement to match official parser
-- Parser already recognizes WHERE keyword and populates check field
-- AST support exists (SFun.check field)
-- Official Pyret parser confirmed this is a real feature
-- Used for testing functions inline
+### 🔥 Priority 1: High-Value Features (NOT Quick Wins)
+⚠️ **Note:** The remaining features are more complex and require significant tokenizer/parser changes:
 
-**Example:**
-```pyret
-fun factorial(n):
-  if n == 0: 1
-  else: n * factorial(n - 1)
-  end
-where:
-  factorial(0) is 1
-  factorial(5) is 120
-end
-```
+1. **String interpolation** - 2 tests (~4-6 hours)
+   - ❌ Tokenizer does NOT support backtick strings yet
+   - Requires: Tokenizer updates for `` `Hello $(expr)` `` syntax
+   - Requires: Parser support for embedded expressions
 
-**What's needed:**
-- Minor refinements to match official parser output exactly
-- Ensure check-test nodes are created correctly
-- Test with all where clause test cases
+2. **Rest parameters** - 1 test (~2-3 hours)
+   - Requires: `...` token recognition
+   - `fun f(x, rest ...): ...`
 
-### Priority 2: High-Value Quick Wins (5-8 hours)
-1. **Advanced block features** - 4 tests, multi-statement blocks
-2. **Type annotations on bindings** - 3 tests, improves type safety
-3. **String interpolation** - 2 tests, very common in practice
+3. **Generic data types** - 1 test (~3-4 hours)
+   - `data List<T>: ...`
+   - Requires: Type parameter parsing
 
-### Priority 3: Medium-Value Features (10-15 hours)
-1. **Advanced for variants** (filter, fold) - 4 tests
-2. **Advanced data features** (sharing, generics) - 6 tests
-3. **Advanced import/export** - 4 tests
-4. **Advanced cases patterns** - 4 tests
+### Priority 2: Medium-Value Features (10-15 hours)
+1. **Check blocks** - 2 tests, important for testing
+2. **Advanced import/export** - 4 tests
+3. **Advanced type annotations** - 3 tests (arrows `->`, unions `|`)
 
-### Priority 4: Advanced Features (20+ hours)
+### Priority 3: Advanced Features (15+ hours)
 1. **Table expressions** - 2 tests
-2. **Check blocks** - 2 tests
-3. **Object refinement** - 3 tests
-4. **Complex patterns** - remaining tests
+2. **Object refinement** - 3 tests
+3. **List comprehensions with guards** - 1 test
+4. **Spy expressions** - 1 test
+5. **Complex real-world patterns** - 2 tests (integration)
 
 ## 🔑 Key Concepts
 
@@ -250,7 +250,7 @@ end
 ```bash
 # Run all comparison tests
 cargo test --test comparison_tests
-# Result: 81 passed, 45 ignored, 0 failed
+# Result: 99 passed, 27 ignored, 0 failed
 
 # See what needs implementation
 cargo test --test comparison_tests -- --ignored --list
@@ -259,8 +259,8 @@ cargo test --test comparison_tests -- --ignored --list
 ./compare_parsers.sh "fun f(x): x + 1 end"
 ```
 
-**68/68 parser unit tests passing** ✅ (100%)
-**81/126 comparison integration tests passing** ✅ (64.3%)
+**72/72 parser unit tests passing** ✅ (100%)
+**99/126 comparison integration tests passing** ✅ (78.6%)
 
 ## 💡 Quick Tips
 
@@ -268,8 +268,8 @@ cargo test --test comparison_tests -- --ignored --list
 1. Read [TEST_STATUS_REPORT.md](TEST_STATUS_REPORT.md) - See exactly what's working
 2. Read [NEXT_STEPS.md](NEXT_STEPS.md) - Implementation guides
 3. Look at `tests/comparison_tests.rs` - See test patterns
-4. Look at `src/parser.rs` - See recent implementations (where clauses partially done!)
-5. **Recommended:** Start with where clauses (already 80% complete)
+4. Look at `src/parser.rs` - See recent implementations
+5. **Recommended next:** Check remaining ignored tests - most "easy wins" are done!
 
 ### Debugging
 ```bash
@@ -324,47 +324,59 @@ let items = self.parse_comma_list(|p| p.parse_expr())?;
 
 ## 🎯 Parser Completion Status
 
-**Core Language: ~90% Complete** ✅
+**Core Language: ~95% Complete** ✅
 - All basic expressions ✅
 - All basic statements ✅
 - Function definitions ✅
-- Data declarations (basic) ✅
+- **Data declarations (basic)** ✅ **[COMPLETED]**
 - Pattern matching (basic) ✅
 - Import/export (basic) ✅
+- **Advanced blocks** ✅ **[COMPLETED]**
+- **Type annotations** ✅ **[COMPLETED]**
 
-**Advanced Features: ~40% Complete** ⚠️
-- Type annotations (partial)
-- Where clauses (PARTIAL - 80% done, needs refinement)
-- String interpolation (missing)
+**Advanced Features: ~65% Complete** ⚠️
+- Where clauses ✅
+- **Cases-else, wildcards, nesting** ✅ **[COMPLETED]**
+- **For-filter, fold, cartesian, nesting** ✅ **[COMPLETED]**
+- **Data sharing clauses** ✅ **[COMPLETED]**
+- String interpolation (missing - requires tokenizer work)
+- Rest parameters (missing)
 - Generic types (missing)
 - Table expressions (missing)
 - Check blocks (missing)
 - ⚠️ Unary operators (DO NOT EXIST in Pyret)
 
-**Overall: 64.3% Complete** (81/126 tests passing)
+**Overall: 78.6% Complete** (99/126 tests passing)
 
 ## 🎉 Ready to Code!
 
 The codebase is clean, well-tested, and ready for the next features:
 
 1. Start with [TEST_STATUS_REPORT.md](TEST_STATUS_REPORT.md) to see the big picture
-2. **RECOMMENDED:** Start with where clauses (80% complete, just needs refinement)
-3. Look at the ignored test to understand what's needed
-4. Follow the implementation pattern
-5. Run tests and validate with `./compare_parsers.sh`
+2. Look at the ignored tests in `tests/comparison_tests.rs`
+3. Follow the implementation pattern from recent work
+4. Run tests and validate with `./compare_parsers.sh`
 
-**Best next steps:**
-- ⭐ **Where clauses:** Partially done, ~1-2 hours to complete
-- Type annotations on bindings: 3 tests, ~2-3 hours
-- Advanced blocks: 4 tests, ~3-4 hours
-- String interpolation: 2 tests, ~3-4 hours
+**Best next steps (all require significant work):**
+- **String interpolation:** 2 tests, ~4-6 hours (requires tokenizer changes)
+- **Rest parameters:** 1 test, ~2-3 hours (`fun f(x, rest ...): ...`)
+- **Generic data types:** 1 test, ~3-4 hours (`data List<T>: ...`)
+
+⚠️ **Note:** Most "quick wins" have been completed! Remaining features require more complex changes.
 
 ---
 
-**Last Updated:** 2025-11-02 (Evening)
-**Tests:** 68/68 parser tests ✅ (100%), 81/126 comparison tests ✅ (64.3%)
-**Recent Change:**
-- Investigated and deleted invalid unary operator tests (Pyret doesn't have unary operators!)
-- Verified where clauses are real and partially implemented
-- Updated priorities to focus on where clauses next
-**Next Session:** Complete where clause implementation (see Priority 1 above)
+**Last Updated:** 2025-11-03 (Early Morning)
+**Tests:** 72/72 parser tests ✅ (100%), 99/126 comparison tests ✅ (78.6%)
+**This Session Completed:**
+- ✅ **Underscore wildcards** (`_` in pattern matching)
+- ✅ **Cases-else** (default branches in cases)
+- ✅ **Nested cases** (cases inside cases)
+- ✅ **Cases in functions** (pattern matching in function bodies)
+- ✅ **For-filter** (`for filter(x from list): predicate end`)
+- ✅ **For-fold** (`for fold(acc from init, x from list): body end`)
+- ✅ **For cartesian product** (multiple generators)
+- ✅ **Nested for expressions**
+- ✅ **Data sharing clauses** (`sharing: method name(self): ... end`)
+**Progress:** +9 tests enabled (from 90 to 99), 27 tests remaining
+**Next Session:** String interpolation, rest parameters, or generic types (all require tokenizer/parser updates)

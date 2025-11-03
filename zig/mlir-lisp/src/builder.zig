@@ -321,7 +321,12 @@ pub const Builder = struct {
         }
 
         // Build result types
-        const num_results = results.len();
+        // Special case: if results is a single empty list (), treat as void (0 results)
+        const num_results = if (results.len() == 1 and results.at(0).type == .list and results.at(0).data.list.len() == 0)
+            0
+        else
+            results.len();
+
         var result_types = try self.allocator.alloc(mlir.MlirType, num_results);
         defer self.allocator.free(result_types);
 
@@ -362,6 +367,15 @@ pub const Builder = struct {
             .function_type => {
                 // Function type - build from inputs/results
                 return self.buildFunctionTypeFromValue(value);
+            },
+            .list => {
+                // Empty list () represents void/unit type (empty tuple)
+                const list = value.data.list;
+                if (list.len() == 0) {
+                    // Create empty tuple type for void
+                    return mlir.Type.parse(self.ctx, "()") catch error.InvalidType;
+                }
+                return error.InvalidType;
             },
             .string => {
                 // String literal containing complex dialect type (e.g., "!llvm.func<...>")
@@ -526,17 +540,44 @@ pub const Builder = struct {
             // Build the type from the type Value
             const mlir_type = try self.buildTypeFromValue(type_val);
 
-            // Handle integer values specially for typed integer attributes
+            // Handle numeric values specially for typed attributes
             if (val.type == .number) {
-                const int_val = std.fmt.parseInt(i64, val.data.atom, 10) catch |err| {
-                    std.debug.print("ERROR: Invalid attribute - failed to parse integer: {s}\n", .{val.data.atom});
-                    std.debug.print("Attribute key: {s}\n", .{attr_key});
-                    std.debug.print("Parse error: {any}\n", .{err});
-                    return error.InvalidAttribute;
-                };
+                const num_str = val.data.atom;
 
-                // Create a typed integer attribute
-                return mlir.c.mlirIntegerAttrGet(mlir_type, int_val);
+                // Check if it's a float type (f16, f32, f64, bf16, etc.)
+                const type_str = if (type_val.type == .type)
+                    type_val.data.type
+                else if (type_val.type == .identifier)
+                    type_val.data.atom
+                else
+                    "";
+
+                const is_float_type = std.mem.startsWith(u8, type_str, "f") or
+                                     std.mem.eql(u8, type_str, "bf16");
+
+                if (is_float_type) {
+                    // Parse as float and create float attribute
+                    const float_val = std.fmt.parseFloat(f64, num_str) catch |err| {
+                        std.debug.print("ERROR: Invalid attribute - failed to parse float: {s}\n", .{num_str});
+                        std.debug.print("Attribute key: {s}\n", .{attr_key});
+                        std.debug.print("Parse error: {any}\n", .{err});
+                        return error.InvalidAttribute;
+                    };
+
+                    // Create a typed float attribute
+                    return mlir.c.mlirFloatAttrDoubleGet(self.ctx.ctx, mlir_type, float_val);
+                } else {
+                    // Parse as integer
+                    const int_val = std.fmt.parseInt(i64, num_str, 10) catch |err| {
+                        std.debug.print("ERROR: Invalid attribute - failed to parse integer: {s}\n", .{num_str});
+                        std.debug.print("Attribute key: {s}\n", .{attr_key});
+                        std.debug.print("Parse error: {any}\n", .{err});
+                        return error.InvalidAttribute;
+                    };
+
+                    // Create a typed integer attribute
+                    return mlir.c.mlirIntegerAttrGet(mlir_type, int_val);
+                }
             }
 
             // For other typed values (like dense<...> : tensor<...>), serialize the entire
