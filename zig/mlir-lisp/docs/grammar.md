@@ -88,7 +88,7 @@ REGION         ::= (region BLOCK+)
 
 BLOCK          ::= (block
                      [ BLOCK_ID ]                     ; block label binding
-                     (arguments [ [ VALUE_ID TYPE ]* ]) ; arg bindings
+                     (arguments [ (: VALUE_ID TYPE)* ]) ; arg bindings
                      OPERATION*)                       ; block body
 
 SUCCESSOR      ::= (successor BLOCK_ID (operand-bundle)?)
@@ -130,7 +130,7 @@ operand-bundle ::= ( VALUE_ID* )
     (regions
       (region
         (block [^entry]
-          (arguments [ [%arg0 !my_vec] [%arg1 !my_tensor] ])
+          (arguments [ (: %arg0 !my_vec) (: %arg1 !my_tensor) ])
           (operation
             (name func.return)
             (operands %arg0)))))))
@@ -158,7 +158,7 @@ operand-bundle ::= ( VALUE_ID* )
     (regions
       (region
         (block [^entry]
-          (arguments [ [%x i32] [%y i32] ])
+          (arguments [ (: %x i32) (: %y i32) ])
           (operation
             (name arith.addi)
             (result-bindings [%sum])
@@ -215,7 +215,7 @@ operand-bundle ::= ( VALUE_ID* )
     (regions
       (region
         (block [^entry]
-          (arguments [ [%cond i1] [%x i32] [%y i32] ])
+          (arguments [ (: %cond i1) (: %x i32) (: %y i32) ])
           (operation
             (name cf.cond_br)
             (operands %cond)
@@ -223,10 +223,10 @@ operand-bundle ::= ( VALUE_ID* )
               (successor ^then (%x))
               (successor ^else (%y)))))
         (block [^then]
-          (arguments [ [%t i32] ])
+          (arguments [ (: %t i32) ])
           (operation (name func.return) (operands %t)))
         (block [^else]
-          (arguments [ [%e i32] ])
+          (arguments [ (: %e i32) ])
           (operation (name func.return) (operands %e)))))))
 
 ;----------------------------------------
@@ -242,7 +242,7 @@ operand-bundle ::= ( VALUE_ID* )
     (regions
       (region
         (block [^entry]
-          (arguments [ [%n i32] ])
+          (arguments [ (: %n i32) ])
 
           ;; Check if n <= 1 (base case)
           (operation

@@ -24,13 +24,13 @@
   (op (scf.for [%c0 %M %c1]
            (region
             (block
-                (arguments [ [%i index] ])
+                (arguments [ (: %i index) ])
 
               ;; Middle loop: for j = 0 to N
               (op (scf.for [(constant (: 0 index)) %N %c1]
                        (region
                         (block
-                            (arguments [ [%j index] ])
+                            (arguments [ (: %j index) ])
 
                           ;; Load initial value from C[i,j] for accumulation
                           (op %acc_init (: f32) (memref.load [%C %i %j]))
@@ -40,7 +40,7 @@
                               (scf.for [%c0 %K %c1 %acc_init]
                                    (region
                                     (block
-                                        (arguments [ [%k index] [%acc f32] ])
+                                        (arguments [ (: %k index) (: %acc f32) ])
 
                                       ;; Load A[i, k]
                                       (op %a (: f32) (memref.load [%A %i %k]))

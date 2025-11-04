@@ -217,11 +217,11 @@ pub const Printer = struct {
         try self.buffer.writer(self.allocator).writeAll("(arguments [");
         for (block.arguments, 0..) |*arg, i| {
             if (i > 0) try self.buffer.writer(self.allocator).writeAll(" ");
-            try self.buffer.writer(self.allocator).writeAll("[");
+            try self.buffer.writer(self.allocator).writeAll("(: ");
             try self.buffer.writer(self.allocator).writeAll(arg.value_id);
             try self.buffer.writer(self.allocator).writeAll(" ");
             try self.printValue(arg.type.value);
-            try self.buffer.writer(self.allocator).writeAll("]");
+            try self.buffer.writer(self.allocator).writeAll(")");
         }
         try self.buffer.writer(self.allocator).writeAll("])");
 

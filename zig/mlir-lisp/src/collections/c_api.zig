@@ -2,6 +2,8 @@ const std = @import("std");
 const vector = @import("vector.zig");
 const map = @import("map.zig");
 const reader = @import("../reader.zig");
+const c_structs = @import("c_structs.zig");
+const c_value_layout = @import("../reader/c_value_layout.zig");
 
 // Opaque types for C API
 pub const CValue = opaque {};
@@ -498,4 +500,179 @@ pub export fn value_free_atom(allocator: ?*anyopaque, atom: ?[*:0]const u8) void
     const alloc = getAllocator(allocator);
     const len = std.mem.len(atom.?);
     alloc.free(atom.?[0..len :0]);
+}
+
+// ============================================================================
+// Struct-Based API - Direct struct access for better MLIR integration
+// ============================================================================
+
+/// Export CVectorLayout type for C/MLIR interop
+pub const CVectorLayout = c_structs.CVectorLayout;
+pub const CMapLayout = c_structs.CMapLayout;
+
+/// Convert a PersistentVector(Value*) to a heap-allocated CVectorLayout
+/// Returns a pointer to the layout struct that can be directly accessed from MLIR
+/// The caller must free the returned pointer with vector_layout_destroy
+pub export fn vector_value_to_layout(allocator: ?*anyopaque, vec: ?*CVectorValue) ?*CVectorLayout {
+    if (vec == null or allocator == null) return null;
+    const alloc = getAllocator(allocator);
+    const vec_ptr: *vector.PersistentVector(*reader.Value) = @ptrCast(@alignCast(vec));
+    return c_structs.vectorToCLayoutAlloc(*reader.Value, alloc, vec_ptr.*) catch null;
+}
+
+/// Free a CVectorLayout created by vector_value_to_layout
+/// Note: This does NOT free the underlying data, only the layout struct itself
+pub export fn vector_layout_destroy(allocator: ?*anyopaque, layout: ?*CVectorLayout) void {
+    if (layout == null or allocator == null) return;
+    if (global_arena_allocator != null) return; // Arena makes this a no-op
+    const alloc = getAllocator(allocator);
+    c_structs.destroyCVectorLayout(alloc, layout.?);
+}
+
+/// Get the length field from a CVectorLayout (example of direct field access)
+/// In MLIR, you can use GEP to access this field directly instead of calling this function
+pub export fn vector_layout_get_len(layout: ?*const CVectorLayout) usize {
+    if (layout == null) return 0;
+    return layout.?.len;
+}
+
+/// Get the data pointer from a CVectorLayout
+pub export fn vector_layout_get_data(layout: ?*const CVectorLayout) ?[*]u8 {
+    if (layout == null) return null;
+    return layout.?.data;
+}
+
+/// Get element size from a CVectorLayout
+pub export fn vector_layout_get_elem_size(layout: ?*const CVectorLayout) usize {
+    if (layout == null) return 0;
+    return layout.?.elem_size;
+}
+
+/// Convert a CVectorLayout back to a PersistentVector(Value*)
+/// This creates a NEW vector that owns a COPY of the data
+pub export fn vector_layout_to_value(allocator: ?*anyopaque, layout: ?*const CVectorLayout) ?*CVectorValue {
+    if (layout == null or allocator == null) return null;
+    const alloc = getAllocator(allocator);
+    const new_vec = c_structs.cLayoutToVector(*reader.Value, alloc, layout.?.*) catch return null;
+    const vec_ptr = alloc.create(vector.PersistentVector(*reader.Value)) catch return null;
+    vec_ptr.* = new_vec;
+    return @ptrCast(vec_ptr);
+}
+
+/// Create an empty CVectorLayout on the heap for Value pointers
+pub export fn vector_layout_create_empty(allocator: ?*anyopaque) ?*CVectorLayout {
+    if (allocator == null) return null;
+    const alloc = getAllocator(allocator);
+    const layout = alloc.create(CVectorLayout) catch return null;
+    layout.* = CVectorLayout.empty(*reader.Value);
+    return layout;
+}
+
+/// Convert a PersistentMap(string, Value*) to CMapLayout
+pub export fn map_str_value_to_layout(allocator: ?*anyopaque, m: ?*CMapStrValue) ?*CMapLayout {
+    if (m == null or allocator == null) return null;
+    const alloc = getAllocator(allocator);
+    const map_ptr: *map.PersistentMap([]const u8, *reader.Value) = @ptrCast(@alignCast(m));
+    const layout = alloc.create(CMapLayout) catch return null;
+    layout.* = c_structs.mapToCLayout([]const u8, *reader.Value, map_ptr.*);
+    return layout;
+}
+
+/// Free a CMapLayout
+pub export fn map_layout_destroy(allocator: ?*anyopaque, layout: ?*CMapLayout) void {
+    if (layout == null or allocator == null) return;
+    if (global_arena_allocator != null) return;
+    const alloc = getAllocator(allocator);
+    alloc.destroy(layout.?);
+}
+
+/// Get the length from a CMapLayout
+pub export fn map_layout_get_len(layout: ?*const CMapLayout) usize {
+    if (layout == null) return 0;
+    return layout.?.len;
+}
+
+/// Get the entries pointer from a CMapLayout
+pub export fn map_layout_get_entries(layout: ?*const CMapLayout) ?[*]u8 {
+    if (layout == null) return null;
+    return layout.?.entries;
+}
+
+// ============================================================================
+// Value Layout API - Flat C-compatible struct for Values
+// ============================================================================
+
+/// Export CValueLayout type for C/MLIR interop
+pub const CValueLayout = c_value_layout.CValueLayout;
+
+/// Convert a Value to a heap-allocated CValueLayout
+/// Returns a pointer to the layout struct that can be directly accessed from MLIR
+/// The caller must free the returned pointer with value_layout_destroy
+pub export fn value_to_layout(allocator: ?*anyopaque, val: ?*CValue) ?*CValueLayout {
+    if (val == null or allocator == null) return null;
+    const alloc = getAllocator(allocator);
+    const val_ptr: *reader.Value = @ptrCast(@alignCast(val));
+
+    const layout = c_value_layout.valueToCLayout(alloc, val_ptr) catch return null;
+    const layout_ptr = alloc.create(CValueLayout) catch return null;
+    layout_ptr.* = layout;
+    return layout_ptr;
+}
+
+/// Free a CValueLayout created by value_to_layout
+/// Note: This does NOT free the underlying data, only the layout struct itself
+pub export fn value_layout_destroy(allocator: ?*anyopaque, layout: ?*CValueLayout) void {
+    if (layout == null or allocator == null) return;
+    if (global_arena_allocator != null) return; // Arena makes this a no-op
+    const alloc = getAllocator(allocator);
+    alloc.destroy(layout.?);
+}
+
+/// Convert a CValueLayout back to a Value
+/// This creates a NEW value that may own copies of the data
+pub export fn value_layout_to_value(allocator: ?*anyopaque, layout: ?*const CValueLayout) ?*CValue {
+    if (layout == null or allocator == null) return null;
+    const alloc = getAllocator(allocator);
+    const val_ptr = c_value_layout.cLayoutToValue(alloc, layout.?.*) catch return null;
+    return @ptrCast(val_ptr);
+}
+
+/// Get the type tag from a CValueLayout
+pub export fn value_layout_get_type_tag(layout: ?*const CValueLayout) u8 {
+    if (layout == null) return 0;
+    return layout.?.type_tag;
+}
+
+/// Get the data pointer from a CValueLayout
+pub export fn value_layout_get_data_ptr(layout: ?*const CValueLayout) ?[*]u8 {
+    if (layout == null) return null;
+    return layout.?.data_ptr;
+}
+
+/// Get the data length from a CValueLayout
+pub export fn value_layout_get_data_len(layout: ?*const CValueLayout) usize {
+    if (layout == null) return 0;
+    return layout.?.data_len;
+}
+
+/// Create an empty CValueLayout on the heap for a given type
+pub export fn value_layout_create_empty(allocator: ?*anyopaque, value_type: u8) ?*CValueLayout {
+    if (allocator == null) return null;
+    const alloc = getAllocator(allocator);
+    const layout = alloc.create(CValueLayout) catch return null;
+    const vtype: reader.ValueType = @enumFromInt(value_type);
+    layout.* = CValueLayout.empty(vtype);
+    return layout;
+}
+
+/// Check if a layout represents an atom type
+pub export fn value_layout_is_atom(layout: ?*const CValueLayout) bool {
+    if (layout == null) return false;
+    return layout.?.isAtom();
+}
+
+/// Check if a layout represents a collection type
+pub export fn value_layout_is_collection(layout: ?*const CValueLayout) bool {
+    if (layout == null) return false;
+    return layout.?.isCollection();
 }

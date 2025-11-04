@@ -725,6 +725,13 @@ impl Tokenizer {
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::ExamplesColon, "examples:".to_string(), loc));
         }
+        if self.starts_with("provide:") {
+            for _ in 0..8 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::ProvideColon, "provide:".to_string(), loc));
+        }
         if self.starts_with("sharing:") {
             for _ in 0..8 { self.advance(); }
             let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);

@@ -457,22 +457,25 @@ pub const Tokenizer = struct {
     }
 
     /// Check if character can start an identifier
-    /// Grammar: [A-Za-z_+*/<>=?&|-]
+    /// Grammar: [A-Za-z_+*/=?&|-]
     /// Note: %, ^, @, !, #, : are reserved prefixes handled separately
+    /// Note: < and > are excluded because they're used for parameterized types/attributes
     fn isIdentifierStart(self: *const Tokenizer, c: u8) bool {
         return self.isAlpha(c) or c == '_' or
                c == '+' or c == '*' or c == '/' or
-               c == '<' or c == '>' or c == '=' or
+               c == '=' or
                c == '?' or c == '&' or c == '|' or c == '-';
     }
 
     /// Check if character can continue an identifier
-    /// Grammar: [A-Za-z0-9_.$:+*/<>=?&|-]
+    /// Grammar: [A-Za-z0-9_.$:+*/=?&|-]
+    /// Note: < and > are excluded because they're used for parameterized types/attributes
+    /// and are handled separately by scanOpaqueMarker
     fn isIdentifierChar(self: *const Tokenizer, c: u8) bool {
         _ = self;
         return c == '_' or c == '.' or c == '$' or c == ':' or
                c == '+' or c == '*' or c == '/' or
-               c == '<' or c == '>' or c == '=' or
+               c == '=' or
                c == '?' or c == '&' or c == '|' or c == '-';
     }
 };

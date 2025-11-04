@@ -236,17 +236,17 @@ test "printer validation - multiple blocks in region" {
         \\    (regions
         \\      (region
         \\        (block [^bb0]
-        \\          (arguments [[%arg0 i32]])
+        \\          (arguments [(: %arg0 i32)])
         \\          (operation
         \\            (name cf.br)
         \\            (successors (successor ^bb1 (%arg0)))))
         \\        (block [^bb1]
-        \\          (arguments [[%arg1 i32]])
+        \\          (arguments [(: %arg1 i32)])
         \\          (operation
         \\            (name cf.br)
         \\            (successors (successor ^bb2 (%arg1)))))
         \\        (block [^bb2]
-        \\          (arguments [[%arg2 i32]])
+        \\          (arguments [(: %arg2 i32)])
         \\          (operation
         \\            (name func.return)
         \\            (operands %arg2)))))))
@@ -507,7 +507,7 @@ test "printer validation - full round-trip with complex nested structure" {
         \\                    (regions
         \\                      (region
         \\                        (block []
-        \\                          (arguments [[%iter i32]])
+        \\                          (arguments [(: %iter i32)])
         \\                          (operation
         \\                            (name arith.constant)
         \\                            (result-bindings [%limit])
@@ -524,7 +524,7 @@ test "printer validation - full round-trip with complex nested structure" {
         \\                            (operands %cond %iter))))
         \\                      (region
         \\                        (block []
-        \\                          (arguments [[%arg i32]])
+        \\                          (arguments [(: %arg i32)])
         \\                          (operation
         \\                            (name arith.constant)
         \\                            (result-bindings [%c1])

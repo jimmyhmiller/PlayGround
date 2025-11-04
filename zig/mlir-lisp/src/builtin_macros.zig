@@ -87,6 +87,19 @@ fn createVector(allocator: std.mem.Allocator, vec: PersistentVector(*Value)) !*V
     return value;
 }
 
+/// Create a has_type Value (: value type)
+fn createHasType(allocator: std.mem.Allocator, val: *Value, type_expr: *Value) !*Value {
+    const value = try allocator.create(Value);
+    value.* = Value{
+        .type = .has_type,
+        .data = .{ .has_type = .{
+            .value = val,
+            .type_expr = type_expr,
+        } },
+    };
+    return value;
+}
+
 /// Convert linked list to vector
 fn linkedListToVector(
     allocator: std.mem.Allocator,
@@ -653,10 +666,23 @@ fn opMacro(
         return error.InvalidMacroArgs;
     }
 
-    // Extract operands - second element should be a vector [operands...]
-    var operands_vec = PersistentVector(*Value).init(allocator, null);
+    // Check for optional attribute map at index 1
+    var attr_map: ?*Value = null;
+    var operands_index: usize = 1;
+
     if (op_call.len() >= 2) {
-        const operands_arg = op_call.at(1);
+        const second_elem = op_call.at(1);
+        if (second_elem.type == .map) {
+            // Second element is an attribute map
+            attr_map = second_elem;
+            operands_index = 2;
+        }
+    }
+
+    // Extract operands - should be a vector [operands...] at operands_index
+    var operands_vec = PersistentVector(*Value).init(allocator, null);
+    if (op_call.len() > operands_index) {
+        const operands_arg = op_call.at(operands_index);
         if (operands_arg.type == .vector) {
             // Copy operands from the vector
             for (operands_arg.data.vector.slice()) |operand| {
@@ -668,11 +694,12 @@ fn opMacro(
         }
     }
 
-    // Extract regions from the operation call (3rd element onwards)
+    // Extract regions from the operation call (after operands)
     var regions = std.ArrayList(*Value){};
     defer regions.deinit(allocator);
-    if (op_call.len() >= 3) {
-        var i: usize = 2;
+    const regions_start = operands_index + 1;
+    if (op_call.len() > regions_start) {
+        var i: usize = regions_start;
         while (i < op_call.len()) : (i += 1) {
             try regions.append(allocator, op_call.at(i));
         }
@@ -718,6 +745,14 @@ fn opMacro(
             ops_vec = try ops_vec.push(operand);
         }
         op_vec = try op_vec.push(try createList(allocator, ops_vec));
+    }
+
+    // Add (attributes {...}) if attributes were provided
+    if (attr_map) |attrs| {
+        var attrs_vec = PersistentVector(*Value).init(allocator, null);
+        attrs_vec = try attrs_vec.push(try createIdentifier(allocator, "attributes"));
+        attrs_vec = try attrs_vec.push(attrs);
+        op_vec = try op_vec.push(try createList(allocator, attrs_vec));
     }
 
     // Handle regions - they should be (region ...) forms from the operation call
@@ -847,14 +882,11 @@ fn defnMacro(
     attrs_vec = try attrs_vec.push(attrs_map_val);
     const attributes = try createList(allocator, attrs_vec);
 
-    // Build block arguments: [[%arg1 type1] [%arg2 type2] ...]
+    // Build block arguments: [(: %arg1 type1) (: %arg2 type2) ...]
     var block_args_vec = PersistentVector(*Value).init(allocator, null);
     for (arg_names.items, arg_types.items) |name, type_val| {
-        var arg_pair = PersistentVector(*Value).init(allocator, null);
-        arg_pair = try arg_pair.push(name);
-        arg_pair = try arg_pair.push(type_val);
-        const arg_vec = try createVector(allocator, arg_pair);
-        block_args_vec = try block_args_vec.push(arg_vec);
+        const has_type_val = try createHasType(allocator, name, type_val);
+        block_args_vec = try block_args_vec.push(has_type_val);
     }
     const block_args = try createVector(allocator, block_args_vec);
 

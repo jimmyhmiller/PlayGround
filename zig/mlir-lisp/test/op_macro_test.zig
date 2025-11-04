@@ -174,13 +174,13 @@ test "op macro: operation with explicit regions" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Test: (op %result (: i32) (scf.if [%cond])
+    // Test: (op %result (: i32) (scf.if [%cond]
     //         (region (block [] (operation (name scf.yield) (operands %x))))
-    //         (region (block [] (operation (name scf.yield) (operands %y)))))
+    //         (region (block [] (operation (name scf.yield) (operands %y))))))
     const input =
-        \\(op %result (: i32) (scf.if [%cond])
+        \\(op %result (: i32) (scf.if [%cond]
         \\  (region (block [] (operation (name scf.yield) (operands %x))))
-        \\  (region (block [] (operation (name scf.yield) (operands %y)))))
+        \\  (region (block [] (operation (name scf.yield) (operands %y))))))
     ;
 
     

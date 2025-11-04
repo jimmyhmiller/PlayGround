@@ -20,12 +20,82 @@ fn loc_to_srcloc_string(loc: &Loc) -> String {
 }
 
 /// Convert our AST to Pyret's JSON format (no locations, specific field names)
+/// Convert a float to a fraction string representation
+/// E.g., 1.5 -> "3/2", 0.25 -> "1/4"
+fn float_to_fraction_string(f: f64) -> String {
+    // If it's an integer, format it carefully to avoid precision loss
+    if f.fract() == 0.0 {
+        // For very large numbers, f64 loses precision
+        // So we need to format them more carefully
+        if f.abs() < 9007199254740992.0 {  // 2^53 - max safe integer in f64
+            return format!("{}", f as i64);
+        } else {
+            // For numbers beyond f64's precision, format as float
+            // This will show the number as stored (possibly with precision loss)
+            return format!("{:.0}", f);
+        }
+    }
+
+    // Convert to fraction using continued fractions algorithm
+    let sign = if f < 0.0 { -1.0 } else { 1.0 };
+    let f = f.abs();
+
+    // Find numerator and denominator
+    let mut num = f;
+    let mut den = 1.0;
+
+    // Multiply by powers of 10 until we get an integer numerator
+    while num.fract() != 0.0 && den < 1e10 {
+        num *= 10.0;
+        den *= 10.0;
+    }
+
+    let mut num = num as i64;
+    let mut den = den as i64;
+
+    // Simplify the fraction by finding GCD
+    fn gcd(mut a: i64, mut b: i64) -> i64 {
+        while b != 0 {
+            let temp = b;
+            b = a % b;
+            a = temp;
+        }
+        a.abs()
+    }
+
+    let g = gcd(num, den);
+    num /= g;
+    den /= g;
+
+    // Apply sign
+    num = (num as f64 * sign) as i64;
+
+    if den == 1 {
+        format!("{}", num)
+    } else {
+        format!("{}/{}", num, den)
+    }
+}
+
 fn expr_to_pyret_json(expr: &Expr) -> Value {
     match expr {
-        Expr::SNum { n, .. } => {
+        Expr::SNum { n, original, .. } => {
+            // Use original string if available (preserves precision for large integers)
+            // Otherwise convert to fraction string
+            let value_str = if let Some(orig) = original {
+                // For decimals, convert to fraction; for integers, use as-is
+                if orig.contains('.') {
+                    float_to_fraction_string(*n)
+                } else {
+                    orig.clone()
+                }
+            } else {
+                float_to_fraction_string(*n)
+            };
+
             json!({
                 "type": "s-num",
-                "value": n.to_string()
+                "value": value_str
             })
         }
         Expr::SStr { s, .. } => {
@@ -88,6 +158,14 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "type": "s-bracket",
                 "obj": expr_to_pyret_json(obj),
                 "field": expr_to_pyret_json(field)
+            })
+        }
+        Expr::SCheck { name, body, keyword_check, .. } => {
+            json!({
+                "type": "s-check",
+                "name": name.as_ref(),
+                "body": expr_to_pyret_json(body),
+                "keyword-check": keyword_check
             })
         }
         Expr::SCheckTest { op, refinement, left, right, cause, .. } => {
@@ -265,6 +343,20 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "check": check.as_ref().map(|c| expr_to_pyret_json(c))
             })
         }
+        Expr::SFrac { num, den, .. } => {
+            json!({
+                "type": "s-frac",
+                "num": num.to_string(),
+                "den": den.to_string()
+            })
+        }
+        Expr::SRfrac { num, den, .. } => {
+            json!({
+                "type": "s-rfrac",
+                "num": num.to_string(),
+                "den": den.to_string()
+            })
+        }
         _ => {
             json!({
                 "type": "UNSUPPORTED",
@@ -361,9 +453,15 @@ fn ann_to_pyret_json(ann: &pyret_attempt2::Ann) -> Value {
     use pyret_attempt2::Ann;
     match ann {
         Ann::ABlank => json!({"type": "a-blank"}),
+        Ann::AAny { .. } => json!({"type": "a-any"}),
         Ann::AName { id, .. } => json!({
             "type": "a-name",
             "id": name_to_pyret_json(id)
+        }),
+        Ann::AApp { ann, args, .. } => json!({
+            "type": "a-app",
+            "ann": ann_to_pyret_json(ann),
+            "args": args.iter().map(ann_to_pyret_json).collect::<Vec<_>>()
         }),
         _ => json!({
             "type": "UNSUPPORTED",
@@ -592,11 +690,42 @@ fn provide_types_to_pyret_json(provide_types: &pyret_attempt2::ProvideTypes) -> 
     }
 }
 
-fn provide_block_to_pyret_json(_provide_block: &pyret_attempt2::ProvideBlock) -> Value {
+fn provide_block_to_pyret_json(provide_block: &pyret_attempt2::ProvideBlock) -> Value {
     json!({
-        "type": "UNSUPPORTED",
-        "debug": "ProvideBlock not yet implemented"
+        "type": "s-provide-block",
+        "path": provide_block.path,
+        "specs": provide_block.specs.iter().map(|s| provide_spec_to_pyret_json(s)).collect::<Vec<_>>()
     })
+}
+
+fn provide_spec_to_pyret_json(spec: &pyret_attempt2::ProvideSpec) -> Value {
+    use pyret_attempt2::ProvideSpec;
+    match spec {
+        ProvideSpec::SProvideName { name, .. } => {
+            json!({
+                "type": "s-provide-name",
+                "name-spec": name_spec_to_pyret_json(name)
+            })
+        }
+        ProvideSpec::SProvideType { name, .. } => {
+            json!({
+                "type": "s-provide-type",
+                "ann": ann_to_pyret_json(name)
+            })
+        }
+        ProvideSpec::SProvideData { name, .. } => {
+            json!({
+                "type": "s-provide-data",
+                "ann": ann_to_pyret_json(name)
+            })
+        }
+        ProvideSpec::SProvideModule { name, .. } => {
+            json!({
+                "type": "s-provide-module",
+                "name": name_to_pyret_json(name)
+            })
+        }
+    }
 }
 
 fn import_to_pyret_json(import: &pyret_attempt2::Import) -> Value {
@@ -609,10 +738,21 @@ fn import_to_pyret_json(import: &pyret_attempt2::Import) -> Value {
             })
         }
         Import::SIncludeFrom { import, names, .. } => {
+            // For include-from, extract the module name from import and format as "mod" array
+            let mod_array = match import {
+                pyret_attempt2::ImportType::SConstImport { module, .. } => {
+                    vec![json!({"type": "s-name", "name": module})]
+                }
+                pyret_attempt2::ImportType::SSpecialImport { .. } => {
+                    // Special imports shouldn't appear in include-from, but handle it anyway
+                    vec![import_type_to_pyret_json(import)]
+                }
+            };
+
             json!({
                 "type": "s-include-from",
-                "import-type": import_type_to_pyret_json(import),
-                "names": names.iter().map(|n| include_spec_to_pyret_json(n)).collect::<Vec<_>>()
+                "mod": mod_array,
+                "specs": names.iter().map(|n| include_spec_to_pyret_json(n)).collect::<Vec<_>>()
             })
         }
         Import::SImport { import, name, .. } => {
@@ -665,7 +805,7 @@ fn include_spec_to_pyret_json(spec: &pyret_attempt2::IncludeSpec) -> Value {
         IncludeSpec::SIncludeName { name, .. } => {
             json!({
                 "type": "s-include-name",
-                "name": name_spec_to_pyret_json(name)
+                "name-spec": name_spec_to_pyret_json(name)
             })
         }
         IncludeSpec::SIncludeType { name, .. } => {
@@ -700,7 +840,8 @@ fn name_spec_to_pyret_json(name_spec: &pyret_attempt2::NameSpec) -> Value {
         NameSpec::SModuleRef { name, .. } => {
             json!({
                 "type": "s-module-ref",
-                "name": name_to_pyret_json(name)
+                "path": vec![name_to_pyret_json(name)],
+                "as-name": Value::Null
             })
         }
         NameSpec::SRemoteRef { uri, name, .. } => {

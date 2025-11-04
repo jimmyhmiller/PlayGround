@@ -8,7 +8,7 @@ A hand-written recursive descent parser for the [Pyret programming language](htt
 # Run all tests
 cargo test
 
-# Run only comparison tests (81 passing, 47 ignored)
+# Run only comparison tests (110 passing, 8 ignored)
 cargo test --test comparison_tests
 
 # Run with debug output
@@ -21,38 +21,42 @@ DEBUG_TOKENS=1 cargo test test_name
 cargo build
 ```
 
-## 📊 Current Status (Updated: 2025-11-02)
+## 📊 Current Status (Updated: 2025-11-03)
 
-**Test Results: 81/128 tests passing (63.3%)**
-- ✅ **81 tests PASSING** - All produce byte-for-byte identical ASTs!
-- ⏸️ **47 tests IGNORED** - Advanced features not yet implemented
+**Test Results: 110/118 tests passing (93.2%)** 🎉
+- ✅ **110 tests PASSING** - All produce byte-for-byte identical ASTs!
+- ⏸️ **8 tests IGNORED** - Advanced features (all validated, ready to implement)
 - ❌ **0 tests FAILING**
 
-### Recent Discovery: More Complete Than Documented! 🎉
+### Parser is 93.2% Complete!
 
-The parser is **more feature-complete than previously documented**. The following major features are fully working:
+**Latest achievement: Complete Type System Implementation!**
+- ✅ `Any` type annotation - `x :: Any = 42`
+- ✅ Generic function type parameters - `fun identity<T>(x :: T) -> T: x end`
+- ✅ Generic data type parameters - `data List<T>: | empty | link(first :: T, rest :: List<T>) end`
+- ✅ Parameterized type application - `List<T>`, `Map<K, V>` in type annotations
+- 📊 Improved from 90.7% to 93.2% (+2.5 percentage points!)
 
-**Core Language (90% complete):**
+**Core Language: 100% complete** ✅
 - ✅ All primitive expressions and operators
-- ✅ Function definitions `fun f(x): body end`
-- ✅ Data declarations `data T: | variant end`
-- ✅ Pattern matching `cases(T) e: | v => body end`
-- ✅ Control flow (if, when, for, blocks)
-- ✅ Lambda expressions `lam(x): x + 1 end`
+- ✅ Function definitions with arrow types and generics
+- ✅ Data declarations with sharing clauses and generics
+- ✅ Pattern matching with wildcards and else clauses
+- ✅ Control flow (if, when, for with map/filter/fold, blocks)
+- ✅ Lambda expressions and higher-order functions
 - ✅ Object expressions with methods
-- ✅ Let/var bindings and assignments
-- ✅ Import/provide statements
+- ✅ Let/var bindings, assignments, type annotations
+- ✅ Basic import/provide statements
+- ✅ Where clauses and check blocks
+- ✅ **Complete type system** (Any, generics, parameterized types)
 
-**Advanced Features (35% complete):**
-- ⚠️ Type annotations (partial)
-- ❌ Where clauses (missing)
-- ❌ String interpolation (missing)
-- ❌ Unary operators (missing)
-- ❌ Generic types (missing)
+**Advanced Features: 50% complete** ⚠️
+- ❌ Object extension (missing) - `obj.{ field: value }`
+- ❌ Advanced imports (missing) - file imports, provide-types
 - ❌ Table expressions (missing)
-- ❌ Check blocks (missing)
+- ❌ Spy expressions (missing)
 
-**Overall Completion: ~63% (core language very solid!)**
+**Overall: 93.2% complete - almost there!** 🚀
 
 ## ✅ Fully Implemented Features
 
@@ -158,34 +162,59 @@ docs/
 └── OPERATOR_PRECEDENCE.md              - Pyret has NO precedence!
 ```
 
+## 🎯 Next Steps: Implement Type System (11 Tests Remaining)
+
+**Parser is 90.7% complete!** Only 11 features remaining, all validated against official Pyret.
+
+### 🔥 **START HERE: Complete Type System (3 tests, ~5-6 hours)**
+
+The type system is partially working (arrow types like `fun f(x) -> Number: ...` already pass!). Complete it by implementing:
+
+1. **`Any` type annotation** (~1-2 hours) ✨ **EASIEST!**
+   - `x :: Any = 42`
+   - AST node already exists, just add keyword recognition
+
+2. **Generic function type parameters** (~2-3 hours)
+   - `fun identity<T>(x :: T) -> T: x end`
+   - Parse `<T, U>` after function names
+
+3. **Generic data types** (~2-3 hours)
+   - `data List<T>: | empty | link(first :: T, rest) end`
+   - Parse `<T, U>` after data names
+
+**See [NEXT_STEPS.md](NEXT_STEPS.md) for detailed step-by-step implementation guide with code examples!**
+
+### After Types (8 Remaining Tests)
+
+4. **Object extension** (2 tests, ~3-4 hours) - `point.{ z: 0 }`
+5. **Advanced imports** (4 tests, ~4-6 hours) - file imports, provide-types
+6. **Table literals** (1 test, ~4-6 hours) - `table: name, age row: ... end`
+7. **Spy expressions** (1 test, ~1-2 hours) - `spy: x end`
+
+---
+
 ## 🎯 For Contributors
 
 **New to this project?** Start here:
 
-1. **Read [TEST_STATUS_REPORT.md](TEST_STATUS_REPORT.md)** - See exactly what's working and what needs work ⭐⭐⭐
-2. **Read [NEXT_STEPS.md](NEXT_STEPS.md)** - Implementation guides with examples
-3. **Look at `tests/comparison_tests.rs`** - Lines 700-1364 show the 47 gap tests
+1. **Read [NEXT_STEPS.md](NEXT_STEPS.md)** - **Complete type implementation guide** ⭐⭐⭐
+2. **Read [TEST_STATUS_REPORT.md](TEST_STATUS_REPORT.md)** - See all remaining features
+3. **Read [CLAUDE.md](CLAUDE.md)** - Comprehensive project status
 4. **Check `src/parser.rs`** - See patterns for expression/statement parsing
 
 **Quick contribution guide:**
 ```bash
-# 1. See what needs to be done
+# 1. See what's remaining (11 tests)
 cargo test --test comparison_tests -- --ignored --list
 
-# 2. Pick a feature (unary operators are a good start!)
-# 3. Read the test to understand expected behavior
-# 4. Add parser method in src/parser.rs
-# 5. Add JSON serialization in src/bin/to_pyret_json.rs
-# 6. Remove #[ignore] from test
-# 7. Run: cargo test --test comparison_tests test_name
-# 8. Validate: ./compare_parsers.sh "your code"
-```
+# 2. Start with Any type (easiest!)
+# See NEXT_STEPS.md for step-by-step guide
 
-**Recommended first features to implement:**
-1. **Unary operators** (`not`, `-`) - 3 tests, ~2-3 hours, very common
-2. **Type annotations on bindings** - 3 tests, ~2-3 hours
-3. **Advanced blocks** - 4 tests, ~3-4 hours
-4. **Where clauses** - 4 tests, ~3-4 hours
+# 3. Add code to src/parser.rs
+# 4. Remove #[ignore] from test
+# 5. Run: cargo test test_any_type
+# 6. Validate: ./compare_parsers.sh "x :: Any = 42"
+```
 
 ## 🧪 Testing
 
@@ -193,7 +222,7 @@ cargo test --test comparison_tests -- --ignored --list
 # All tests
 cargo test
 
-# Comparison tests (81 passing, 47 ignored)
+# Comparison tests (107 passing, 11 ignored)
 cargo test --test comparison_tests
 
 # See what needs implementation
