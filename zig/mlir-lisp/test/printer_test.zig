@@ -62,7 +62,7 @@ test "printer - function with operations round-trip" {
         \\    (regions
         \\      (region
         \\        (block [^entry]
-        \\          (arguments [ [%x i32] [%y i32] ])
+        \\          (arguments [ (: %x i32) (: %y i32) ])
         \\          (operation
         \\            (name arith.addi)
         \\            (result-bindings [%sum])
@@ -98,7 +98,7 @@ test "printer - function with operations round-trip" {
     try testing.expect(std.mem.indexOf(u8, output, "(region") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(block") != null);
     try testing.expect(std.mem.indexOf(u8, output, "[^entry]") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "(arguments [[%x i32] [%y i32]])") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "(arguments [(: %x i32) (: %y i32)])") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(name arith.addi)") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(result-bindings [%sum])") != null);
     try testing.expect(std.mem.indexOf(u8, output, "(operands %x %y)") != null);
@@ -116,7 +116,7 @@ test "printer - control flow with successors" {
         \\    (regions
         \\      (region
         \\        (block [^entry]
-        \\          (arguments [ [%cond i1] [%x i32] [%y i32] ])
+        \\          (arguments [ (: %cond i1) (: %x i32) (: %y i32) ])
         \\          (operation
         \\            (name cf.cond_br)
         \\            (operands %cond)
@@ -124,10 +124,10 @@ test "printer - control flow with successors" {
         \\              (successor ^then (%x))
         \\              (successor ^else (%y)))))
         \\        (block [^then]
-        \\          (arguments [ [%t i32] ])
+        \\          (arguments [ (: %t i32) ])
         \\          (operation (name func.return) (operands %t)))
         \\        (block [^else]
-        \\          (arguments [ [%e i32] ])
+        \\          (arguments [ (: %e i32) ])
         \\          (operation (name func.return) (operands %e)))))))
     ;
 

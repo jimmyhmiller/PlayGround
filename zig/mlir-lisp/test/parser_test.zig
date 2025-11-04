@@ -54,7 +54,7 @@ const example2 =
     \\    (regions
     \\      (region
     \\        (block [^entry]
-    \\          (arguments [ [%x i32] [%y i32] ])
+    \\          (arguments [ (: %x i32) (: %y i32) ])
     \\          (operation
     \\            (name arith.addi)
     \\            (result-bindings [%sum])
@@ -196,7 +196,7 @@ const example4 =
     \\    (regions
     \\      (region
     \\        (block [^entry]
-    \\          (arguments [ [%cond i1] [%x i32] [%y i32] ])
+    \\          (arguments [ (: %cond i1) (: %x i32) (: %y i32) ])
     \\          (operation
     \\            (name cf.cond_br)
     \\            (operands %cond)
@@ -204,10 +204,10 @@ const example4 =
     \\              (successor ^then (%x))
     \\              (successor ^else (%y)))))
     \\        (block [^then]
-    \\          (arguments [ [%t i32] ])
+    \\          (arguments [ (: %t i32) ])
     \\          (operation (name func.return) (operands %t)))
     \\        (block [^else]
-    \\          (arguments [ [%e i32] ])
+    \\          (arguments [ (: %e i32) ])
     \\          (operation (name func.return) (operands %e)))))))
 ;
 
@@ -278,7 +278,7 @@ const example5 =
     \\    (regions
     \\      (region
     \\        (block [^entry]
-    \\          (arguments [ [%n i32] ])
+    \\          (arguments [ (: %n i32) ])
     \\          (operation
     \\            (name arith.constant)
     \\            (result-bindings [%c1])

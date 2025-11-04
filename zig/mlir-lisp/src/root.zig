@@ -2,37 +2,49 @@
 const std = @import("std");
 
 // Export the tokenizer module
-pub const Tokenizer = @import("tokenizer.zig").Tokenizer;
-pub const Token = @import("tokenizer.zig").Token;
-pub const TokenType = @import("tokenizer.zig").TokenType;
+pub const tokenizer = @import("tokenizer.zig");
+pub const Tokenizer = tokenizer.Tokenizer;
+pub const Token = tokenizer.Token;
+pub const TokenType = tokenizer.TokenType;
 
 // Export the reader module
-pub const Reader = @import("reader.zig").Reader;
-pub const Value = @import("reader.zig").Value;
-pub const ValueType = @import("reader.zig").ValueType;
+pub const reader = @import("reader.zig");
+pub const Reader = reader.Reader;
+pub const Value = reader.Value;
+pub const ValueType = reader.ValueType;
 
 // Export the parser module
-pub const Parser = @import("parser.zig").Parser;
-pub const MlirModule = @import("parser.zig").MlirModule;
-pub const TypeAlias = @import("parser.zig").TypeAlias;
-pub const AttributeAlias = @import("parser.zig").AttributeAlias;
-pub const Operation = @import("parser.zig").Operation;
-pub const Region = @import("parser.zig").Region;
-pub const Block = @import("parser.zig").Block;
-pub const Argument = @import("parser.zig").Argument;
-pub const Successor = @import("parser.zig").Successor;
-pub const Attribute = @import("parser.zig").Attribute;
-pub const TypeExpr = @import("parser.zig").TypeExpr;
-pub const AttrExpr = @import("parser.zig").AttrExpr;
+pub const parser = @import("parser.zig");
+pub const Parser = parser.Parser;
+pub const MlirModule = parser.MlirModule;
+pub const TypeAlias = parser.TypeAlias;
+pub const AttributeAlias = parser.AttributeAlias;
+pub const Operation = parser.Operation;
+pub const Region = parser.Region;
+pub const Block = parser.Block;
+pub const Argument = parser.Argument;
+pub const Successor = parser.Successor;
+pub const Attribute = parser.Attribute;
+pub const TypeExpr = parser.TypeExpr;
+pub const AttrExpr = parser.AttrExpr;
 
 // Export the collections modules
-pub const PersistentVector = @import("collections/vector.zig").PersistentVector;
+pub const vector = @import("collections/vector.zig");
+pub const PersistentVector = vector.PersistentVector;
 pub const PersistentLinkedList = @import("collections/linked_list.zig").PersistentLinkedList;
 pub const PersistentMap = @import("collections/map.zig").PersistentMap;
 pub const PersistentMapWithEq = @import("collections/map.zig").PersistentMapWithEq;
 
 // Export the C API for collections
 pub const c_api = @import("collections/c_api.zig");
+
+// Export C-compatible struct layouts
+pub const c_structs = @import("collections/c_structs.zig");
+pub const c_value_layout = @import("reader/c_value_layout.zig");
+
+// Export MLIR collection type helpers
+pub const collection_types = @import("mlir/collection_types.zig");
+pub const value_types = @import("mlir/value_types.zig");
 
 // Export the C API transform module
 pub const c_api_transform = @import("c_api_transform.zig");
@@ -51,7 +63,8 @@ pub const OperationFlattener = @import("operation_flattener.zig").OperationFlatt
 pub const mlir = @import("mlir/c.zig");
 
 // Export the builder module
-pub const Builder = @import("builder.zig").Builder;
+pub const builder = @import("builder.zig");
+pub const Builder = builder.Builder;
 
 // Export the printer module
 pub const Printer = @import("printer.zig").Printer;

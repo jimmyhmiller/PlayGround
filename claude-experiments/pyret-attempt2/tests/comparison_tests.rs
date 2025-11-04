@@ -773,7 +773,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Recursive functions with complex logic
 fn test_recursive_function_with_cases() {
     // Real pattern: data structure traversal
     assert_matches_pyret(r#"
@@ -787,7 +786,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Higher-order functions
 fn test_function_returning_function() {
     // Real pattern: currying and closures
     assert_matches_pyret(r#"
@@ -797,18 +795,8 @@ end
 "#);
 }
 
-#[test]
-#[ignore] // TODO: Rest parameters
-fn test_function_with_rest_args() {
-    // Real pattern: variadic functions
-    assert_matches_pyret(r#"
-fun sum-all(first, rest ...):
-  for fold(acc from first, x from rest):
-    acc + x
-  end
-end
-"#);
-}
+// REMOVED: Rest parameters (...args) do NOT exist in Pyret
+// The parser fails with: Parse failed, next token is ('DOTDOTDOT "...")
 
 // ============================================================================
 // CATEGORY: Data Definitions - Real World Examples
@@ -876,7 +864,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Parameterized data types
 fn test_generic_data_definition() {
     // Real pattern: generic types
     assert_matches_pyret(r#"
@@ -1004,7 +991,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Table operations
 fn test_table_with_filter() {
     // Real pattern: SQL-like operations
     assert_matches_pyret(r#"
@@ -1016,25 +1002,10 @@ my-table.filter(lam(r): r.age > 25 end)
 // CATEGORY: String Interpolation
 // ============================================================================
 
-#[test]
-#[ignore] // TODO: String interpolation not implemented
-fn test_string_with_interpolation() {
-    // Real pattern: formatted strings
-    assert_matches_pyret(r#"
-name = "World"
-`Hello, $(name)!`
-"#);
-}
-
-#[test]
-#[ignore] // TODO: Complex interpolation
-fn test_string_with_complex_expression() {
-    // Real pattern: expressions in strings
-    assert_matches_pyret(r#"
-x = 10
-`The answer is $(x + 32)`
-"#);
-}
+// NOTE: String interpolation with single backticks `$()` does NOT exist in Pyret
+// Single backticks are UNKNOWN tokens in the Pyret tokenizer
+// (Three backticks ``` are used for multi-line strings, not interpolation)
+// These tests were removed as they test a non-existent feature
 
 // ============================================================================
 // CATEGORY: Advanced Object Features
@@ -1050,15 +1021,8 @@ point.{ z: 0 }
 "#);
 }
 
-#[test]
-#[ignore] // TODO: Computed property names
-fn test_object_with_computed_field() {
-    // Real pattern: dynamic keys
-    assert_matches_pyret(r#"
-key = "myField"
-{ [key]: 42 }
-"#);
-}
+// REMOVED: Computed property names [key] do NOT exist in Pyret
+// The parser fails with: Parse failed, next token is ('RBRACK "]")
 
 #[test]
 #[ignore] // TODO: Object with update
@@ -1075,7 +1039,6 @@ point.{ x: 10 }
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Standalone check blocks
 fn test_check_block() {
     // Real pattern: test blocks
     assert_matches_pyret(r#"
@@ -1087,27 +1050,14 @@ end
 "#);
 }
 
-#[test]
-#[ignore] // TODO: Check with examples block
-fn test_check_with_examples() {
-    // Real pattern: example-based testing
-    assert_matches_pyret(r#"
-check:
-  examples:
-    | input | output |
-    | 0     | 1      |
-    | 5     | 120    |
-  end
-end
-"#);
-}
+// REMOVED: Check blocks with examples: syntax do NOT exist in Pyret
+// The parser fails with: Parse failed, next token is ('BAR "|")
 
 // ============================================================================
 // CATEGORY: Advanced Import/Export
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Import with alias
 fn test_import_specific_names() {
     // Real pattern: selective imports
     assert_matches_pyret(r#"
@@ -1116,7 +1066,6 @@ import lists as L
 }
 
 #[test]
-#[ignore] // TODO: Import from file
 fn test_import_from_file() {
     // Real pattern: local modules
     assert_matches_pyret(r#"
@@ -1125,7 +1074,6 @@ import file("util.arr") as U
 }
 
 #[test]
-#[ignore] // TODO: Provide with types
 fn test_provide_with_types() {
     // Real pattern: exporting types and values
     assert_matches_pyret(r#"
@@ -1134,11 +1082,10 @@ provide-types *
 }
 
 #[test]
-#[ignore] // TODO: Provide specific names
 fn test_provide_specific_names() {
     // Real pattern: selective exports
     assert_matches_pyret(r#"
-provide { add, multiply } end
+provide: add, multiply end
 "#);
 }
 
@@ -1147,7 +1094,6 @@ provide { add, multiply } end
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Function type annotations
 fn test_function_with_arrow_type() {
     // Real pattern: explicit function types
     assert_matches_pyret(r#"
@@ -1157,17 +1103,10 @@ end
 "#);
 }
 
-#[test]
-#[ignore] // TODO: Union types
-fn test_union_type_annotation() {
-    // Real pattern: multiple allowed types
-    assert_matches_pyret(r#"
-x :: (Number | String) = 42
-"#);
-}
+// REMOVED: Union type annotations (Number | String) do NOT exist in Pyret
+// The parser fails with: Parse failed, next token is ('BAR "|")
 
 #[test]
-#[ignore] // TODO: Generic type parameters
 fn test_generic_function() {
     // Real pattern: parametric polymorphism
     assert_matches_pyret(r#"
@@ -1182,7 +1121,6 @@ end
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Custom operators
 fn test_custom_binary_operator() {
     // Real pattern: user-defined operators
     assert_matches_pyret(r#"
@@ -1194,16 +1132,9 @@ x._plus(y)
 // CATEGORY: Comprehensions and Advanced List Operations
 // ============================================================================
 
-#[test]
-#[ignore] // TODO: List comprehension with guard
-fn test_list_comprehension_with_filter() {
-    // Real pattern: filtered iteration
-    assert_matches_pyret(r#"
-for map(x from [list: 1, 2, 3, 4, 5]) when (x > 2):
-  x * 2
-end
-"#);
-}
+// REMOVED: For expressions with 'when' guards do NOT exist in Pyret
+// The parser fails with: Parse failed, next token is ('WHEN "when")
+// Use 'for filter' instead
 
 // ============================================================================
 // CATEGORY: Spy Expressions (Debugging)
@@ -1222,15 +1153,32 @@ spy: x end
 // CATEGORY: Contract Expressions
 // ============================================================================
 
+// REMOVED: Contract syntax :: (Number, Number -> Number) on functions does NOT exist
+// The parser fails with error about annotations only applying to names
+
+// ============================================================================
+// CATEGORY: Known Bugs - Requires Implementation
+// ============================================================================
+
 #[test]
-#[ignore] // TODO: Contracts not implemented
-fn test_contract_on_function() {
-    // Real pattern: runtime contracts
+fn test_fraction_literal() {
+    // Pyret supports fraction literals like 1/2, 3/2
+    // These should parse as s-frac with num and den as strings
+    // Fixed: Added JSON serialization for SFrac node
     assert_matches_pyret(r#"
-fun divide(x, y) :: (Number, Number -> Number):
-  x / y
-where:
-  divide(10, 2) is 5
+1/2
+"#);
+}
+
+#[test]
+fn test_let_in_for_loop() {
+    // Let bindings inside for loop bodies now use correct structure
+    // Fixed: Created parse_block_statement helper for consistent block parsing
+    // All block contexts (for, if, when, cases, etc.) now use s-let instead of s-let-expr
+    assert_matches_pyret(r#"
+for each(i from range(0, 2)):
+  ix1 = random(100)
+  ix1
 end
 "#);
 }
@@ -1273,7 +1221,6 @@ provide { Tree, make-tree } end
 }
 
 #[test]
-#[ignore] // TODO: Multiple features combined
 fn test_functional_programming_pattern() {
     // Real pattern: functional composition
     assert_matches_pyret(r#"
@@ -1293,7 +1240,6 @@ add1-then-double = compose(double, add1)
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Any type annotation
 fn test_any_type() {
     // Real pattern: gradual typing
     assert_matches_pyret(r#"

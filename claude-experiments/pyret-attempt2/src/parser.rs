@@ -247,6 +247,13 @@ impl Parser {
     )> {
         let _use = None; // TODO: parse use statements
 
+        // Parse provide-blocks FIRST: provide: name1, name2 end
+        // (must be before regular provide to avoid consuming the token)
+        let mut provides = Vec::new();
+        while self.matches(&TokenType::ProvideColon) {
+            provides.push(self.parse_provide_block()?);
+        }
+
         // Parse provide statements
         let mut _provide = Provide::SProvideNone {
             l: self.current_loc(),
@@ -256,10 +263,14 @@ impl Parser {
             _provide = self.parse_provide_stmt()?;
         }
 
-        let provided_types = ProvideTypes::SProvideTypesNone {
+        // Parse provide-types statements
+        let mut provided_types = ProvideTypes::SProvideTypesNone {
             l: self.current_loc(),
         };
-        let provides = Vec::new();
+
+        if self.matches(&TokenType::ProvideTypes) {
+            provided_types = self.parse_provide_types_stmt()?;
+        }
 
         // Parse import statements
         let mut imports = Vec::new();
@@ -278,48 +289,11 @@ impl Parser {
 
         // Parse statements until EOF or until we can't parse any more
         while !self.is_at_end() {
-            // Try to parse different statement types
-            let stmt = if self.matches(&TokenType::Let) {
-                // Explicit let binding: let x = 5
-                self.parse_let_expr()?
-            } else if self.matches(&TokenType::Var) {
-                // Var binding: var x := 5
-                self.parse_var_expr()?
-            } else if self.matches(&TokenType::Name) {
-                // Check if this is an implicit let binding: x = value or x :: Type = value
-                // Look ahead to see if there's a :: or = or := after the name
-                let checkpoint = self.checkpoint();
-                let _name = self.advance(); // Consume the name
-
-                // Check for type annotation first
-                if self.matches(&TokenType::ColonColon) {
-                    // Has type annotation - must be a let or var binding
-                    self.restore(checkpoint);
-                    self.parse_implicit_let_expr()?
-                } else if self.matches(&TokenType::Equals) {
-                    // Implicit let binding: x = value
-                    self.restore(checkpoint);
-                    self.parse_implicit_let_expr()?
-                } else if self.matches(&TokenType::ColonEquals) {
-                    // Implicit var binding: x := value
-                    self.restore(checkpoint);
-                    self.parse_implicit_var_expr()?
-                } else {
-                    // Not a binding, restore and parse as expression
-                    self.restore(checkpoint);
-                    match self.parse_expr() {
-                        Ok(expr) => expr,
-                        Err(_) => break,
-                    }
-                }
-            } else {
-                // Default: try to parse as expression
-                match self.parse_expr() {
-                    Ok(expr) => expr,
-                    Err(_) => break, // Stop if we can't parse
-                }
-            };
-            stmts.push(Box::new(stmt));
+            // Try to parse a statement
+            match self.parse_block_statement() {
+                Ok(stmt) => stmts.push(Box::new(stmt)),
+                Err(_) => break, // Stop if we can't parse
+            }
         }
 
         let end = if self.current > 0 {
@@ -420,14 +394,27 @@ impl Parser {
 
                     self.expect(TokenType::Colon)?;
 
-                    // Parse include specs (names)
-                    let names = Vec::new(); // TODO: parse include specs
+                    // Parse include specs (comma-separated names ending with END)
+                    let mut names = Vec::new();
 
-                    let end = if self.current > 0 {
-                        self.tokens[self.current - 1].clone()
-                    } else {
-                        start.clone()
-                    };
+                    if !self.matches(&TokenType::End) {
+                        // Parse first include spec
+                        names.push(self.parse_include_spec()?);
+
+                        // Parse additional specs with comma separators
+                        while self.matches(&TokenType::Comma) {
+                            self.advance(); // consume comma
+
+                            // Allow optional trailing comma
+                            if self.matches(&TokenType::End) {
+                                break;
+                            }
+
+                            names.push(self.parse_include_spec()?);
+                        }
+                    }
+
+                    let end = self.expect(TokenType::End)?;
 
                     Ok(Import::SIncludeFrom {
                         l: self.make_loc(&start, &end),
@@ -458,15 +445,45 @@ impl Parser {
     }
 
     /// Parse import source (module name)
-    /// For now, just parse a simple name token
+    /// Handles:
+    /// - Simple name: `module-name`
+    /// - Special import: `file("path.arr")` or `file("path.arr", "other")`
     fn parse_import_source(&mut self) -> ParseResult<ImportType> {
         let start = self.peek().clone();
         let module_name = self.expect(TokenType::Name)?;
 
-        Ok(ImportType::SConstImport {
-            l: self.make_loc(&start, &module_name),
-            module: module_name.value,
-        })
+        // Check for special import: NAME PARENNOSPACE STRING (COMMA STRING)* RPAREN
+        if self.matches(&TokenType::ParenNoSpace) {
+            self.advance(); // consume (
+
+            let kind = module_name.value;
+            let mut args = Vec::new();
+
+            // Parse first string argument
+            let first_arg = self.expect(TokenType::String)?;
+            args.push(first_arg.value);
+
+            // Parse optional additional string arguments
+            while self.matches(&TokenType::Comma) {
+                self.advance(); // consume ,
+                let arg = self.expect(TokenType::String)?;
+                args.push(arg.value);
+            }
+
+            let end = self.expect(TokenType::RParen)?;
+
+            Ok(ImportType::SSpecialImport {
+                l: self.make_loc(&start, &end),
+                kind,
+                args,
+            })
+        } else {
+            // Simple const import
+            Ok(ImportType::SConstImport {
+                l: self.make_loc(&start, &module_name),
+                module: module_name.value,
+            })
+        }
     }
 
     /// provide-stmt: PROVIDE stmt END | PROVIDE *
@@ -490,7 +507,7 @@ impl Parser {
             // Parse the provide block
             let mut block_stmts = Vec::new();
             while !self.matches(&TokenType::End) && !self.is_at_end() {
-                let stmt = self.parse_expr()?;
+                let stmt = self.parse_block_statement()?;
                 block_stmts.push(Box::new(stmt));
             }
 
@@ -508,9 +525,109 @@ impl Parser {
         }
     }
 
-    /// provide-types-stmt: PROVIDE-TYPES ann | ...
+    /// provide-types-stmt: PROVIDE-TYPES record-ann | PROVIDE-TYPES (STAR|TIMES)
+    /// Parses provide-types statements like:
+    /// - provide-types *
+    /// - provide-types { Type1, Type2 } (TODO: record-ann not yet implemented)
     fn parse_provide_types_stmt(&mut self) -> ParseResult<ProvideTypes> {
-        todo!("Implement parse_provide_types_stmt")
+        let start = self.expect(TokenType::ProvideTypes)?;
+
+        // Check for provide-types-all: provide-types *
+        if self.matches(&TokenType::Times) || self.matches(&TokenType::Star) {
+            self.advance();
+
+            Ok(ProvideTypes::SProvideTypesAll {
+                l: self.make_loc(&start, &start),
+            })
+        } else {
+            // TODO: Implement record-ann for provide-types { Type1, Type2 }
+            // For now, just return an error
+            Err(ParseError::general(
+                self.peek(),
+                "provide-types with specific types not yet implemented",
+            ))
+        }
+    }
+
+    /// provide-block: PROVIDECOLON [provide-spec (COMMA provide-spec)* [COMMA]] END
+    /// Parses provide-block statements like:
+    /// - provide: add, multiply end
+    /// - provide: * end (provide all)
+    fn parse_provide_block(&mut self) -> ParseResult<ProvideBlock> {
+        let start = self.expect(TokenType::ProvideColon)?;
+
+        // Parse provide-specs
+        let mut specs = Vec::new();
+
+        // Parse specs until we hit END
+        if !self.matches(&TokenType::End) {
+            // Parse first spec
+            specs.push(self.parse_provide_spec()?);
+
+            // Parse additional specs with comma separators
+            while self.matches(&TokenType::Comma) {
+                self.advance(); // consume comma
+
+                // Allow optional trailing comma
+                if self.matches(&TokenType::End) {
+                    break;
+                }
+
+                specs.push(self.parse_provide_spec()?);
+            }
+        }
+
+        let end = self.expect(TokenType::End)?;
+
+        Ok(ProvideBlock {
+            node_type: "s-provide-block".to_string(),
+            l: self.make_loc(&start, &end),
+            path: Vec::new(), // Empty path for basic provide-blocks
+            specs,
+        })
+    }
+
+    /// Parse a single provide-spec
+    /// provide-spec: provide-name-spec | provide-type-spec | provide-data-spec | provide-module-spec
+    fn parse_provide_spec(&mut self) -> ParseResult<ProvideSpec> {
+        // For now, just handle provide-name-spec (simple names)
+        // TODO: Handle TYPE, DATA, MODULE keywords
+        let name_spec = self.parse_name_spec()?;
+
+        Ok(ProvideSpec::SProvideName {
+            l: self.current_loc(),
+            name: name_spec,
+        })
+    }
+
+    /// Parse a name-spec
+    /// name-spec: (STAR|TIMES) [hiding-spec] | module-ref | module-ref AS NAME
+    fn parse_name_spec(&mut self) -> ParseResult<NameSpec> {
+        // For now, just handle simple module-ref (single name)
+        // TODO: Handle * and AS NAME variants
+        let name = self.parse_name()?;
+
+        // The JSON format shows: "name-spec": {"type": "s-module-ref", "path": [{"type": "s-name", "name": "add"}], "as-name": null}
+        // But our AST has: SModuleRef { l: Loc, name: Name }
+        // We need to match the serialization, so let's use SModuleRef
+        Ok(NameSpec::SModuleRef {
+            l: self.current_loc(),
+            name,
+        })
+    }
+
+    /// Parse an include-spec
+    /// include-spec: include-name-spec | include-type-spec | include-data-spec | include-module-spec
+    /// For now, just handles include-name-spec (simple names)
+    fn parse_include_spec(&mut self) -> ParseResult<IncludeSpec> {
+        // TODO: Check for TYPE, DATA, MODULE keywords
+        // For now, just parse as include-name-spec
+        let name_spec = self.parse_name_spec()?;
+
+        Ok(IncludeSpec::SIncludeName {
+            l: self.current_loc(),
+            name: name_spec,
+        })
     }
 }
 
@@ -521,19 +638,41 @@ impl Parser {
 impl Parser {
     /// ann: name-ann | record-ann | arrow-ann | ...
     fn parse_ann(&mut self) -> ParseResult<Ann> {
-        // For now, just handle simple name annotations like "Either", "Number", etc.
+        // Handle simple name annotations like "Either", "Number", "Any", etc.
         // Full implementation would handle arrows, records, tuples, etc.
         if self.matches(&TokenType::Name) {
             let name_token = self.advance().clone();
             let loc = self.make_loc(&name_token, &name_token);
+
+            // Check if it's the special "Any" type
+            if name_token.value == "Any" {
+                return Ok(Ann::AAny { l: loc });
+            }
+
             let name = Name::SName {
                 l: loc.clone(),
                 s: name_token.value.clone(),
             };
-            Ok(Ann::AName {
-                l: loc,
+
+            let base_ann = Ann::AName {
+                l: loc.clone(),
                 id: name,
-            })
+            };
+
+            // Check for type application: List<T>, Map<K, V>, etc.
+            if self.matches(&TokenType::Lt) {
+                self.advance(); // consume '<'
+                let type_args = self.parse_comma_list(|p| p.parse_ann())?;
+                let end_token = self.expect(TokenType::Gt)?; // consume '>'
+                let app_loc = self.make_loc(&name_token, &end_token);
+                Ok(Ann::AApp {
+                    l: app_loc,
+                    ann: Box::new(base_ann),
+                    args: type_args,
+                })
+            } else {
+                Ok(base_ann)
+            }
         } else {
             // Default to blank annotation
             Ok(Ann::ABlank)
@@ -932,8 +1071,58 @@ impl Parser {
 
             // Parse the right-hand side (if needed)
             // Some check operators may not have a right side (e.g., "raises" without specific error)
+            // The right side should allow function calls and other postfix operations
             let right = if !self.is_at_end() && !matches!(self.peek().token_type, TokenType::Eof) {
-                Some(Box::new(self.parse_prim_expr()?))
+                // Parse primitive expression first
+                let mut right_expr = self.parse_prim_expr()?;
+
+                // Then apply postfix operators (function calls, dot access, bracket access)
+                loop {
+                    if self.matches(&TokenType::ParenNoSpace) {
+                        right_expr = self.parse_app_expr(right_expr)?;
+                    } else if self.matches(&TokenType::Dot) {
+                        let _dot_token = self.expect(TokenType::Dot)?;
+                        let field_token = self.parse_field_name()?;
+
+                        let start_loc = match &right_expr {
+                            Expr::SNum { l, .. } => l.clone(),
+                            Expr::SBool { l, .. } => l.clone(),
+                            Expr::SStr { l, .. } => l.clone(),
+                            Expr::SId { l, .. } => l.clone(),
+                            Expr::SOp { l, .. } => l.clone(),
+                            Expr::SParen { l, .. } => l.clone(),
+                            Expr::SApp { l, .. } => l.clone(),
+                            Expr::SConstruct { l, .. } => l.clone(),
+                            Expr::SDot { l, .. } => l.clone(),
+                            Expr::SBracket { l, .. } => l.clone(),
+                            Expr::SObj { l, .. } => l.clone(),
+                            Expr::STuple { l, .. } => l.clone(),
+                            Expr::STupleGet { l, .. } => l.clone(),
+                            Expr::SLam { l, .. } => l.clone(),
+                            _ => self.current_loc(),
+                        };
+
+                        right_expr = Expr::SDot {
+                            l: Loc::new(
+                                self.file_name.clone(),
+                                start_loc.start_line,
+                                start_loc.start_column,
+                                start_loc.start_char,
+                                field_token.location.end_line,
+                                field_token.location.end_col,
+                                field_token.location.end_pos,
+                            ),
+                            obj: Box::new(right_expr),
+                            field: field_token.value.clone(),
+                        };
+                    } else if self.matches(&TokenType::LBrack) {
+                        right_expr = self.parse_bracket_expr(right_expr)?;
+                    } else {
+                        break;
+                    }
+                }
+
+                Some(Box::new(right_expr))
             } else {
                 None
             };
@@ -1058,6 +1247,8 @@ impl Parser {
             TokenType::For => self.parse_for_expr(),
             TokenType::Let => self.parse_let_expr(),
             TokenType::Var => self.parse_var_expr(),
+            TokenType::CheckColon => self.parse_check_expr(),
+            TokenType::Check => self.parse_check_expr(),
             _ => Err(ParseError::unexpected(token)),
         }
     }
@@ -1065,7 +1256,9 @@ impl Parser {
     /// num-expr: NUMBER
     /// Pyret represents all numbers as rationals, so:
     /// - Integers like "42" -> SNum with n=42.0
-    /// - Decimals like "3.14" -> SFrac with num=157, den=50
+    /// - Decimals like "3.14" -> SNum with n=3.14 (NOT SFrac - decimals are stored as floats)
+    /// Note: The official Pyret parser converts decimals to fractions internally but
+    /// represents them as s-num in JSON with fraction string values like "157/50"
     fn parse_num(&mut self) -> ParseResult<Expr> {
         let token = self.expect(TokenType::Number)?;
         let loc = Loc::new(
@@ -1078,22 +1271,14 @@ impl Parser {
             token.location.end_pos,
         );
 
-        // Check if this is a decimal number (contains '.')
-        if token.value.contains('.') {
-            // Convert decimal to rational
-            let (num, den) = Self::decimal_to_rational(&token.value)
-                .map_err(|e| ParseError::invalid("number", &token, &e))?;
+        // Parse as float (integers and decimals)
+        let n: f64 = token
+            .value
+            .parse()
+            .map_err(|_| ParseError::invalid("number", &token, "Invalid number format"))?;
 
-            Ok(Expr::SFrac { l: loc, num, den })
-        } else {
-            // Integer - keep as SNum
-            let n: f64 = token
-                .value
-                .parse()
-                .map_err(|_| ParseError::invalid("number", &token, "Invalid number format"))?;
-
-            Ok(Expr::SNum { l: loc, n })
-        }
+        // Store original string to preserve precision for large integers
+        Ok(Expr::SNum { l: loc, n, original: Some(token.value.clone()) })
     }
 
     /// frac-expr: RATIONAL
@@ -1807,6 +1992,48 @@ impl Parser {
 
 impl Parser {
     /// block-expr: BLOCK COLON stmts END
+    /// Helper function to parse a single statement in a block context
+    /// This handles let bindings, var bindings, and other statements
+    fn parse_block_statement(&mut self) -> ParseResult<Expr> {
+        if self.matches(&TokenType::Let) {
+            // Explicit let binding: let x = 5
+            self.parse_let_expr()
+        } else if self.matches(&TokenType::Var) {
+            // Var binding: var x := 5
+            self.parse_var_expr()
+        } else if self.matches(&TokenType::CheckColon) || self.matches(&TokenType::Check) {
+            // Check block: check: ... end or check "name": ... end
+            self.parse_check_expr()
+        } else if self.matches(&TokenType::Name) {
+            // Check if this is an implicit let binding: x = value or x :: Type = value
+            // Look ahead to see if there's a :: or = or := after the name
+            let checkpoint = self.checkpoint();
+            let _name = self.advance(); // Consume the name
+
+            // Check for type annotation first
+            if self.matches(&TokenType::ColonColon) {
+                // Has type annotation - must be a let or var binding
+                self.restore(checkpoint);
+                self.parse_implicit_let_expr()
+            } else if self.matches(&TokenType::Equals) {
+                // Implicit let binding: x = value
+                self.restore(checkpoint);
+                self.parse_implicit_let_expr()
+            } else if self.matches(&TokenType::ColonEquals) {
+                // Implicit var binding: x := value
+                self.restore(checkpoint);
+                self.parse_implicit_var_expr()
+            } else {
+                // Not a binding, restore and parse as expression
+                self.restore(checkpoint);
+                self.parse_expr()
+            }
+        } else {
+            // Default: try to parse as expression
+            self.parse_expr()
+        }
+    }
+
     /// Parses user-defined block expressions like: block: 5 end, block: x = 1 x + 2 end
     /// NOTE: "block:" is tokenized as a single Block token that includes the colon
     fn parse_block_expr(&mut self) -> ParseResult<Expr> {
@@ -1816,41 +2043,7 @@ impl Parser {
         // Parse statements until we hit 'end'
         let mut stmts = Vec::new();
         while !self.matches(&TokenType::End) && !self.is_at_end() {
-            // Use the same statement parsing logic as parse_block()
-            let stmt = if self.matches(&TokenType::Let) {
-                // Explicit let binding: let x = 5
-                self.parse_let_expr()?
-            } else if self.matches(&TokenType::Var) {
-                // Var binding: var x := 5
-                self.parse_var_expr()?
-            } else if self.matches(&TokenType::Name) {
-                // Check if this is an implicit let binding: x = value or x :: Type = value
-                // Look ahead to see if there's a :: or = or := after the name
-                let checkpoint = self.checkpoint();
-                let _name = self.advance(); // Consume the name
-
-                // Check for type annotation first
-                if self.matches(&TokenType::ColonColon) {
-                    // Has type annotation - must be a let or var binding
-                    self.restore(checkpoint);
-                    self.parse_implicit_let_expr()?
-                } else if self.matches(&TokenType::Equals) {
-                    // Implicit let binding: x = value
-                    self.restore(checkpoint);
-                    self.parse_implicit_let_expr()?
-                } else if self.matches(&TokenType::ColonEquals) {
-                    // Implicit var binding: x := value
-                    self.restore(checkpoint);
-                    self.parse_implicit_var_expr()?
-                } else {
-                    // Not a binding, restore and parse as expression
-                    self.restore(checkpoint);
-                    self.parse_expr()?
-                }
-            } else {
-                // Default: try to parse as expression
-                self.parse_expr()?
-            };
+            let stmt = self.parse_block_statement()?;
             stmts.push(Box::new(stmt));
         }
 
@@ -1885,7 +2078,7 @@ impl Parser {
             && !self.matches(&TokenType::End)
             && !self.is_at_end()
         {
-            let stmt = self.parse_expr()?;
+            let stmt = self.parse_block_statement()?;
             then_stmts.push(Box::new(stmt));
         }
 
@@ -1915,7 +2108,7 @@ impl Parser {
                 && !self.matches(&TokenType::End)
                 && !self.is_at_end()
             {
-                let stmt = self.parse_expr()?;
+                let stmt = self.parse_block_statement()?;
                 elseif_stmts.push(Box::new(stmt));
             }
 
@@ -1938,7 +2131,7 @@ impl Parser {
 
             let mut else_stmts = Vec::new();
             while !self.matches(&TokenType::End) && !self.is_at_end() {
-                let stmt = self.parse_expr()?;
+                let stmt = self.parse_block_statement()?;
                 else_stmts.push(Box::new(stmt));
             }
 
@@ -2059,7 +2252,7 @@ impl Parser {
         // Parse the body (statements until END)
         let mut body_stmts = Vec::new();
         while !self.matches(&TokenType::End) && !self.is_at_end() {
-            let stmt = self.parse_expr()?;
+            let stmt = self.parse_block_statement()?;
             body_stmts.push(Box::new(stmt));
         }
 
@@ -2307,7 +2500,7 @@ impl Parser {
                 // Parse else body (statements until end)
                 let mut else_stmts = Vec::new();
                 while !self.matches(&TokenType::End) && !self.is_at_end() {
-                    let stmt = self.parse_expr()?;
+                    let stmt = self.parse_block_statement()?;
                     else_stmts.push(Box::new(stmt));
                 }
 
@@ -2359,7 +2552,7 @@ impl Parser {
             // Parse body (statements until next | or end)
             let mut body_stmts = Vec::new();
             while !self.matches(&TokenType::Bar) && !self.matches(&TokenType::End) && !self.is_at_end() {
-                let stmt = self.parse_expr()?;
+                let stmt = self.parse_block_statement()?;
                 body_stmts.push(Box::new(stmt));
             }
 
@@ -2427,7 +2620,7 @@ impl Parser {
         // Parse the block (statements until end)
         let mut block_stmts = Vec::new();
         while !self.matches(&TokenType::End) && !self.is_at_end() {
-            let stmt = self.parse_expr()?;
+            let stmt = self.parse_block_statement()?;
             block_stmts.push(Box::new(stmt));
         }
 
@@ -2463,9 +2656,15 @@ impl Parser {
         let name_token = self.expect(TokenType::Name)?;
         let name = name_token.value.clone();
 
-        // Parse type parameters (for now, skip - just empty vec)
-        // TODO: Parse <T, U> type parameters
-        let params: Vec<Name> = Vec::new();
+        // Parse optional type parameters <T, U, V>
+        let params: Vec<Name> = if self.matches(&TokenType::Lt) {
+            self.advance(); // consume '<'
+            let type_params = self.parse_comma_list(|p| p.parse_name())?;
+            self.expect(TokenType::Gt)?; // consume '>'
+            type_params
+        } else {
+            Vec::new()
+        };
 
         // Expect opening paren (can be LParen, ParenSpace, or ParenNoSpace)
         let paren_token = self.peek().clone();
@@ -2647,9 +2846,15 @@ impl Parser {
         let name_token = self.expect(TokenType::Name)?;
         let name = name_token.value.clone();
 
-        // Parse type parameters (for now, skip - just empty vec)
-        // TODO: Parse <T, U> type parameters
-        let params: Vec<Name> = Vec::new();
+        // Parse optional type parameters <T, U, V>
+        let params: Vec<Name> = if self.matches(&TokenType::Lt) {
+            self.advance(); // consume '<'
+            let type_params = self.parse_comma_list(|p| p.parse_name())?;
+            self.expect(TokenType::Gt)?; // consume '>'
+            type_params
+        } else {
+            Vec::new()
+        };
 
         // Expect colon
         self.expect(TokenType::Colon)?;
@@ -2875,14 +3080,77 @@ impl Parser {
 // ============================================================================
 
 impl Parser {
-    /// check-expr: CHECK name: body END
+    /// check-expr: CHECK [name] COLON body END
+    /// Parses a check block like:
+    ///   check:
+    ///     1 + 1 is 2
+    ///   end
+    /// or with a name:
+    ///   check "my test":
+    ///     1 + 1 is 2
+    ///   end
     fn parse_check_expr(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_check_expr")
+        let start_token = self.peek().clone();
+
+        // Check for two patterns:
+        // 1. check: ... end (CheckColon token)
+        // 2. check "string": ... end (Check String Colon tokens)
+        let (start, name, keyword_check) = if self.matches(&TokenType::CheckColon) {
+            let tok = self.advance().clone();
+            (tok, None, true)
+        } else if self.matches(&TokenType::Check) {
+            self.advance(); // consume CHECK
+
+            // Expect a string for the name
+            let name_token = self.expect(TokenType::String)?;
+            let name_str = name_token.value.clone();
+
+            // Expect colon
+            self.expect(TokenType::Colon)?;
+
+            (start_token, Some(name_str), true)
+        } else {
+            return Err(ParseError::general(
+                &start_token,
+                "Expected 'check:' or 'check \"name\":'",
+            ));
+        };
+
+        // Parse the body as a block of check-test statements
+        let mut stmts = Vec::new();
+
+        while !self.matches(&TokenType::End) && !self.is_at_end() {
+            // Each statement in a check block should be a check-test
+            let stmt = self.parse_check_test()?;
+            stmts.push(Box::new(stmt));
+        }
+
+        let end = self.expect(TokenType::End)?;
+
+        // Create the block for the body
+        let body_loc = self.make_loc(&start, &end);
+        let body = Box::new(Expr::SBlock {
+            l: body_loc,
+            stmts,
+        });
+
+        Ok(Expr::SCheck {
+            l: self.make_loc(&start, &end),
+            name,
+            body,
+            keyword_check,
+        })
     }
 
     /// check-test: expr is expr | expr raises expr | ...
+    /// Parses check test expressions like:
+    ///   1 + 1 is 2
+    ///   foo() raises "error"
+    ///
+    /// Note: parse_expr() will create an SCheckTest when it sees a check operator in parse_binop_expr.
     fn parse_check_test(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_check_test")
+        // Simply parse the full expression (which will create SCheckTest when it sees the check operator)
+        self.parse_expr()
     }
 
     /// spy-stmt: spy: contents END

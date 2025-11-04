@@ -582,3 +582,56 @@ test "tokenize deeply nested type" {
     try std.testing.expectEqual(TokenType.type_marker, token.type);
     try std.testing.expectEqualStrings("!llvm.struct<(ptr<struct<(i32, i64)>>)>", token.lexeme);
 }
+
+test "tokenize map with array<i32: 0> attribute" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "{:elem_type i8 :rawConstantIndices array<i32: 0>}";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    // {
+    var tok = try t.next();
+    try std.testing.expectEqual(TokenType.left_brace, tok.type);
+
+    // :elem_type
+    tok = try t.next();
+    try std.testing.expectEqual(TokenType.keyword, tok.type);
+    try std.testing.expectEqualStrings(":elem_type", tok.lexeme);
+
+    // i8
+    tok = try t.next();
+    try std.testing.expectEqual(TokenType.identifier, tok.type);
+    try std.testing.expectEqualStrings("i8", tok.lexeme);
+
+    // :rawConstantIndices
+    tok = try t.next();
+    try std.testing.expectEqual(TokenType.keyword, tok.type);
+    try std.testing.expectEqualStrings(":rawConstantIndices", tok.lexeme);
+
+    // array<i32: 0> - this should be ONE token
+    tok = try t.next();
+    try std.testing.expectEqual(TokenType.identifier, tok.type);
+    try std.testing.expectEqualStrings("array<i32: 0>", tok.lexeme);
+
+    // }
+    tok = try t.next();
+    try std.testing.expectEqual(TokenType.right_brace, tok.type);
+
+    // EOF
+    tok = try t.next();
+    try std.testing.expectEqual(TokenType.eof, tok.type);
+}
+
+test "tokenize identifier array<i32: 0> with spaces" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "array<i32: 0>";
+    var t = Tokenizer.init(std.testing.allocator, source);
+
+    var tok = try t.next();
+    try std.testing.expectEqual(TokenType.identifier, tok.type);
+    try std.testing.expectEqualStrings("array<i32: 0>", tok.lexeme);
+
+    tok = try t.next();
+    try std.testing.expectEqual(TokenType.eof, tok.type);
+}

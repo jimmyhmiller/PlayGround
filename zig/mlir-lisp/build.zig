@@ -509,6 +509,38 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the op macro test executable.
     const run_op_macro_tests = fixRpathForTest(b, op_macro_tests, target, mlir_lib_path);
 
+    // Creates a test executable for struct access
+    const struct_access_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/struct_access_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(struct_access_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the struct access test executable.
+    const run_struct_access_tests = fixRpathForTest(b, struct_access_tests, target, mlir_lib_path);
+
+    // Creates a test executable for value layout
+    const value_layout_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/value_layout_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(value_layout_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the value layout test executable.
+    const run_value_layout_tests = fixRpathForTest(b, value_layout_tests, target, mlir_lib_path);
+
     // Creates an executable to test the printer manually
     const test_printer_exe = b.addExecutable(.{
         .name = "test_printer",
@@ -676,6 +708,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_macro_system_tests.step);
     test_step.dependOn(&run_operation_flattener_tests.step);
     test_step.dependOn(&run_op_macro_tests.step);
+    test_step.dependOn(&run_struct_access_tests.step);
+    test_step.dependOn(&run_value_layout_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

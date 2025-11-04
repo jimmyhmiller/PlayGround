@@ -1,26 +1,36 @@
 #!/bin/bash
 # Compare Pyret's official parser with our Rust parser
 # Usage: ./compare_parsers.sh "2 + 3"
+#    OR: ./compare_parsers.sh /path/to/file.arr
 
 set -e
 
 if [ -z "$1" ]; then
-    echo "Usage: $0 '<pyret expression>'"
+    echo "Usage: $0 '<pyret expression>' OR $0 '/path/to/file.arr'"
     echo "Example: $0 '2 + 3'"
+    echo "Example: $0 tests/pyret/tests/test-strings.arr"
     exit 1
 fi
 
-EXPR="$1"
+INPUT="$1"
 TEMP_FILE="/tmp/pyret_compare_input.arr"
 PYRET_JSON="/tmp/pyret_output.json"
 RUST_JSON="/tmp/rust_output.json"
 PYRET_EXPR="/tmp/pyret_expr.json"
 
-# Write expression to temp file
-echo "$EXPR" > "$TEMP_FILE"
-
-echo "=== Input ==="
-echo "$EXPR"
+# Check if input is a file path or an expression
+if [ -f "$INPUT" ]; then
+    # It's a file - use it directly
+    TEMP_FILE="$INPUT"
+    echo "=== Input File ==="
+    echo "$INPUT"
+    echo "(File contains $(wc -l < "$INPUT") lines)"
+else
+    # It's an expression - write to temp file
+    echo "$INPUT" > "$TEMP_FILE"
+    echo "=== Input ==="
+    echo "$INPUT"
+fi
 echo
 
 # Parse with Pyret's official parser

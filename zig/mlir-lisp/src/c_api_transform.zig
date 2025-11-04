@@ -71,6 +71,7 @@ fn createMap(allocator: std.mem.Allocator, vec: PersistentVector(*Value)) !*Valu
 // Transform (@test %arg1 %arg2 i64) => (operation (name func.call) ...)
 // Takes args-only (without the "call" identifier) for use as a macro
 // Syntax: (@callee operand1 operand2 ... return_type)
+// OR with explicit binding: (%result @callee operand1 operand2 ... return_type)
 // Returns null on error (C-compatible calling convention)
 pub export fn transformCallToOperation(allocator_ptr: ?*anyopaque, call_args: ?*anyopaque) ?*anyopaque {
     if (allocator_ptr == null or call_args == null) return null;
@@ -80,25 +81,37 @@ pub export fn transformCallToOperation(allocator_ptr: ?*anyopaque, call_args: ?*
     const args_value: *Value = @ptrCast(@alignCast(call_args));
 
     // Expect a list containing (@callee operand1 operand2 ... return_type)
+    // OR (%binding @callee operand1 operand2 ... return_type)
     if (args_value.type != .list) return null;
     const args_vec = args_value.data.list;
 
     if (args_vec.len() < 2) return null; // Need at least (callee return_type)
 
-    // Extract: @callee is first, return_type is last, operands are in between
-    const callee_symbol = args_vec.at(0);
+    // Check if first arg is a value_id (starts with %)
+    var start_idx: usize = 0;
+    var custom_binding: ?*Value = null;
+    const first_arg = args_vec.at(0);
+    if (first_arg.type == .value_id) {
+        // First arg is the custom binding
+        custom_binding = first_arg;
+        start_idx = 1;
+        if (args_vec.len() < 3) return null; // Need at least (%binding callee return_type)
+    }
+
+    // Extract: @callee is at start_idx, return_type is last, operands are in between
+    const callee_symbol = args_vec.at(start_idx);
     const return_type = args_vec.at(args_vec.len() - 1);
 
     // Extract operands (everything between callee and return_type)
     var operands = PersistentVector(*Value).init(allocator, null);
-    var i: usize = 1;
+    var i: usize = start_idx + 1;
     while (i < args_vec.len() - 1) : (i += 1) {
         operands = operands.push(args_vec.at(i)) catch return null;
     }
 
     // Build result: (operation (name func.call) (result-bindings [%result0]) (result-types i64) (operands ...) (attributes { :callee @test }))
 
-    const result = transformCallToOperationInner(allocator, callee_symbol, return_type, operands) catch return null;
+    const result = transformCallToOperationInner(allocator, callee_symbol, return_type, operands, custom_binding) catch return null;
     return @ptrCast(result);
 }
 
@@ -107,6 +120,7 @@ fn transformCallToOperationInner(
     callee_symbol: *Value,
     return_type: *Value,
     operands: PersistentVector(*Value),
+    custom_binding: ?*Value,
 ) !*Value {
     // Create "operation" identifier
     const operation_ident = try createIdentifier(allocator, "operation");
@@ -125,9 +139,14 @@ fn transformCallToOperationInner(
     var types_clause: ?*Value = null;
 
     if (!is_void) {
-        // Create (result-bindings [%result0])
+        // Create (result-bindings [%binding])
+        // Use custom binding if provided, otherwise use %result0
         var gensym_vec = PersistentVector(*Value).init(allocator, null);
-        gensym_vec = try gensym_vec.push(try createValueId(allocator, "%result0"));
+        if (custom_binding) |binding| {
+            gensym_vec = try gensym_vec.push(binding);
+        } else {
+            gensym_vec = try gensym_vec.push(try createValueId(allocator, "%result0"));
+        }
         const bindings_vector = try createVector(allocator, gensym_vec);
 
         var bindings_vec = PersistentVector(*Value).init(allocator, null);

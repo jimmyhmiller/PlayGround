@@ -13,6 +13,7 @@ pub const ParseError = error{
     ExpectedValueId,
     ExpectedBlockId,
     ExpectedTypeIdentifier,
+    ExpectedHasType,
     UnexpectedStructure,
     MissingRequiredField,
     InvalidSectionName,
@@ -624,7 +625,21 @@ pub const Parser = struct {
         var i: usize = 1;
         while (i < list.len()) : (i += 1) {
             const val = list.at(i);
-            if (val.type != .value_id) return error.ExpectedValueId;
+            if (val.type != .value_id) {
+                std.debug.print("Error: Expected value ID in operands at position {d}, but got {s}\n", .{ i, @tagName(val.type) });
+                if (val.type == .identifier or val.type == .symbol or val.type == .string or val.type == .number) {
+                    std.debug.print("  Found atom: '{s}'\n", .{val.data.atom});
+                } else if (val.type == .list) {
+                    std.debug.print("  Found nested list with {d} elements\n", .{val.data.list.len()});
+                    if (val.data.list.len() > 0) {
+                        const first = val.data.list.at(0);
+                        if (first.type == .identifier) {
+                            std.debug.print("  List starts with: '{s}'\n", .{first.data.atom});
+                        }
+                    }
+                }
+                return error.ExpectedValueId;
+            }
             try operands.append(self.allocator, val.data.atom);
         }
 
@@ -885,7 +900,7 @@ pub const Parser = struct {
     }
 
     fn parseArguments(self: *Parser, section: *Value) ParseError![]Argument {
-        // (arguments [ [ VALUE_ID TYPE ]* ])
+        // (arguments [ (: VALUE_ID TYPE)* ])
         const list = section.data.list;
         if (list.len() < 2) return error.UnexpectedStructure;
 
@@ -903,14 +918,11 @@ pub const Parser = struct {
 
         var i: usize = 0;
         while (i < vec.len()) : (i += 1) {
-            const arg_pair = vec.at(i);
-            if (arg_pair.type != .vector) return error.ExpectedVector;
+            const arg_value = vec.at(i);
+            if (arg_value.type != .has_type) return error.ExpectedHasType;
 
-            const pair = arg_pair.data.vector;
-            if (pair.len() < 2) return error.UnexpectedStructure;
-
-            const value_id = pair.at(0);
-            const type_expr = pair.at(1);
+            const value_id = arg_value.data.has_type.value;
+            const type_expr = arg_value.data.has_type.type_expr;
 
             if (value_id.type != .value_id) return error.ExpectedValueId;
             if (type_expr.type != .type and type_expr.type != .function_type and type_expr.type != .identifier) {

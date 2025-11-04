@@ -522,8 +522,9 @@ pub enum Expr {
     // ========== Primitives ==========
 
     /// Number literal
+    /// Stores both the parsed float value and original string to preserve precision
     #[serde(rename = "s-num")]
-    SNum { l: Loc, n: f64 },
+    SNum { l: Loc, n: f64, #[serde(skip)] original: Option<String> },
 
     /// Fraction literal (rational)
     #[serde(rename = "s-frac")]
