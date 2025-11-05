@@ -3,7 +3,8 @@
 # Usage: ./compare_parsers.sh "2 + 3"
 #    OR: ./compare_parsers.sh /path/to/file.arr
 
-set -e
+# Note: Don't use set -e because we want to see the comparison output
+# even when parsers differ (Python script exits with code 1)
 
 if [ -z "$1" ]; then
     echo "Usage: $0 '<pyret expression>' OR $0 '/path/to/file.arr'"
@@ -34,24 +35,17 @@ fi
 echo
 
 # Parse with Pyret's official parser
-echo "=== Pyret Parser ==="
+echo "=== Parsing with Pyret's official parser... ==="
 cd /Users/jimmyhmiller/Documents/Code/open-source/pyret-lang
 node ast-to-json.jarr "$TEMP_FILE" "$PYRET_JSON" 2>&1 | grep "JSON written" || true
 
 # Copy the full program AST (no longer extracting just the first statement)
 cp "$PYRET_JSON" "$PYRET_EXPR"
 
-cat "$PYRET_EXPR"
-echo
-echo
-
 # Parse with our Rust parser
-echo "=== Rust Parser ==="
+echo "=== Parsing with Rust parser... ==="
 cd /Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/pyret-attempt2
 cargo run --bin to_pyret_json "$TEMP_FILE" 2>/dev/null > "$RUST_JSON"
-cat "$RUST_JSON"
-echo
-echo
 
 # Compare the two JSON outputs (normalize for field order)
 echo "=== Comparison ==="
@@ -93,10 +87,25 @@ if pyret_norm == rust_norm:
 else:
     print("❌ DIFFERENT - Found differences:")
     print()
-    print("Pyret AST:")
-    print(json.dumps(pyret_norm, indent=2))
-    print()
-    print("Rust AST:")
-    print(json.dumps(rust_norm, indent=2))
+
+    # Save full ASTs to files for diffing
+    with open('/tmp/pyret_ast_normalized.json', 'w') as f:
+        json.dump(pyret_norm, f, indent=2)
+
+    with open('/tmp/rust_ast_normalized.json', 'w') as f:
+        json.dump(rust_norm, f, indent=2)
+
     sys.exit(1)
 EOF
+
+# Capture the exit code from Python
+EXIT_CODE=$?
+
+# If different, show the diff
+if [ $EXIT_CODE -eq 1 ]; then
+    echo
+    echo "=== Diff (Pyret vs Rust) ==="
+    diff /tmp/pyret_ast_normalized.json /tmp/rust_ast_normalized.json || true
+fi
+
+exit $EXIT_CODE

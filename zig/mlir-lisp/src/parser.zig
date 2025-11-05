@@ -919,7 +919,14 @@ pub const Parser = struct {
         var i: usize = 0;
         while (i < vec.len()) : (i += 1) {
             const arg_value = vec.at(i);
-            if (arg_value.type != .has_type) return error.ExpectedHasType;
+            if (arg_value.type != .has_type) {
+                std.debug.print("\nError: Expected block argument with type annotation\n", .{});
+                std.debug.print("Found: {s}\n", .{@tagName(arg_value.type)});
+                std.debug.print("\nExpected syntax: (arguments [ (: %%arg_name type) ... ])\n", .{});
+                std.debug.print("Example: (arguments [ (: %%arg0 !llvm.ptr) (: %%arg1 i32) ])\n", .{});
+                std.debug.print("\nIncorrect syntax: (arguments [[%%arg0 !llvm.ptr] [%%arg1 i32]])\n\n", .{});
+                return error.ExpectedHasType;
+            }
 
             const value_id = arg_value.data.has_type.value;
             const type_expr = arg_value.data.has_type.type_expr;

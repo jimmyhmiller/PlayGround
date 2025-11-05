@@ -2752,7 +2752,7 @@
             (regions
               (region
                 (block [^bb0]
-                  (arguments [[%arg0 !llvm.ptr] [%arg1 !llvm.ptr]])
+                  (arguments [(: %arg0 !llvm.ptr) (: %arg1 !llvm.ptr)])
                   (operation
                     (name llvm.mlir.constant)
                     (result-bindings [%45])
@@ -3340,7 +3340,7 @@
                       (successor ^bb8)
                       (successor ^bb9))))
                 (block [^bb2]
-                  (arguments [[%110 i1]])
+                  (arguments [(: %110 i1)])
                   (operation
                     (name llvm.cond_br)
                     (operand-uses %110)
@@ -3380,7 +3380,7 @@
                     (successors
                       (successor ^bb1))))
                 (block [^bb7]
-                  (arguments [[%112 !llvm.ptr]])
+                  (arguments [(: %112 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %112 %104)
@@ -3497,7 +3497,7 @@
                     (successors
                       (successor ^bb10))))
                 (block [^bb13]
-                  (arguments [[%121 !llvm.ptr]])
+                  (arguments [(: %121 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %121 %98)
@@ -3542,7 +3542,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb16]
-                  (arguments [[%124 !llvm.ptr]])
+                  (arguments [(: %124 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %124 %97)
@@ -3587,7 +3587,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb19]
-                  (arguments [[%127 !llvm.ptr]])
+                  (arguments [(: %127 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %127 %96)
@@ -3632,7 +3632,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb22]
-                  (arguments [[%130 !llvm.ptr]])
+                  (arguments [(: %130 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %130 %95)
@@ -3677,7 +3677,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb25]
-                  (arguments [[%133 !llvm.ptr]])
+                  (arguments [(: %133 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %133 %94)
@@ -3726,7 +3726,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb28]
-                  (arguments [[%136 !llvm.ptr]])
+                  (arguments [(: %136 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %136 %93)
@@ -3775,7 +3775,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb31]
-                  (arguments [[%139 !llvm.ptr]])
+                  (arguments [(: %139 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %139 %92)
@@ -3820,7 +3820,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb34]
-                  (arguments [[%142 !llvm.ptr]])
+                  (arguments [(: %142 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %142 %91)
@@ -3865,7 +3865,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb37]
-                  (arguments [[%145 !llvm.ptr]])
+                  (arguments [(: %145 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %145 %90)
@@ -3910,7 +3910,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb40]
-                  (arguments [[%148 !llvm.ptr]])
+                  (arguments [(: %148 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %148 %89)
@@ -3955,7 +3955,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb43]
-                  (arguments [[%151 !llvm.ptr]])
+                  (arguments [(: %151 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %151 %88)
@@ -4004,7 +4004,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb46]
-                  (arguments [[%154 !llvm.ptr]])
+                  (arguments [(: %154 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %154 %87)
@@ -4049,7 +4049,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb49]
-                  (arguments [[%157 !llvm.ptr]])
+                  (arguments [(: %157 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %157 %86)
@@ -4094,7 +4094,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb52]
-                  (arguments [[%160 !llvm.ptr]])
+                  (arguments [(: %160 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %160 %85)
@@ -4143,7 +4143,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb55]
-                  (arguments [[%163 !llvm.ptr]])
+                  (arguments [(: %163 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %163 %84)
@@ -4192,7 +4192,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb58]
-                  (arguments [[%166 !llvm.ptr]])
+                  (arguments [(: %166 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %166 %83)
@@ -4237,7 +4237,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb61]
-                  (arguments [[%169 !llvm.ptr]])
+                  (arguments [(: %169 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %169 %82)
@@ -4282,7 +4282,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb64]
-                  (arguments [[%172 !llvm.ptr]])
+                  (arguments [(: %172 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %172 %81)
@@ -4327,7 +4327,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb67]
-                  (arguments [[%175 !llvm.ptr]])
+                  (arguments [(: %175 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %175 %80)
@@ -4372,7 +4372,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb70]
-                  (arguments [[%178 !llvm.ptr]])
+                  (arguments [(: %178 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %178 %79)
@@ -4421,7 +4421,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb73]
-                  (arguments [[%181 !llvm.ptr]])
+                  (arguments [(: %181 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %181 %78)
@@ -4470,7 +4470,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb76]
-                  (arguments [[%184 !llvm.ptr]])
+                  (arguments [(: %184 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %184 %77)
@@ -4515,7 +4515,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb79]
-                  (arguments [[%187 !llvm.ptr]])
+                  (arguments [(: %187 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %187 %76)
@@ -4560,7 +4560,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb82]
-                  (arguments [[%190 !llvm.ptr]])
+                  (arguments [(: %190 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %190 %75)
@@ -4605,7 +4605,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb85]
-                  (arguments [[%193 !llvm.ptr]])
+                  (arguments [(: %193 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %193 %74)
@@ -4650,7 +4650,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb88]
-                  (arguments [[%196 !llvm.ptr]])
+                  (arguments [(: %196 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %196 %73)
@@ -4699,7 +4699,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb91]
-                  (arguments [[%199 !llvm.ptr]])
+                  (arguments [(: %199 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %199 %72)
@@ -4748,7 +4748,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb94]
-                  (arguments [[%202 !llvm.ptr]])
+                  (arguments [(: %202 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %202 %71)
@@ -4793,7 +4793,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb97]
-                  (arguments [[%205 !llvm.ptr]])
+                  (arguments [(: %205 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %205 %70)
@@ -4838,7 +4838,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb100]
-                  (arguments [[%208 !llvm.ptr]])
+                  (arguments [(: %208 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %208 %69)
@@ -4887,7 +4887,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb103]
-                  (arguments [[%211 !llvm.ptr]])
+                  (arguments [(: %211 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %211 %68)
@@ -4936,7 +4936,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb106]
-                  (arguments [[%214 !llvm.ptr]])
+                  (arguments [(: %214 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %214 %67)
@@ -4981,7 +4981,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb109]
-                  (arguments [[%217 !llvm.ptr]])
+                  (arguments [(: %217 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %217 %66)
@@ -5026,7 +5026,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb112]
-                  (arguments [[%220 !llvm.ptr]])
+                  (arguments [(: %220 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %220 %65)
@@ -5075,7 +5075,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb115]
-                  (arguments [[%223 !llvm.ptr]])
+                  (arguments [(: %223 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %223 %64)
@@ -5124,7 +5124,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb118]
-                  (arguments [[%226 !llvm.ptr]])
+                  (arguments [(: %226 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %226 %63)
@@ -5173,7 +5173,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb121]
-                  (arguments [[%229 !llvm.ptr]])
+                  (arguments [(: %229 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %229 %62)
@@ -5222,7 +5222,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb124]
-                  (arguments [[%232 !llvm.ptr]])
+                  (arguments [(: %232 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %232 %61)
@@ -5271,7 +5271,7 @@
                     (name llvm.return)
                     (operand-uses %46)))
                 (block [^bb127]
-                  (arguments [[%235 !llvm.ptr]])
+                  (arguments [(: %235 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %235 %60)
@@ -5522,7 +5522,7 @@
                       (successor ^bb2)
                       (successor ^bb3))))
                 (block [^bb1]
-                  (arguments [[%17 !llvm.ptr]])
+                  (arguments [(: %17 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %17 %14)
@@ -5559,7 +5559,7 @@
                     (name llvm.return)
                     (operand-uses %1)))
                 (block [^bb4]
-                  (arguments [[%20 !llvm.ptr]])
+                  (arguments [(: %20 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %20 %13)
@@ -5596,7 +5596,7 @@
                     (name llvm.return)
                     (operand-uses %1)))
                 (block [^bb7]
-                  (arguments [[%23 !llvm.ptr]])
+                  (arguments [(: %23 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %23 %12)
@@ -5633,7 +5633,7 @@
                     (name llvm.return)
                     (operand-uses %1)))
                 (block [^bb10]
-                  (arguments [[%26 !llvm.ptr]])
+                  (arguments [(: %26 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %26 %11)
@@ -5670,7 +5670,7 @@
                     (name llvm.return)
                     (operand-uses %1)))
                 (block [^bb13]
-                  (arguments [[%29 !llvm.ptr]])
+                  (arguments [(: %29 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %29 %10)
@@ -5707,7 +5707,7 @@
                     (name llvm.return)
                     (operand-uses %1)))
                 (block [^bb16]
-                  (arguments [[%32 !llvm.ptr]])
+                  (arguments [(: %32 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %32 %9)
@@ -5748,7 +5748,7 @@
                     (name llvm.return)
                     (operand-uses %1)))
                 (block [^bb19]
-                  (arguments [[%35 !llvm.ptr]])
+                  (arguments [(: %35 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %35 %8)
@@ -5789,7 +5789,7 @@
                     (name llvm.return)
                     (operand-uses %1)))
                 (block [^bb22]
-                  (arguments [[%38 !llvm.ptr]])
+                  (arguments [(: %38 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %38 %7)
@@ -5830,7 +5830,7 @@
                     (name llvm.return)
                     (operand-uses %1)))
                 (block [^bb25]
-                  (arguments [[%41 !llvm.ptr]])
+                  (arguments [(: %41 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %41 %6)
@@ -5867,7 +5867,7 @@
                     (name llvm.return)
                     (operand-uses %1)))
                 (block [^bb28]
-                  (arguments [[%44 !llvm.ptr]])
+                  (arguments [(: %44 !llvm.ptr)])
                   (operation
                     (name llvm.store)
                     (operand-uses %44 %5)

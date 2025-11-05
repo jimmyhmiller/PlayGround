@@ -536,11 +536,11 @@ pub const LispPrinter = struct {
         if (block.label.args) |args| {
             for (args.args, 0..) |arg, i| {
                 if (i > 0) try self.writer.writeByte(' ');
-                try self.writer.writeAll("[");
+                try self.writer.writeAll("(: ");
                 try self.writer.writeAll(arg.value_id);
                 try self.writer.writeByte(' ');
                 try self.printType(arg.type, .argument_type);
-                try self.writer.writeByte(']');
+                try self.writer.writeByte(')');
             }
         }
         try self.writer.writeAll("])");

@@ -4,26 +4,59 @@
 
 A hand-written recursive descent parser for the Pyret programming language in Rust.
 
-## 📊 Current Status (2025-11-03 - LATEST UPDATE)
+## 📊 Current Status (2025-11-04 - LATEST UPDATE)
 
-**Test Results: 110/118 tests passing (93.2%)** 🎉
-- ✅ **110 tests PASSING** (93.2%) - **+3 new type system tests!**
-- ⏸️ **8 tests IGNORED** (valid features not yet implemented)
+**Test Results: 131/133 tests passing (98.5%)** 🎉
+- ✅ **131 tests PASSING** (98.5%) - **100% of non-ignored tests!**
+- ⏸️ **2 tests IGNORED** (valid features: tables, spy)
 - ❌ **0 tests FAILING**
-- 🗑️ **10 tests DELETED** (invalid Pyret syntax that doesn't exist)
+- 🗑️ **11 tests DELETED/FIXED** (invalid Pyret syntax)
 
 **All passing tests produce byte-for-byte identical ASTs to the official Pyret parser!** ✨
 
-### Latest Completion: Complete Type System Implementation! ✅
+### 🏆 MAJOR MILESTONE: test-equality.arr Fully Parses with IDENTICAL AST! ✅
+
+**The 364-line test-equality.arr file from the official Pyret test suite now produces a 100% IDENTICAL AST!**
+
+### Latest Completion: Prelude Ordering Fix! ✅
 
 **This session's achievements:**
+- 🔧 **Fixed prelude statement ordering** - Parser now allows import/provide in any order ✨ **[NEW!]**
+  - Modified `parse_prelude()` to loop through provide/import statements
+  - Follows Pyret grammar: `(provide-stmt|import-stmt)*`
+  - Previously required provides before imports, now properly interleaved
+  - **1 new test passing**: `test_realistic_module_structure`
+- 🐛 **Fixed test_realistic_module_structure** - Corrected invalid syntax
+  - Changed `provide { Tree, make-tree } end` to `provide: Tree, make-tree end`
+  - Moved provide to prelude (before code) per Pyret grammar requirements
+  - Verified with official Pyret parser - `provide { ... }` is NOT valid syntax
+- 📊 **Test coverage improved** - From 97.7% to 98.5% (+1 test!)
+- 🎉 **131 tests now passing** - Up from 130 (131/133 total = 100% of non-ignored!)
+- 🎯 **Only 2 tests remaining**: Table literals and Spy expressions (both valid features)
+
+**Previous session achievements:**
+- 🎯 **Implemented check operator refinements** - `is%(refinement)`, `is-not%(refinement)`, etc.
+  - Syntax: `3 is%(within(1)) 4` allows custom equality checking
+  - Parses `%` after check operators and captures refinement expression
+  - Properly unwraps parentheses to match official parser AST structure
+- 🔧 **Fixed binary operators in check test right-hand side**
+  - Can now parse `BIG is%(within-rel(TOL)) BIG * (1 + TOL)`
+  - Created `parse_binop_expr_no_check()` to handle full expressions on RHS
+  - Check tests can now have complex expressions with `+`, `*`, `/`, etc.
+- 🧹 **Fixed comment handling**
+  - Comments and block comments now filtered out like official parser
+  - Matches Pyret behavior: `ignore: new Set(["WS", "COMMENT"])`
+- 📊 **Test coverage improved** - From 93.2% to 95.9% (+2.7 percentage points!)
+- 🎉 **118 tests now passing** - Up from 110 (118/123 total = 100% of non-ignored!)
+
+**Previous session achievements:**
 - 🎯 **Implemented complete type system** - All 3 type features now working!
   1. ✅ **Any type annotation** - `x :: Any = 42`
   2. ✅ **Generic function type parameters** - `fun identity<T>(x :: T) -> T: x end`
   3. ✅ **Generic data type parameters** - `data List<T>: | empty | link(first :: T, rest :: List<T>) end`
   4. ✅ **Parameterized type application** - `List<T>`, `Map<K, V>` in type annotations
 - 📊 **Test coverage improved** - From 90.7% to 93.2% (+2.5 percentage points!)
-- 🎉 **110 tests now passing** - Up from 107 (110/118 total)
+- 🎉 **110 tests passing** - Up from 107 (110/118 total)
 
 **Previous session achievements:**
 - 🧹 **Test cleanup** - Removed 8 invalid tests, enabled 7 passing tests
@@ -59,10 +92,10 @@ cd /Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/pyret-attemp
 # Run all tests
 cargo test
 
-# Run comparison tests only (107 passing, 11 ignored)
+# Run comparison tests only (124 passing, 5 ignored)
 cargo test --test comparison_tests
 
-# Run ignored tests to see what needs work (11 tests)
+# Run ignored tests to see what needs work (5 tests)
 cargo test --test comparison_tests -- --ignored
 
 # Compare specific code
@@ -117,6 +150,8 @@ tests/
 - Dot access `obj.field.subfield`
 - Bracket access `arr[0]`, `matrix[i][j]`
 - Tuple access `x.{2}`
+- **Object extension** `obj.{ field: value }` ✨ **[THIS SESSION]**
+- **Object update** `obj.{ x: 10 }` (same syntax as extension) ✨ **[THIS SESSION]**
 - Keywords as field names `obj.method()`
 
 ### Data Structures ✅
@@ -162,8 +197,13 @@ tests/
 - Check operators `is`, `raises`, `satisfies`, `violates`
 
 ### Testing ✅
-- **Check blocks** `check: 1 + 1 is 2 end` ✨ **[THIS SESSION]**
+- **Check blocks** `check: 1 + 1 is 2 end`
+- **Check blocks with names** `check "test name": ... end`
 - Check test statements with `is`, `raises`, `satisfies`, `violates`
+- **Check operator variants** ✨ **[THIS SESSION]**
+  - `is==`, `is=~`, `is<=>` (custom equality comparators)
+  - `is-not==`, `is-not=~`, `is-not<=>` (negated variants)
+- **Check operator refinements** `is%(within(1))`, `is-not%(refinement)`
 
 ### Modules ✅
 - Import statements `import mod as M`
@@ -174,11 +214,11 @@ tests/
 - Ultra-complex nested expressions
 - Program structure with prelude and body
 
-## 🔴 Features Not Yet Implemented (8 Ignored Tests - All Valid!)
+## 🔴 Features Not Yet Implemented (2 Ignored Tests - All Valid!)
 
 **All remaining ignored tests have been verified against the official Pyret parser.** These represent real features worth implementing.
 
-**Parser is now 93.2% complete!** Only 8 tests remaining, all for valid Pyret features.
+**Parser is now 98.5% complete!** Only 2 tests remaining, both for valid Pyret features.
 
 ### ⚠️ Features That DO NOT Exist in Pyret (Removed!)
 The following features were tested and **removed** as they don't exist in Pyret:
@@ -191,73 +231,86 @@ The following features were tested and **removed** as they don't exist in Pyret:
 - ❌ **Computed object properties** - `{ [key]: value }` (doesn't exist)
 - ❌ **Check examples blocks** - `check: examples: | input | output | ...`
 
-### ✅ Type System (COMPLETED!)
+### ✅ Method Expressions (COMPLETED THIS SESSION!)
+- ✅ Method expressions: `m = method(self): body end` ✨
+- ✅ Method with arguments: `method(self, x, y): x + y end` ✨
+- ✅ AST node: `s-method` with `args`, `body`, `name`, etc.
+- ✅ Unblocked test-equality.arr! Now parses 100% with IDENTICAL AST!
+
+### ✅ For Each Iterations (COMPLETED THIS SESSION!)
+- ✅ `for each(x from list): body end` ✨
+- ✅ `for each2(x from l1, y from l2): body end` ✨
+- ✅ Complex bodies with multiple statements ✨
+
+### ✅ If Block Syntax (COMPLETED THIS SESSION!)
+- ✅ `if cond block: body end` syntax ✨
+- ✅ Sets `blocky` field correctly to match official parser
+
+### ✅ Object Extension (COMPLETED PREVIOUS SESSION!)
+- ✅ Object extension: `point.{ z: 0 }` ✨
+- ✅ Object update: `point.{ x: 10 }` ✨
+- ✅ Distinguishes `.{number}` (tuple access) from `.{fields}` (extension)
+- ✅ AST nodes: `SExtend` and `SUpdate` (both serialize as `s-extend`)
+
+### ✅ Check Operator Variants (COMPLETED PREVIOUS SESSION!)
+- ✅ `is==`, `is=~`, `is<=>` operators ✨
+- ✅ `is-not==`, `is-not=~`, `is-not<=>` operators ✨
+- ✅ Tokenizer support for multi-character operators with `=` and `<`
+- ✅ Parser creates `SOpIsOp` and `SOpIsNotOp` with operator names
+
+### ✅ Check Operator Refinements (COMPLETED PREVIOUS SESSION!)
+- ✅ Refinement syntax: `is%(refinement-fn)`, `is-not%(refinement-fn)`
+- ✅ Complex right-hand expressions: `BIG is%(within-rel(TOL)) BIG * (1 + TOL)`
+- ✅ Comment filtering: Comments properly ignored during parsing
+
+### ✅ Type System (COMPLETED PREVIOUS SESSION!)
 - ✅ Function type annotations with arrow: `fun f(x) -> Number: ...`
 - ✅ `Any` type annotation: `x :: Any = 42`
 - ✅ Generic function type parameters: `fun identity<T>(x :: T) -> T: x end`
 - ✅ Generic data type parameters: `data List<T>: | empty | link(first :: T, rest :: List<T>) end`
 - ✅ Parameterized type application: `List<T>`, `Map<K, V>` in type annotations
 
-### Object Features (2 tests) - ✅ VALID
-- Object extension: `point.{ z: 0 }`
-- Object update: `point.{ x: 10 }` (same as extension syntactically)
-
-### Table Features (2 tests) - ✅ VALID
-- Table literals: `table: name, age row: "Alice", 30 end`
-- Table methods: `my-table.filter(lam(r): r.age > 25 end)` (should already work!)
-
-### Advanced Import/Export (3 tests) - ✅ VALID
+### Advanced Import/Export (1 test) - ✅ VALID - 🔥 **NEXT PRIORITY**
 - File imports: `import file("util.arr") as U`
 - Provide with types: `provide-types *`
+- Provide with specific exports: `provide { foo, bar } end`
 - Module structures with multiple imports/exports
 
-### Complex Patterns (7 tests) - ✅ VALID
-- Higher-order functions: `fun adder(x): lam(y): x + y end end`
-- Function composition patterns
-- Recursive functions with cases (should already work!)
-- Custom operator methods: `x._plus(y)`
-- Real-world module structures
+### Table Features (1 test) - ✅ VALID
+- Table literals: `table: name, age row: "Alice", 30 end`
+- Requires significant parser work
 
-## 🎯 NEXT STEPS: Implement Remaining Features (8 Tests Remaining)
+### Spy Expressions (1 test) - ✅ VALID
+- Spy expressions: `spy: x end`
+- May already parse, needs investigation
 
-**Parser is 93.2% complete!** Only 8 tests remaining, all for valid Pyret features.
+## 🎯 NEXT STEPS: Implement Remaining Features (2 Tests Remaining)
 
-### Remaining Features (8 Tests):
+**Parser is 98.5% complete!** Only 2 tests remaining, both for valid Pyret features.
 
-1. **Advanced Import/Export** (4 tests, ~4-6 hours) 🔥 **PRIORITY**
-   - `import file("path.arr") as M`
-   - `provide-types *`
-   - `provide { foo, bar } end`
-   - Complex module structures
+### Remaining Features (2 Tests):
 
-2. **Object Extension** (2 tests, ~3-4 hours)
-   - `point.{ z: 0 }` syntax
-   - Parse `.{` after dot access
-   - AST nodes already exist: `SExtend` and `SUpdate`
-
-3. **Table Literals** (1 test, ~4-6 hours)
+1. **Table Literals** (1 test, ~4-6 hours)
    - `table: name, age row: "Alice", 30 end`
    - Requires significant parser work
+   - Grammar: `table-expr: TABLE COLON column-names [ROW COLON values]* END`
 
-4. **Spy Expressions** (1 test, ~1-2 hours)
+2. **Spy Expressions** (1 test, ~1-2 hours)
    - `spy: x end`
-   - May already parse, needs investigation
+   - Grammar: `spy-expr: SPY COLON expr END`
+   - May require minimal work - stub already exists in parser
 
-### 🔥 **RECOMMENDED: Start with Advanced Import/Export!**
+### 🔥 **RECOMMENDED NEXT STEPS:**
 
-Import/export is the highest-impact remaining feature:
-1. ✅ **4 tests remaining** (highest count)
-2. ✅ **Critical for real programs** (module system)
-3. ✅ **Foundation exists** (basic imports already work)
-4. ✅ **~4-6 hours** estimated time
+1. **Try Spy Expressions First** (~1-2 hours)
+   - Quick win - may already be mostly implemented
+   - Check if `parse_spy_stmt()` stub just needs to be connected
+   - Add to `parse_prim_expr()` to handle `TokenType::Spy`
 
-**Implementation steps:**
-1. **File imports** - `import file("path.arr") as U`
-2. **Provide-types** - `provide-types *` or `provide-types { Type1 }`
-3. **Provide specific names** - `provide { foo, bar } end`
-4. **Complex module structure** - Test multiple imports/exports together
-
-**See NEXT_STEPS.md for detailed implementation guide!**
+2. **Then Table Literals** (~4-6 hours)
+   - More complex feature requiring multiple parsing functions
+   - `parse_table_expr()` stub exists but needs full implementation
+   - Need to parse column names and row data
 
 ## 🔑 Key Concepts
 
@@ -294,7 +347,7 @@ cargo test --test comparison_tests -- --ignored --list
 ```
 
 **72/72 parser unit tests passing** ✅ (100%)
-**100/126 comparison integration tests passing** ✅ (79.4%)
+**118/123 comparison integration tests passing** ✅ (95.9%)
 
 ## 💡 Quick Tips
 
@@ -381,7 +434,7 @@ let items = self.parse_comma_list(|p| p.parse_expr())?;
 - Check blocks with examples (missing)
 - ⚠️ Unary operators (DO NOT EXIST in Pyret)
 
-**Overall: 79.4% Complete** (100/126 tests passing)
+**Overall: 96.1% Complete** (124/129 tests passing)
 
 ## 🎉 Ready to Code!
 
@@ -394,42 +447,54 @@ The codebase is clean, well-tested, and ready for the next features:
 
 **🚀 RECOMMENDED NEXT STEPS - START HERE:**
 
-1. **🔥 IMMEDIATE: Implement `Any` type** (~1 hour)
-   - Easiest remaining feature
-   - Just add keyword recognition in type parser
+1. **🔥 IMMEDIATE: Implement Method Expressions** (~3-4 hours)
+   - Highest priority - blocks test-equality.arr at line 213 (58%)
+   - Parse `method(self): body end` as standalone expressions
+   - AST node already exists: `SMethod` in `src/ast.rs`
    - See NEXT_STEPS section above for details
 
-2. **Generic function type parameters** (~2 hours)
-   - Parse `<T>` after function names
-   - Already have AST fields ready
-
-3. **Generic data types** (~2 hours)
-   - Parse `<T>` after data names
-   - Completes type system support
-
-4. **Object extension** (~3-4 hours)
-   - Parse `.{ field: value }` syntax
-   - Already have AST nodes
-
-5. **Advanced imports/exports** (~4-6 hours)
+2. **Advanced imports/exports** (~4-6 hours)
    - File imports, provide-types, etc.
+   - Critical for real programs
+
+3. **Table literals** (~4-6 hours)
+   - `table:` expression support
+   - Moderate complexity
+
+4. **Spy expressions** (~1-2 hours)
+   - May already parse, needs investigation
+   - Quick win if it works
 
 ---
 
 **Last Updated:** 2025-11-03 (Latest)
-**Tests:** 72/72 parser tests ✅ (100%), 110/118 comparison tests ✅ (93.2%)
+**Tests:** 72/72 parser tests ✅ (100%), 124/129 comparison tests ✅ (96.1%)
 **This Session Completed:**
-- 🎯 **Complete Type System Implementation**
-  - ✅ `Any` type annotation (`x :: Any = 42`)
-  - ✅ Generic function type parameters (`fun identity<T>(x :: T) -> T: x end`)
-  - ✅ Generic data type parameters (`data List<T>: | empty | link(first :: T, rest :: List<T>) end`)
-  - ✅ Parameterized type application (`List<T>`, `Map<K, V>` in type annotations)
-  - Test percentage improved from 90.7% to 93.2% (+2.5 points!)
+- 🎯 **Object Extension** - `obj.{ field: value, ... }` ✨ **[NEW!]**
+  - ✅ Syntax: `point.{ z: 0 }` extends objects with new fields
+  - ✅ Distinguishes `.{number}` (tuple access) from `.{fields}` (object extension)
+  - ✅ Parser handles empty extensions, multiple fields, trailing commas
+  - ✅ AST nodes: `SExtend` and `SUpdate` (both serialize as `s-extend`)
+  - ✅ JSON serialization added to `src/bin/to_pyret_json.rs`
+  - ✅ **2 new tests passing**: `test_object_extension`, `test_object_update_syntax`
+- 🔧 **Check Operator Variants** - `is<op>`, `is-not<op>` ✨ **[NEW!]**
+  - ✅ Added: `is==`, `is=~`, `is<=>` (custom equality comparators)
+  - ✅ Added: `is-not==`, `is-not=~`, `is-not<=>` (negated variants)
+  - ✅ Fixed tokenizer: special handling for multi-character operators with `=` and `<`
+  - ✅ Parser creates `SOpIsOp` and `SOpIsNotOp` with operator names
+  - ✅ **4 new tests passing**: check operator variant tests
+- 📊 **Test coverage improved** - From 95.9% to 96.1% (+6 tests!)
+- 🎉 **124 tests now passing** - Up from 118 (124/129 total = 100% of non-ignored!)
+- ✨ **test-equality.arr progress** - Now parses to line 213/364 (58%, up from 36%!)
+  - **Next blocker**: Method expressions (`method(self): body end`)
 **Implementation Details:**
-- Updated `parse_ann()` to recognize `Any` keyword and return `Ann::AAny`
-- Updated `parse_ann()` to handle type application (`List<T>`) using `Ann::AApp`
-- Added type parameter parsing to `parse_fun_expr()` (using `Lt`/`Gt` tokens)
-- Added type parameter parsing to `parse_data_expr()` (using `Lt`/`Gt` tokens)
-- Added JSON serialization for `AAny` and `AApp` annotation types
-**Progress:** 110/118 passing (93.2%), only 8 tests remaining
-**Next Session:** Object extension (2 tests), advanced imports (4 tests), tables (1 test), or spy (1 test)
+- **Object Extension**: Modified postfix expression parser (src/parser.rs:849-981)
+  - Detects `.{` and checks if next token is `Number` (tuple) or field name (extension)
+  - Parses object fields using existing `parse_obj_field()` function
+  - Creates `Expr::SExtend` with `supe` (super object) and `fields`
+- **Check Operators**: Fixed tokenizer (src/tokenizer.rs:694-737)
+  - Added early checks for `is==`, `is=~`, `is<=>`, `is-not==`, etc. before identifier scanning
+  - Needed because `=` and `<` aren't valid identifier characters
+  - Parser recognizes new token types in `is_check_op()` and `parse_check_op()`
+**Progress:** 124/129 passing (96.1%), only 5 tests remaining (100% of non-ignored!)
+**Next Session:** Method expressions (2 tests) - **PRIORITY**, blocks test-equality.arr at line 213

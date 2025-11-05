@@ -525,6 +525,22 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the struct access test executable.
     const run_struct_access_tests = fixRpathForTest(b, struct_access_tests, target, mlir_lib_path);
 
+    // Creates a test executable for JIT-compiled macros
+    const jit_macro_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/jit_macro_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    linkMLIR(jit_macro_tests, mlir_include_path, mlir_lib_path);
+
+    // A run step that will run the JIT macro test executable.
+    const run_jit_macro_tests = fixRpathForTest(b, jit_macro_tests, target, mlir_lib_path);
+
     // Creates a test executable for value layout
     const value_layout_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -709,6 +725,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_operation_flattener_tests.step);
     test_step.dependOn(&run_op_macro_tests.step);
     test_step.dependOn(&run_struct_access_tests.step);
+    test_step.dependOn(&run_jit_macro_tests.step);
     test_step.dependOn(&run_value_layout_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.

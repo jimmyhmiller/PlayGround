@@ -392,3 +392,103 @@ test "generateLoadExtraPtr2 - generates correct MLIR" {
     try std.testing.expect(std.mem.indexOf(u8, code, "%my_ptr2 = llvm.load") != null);
     try std.testing.expect(std.mem.indexOf(u8, code, "-> !llvm.ptr") != null);
 }
+
+// ============================================================================
+// Ergonomic API tests
+// ============================================================================
+
+test "CValueLayout - ergonomic atom accessor" {
+    const allocator = std.testing.allocator;
+
+    // Create an identifier layout
+    const str = "test_identifier";
+    var layout = c_value_layout.CValueLayout.empty(.identifier);
+    layout.data_ptr = @constCast(str.ptr);
+    layout.data_len = str.len;
+
+    // Test type checking methods
+    try std.testing.expect(layout.isAtom());
+    try std.testing.expect(!layout.isCollection());
+    try std.testing.expectEqual(reader.ValueType.identifier, layout.getType());
+
+    // Test ergonomic accessor
+    if (layout.asAtom()) |atom| {
+        try std.testing.expectEqualStrings("test_identifier", atom);
+    } else {
+        return error.ExpectedAtom;
+    }
+
+    // Test that wrong accessors return null
+    try std.testing.expect(layout.asList() == null);
+    try std.testing.expect(layout.asVector() == null);
+    try std.testing.expect(layout.asMap() == null);
+
+    _ = allocator;
+}
+
+test "CValueLayout - ergonomic pattern matching" {
+    const allocator = std.testing.allocator;
+
+    // Test atom matching
+    {
+        const str = "hello";
+        var layout = c_value_layout.CValueLayout.empty(.string);
+        layout.data_ptr = @constCast(str.ptr);
+        layout.data_len = str.len;
+
+        var matched_atom = false;
+        var matched_value: []const u8 = undefined;
+
+        const Visitor = struct {
+            matched: *bool,
+            value: *[]const u8,
+
+            pub fn onAtom(self: @This(), atom: []const u8) !void {
+                self.matched.* = true;
+                self.value.* = atom;
+            }
+
+            pub fn onList(_: @This(), _: []*c_value_layout.CValueLayout) !void {
+                return error.UnexpectedList;
+            }
+        };
+
+        const visitor = Visitor{
+            .matched = &matched_atom,
+            .value = &matched_value,
+        };
+
+        try layout.match(visitor);
+        try std.testing.expect(matched_atom);
+        try std.testing.expectEqualStrings("hello", matched_value);
+    }
+
+    _ = allocator;
+}
+
+test "CValueLayout - collection accessors with null data" {
+    // Test that collection accessors handle null data_ptr gracefully
+    var list_layout = c_value_layout.CValueLayout.empty(.list);
+    var vec_layout = c_value_layout.CValueLayout.empty(.vector);
+    var map_layout = c_value_layout.CValueLayout.empty(.map);
+
+    // All should be collections
+    try std.testing.expect(list_layout.isCollection());
+    try std.testing.expect(vec_layout.isCollection());
+    try std.testing.expect(map_layout.isCollection());
+
+    // asAtom should return null for collections
+    try std.testing.expect(list_layout.asAtom() == null);
+    try std.testing.expect(vec_layout.asAtom() == null);
+    try std.testing.expect(map_layout.asAtom() == null);
+
+    // Collection accessors should return null when data_ptr is null
+    try std.testing.expect(list_layout.asList() == null);
+    try std.testing.expect(vec_layout.asVector() == null);
+    try std.testing.expect(map_layout.asMap() == null);
+
+    // Wrong collection type should return null
+    try std.testing.expect(list_layout.asVector() == null);
+    try std.testing.expect(vec_layout.asMap() == null);
+    try std.testing.expect(map_layout.asList() == null);
+}

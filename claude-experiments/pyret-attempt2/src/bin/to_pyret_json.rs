@@ -83,8 +83,12 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
             // Use original string if available (preserves precision for large integers)
             // Otherwise convert to fraction string
             let value_str = if let Some(orig) = original {
-                // For decimals, convert to fraction; for integers, use as-is
-                if orig.contains('.') {
+                // Rough numbers (starting with ~) are kept as-is
+                if orig.starts_with('~') {
+                    orig.clone()
+                }
+                // For decimals or scientific notation, convert to fraction; for integers, use as-is
+                else if orig.contains('.') || orig.contains('e') || orig.contains('E') {
                     float_to_fraction_string(*n)
                 } else {
                     orig.clone()
@@ -187,6 +191,20 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
         Expr::SFun { name, params, args, ann, doc, body, check, check_loc, blocky, .. } => {
             json!({
                 "type": "s-fun",
+                "name": name,
+                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
+                "args": args.iter().map(|a| bind_to_pyret_json(a)).collect::<Vec<_>>(),
+                "ann": ann_to_pyret_json(ann),
+                "doc": doc,
+                "body": expr_to_pyret_json(body),
+                "check": check.as_ref().map(|c| expr_to_pyret_json(c)),
+                "check-loc": check_loc.as_ref().map(|loc| loc_to_srcloc_string(loc)),
+                "blocky": blocky
+            })
+        }
+        Expr::SMethod { name, params, args, ann, doc, body, check, check_loc, blocky, .. } => {
+            json!({
+                "type": "s-method",
                 "name": name,
                 "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
                 "args": args.iter().map(|a| bind_to_pyret_json(a)).collect::<Vec<_>>(),
@@ -355,6 +373,20 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "type": "s-rfrac",
                 "num": num.to_string(),
                 "den": den.to_string()
+            })
+        }
+        Expr::SExtend { supe, fields, .. } => {
+            json!({
+                "type": "s-extend",
+                "super": expr_to_pyret_json(supe),
+                "fields": fields.iter().map(|f| member_to_pyret_json(f)).collect::<Vec<_>>()
+            })
+        }
+        Expr::SUpdate { supe, fields, .. } => {
+            json!({
+                "type": "s-update",
+                "super": expr_to_pyret_json(supe),
+                "fields": fields.iter().map(|f| member_to_pyret_json(f)).collect::<Vec<_>>()
             })
         }
         _ => {
