@@ -1,0 +1,299 @@
+tools/benchmark/auto-report-programs/recursion-tail-call.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tools/benchmark/auto-report-programs/adding-ones-2000.arr  # SUCCESS - Parser now handles this!
+tools/benchmark/auto-report-programs/anf-loop-compiler.arr  # MISSING: type alias (type Name = Type)
+tools/benchmark/auto-report-programs/ast.arr  # MISSING: type alias (type Name = Type)
+pyret-ast.arr  # MISSING: Import/provide/type feature
+ast-to-json.arr  # MISSING: Runtime feature (needs manual check)
+tests/lib-test/lib-test-main.arr  # SUCCESS - Parser now handles this!
+tests/all.arr  # SUCCESS - Parser now handles this!
+tests/pyret/test-compile-helper.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-errors.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-each-loop.arr  # SUCCESS - Parser now handles this!
+tests/pyret/tests/test-matrices.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-file-locators.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-examples.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/pyret/tests/test-modules.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-import.arr  # MISSING: import without as
+tests/pyret/tests/test-lists.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-contracts.arr  # SUCCESS - Parser now handles this!
+tests/pyret/tests/test-compile-lib.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-tail-call.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-matrices2.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-roughnum.arr  # SUCCESS - Parser now handles this!
+tests/pyret/tests/test-timing.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-sets.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-string-dict.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-error-rendering.arr  # SUCCESS - Parser now handles this!
+tests/pyret/tests/test-parse-errors.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-binops.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-flatness.arr  # SUCCESS - Parser now handles this!
+tests/pyret/tests/test-letrec.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-rounding.arr  # SUCCESS - Parser now handles this!
+tests/pyret/tests/test-parse.arr  # SUCCESS - Parser now handles this!
+tests/pyret/tests/test-cases.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-statistics.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-file.arr  # SUCCESS - Parser now handles this!
+tests/pyret/tests/test-reactor.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/use/test-essentials.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/pyret/tests/use/test-simple-use.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/pyret/tests/test-builtin-locator.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-refined-refs.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-include.arr  # MISSING: type alias (type Name = Type)
+tests/pyret/tests/test-math.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-output.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-include-block.arr  # MISSING: * in provide list
+tests/pyret/tests/test-rec.arr  # SUCCESS - Parser now handles this!
+tests/pyret/tests/test-compile-errors.arr  # SUCCESS - Parser now handles this!
+tests/pyret/tests/exporter.arr  # MISSING: provide { } block syntax
+tests/pyret/tests/test-filesystem.arr  # SUCCESS - Parser now handles this!
+tests/pyret/tests/test-refs.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/provide-modules.arr  # MISSING: provide...as syntax
+tests/pyret/tests/test-csv-table.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/modules/alias-x.arr  # MISSING: import...from syntax
+tests/pyret/tests/modules/test-double-rename.arr  # MISSING: type in provide
+tests/pyret/tests/modules/provide-as-simple.arr  # MISSING: provide...as syntax
+tests/pyret/tests/modules/provide-type-as-simple.arr  # MISSING: type in provide
+tests/pyret/tests/modules/double-rename.arr  # MISSING: provide...as syntax
+tests/pyret/tests/modules/provide-data-with-provide-star.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/modules/re-re-provide-data.arr  # MISSING: data in provide
+tests/pyret/tests/modules/test-import-data-from-data-star.arr  # MISSING: data in provide
+tests/pyret/tests/modules/provide-data-star.arr  # MISSING: data in provide
+tests/pyret/tests/modules/provide-data.arr  # MISSING: data in provide
+tests/pyret/tests/modules/provide-provide-x.arr  # MISSING: module in provide
+tests/pyret/tests/modules/aliased-names-same-type.arr  # MISSING: type in provide
+tests/pyret/tests/modules/re-provide-data.arr  # MISSING: data in provide
+tests/pyret/tests/modules/provide-datatype-as-type-alias.arr  # MISSING: * in provide list
+tests/pyret/tests/modules/test-aliased-names-same-type.arr  # MISSING: type in provide
+tests/pyret/tests/modules/aliased-name-re-provided.arr  # MISSING: import...from syntax
+tests/pyret/tests/modules/provide-x.arr  # MISSING: type in provide
+tests/pyret/tests/modules/test-provide-type-as-simple.arr  # MISSING: type in provide
+tests/pyret/tests/modules/import-re-provided.arr  # MISSING: provide from syntax
+tests/pyret/tests/modules/import-datatype-as-type-alias.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/pyret/tests/modules/test-provide-data-with-provide-star.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/pyret/tests/test-adaptive-simpson.arr  # SUCCESS - Parser now handles this!
+tests/pyret/tests/test-array.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-s-exp.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-numbers.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-within.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-images.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-pprint.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-bar-chart.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/pyret/tests/test-repl.arr  # MISSING: type alias (type Name = Type)
+tests/pyret/tests/test-tuple.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/tests/test-constructors.arr  # MISSING: Import/provide/type feature
+tests/pyret/tests/test-module-syntax.arr  # MISSING: type in provide
+tests/pyret/tests/provider.arr  # MISSING: type alias (type Name = Type)
+tests/pyret/tests/test-well-formed.arr  # UNKNOWN ERROR
+tests/pyret/tests/test-str-dict.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/main2.arr  # SUCCESS - Parser now handles this!
+tests/pyret/regression/weave-tuple.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/pyret/regression/duplicate-check-block-report.arr  # SUCCESS - Parser now handles this!
+tests/pyret/regression/curried-funs.arr  # SUCCESS - Parser now handles this!
+tests/pyret/regression/flat-refinement.arr  # MISSING: Import/provide/type feature
+tests/pyret/regression/stack-safe-each-loop.arr  # MISSING: Import/provide/type feature
+tests/pyret/regression/toplevel-data.arr  # MISSING: Import/provide/type feature
+tests/pyret/regression/seq-of-lettable.arr  # MISSING: Import/provide/type feature
+tests/pyret/regression/render-reason-wrong-op.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/regression/provides-less-than-data.arr  # MISSING: type in provide
+tests/pyret/regression/escaping-module-uris.arr  # SUCCESS - Parser now handles this!
+tests/pyret/regression/named-arrow-ann.arr  # SUCCESS - Parser now handles this!
+tests/pyret/regression/sloppy-list-filter.arr  # MISSING: Import/provide/type feature
+tests/pyret/regression/immediate-app-return-ann.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/pyret/regression/parens-after-comments.arr  # SUCCESS - Parser now handles this!
+tests/pyret/regression/empty-check-block.arr  # SUCCESS - Parser now handles this!
+tests/pyret/regression/tc-internal-err.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/pyret/regression/anf-of-vars.arr  # MISSING: Import/provide/type feature
+tests/pyret/regression/tail-recursion-arg-order.arr  # MISSING: Runtime feature (needs manual check)
+tests/pyret/regression/random-bogus-range.arr  # SUCCESS - Parser now handles this!
+tests/pyret/regression.arr  # SUCCESS - Parser now handles this!
+tests/pyret/test-parse-helper.arr  # MISSING: type alias (type Name = Type)
+tests/io-tests/tests/test-csv-table-file-with-url.arr  # MISSING: Import/provide/type feature
+tests/io-tests/tests/test-csv-table-url-with-path.arr  # MISSING: Import/provide/type feature
+tests/io-tests/tests/test-csv-table-url.arr  # MISSING: Import/provide/type feature
+tests/type-check/main.arr  # MISSING: Runtime feature (needs manual check)
+tests/type-check/should-not/data-covariant.arr  # MISSING: Import/provide/type feature
+tests/type-check/should-not/data-invariant.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/should-not/data-contravariant.arr  # MISSING: Import/provide/type feature
+tests/type-check/should-not/data-phantom.arr  # MISSING: Import/provide/type feature
+tests/type-check/should-not/obj-update.arr  # MISSING: Import/provide/type feature
+tests/type-check/bad/ask.arr  # MISSING: Import/provide/type feature
+tests/type-check/bad/obj-update-non-ref.arr  # MISSING: Import/provide/type feature
+tests/type-check/bad/obj-check.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/function-tuple-any-to-bool.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/bad-reactor.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/local-import.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/lambda-instantiate.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/bad-type-instantiation.arr  # MISSING: Import/provide/type feature
+tests/type-check/bad/obj-update-incorrect-type.arr  # MISSING: Import/provide/type feature
+tests/type-check/bad/test-refinement.arr  # MISSING: Import/provide/type feature
+tests/type-check/bad/letrec.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/local-function.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/ref-not-ref.arr  # MISSING: Import/provide/type feature
+tests/type-check/bad/newtype.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/a-pred.arr  # MISSING: Import/provide/type feature
+tests/type-check/bad/tuple-length-binding.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/function-tuple-not-function.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/forall-lub.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/obj-glb.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/lib/provide-data.arr  # MISSING: data in provide
+tests/type-check/bad/data-is-object.arr  # MISSING: Import/provide/type feature
+tests/type-check/bad/no-maker.arr  # MISSING: Import/provide/type feature
+tests/type-check/bad/tuple-is-not-booleans.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/cases-singleton-1.arr  # SUCCESS - Parser now handles this!
+tests/type-check/bad/tuple-wrong-types.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/mutual-rec.arr  # SUCCESS - Parser now handles this!
+tests/type-check/bad/function-tuple-string-to-bool.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/ref-fail.arr  # MISSING: Import/provide/type feature
+tests/type-check/bad/data-unify-methods.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/bad/error-in-array.arr  # MISSING: Import/provide/type feature
+tests/type-check/should/lambda-test-inference.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/should/lambda-instantiate.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/should/lambda-infer.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/should/obj-glb.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/should/underscore.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/d-dx.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/data-covariant.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/data-constructorAsSingleton-instantiate.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/data-higherOrder-infer.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/test-double-rename.arr  # MISSING: type in provide
+tests/type-check/good/string-dict.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/obj-check.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/polymorphic-type-alias-chain.arr  # MISSING: type alias (type Name = Type)
+tests/type-check/good/int-list-map.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/string-to-number.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/lazy-lists.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/local-import.arr  # MISSING: type alias (type Name = Type)
+tests/type-check/good/data-higherOrder-instantiate.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/double-rename.arr  # MISSING: provide...as syntax
+tests/type-check/good/type-instantiation.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/function-tuple-bool-to-any.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/_plus.arr  # MISSING: Runtime feature (needs manual check)
+tests/type-check/good/tests.arr  # MISSING: import without as
+tests/type-check/good/map.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/imports.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/polymorphic-newtype.arr  # MISSING: type alias (type Name = Type)
+tests/type-check/good/data-polymorphic-instantiate.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/letrec.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/polymorphic-type-alias-transitive-application.arr  # MISSING: type alias (type Name = Type)
+tests/type-check/good/export.arr  # MISSING: provide { } block syntax
+tests/type-check/good/tuple-matches-function-ann.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/data-constructorAsSingleton-infer.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/data-methods.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/set-include.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/obj-methods.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/polymorphic-type-alias-application.arr  # MISSING: type alias (type Name = Type)
+tests/type-check/good/shadowing-doesnt-change-type.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/provide-data.arr  # MISSING: data in provide
+tests/type-check/good/data-polymorphic-ref.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/tests-because.arr  # MISSING: Runtime feature (needs manual check)
+tests/type-check/good/a-pred.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/subtyping-and-bottom.arr  # MISSING: Runtime feature (needs manual check)
+tests/type-check/good/good-reactor.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/let.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/raw-array.arr  # MISSING: Runtime feature (needs manual check)
+tests/type-check/good/tuple-regression.arr  # MISSING: Runtime feature (needs manual check)
+tests/type-check/good/forall-lub.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/use-param.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/module-alias.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/lazy-maker.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/lam-forall-check.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/data-polymorphic-recursive-infer.arr  # SUCCESS - Parser now handles this!
+tests/type-check/good/id.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/references.arr  # MISSING: Runtime feature (needs manual check)
+tests/type-check/good/table.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/data-polymorphic-recursive-instantiate.arr  # SUCCESS - Parser now handles this!
+tests/type-check/good/ref-set.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/data-constructorAsFun-infer.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/obj-fun-check.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/underscore.arr  # MISSING: Import/provide/type feature
+tests/type-check/good/lam.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+tests/type-check/good/data-constructorAsFun-instantiate.arr  # MISSING: Import/provide/type feature
+pyret-ast-repr.arr  # MISSING: Import/provide/type feature
+ast-json-simple.arr  # MISSING: Import/provide/type feature
+examples/parse-and-print.arr  # MISSING: Runtime feature (needs manual check)
+examples/point.arr  # MISSING: Runtime feature (needs manual check)
+examples/queue.arr  # SUCCESS - Parser now handles this!
+examples/ralist.arr  # MISSING: provide { } block syntax
+examples/htdp/types.arr  # MISSING: Import/provide/type feature
+examples/htdp/struct.arr  # SUCCESS - Parser now handles this!
+examples/heap.arr  # MISSING: provide { } block syntax
+examples/call-flat-local.arr  # SUCCESS - Parser now handles this!
+examples/loop.arr  # MISSING: Import/provide/type feature
+test-type-alias.arr  # MISSING: type alias (type Name = Type)
+ast-to-json-v2.arr  # SUCCESS - Parser now handles this!
+ast-to-json-final.arr  # SUCCESS - Parser now handles this!
+src/arr/trove/valueskeleton.arr  # SUCCESS - Parser now handles this!
+src/arr/trove/reactor-events.arr  # MISSING: type alias (type Name = Type)
+src/arr/trove/timing.arr  # MISSING: import...from syntax
+src/arr/trove/sets.arr  # MISSING: provide...as syntax
+src/arr/trove/charts.arr  # MISSING: type in provide
+src/arr/trove/either.arr  # SUCCESS - Parser now handles this!
+src/arr/trove/vector-util.arr  # MISSING: * in provide list
+src/arr/trove/checker.arr  # MISSING: type alias (type Name = Type)
+src/arr/trove/system.arr  # SUCCESS - Parser now handles this!
+src/arr/trove/pick.arr  # SUCCESS - Parser now handles this!
+src/arr/trove/file.arr  # MISSING: provide { } block syntax
+src/arr/trove/matrices.arr  # MISSING: data in provide
+src/arr/trove/cmdline.arr  # MISSING: provide { } block syntax
+src/arr/trove/arrays.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/trove/equality.arr  # MISSING: Import/provide/type feature
+src/arr/trove/particle-shim-structs.arr  # MISSING: type alias (type Name = Type)
+src/arr/trove/option.arr  # MISSING: Import/provide/type feature
+src/arr/trove/color.arr  # SUCCESS - Parser now handles this!
+src/arr/trove/lists.arr  # MISSING: Import/provide/type feature
+src/arr/trove/image-structs.arr  # MISSING: import...from syntax
+src/arr/trove/tables.arr  # MISSING: * in provide list
+src/arr/trove/statistics.arr  # MISSING: type in provide
+src/arr/trove/srcloc.arr  # MISSING: Import/provide/type feature
+src/arr/trove/matrix-util.arr  # MISSING: data in provide
+src/arr/trove/constants.arr  # SUCCESS - Parser now handles this!
+src/arr/trove/error.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/trove/math.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/trove/essentials2020.arr  # MISSING: Prelude feature (#lang, provide-types, etc.)
+src/arr/trove/error-display.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/trove/ast.arr  # MISSING: type alias (type Name = Type)
+src/arr/trove/render-error-display.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/trove/csv.arr  # MISSING: import...from syntax
+src/arr/trove/data-source.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/trove/contracts.arr  # MISSING: Import/provide/type feature
+src/arr/trove/json-structs.arr  # MISSING: Import/provide/type feature
+src/arr/trove/internal-image-shared.arr  # MISSING: type alias (type Name = Type)
+src/arr/trove/image.arr  # MISSING: import...from syntax
+src/arr/trove/pprint.arr  # MISSING: provide { } block syntax
+src/arr/trove/image-typed.arr  # MISSING: import...from syntax
+src/arr/trove/s-exp-structs.arr  # SUCCESS - Parser now handles this!
+src/arr/compiler/server.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/compiler/pyret.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/compiler/flatness.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/ast-anf.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/concat-lists.arr  # MISSING: Import/provide/type feature
+src/arr/compiler/js-of-pyret.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/compiler/ast-util.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/desugar.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/compiler/compile-structs.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/desugar-post-tc.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/compiler/locators/builtin.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/compiler/locators/file.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/compiler/locators/npm.arr  # SUCCESS - Parser now handles this!
+src/arr/compiler/locators/jsfile.arr  # SUCCESS - Parser now handles this!
+src/arr/compiler/locators/url.arr  # MISSING: * in provide list
+src/arr/compiler/anf.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/desugar-check.arr  # MISSING: Import/provide/type feature
+src/arr/compiler/compile-lib.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/base.arr  # SUCCESS - Parser now handles this!
+src/arr/compiler/js-ast.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/cli-module-loader.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/resolve-scope.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/well-formed.arr  # MISSING: provide { } block syntax
+src/arr/compiler/type-check.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/list-aux.arr  # MISSING: Import/provide/type feature
+src/arr/compiler/anf-loop-compiler.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/js-dag-utils.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/type-check-structs.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/libs.arr  # SUCCESS - Parser now handles this!
+src/arr/compiler/repl.arr  # MISSING: Runtime feature (needs manual check)
+src/arr/compiler/type-defaults.arr  # MISSING: type alias (type Name = Type)
+src/arr/compiler/type-structs.arr  # MISSING: type alias (type Name = Type)
+src/scripts/time-obj-vs-tup.arr  # MISSING: Runtime feature (needs manual check)
+src/scripts/time-string-dict.arr  # MISSING: Runtime feature (needs manual check)
+src/scripts/show-compilation.arr  # MISSING: Runtime feature (needs manual check)

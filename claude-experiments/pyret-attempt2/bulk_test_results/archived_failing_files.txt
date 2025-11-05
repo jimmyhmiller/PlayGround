@@ -1,0 +1,299 @@
+tools/benchmark/auto-report-programs/recursion-tail-call.arr  # #lang/provide-types (prelude)
+tools/benchmark/auto-report-programs/adding-ones-2000.arr  # FAIL despite earlier success (stack overflow (expression too deep))
+tools/benchmark/auto-report-programs/anf-loop-compiler.arr  # type alias
+tools/benchmark/auto-report-programs/ast.arr  # type alias
+pyret-ast.arr  # advanced import/provide/type
+ast-to-json.arr  # unknown runtime feature
+tests/lib-test/lib-test-main.arr  # 🔸 underscore (s-underscore vs s-name)
+tests/all.arr  # 🔸 underscore (s-underscore vs s-name)
+tests/pyret/test-compile-helper.arr  # cases block
+tests/pyret/tests/test-errors.arr  # unknown runtime feature
+tests/pyret/tests/test-each-loop.arr  # 🔸 dot/bang operator handling
+tests/pyret/tests/test-matrices.arr  # advanced import/provide/type
+tests/pyret/tests/test-file-locators.arr  # advanced import/provide/type
+tests/pyret/tests/test-examples.arr  # #lang/provide-types (prelude)
+tests/pyret/tests/test-modules.arr  # unknown runtime feature
+tests/pyret/tests/test-import.arr  # import without as
+tests/pyret/tests/test-lists.arr  # advanced import/provide/type
+tests/pyret/tests/test-contracts.arr  # ❌ other AST difference
+tests/pyret/tests/test-compile-lib.arr  # unknown runtime feature
+tests/pyret/tests/test-tail-call.arr  # advanced import/provide/type
+tests/pyret/tests/test-matrices2.arr  # advanced import/provide/type
+tests/pyret/tests/test-roughnum.arr  # ❌ other AST difference
+tests/pyret/tests/test-timing.arr  # unknown runtime feature
+tests/pyret/tests/test-sets.arr  # advanced import/provide/type
+tests/pyret/tests/test-string-dict.arr  # unknown runtime feature
+tests/pyret/tests/test-error-rendering.arr  # 🔸 underscore (s-underscore vs s-name)
+tests/pyret/tests/test-parse-errors.arr  # unknown runtime feature
+tests/pyret/tests/test-binops.arr  # advanced import/provide/type
+tests/pyret/tests/test-flatness.arr  # ❌ other AST difference
+tests/pyret/tests/test-letrec.arr  # advanced import/provide/type
+tests/pyret/tests/test-rounding.arr  # ❌ other AST difference
+tests/pyret/tests/test-parse.arr  # ❌ other AST difference
+tests/pyret/tests/test-cases.arr  # advanced import/provide/type
+tests/pyret/tests/test-statistics.arr  # unknown runtime feature
+tests/pyret/tests/test-file.arr  # 🔸 underscore (s-underscore vs s-name)
+tests/pyret/tests/test-reactor.arr  # advanced import/provide/type
+tests/pyret/tests/use/test-essentials.arr  # #lang/provide-types (prelude)
+tests/pyret/tests/use/test-simple-use.arr  # #lang/provide-types (prelude)
+tests/pyret/tests/test-builtin-locator.arr  # unknown runtime feature
+tests/pyret/tests/test-refined-refs.arr  # advanced import/provide/type
+tests/pyret/tests/test-include.arr  # type alias
+tests/pyret/tests/test-math.arr  # advanced import/provide/type
+tests/pyret/tests/test-output.arr  # unknown runtime feature
+tests/pyret/tests/test-include-block.arr  # asterisk in provide
+tests/pyret/tests/test-rec.arr  # ❌ other AST difference
+tests/pyret/tests/test-compile-errors.arr  # ❌ other AST difference
+tests/pyret/tests/exporter.arr  # provide block
+tests/pyret/tests/test-filesystem.arr  # 🔸 underscore (s-underscore vs s-name)
+tests/pyret/tests/test-refs.arr  # advanced import/provide/type
+tests/pyret/tests/provide-modules.arr  # provide as
+tests/pyret/tests/test-csv-table.arr  # unknown runtime feature
+tests/pyret/tests/modules/alias-x.arr  # import from
+tests/pyret/tests/modules/test-double-rename.arr  # type in provide
+tests/pyret/tests/modules/provide-as-simple.arr  # provide as
+tests/pyret/tests/modules/provide-type-as-simple.arr  # type in provide
+tests/pyret/tests/modules/double-rename.arr  # provide as
+tests/pyret/tests/modules/provide-data-with-provide-star.arr  # advanced import/provide/type
+tests/pyret/tests/modules/re-re-provide-data.arr  # data in provide
+tests/pyret/tests/modules/test-import-data-from-data-star.arr  # data in provide
+tests/pyret/tests/modules/provide-data-star.arr  # data in provide
+tests/pyret/tests/modules/provide-data.arr  # data in provide
+tests/pyret/tests/modules/provide-provide-x.arr  # module in provide
+tests/pyret/tests/modules/aliased-names-same-type.arr  # type in provide
+tests/pyret/tests/modules/re-provide-data.arr  # data in provide
+tests/pyret/tests/modules/provide-datatype-as-type-alias.arr  # asterisk in provide
+tests/pyret/tests/modules/test-aliased-names-same-type.arr  # type in provide
+tests/pyret/tests/modules/aliased-name-re-provided.arr  # import from
+tests/pyret/tests/modules/provide-x.arr  # type in provide
+tests/pyret/tests/modules/test-provide-type-as-simple.arr  # type in provide
+tests/pyret/tests/modules/import-re-provided.arr  # provide from
+tests/pyret/tests/modules/import-datatype-as-type-alias.arr  # #lang/provide-types (prelude)
+tests/pyret/tests/modules/test-provide-data-with-provide-star.arr  # #lang/provide-types (prelude)
+tests/pyret/tests/test-adaptive-simpson.arr  # ❌ other AST difference
+tests/pyret/tests/test-array.arr  # unknown runtime feature
+tests/pyret/tests/test-s-exp.arr  # unknown runtime feature
+tests/pyret/tests/test-numbers.arr  # unknown runtime feature
+tests/pyret/tests/test-within.arr  # unknown runtime feature
+tests/pyret/tests/test-images.arr  # advanced import/provide/type
+tests/pyret/tests/test-pprint.arr  # advanced import/provide/type
+tests/pyret/tests/test-bar-chart.arr  # #lang/provide-types (prelude)
+tests/pyret/tests/test-repl.arr  # type alias
+tests/pyret/tests/test-tuple.arr  # unknown runtime feature
+tests/pyret/tests/test-constructors.arr  # lambda block
+tests/pyret/tests/test-module-syntax.arr  # type in provide
+tests/pyret/tests/provider.arr  # type alias
+tests/pyret/tests/test-well-formed.arr  # unknown error
+tests/pyret/tests/test-str-dict.arr  # unknown runtime feature
+tests/pyret/main2.arr  # 🔸 underscore (s-underscore vs s-name)
+tests/pyret/regression/weave-tuple.arr  # #lang/provide-types (prelude)
+tests/pyret/regression/duplicate-check-block-report.arr  # ❌ other AST difference
+tests/pyret/regression/curried-funs.arr  # 🔸 underscore (s-underscore vs s-name)
+tests/pyret/regression/flat-refinement.arr  # advanced import/provide/type
+tests/pyret/regression/stack-safe-each-loop.arr  # lambda block
+tests/pyret/regression/toplevel-data.arr  # cases block
+tests/pyret/regression/seq-of-lettable.arr  # advanced import/provide/type
+tests/pyret/regression/render-reason-wrong-op.arr  # unknown runtime feature
+tests/pyret/regression/provides-less-than-data.arr  # type in provide
+tests/pyret/regression/escaping-module-uris.arr  # ❌ other AST difference
+tests/pyret/regression/named-arrow-ann.arr  # ❌ other AST difference
+tests/pyret/regression/sloppy-list-filter.arr  # advanced import/provide/type
+tests/pyret/regression/immediate-app-return-ann.arr  # #lang/provide-types (prelude)
+tests/pyret/regression/parens-after-comments.arr  # ❌ other AST difference
+tests/pyret/regression/empty-check-block.arr  # ❌ other AST difference
+tests/pyret/regression/tc-internal-err.arr  # #lang/provide-types (prelude)
+tests/pyret/regression/anf-of-vars.arr  # advanced import/provide/type
+tests/pyret/regression/tail-recursion-arg-order.arr  # unknown runtime feature
+tests/pyret/regression/random-bogus-range.arr  # 🔸 underscore (s-underscore vs s-name)
+tests/pyret/regression.arr  # 🔸 underscore (s-underscore vs s-name)
+tests/pyret/test-parse-helper.arr  # type alias
+tests/io-tests/tests/test-csv-table-file-with-url.arr  # advanced import/provide/type
+tests/io-tests/tests/test-csv-table-url-with-path.arr  # advanced import/provide/type
+tests/io-tests/tests/test-csv-table-url.arr  # advanced import/provide/type
+tests/type-check/main.arr  # unknown runtime feature
+tests/type-check/should-not/data-covariant.arr  # advanced import/provide/type
+tests/type-check/should-not/data-invariant.arr  # #lang/provide-types (prelude)
+tests/type-check/should-not/data-contravariant.arr  # advanced import/provide/type
+tests/type-check/should-not/data-phantom.arr  # advanced import/provide/type
+tests/type-check/should-not/obj-update.arr  # advanced import/provide/type
+tests/type-check/bad/ask.arr  # advanced import/provide/type
+tests/type-check/bad/obj-update-non-ref.arr  # advanced import/provide/type
+tests/type-check/bad/obj-check.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/function-tuple-any-to-bool.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/bad-reactor.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/local-import.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/lambda-instantiate.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/bad-type-instantiation.arr  # advanced import/provide/type
+tests/type-check/bad/obj-update-incorrect-type.arr  # advanced import/provide/type
+tests/type-check/bad/test-refinement.arr  # advanced import/provide/type
+tests/type-check/bad/letrec.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/local-function.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/ref-not-ref.arr  # advanced import/provide/type
+tests/type-check/bad/newtype.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/a-pred.arr  # advanced import/provide/type
+tests/type-check/bad/tuple-length-binding.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/function-tuple-not-function.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/forall-lub.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/obj-glb.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/lib/provide-data.arr  # data in provide
+tests/type-check/bad/data-is-object.arr  # advanced import/provide/type
+tests/type-check/bad/no-maker.arr  # advanced import/provide/type
+tests/type-check/bad/tuple-is-not-booleans.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/cases-singleton-1.arr  # ❌ other AST difference
+tests/type-check/bad/tuple-wrong-types.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/mutual-rec.arr  # ❌ other AST difference
+tests/type-check/bad/function-tuple-string-to-bool.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/ref-fail.arr  # advanced import/provide/type
+tests/type-check/bad/data-unify-methods.arr  # #lang/provide-types (prelude)
+tests/type-check/bad/error-in-array.arr  # advanced import/provide/type
+tests/type-check/should/lambda-test-inference.arr  # #lang/provide-types (prelude)
+tests/type-check/should/lambda-instantiate.arr  # #lang/provide-types (prelude)
+tests/type-check/should/lambda-infer.arr  # #lang/provide-types (prelude)
+tests/type-check/should/obj-glb.arr  # #lang/provide-types (prelude)
+tests/type-check/should/underscore.arr  # #lang/provide-types (prelude)
+tests/type-check/good/d-dx.arr  # advanced import/provide/type
+tests/type-check/good/data-covariant.arr  # advanced import/provide/type
+tests/type-check/good/data-constructorAsSingleton-instantiate.arr  # advanced import/provide/type
+tests/type-check/good/data-higherOrder-infer.arr  # advanced import/provide/type
+tests/type-check/good/test-double-rename.arr  # type in provide
+tests/type-check/good/string-dict.arr  # advanced import/provide/type
+tests/type-check/good/obj-check.arr  # #lang/provide-types (prelude)
+tests/type-check/good/polymorphic-type-alias-chain.arr  # type alias
+tests/type-check/good/int-list-map.arr  # advanced import/provide/type
+tests/type-check/good/string-to-number.arr  # advanced import/provide/type
+tests/type-check/good/lazy-lists.arr  # #lang/provide-types (prelude)
+tests/type-check/good/local-import.arr  # type alias
+tests/type-check/good/data-higherOrder-instantiate.arr  # advanced import/provide/type
+tests/type-check/good/double-rename.arr  # provide as
+tests/type-check/good/type-instantiation.arr  # #lang/provide-types (prelude)
+tests/type-check/good/function-tuple-bool-to-any.arr  # #lang/provide-types (prelude)
+tests/type-check/good/_plus.arr  # unknown runtime feature
+tests/type-check/good/tests.arr  # import without as
+tests/type-check/good/map.arr  # advanced import/provide/type
+tests/type-check/good/imports.arr  # advanced import/provide/type
+tests/type-check/good/polymorphic-newtype.arr  # type alias
+tests/type-check/good/data-polymorphic-instantiate.arr  # advanced import/provide/type
+tests/type-check/good/letrec.arr  # #lang/provide-types (prelude)
+tests/type-check/good/polymorphic-type-alias-transitive-application.arr  # type alias
+tests/type-check/good/export.arr  # provide block
+tests/type-check/good/tuple-matches-function-ann.arr  # #lang/provide-types (prelude)
+tests/type-check/good/data-constructorAsSingleton-infer.arr  # advanced import/provide/type
+tests/type-check/good/data-methods.arr  # #lang/provide-types (prelude)
+tests/type-check/good/set-include.arr  # #lang/provide-types (prelude)
+tests/type-check/good/obj-methods.arr  # #lang/provide-types (prelude)
+tests/type-check/good/polymorphic-type-alias-application.arr  # type alias
+tests/type-check/good/shadowing-doesnt-change-type.arr  # advanced import/provide/type
+tests/type-check/good/provide-data.arr  # data in provide
+tests/type-check/good/data-polymorphic-ref.arr  # advanced import/provide/type
+tests/type-check/good/tests-because.arr  # unknown runtime feature
+tests/type-check/good/a-pred.arr  # advanced import/provide/type
+tests/type-check/good/subtyping-and-bottom.arr  # unknown runtime feature
+tests/type-check/good/good-reactor.arr  # #lang/provide-types (prelude)
+tests/type-check/good/let.arr  # advanced import/provide/type
+tests/type-check/good/raw-array.arr  # unknown runtime feature
+tests/type-check/good/tuple-regression.arr  # unknown runtime feature
+tests/type-check/good/forall-lub.arr  # #lang/provide-types (prelude)
+tests/type-check/good/use-param.arr  # advanced import/provide/type
+tests/type-check/good/module-alias.arr  # advanced import/provide/type
+tests/type-check/good/lazy-maker.arr  # #lang/provide-types (prelude)
+tests/type-check/good/lam-forall-check.arr  # #lang/provide-types (prelude)
+tests/type-check/good/data-polymorphic-recursive-infer.arr  # ❌ other AST difference
+tests/type-check/good/id.arr  # advanced import/provide/type
+tests/type-check/good/references.arr  # unknown runtime feature
+tests/type-check/good/table.arr  # table literal
+tests/type-check/good/data-polymorphic-recursive-instantiate.arr  # ❌ other AST difference
+tests/type-check/good/ref-set.arr  # advanced import/provide/type
+tests/type-check/good/data-constructorAsFun-infer.arr  # advanced import/provide/type
+tests/type-check/good/obj-fun-check.arr  # #lang/provide-types (prelude)
+tests/type-check/good/underscore.arr  # advanced import/provide/type
+tests/type-check/good/lam.arr  # #lang/provide-types (prelude)
+tests/type-check/good/data-constructorAsFun-instantiate.arr  # advanced import/provide/type
+pyret-ast-repr.arr  # advanced import/provide/type
+ast-json-simple.arr  # advanced import/provide/type
+examples/parse-and-print.arr  # unknown runtime feature
+examples/point.arr  # unknown runtime feature
+examples/queue.arr  # 🔸 underscore (s-underscore vs s-name)
+examples/ralist.arr  # provide block
+examples/htdp/types.arr  # advanced import/provide/type
+examples/htdp/struct.arr  # ❌ other AST difference
+examples/heap.arr  # provide block
+examples/call-flat-local.arr  # ❌ other AST difference
+examples/loop.arr  # advanced import/provide/type
+test-type-alias.arr  # type alias
+ast-to-json-v2.arr  # 🔸 dot/bang operator handling
+ast-to-json-final.arr  # 🔸 underscore (s-underscore vs s-name)
+src/arr/trove/valueskeleton.arr  # 🔸 underscore (s-underscore vs s-name)
+src/arr/trove/reactor-events.arr  # type alias
+src/arr/trove/timing.arr  # import from
+src/arr/trove/sets.arr  # provide as
+src/arr/trove/charts.arr  # type in provide
+src/arr/trove/either.arr  # 🔸 underscore (s-underscore vs s-name)
+src/arr/trove/vector-util.arr  # asterisk in provide
+src/arr/trove/checker.arr  # type alias
+src/arr/trove/system.arr  # 🔸 underscore (s-underscore vs s-name)
+src/arr/trove/pick.arr  # 🔸 underscore (s-underscore vs s-name)
+src/arr/trove/file.arr  # provide block
+src/arr/trove/matrices.arr  # data in provide
+src/arr/trove/cmdline.arr  # provide block
+src/arr/trove/arrays.arr  # unknown runtime feature
+src/arr/trove/equality.arr  # ask expression
+src/arr/trove/particle-shim-structs.arr  # type alias
+src/arr/trove/option.arr  # advanced import/provide/type
+src/arr/trove/color.arr  # 🔸 underscore (s-underscore vs s-name)
+src/arr/trove/lists.arr  # advanced import/provide/type
+src/arr/trove/image-structs.arr  # import from
+src/arr/trove/tables.arr  # asterisk in provide
+src/arr/trove/statistics.arr  # type in provide
+src/arr/trove/srcloc.arr  # advanced import/provide/type
+src/arr/trove/matrix-util.arr  # data in provide
+src/arr/trove/constants.arr  # 🔸 underscore (s-underscore vs s-name)
+src/arr/trove/error.arr  # unknown runtime feature
+src/arr/trove/math.arr  # unknown runtime feature
+src/arr/trove/essentials2020.arr  # #lang/provide-types (prelude)
+src/arr/trove/error-display.arr  # unknown runtime feature
+src/arr/trove/ast.arr  # type alias
+src/arr/trove/render-error-display.arr  # unknown runtime feature
+src/arr/trove/csv.arr  # import from
+src/arr/trove/data-source.arr  # unknown runtime feature
+src/arr/trove/contracts.arr  # advanced import/provide/type
+src/arr/trove/json-structs.arr  # advanced import/provide/type
+src/arr/trove/internal-image-shared.arr  # type alias
+src/arr/trove/image.arr  # import from
+src/arr/trove/pprint.arr  # provide block
+src/arr/trove/image-typed.arr  # import from
+src/arr/trove/s-exp-structs.arr  # 🔸 underscore (s-underscore vs s-name)
+src/arr/compiler/server.arr  # lambda block
+src/arr/compiler/pyret.arr  # unknown runtime feature
+src/arr/compiler/flatness.arr  # type alias
+src/arr/compiler/ast-anf.arr  # type alias
+src/arr/compiler/concat-lists.arr  # advanced import/provide/type
+src/arr/compiler/js-of-pyret.arr  # unknown runtime feature
+src/arr/compiler/ast-util.arr  # type alias
+src/arr/compiler/desugar.arr  # unknown runtime feature
+src/arr/compiler/compile-structs.arr  # type alias
+src/arr/compiler/desugar-post-tc.arr  # unknown runtime feature
+src/arr/compiler/locators/builtin.arr  # unknown runtime feature
+src/arr/compiler/locators/file.arr  # unknown runtime feature
+src/arr/compiler/locators/npm.arr  # 🔸 dot/bang operator handling
+src/arr/compiler/locators/jsfile.arr  # 🔸 dot/bang operator handling
+src/arr/compiler/locators/url.arr  # asterisk in provide
+src/arr/compiler/anf.arr  # type alias
+src/arr/compiler/desugar-check.arr  # advanced import/provide/type
+src/arr/compiler/compile-lib.arr  # type alias
+src/arr/compiler/base.arr  # 🔸 underscore (s-underscore vs s-name)
+src/arr/compiler/js-ast.arr  # type alias
+src/arr/compiler/cli-module-loader.arr  # type alias
+src/arr/compiler/resolve-scope.arr  # type alias
+src/arr/compiler/well-formed.arr  # provide block
+src/arr/compiler/type-check.arr  # type alias
+src/arr/compiler/list-aux.arr  # advanced import/provide/type
+src/arr/compiler/anf-loop-compiler.arr  # type alias
+src/arr/compiler/js-dag-utils.arr  # type alias
+src/arr/compiler/type-check-structs.arr  # type alias
+src/arr/compiler/libs.arr  # 🔸 underscore (s-underscore vs s-name)
+src/arr/compiler/repl.arr  # unknown runtime feature
+src/arr/compiler/type-defaults.arr  # type alias
+src/arr/compiler/type-structs.arr  # type alias
+src/scripts/time-obj-vs-tup.arr  # unknown runtime feature
+src/scripts/time-string-dict.arr  # unknown runtime feature
+src/scripts/show-compilation.arr  # unknown runtime feature
