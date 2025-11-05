@@ -75,6 +75,9 @@ pub const Executor = @import("executor.zig").Executor;
 pub const ExecutorConfig = @import("executor.zig").ExecutorConfig;
 pub const OptLevel = @import("executor.zig").OptLevel;
 
+// Export the dialect registry module
+pub const DialectRegistry = @import("dialect_registry.zig").DialectRegistry;
+
 // Export the runtime symbols registration module
 pub const runtime_symbols = @import("runtime_symbols.zig");
 

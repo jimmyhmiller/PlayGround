@@ -38,6 +38,8 @@ pub const Executor = struct {
     ctx: *mlir.Context,
     config: ExecutorConfig,
     engine: ?mlir.ExecutionEngine,
+    /// Optional transform operations to apply before lowering
+    transform_ops: []const mlir.MlirOperation,
 
     pub fn init(allocator: std.mem.Allocator, ctx: *mlir.Context, config: ExecutorConfig) Executor {
         return Executor{
@@ -45,13 +47,84 @@ pub const Executor = struct {
             .ctx = ctx,
             .config = config,
             .engine = null,
+            .transform_ops = &.{},
         };
+    }
+
+    /// Set transform operations to apply during compilation
+    pub fn setTransforms(self: *Executor, transforms: []const mlir.MlirOperation) void {
+        self.transform_ops = transforms;
     }
 
     pub fn deinit(self: *Executor) void {
         if (self.engine) |*eng| {
             eng.destroy();
         }
+    }
+
+    /// Apply transform dialect operations to the module
+    /// This takes transform operations (e.g., PDL patterns) and applies them to the module
+    /// transformOps: Array of transform operations to apply
+    pub fn applyTransforms(
+        self: *Executor,
+        module: *mlir.Module,
+        transformOps: []const mlir.MlirOperation,
+    ) !void {
+        if (transformOps.len == 0) {
+            // Nothing to do
+            return;
+        }
+
+        std.debug.print("  Applying {} transform operation(s)...\n", .{transformOps.len});
+
+        // Create a temporary module to hold the transform operations
+        const location = mlir.Location.unknown(self.ctx);
+        var transform_module = try mlir.Module.create(location);
+        defer transform_module.destroy();
+
+        // Clone transform operations into the transform module
+        const transform_mod_body = transform_module.getBody();
+        for (transformOps) |transform_op| {
+            // Clone the operation
+            const cloned = mlir.c.mlirOperationClone(transform_op);
+            mlir.c.mlirBlockAppendOwnedOperation(transform_mod_body, cloned);
+        }
+
+        std.debug.print("  Transform module:\n", .{});
+        transform_module.print();
+
+        // Get the first transform operation as the root
+        if (transformOps.len == 0) return;
+
+        const first_transform = mlir.c.mlirBlockGetFirstOperation(transform_mod_body);
+        if (mlir.c.mlirOperationIsNull(first_transform)) {
+            return error.NoTransformRoot;
+        }
+
+        // Create transform options
+        var transform_options = mlir.TransformOptions.create();
+        defer transform_options.destroy();
+
+        // Enable expensive checks if verifier is enabled
+        transform_options.enableExpensiveChecks(self.config.enable_verifier);
+
+        std.debug.print("  Module before transform:\n", .{});
+        module.print();
+
+        // Apply the transform
+        const payload = module.getOperation();
+        const transform_mod_op = transform_module.getOperation();
+
+        try mlir.Transform.applyNamedSequence(
+            payload,
+            first_transform,
+            transform_mod_op,
+            &transform_options,
+        );
+
+        std.debug.print("  Module after transform:\n", .{});
+        module.print();
+        std.debug.print("  ✓ Transforms applied successfully\n", .{});
     }
 
     /// Apply lowering passes to convert high-level MLIR to LLVM IR
@@ -80,7 +153,12 @@ pub const Executor = struct {
 
     /// Compile the MLIR module and create an execution engine
     pub fn compile(self: *Executor, module: *mlir.Module) !void {
-        // First, lower to LLVM IR
+        // First, apply transforms if any were set
+        if (self.transform_ops.len > 0) {
+            try self.applyTransforms(module, self.transform_ops);
+        }
+
+        // Then, lower to LLVM IR
         try self.lowerToLLVM(module);
 
         // Create execution engine config

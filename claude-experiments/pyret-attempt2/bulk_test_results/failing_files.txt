@@ -24,19 +24,16 @@ tests/pyret/tests/test-sets.arr  # UNKNOWN: line=6 content='[set: 1, 2, 3, 2].me
 tests/pyret/tests/test-string-dict.arr  # UNKNOWN: line=62 content='[SD.mutable-string-dict: "a", 5] is-not [SD.mutable-string-d...'
 tests/pyret/tests/test-error-rendering.arr  # SUCCESS (verified)
 tests/pyret/tests/test-parse-errors.arr  # UNKNOWN: line=133 content=']...'
-tests/pyret/tests/test-binops.arr  # SUCCESS (verified)
 tests/pyret/tests/test-flatness.arr  # SUCCESS (verified)
-tests/pyret/tests/test-letrec.arr  # UNKNOWN: line=11 content='letrec f = lam(n):...'
 tests/pyret/tests/test-rounding.arr  # SUCCESS (verified)
 tests/pyret/tests/test-parse.arr  # SUCCESS (verified)
 tests/pyret/tests/test-cases.arr  # UNKNOWN: line=13 content='| mpair(ref car, cdr) => car + cdr...'
-tests/pyret/tests/test-statistics.arr  # UNKNOWN: line=155 content='tee = table: x, y, z...'
+tests/pyret/tests/test-statistics.arr  # SUCCESS (verified)
 tests/pyret/tests/test-file.arr  # SUCCESS (verified)
 tests/pyret/tests/test-reactor.arr  # UNKNOWN: line=14 content='r1 = reactor:...'
 tests/pyret/tests/use/test-essentials.arr  # UNKNOWN: line=1 content='use context essentials2020...'
 tests/pyret/tests/use/test-simple-use.arr  # UNKNOWN: line=1 content='use context global...'
 tests/pyret/tests/test-builtin-locator.arr  # SUCCESS (verified)
-tests/pyret/tests/test-refined-refs.arr  # SUCCESS (verified)
 tests/pyret/tests/test-include.arr  # UNKNOWN: "value": "Expected an answer, but got compilation errors:"
 tests/pyret/tests/test-math.arr  # UNKNOWN: line=14 content='min([list: 1/10, 1/100, 1/100000000000000000000000]) is 1/10...'
 tests/pyret/tests/test-output.arr  # UNKNOWN: line=22 content='| x-sing with:...'
@@ -48,22 +45,17 @@ tests/pyret/tests/test-refs.arr  # UNKNOWN: line=7 content='b1!v is 5...'
 tests/pyret/tests/provide-modules.arr  # type in provide (provide: type T end)
 tests/pyret/tests/test-csv-table.arr  # UNKNOWN: line=18 content='t = load-table: x, y, z...'
 tests/pyret/tests/modules/test-double-rename.arr  # type in provide (provide: type T end)
-tests/pyret/tests/modules/provide-type-as-simple.arr  # SUCCESS (verified)
 tests/pyret/tests/modules/double-rename.arr  # type in provide (provide: type T end)
 tests/pyret/tests/modules/provide-data-with-provide-star.arr  # UNKNOWN: line=5 content='| d1 with:...'
 tests/pyret/tests/modules/re-re-provide-data.arr  # provide from (provide from M: x end)
 tests/pyret/tests/modules/test-import-data-from-data-star.arr  # data in provide (provide: data D end)
 tests/pyret/tests/modules/provide-data-star.arr  # SUCCESS (verified)
 tests/pyret/tests/modules/provide-data.arr  # SUCCESS (verified)
-tests/pyret/tests/modules/aliased-names-same-type.arr  # SUCCESS (verified)
 tests/pyret/tests/modules/re-provide-data.arr  # provide from (provide from M: x end)
 tests/pyret/tests/modules/provide-datatype-as-type-alias.arr  # SUCCESS (verified)
 tests/pyret/tests/modules/test-aliased-names-same-type.arr  # type in provide (provide: type T end)
-tests/pyret/tests/modules/provide-x.arr  # SUCCESS (verified)
 tests/pyret/tests/modules/test-provide-type-as-simple.arr  # type in provide (provide: type T end)
 tests/pyret/tests/modules/import-re-provided.arr  # provide from (provide from M: x end)
-tests/pyret/tests/modules/import-datatype-as-type-alias.arr  # SUCCESS (verified)
-tests/pyret/tests/modules/test-provide-data-with-provide-star.arr  # SUCCESS (verified)
 tests/pyret/tests/test-adaptive-simpson.arr  # SUCCESS (verified)
 tests/pyret/tests/test-array.arr  # UNKNOWN: line=350 content='[array: 1, 2, 3] is=~ [array: 1, 2, 3]...'
 tests/pyret/tests/test-s-exp.arr  # UNKNOWN: line=104 content='doc: "Parse an s-expr in Paret's concrete syntax into an Exp...'
@@ -76,15 +68,12 @@ tests/pyret/tests/test-repl.arr  # UNKNOWN: line=31 content='| left(shadow res) 
 tests/pyret/tests/test-tuple.arr  # UNKNOWN: line=88 content='{a;b;c;d;e} = {10; 214; 124; 62; 12}...'
 tests/pyret/tests/test-constructors.arr  # UNKNOWN: line=23 content='[every-other: 1, 2, 3, 4, 5, 6, 7] is link(1, link(3, link(5...'
 tests/pyret/tests/test-module-syntax.arr  # type in provide (provide: type T end)
-tests/pyret/tests/provider.arr  # SUCCESS (verified)
 tests/pyret/tests/test-well-formed.arr  # UNKNOWN: "value": "Expected at least one error for running \n\n "
 tests/pyret/tests/test-str-dict.arr  # UNKNOWN: line=63 content='[SD.mutable-string-dict: {"a"; 5}] is-not [SD.mutable-string...'
 tests/pyret/main2.arr  # SUCCESS (verified)
 tests/pyret/regression/weave-tuple.arr  # UNKNOWN: line=1 content='tuply-contract :: {Number;Number} -> {Number;Number}...'
 tests/pyret/regression/duplicate-check-block-report.arr  # SUCCESS (verified)
 tests/pyret/regression/curried-funs.arr  # SUCCESS (verified)
-tests/pyret/regression/flat-refinement.arr  # SUCCESS (verified)
-tests/pyret/regression/stack-safe-each-loop.arr  # SUCCESS (verified)
 tests/pyret/regression/toplevel-data.arr  # SUCCESS (verified)
 tests/pyret/regression/seq-of-lettable.arr  # UNKNOWN: line=4 content='k((lam(shadow k):...'
 tests/pyret/regression/render-reason-wrong-op.arr  # UNKNOWN: line=18 content='exn-unwrap(ans.v).render-reason() does-not-raise...'
@@ -95,128 +84,87 @@ tests/pyret/regression/immediate-app-return-ann.arr  # UNKNOWN: line=3 content='
 tests/pyret/regression/parens-after-comments.arr  # SUCCESS (verified)
 tests/pyret/regression/empty-check-block.arr  # SUCCESS (verified)
 tests/pyret/regression/tc-internal-err.arr  # UNKNOWN: line=2 content='use context base...'
-tests/pyret/regression/anf-of-vars.arr  # UNKNOWN: line=12 content='letrec x = y + raise("y should trigger error first"), y = 10...'
 tests/pyret/regression/tail-recursion-arg-order.arr  # UNKNOWN: line=20 content='examples:...'
 tests/pyret/regression/random-bogus-range.arr  # SUCCESS (verified)
 tests/pyret/regression.arr  # SUCCESS (verified)
 tests/pyret/test-parse-helper.arr  # UNKNOWN: "field": "ParseError",
 tests/io-tests/tests/test-csv-table-file-with-url.arr  # UNKNOWN: line=5 content='load-table: name, species, sex, age, fixed, legs, pounds, we...'
 tests/io-tests/tests/test-csv-table-url-with-path.arr  # UNKNOWN: line=5 content='load-table: name, species, sex, age, fixed, legs, pounds, we...'
-tests/io-tests/tests/test-csv-table-url.arr  # UNKNOWN: line=5 content='animals-table-check = table: name, species, sex, age, fixed,...'
+tests/io-tests/tests/test-csv-table-url.arr  # UNKNOWN: line=42 content='load-table: name, species, sex, age, fixed, legs, pounds, we...'
 tests/type-check/main.arr  # UNKNOWN: "field": "is-unann-failed-test-inference",
-tests/type-check/should-not/data-covariant.arr  # UNKNOWN: line=7 content='fun wants-list-of-records(lst :: My-List<{ a :: Number, d ::...'
-tests/type-check/should-not/data-invariant.arr  # UNKNOWN: line=6 content='fun wants-foo-of-records(lst :: Foo<{ a :: Number }>):...'
-tests/type-check/should-not/data-contravariant.arr  # UNKNOWN: line=7 content='fun wants-list-of-records(lst :: My-List<{ a :: Number, b ::...'
+tests/type-check/should-not/data-contravariant.arr  # SUCCESS (verified)
 tests/type-check/should-not/data-phantom.arr  # SUCCESS (verified)
 tests/type-check/should-not/obj-update.arr  # UNKNOWN: line=8 content='b :: Foo = a!{a : 6}...'
 tests/type-check/bad/ask.arr  # UNKNOWN: line=12 content='a = ask:...'
 tests/type-check/bad/obj-update-non-ref.arr  # UNKNOWN: line=7 content='a!{a : 6}...'
-tests/type-check/bad/obj-check.arr  # UNKNOWN: line=2 content='a :: { b :: Number, c :: String }  = { c : 5, b : "hello" }...'
-tests/type-check/bad/function-tuple-any-to-bool.arr  # SUCCESS (verified)
 tests/type-check/bad/bad-reactor.arr  # UNKNOWN: line=2 content='reactor:...'
-tests/type-check/bad/local-import.arr  # SUCCESS (verified)
 tests/type-check/bad/lambda-instantiate.arr  # UNKNOWN: line=1 content='tru  = lam<A>(t :: A): lam<B>(f :: B): t end end...'
-tests/type-check/bad/bad-type-instantiation.arr  # SUCCESS (verified)
 tests/type-check/bad/obj-update-incorrect-type.arr  # UNKNOWN: line=7 content='a!{a : "hello"}...'
 tests/type-check/bad/test-refinement.arr  # UNKNOWN: line=4 content='func() is%({(x :: Number): false}) 0...'
-tests/type-check/bad/letrec.arr  # UNKNOWN: line=1 content='a = letrec b = 5: "hello" end...'
 tests/type-check/bad/local-function.arr  # UNKNOWN: line=2 content='fun h(shadow l, rv):...'
 tests/type-check/bad/ref-not-ref.arr  # UNKNOWN: line=6 content='e!{val: 8}...'
 tests/type-check/bad/newtype.arr  # UNKNOWN: line=2 content='newtype Foo as FooT...'
-tests/type-check/bad/a-pred.arr  # SUCCESS (verified)
 tests/type-check/bad/tuple-length-binding.arr  # UNKNOWN: line=3 content='{y;z} = x...'
-tests/type-check/bad/function-tuple-not-function.arr  # SUCCESS (verified)
 tests/type-check/bad/forall-lub.arr  # UNKNOWN: line=3 content='lam<A>(a :: A, b :: A):...'
-tests/type-check/bad/obj-glb.arr  # UNKNOWN: line=3 content='lam(v :: { a :: Number, obj :: { } }):...'
+tests/type-check/bad/obj-glb.arr  # SUCCESS (verified)
 tests/type-check/bad/lib/provide-data.arr  # UNKNOWN: line=6 content='| d1 with:...'
-tests/type-check/bad/data-is-object.arr  # UNKNOWN: line=6 content='fun wants-object(v :: { a :: Number, b :: String }):...'
 tests/type-check/bad/no-maker.arr  # UNKNOWN: line=4 content='[a: 1]...'
-tests/type-check/bad/tuple-is-not-booleans.arr  # SUCCESS (verified)
 tests/type-check/bad/cases-singleton-1.arr  # SUCCESS (verified)
-tests/type-check/bad/tuple-wrong-types.arr  # SUCCESS (verified)
 tests/type-check/bad/mutual-rec.arr  # SUCCESS (verified)
-tests/type-check/bad/function-tuple-string-to-bool.arr  # SUCCESS (verified)
 tests/type-check/bad/ref-fail.arr  # UNKNOWN: line=6 content='e!{parent: 8}...'
 tests/type-check/bad/data-unify-methods.arr  # UNKNOWN: line=2 content='| noneM with:...'
-tests/type-check/bad/error-in-array.arr  # SUCCESS (verified)
 tests/type-check/should/lambda-test-inference.arr  # UNKNOWN: line=1 content='tru  = lam<A>(t :: A) -> A: lam(f :: A): t end end...'
 tests/type-check/should/lambda-instantiate.arr  # UNKNOWN: line=1 content='tru  = lam<A>(t :: A): lam<B>(f :: B): t end end...'
 tests/type-check/should/lambda-infer.arr  # UNKNOWN: line=1 content='tru  = lam <A>(t :: A): lam <B>(f :: B): t end end...'
-tests/type-check/should/obj-glb.arr  # UNKNOWN: line=3 content='lam(v :: { a :: Number, obj :: { } }):...'
+tests/type-check/should/obj-glb.arr  # SUCCESS (verified)
 tests/type-check/should/underscore.arr  # UNKNOWN: line=9 content='example<Number,Number>(5, (_ + 2), (_ + 2))...'
 tests/type-check/good/d-dx.arr  # UNKNOWN: line=8 content='lam(x :: Number) -> Number:...'
-tests/type-check/good/data-covariant.arr  # UNKNOWN: line=7 content='fun wants-list-of-records(lst :: My-List<{ a :: Number }>):...'
 tests/type-check/good/data-constructorAsSingleton-instantiate.arr  # UNKNOWN: line=14 content='| my-link(a, r) =>...'
 tests/type-check/good/data-higherOrder-infer.arr  # SUCCESS (verified)
 tests/type-check/good/test-double-rename.arr  # type in provide (provide: type T end)
-tests/type-check/good/string-dict.arr  # SUCCESS (verified)
-tests/type-check/good/obj-check.arr  # UNKNOWN: line=2 content='a :: { b :: Number, c :: String } = { b : 5, c : "hello" }...'
-tests/type-check/good/polymorphic-type-alias-chain.arr  # SUCCESS (verified)
 tests/type-check/good/int-list-map.arr  # SUCCESS (verified)
-tests/type-check/good/string-to-number.arr  # SUCCESS (verified)
 tests/type-check/good/lazy-lists.arr  # UNKNOWN: line=4 content='lam(x :: Number) -> (Number -> Number):...'
-tests/type-check/good/local-import.arr  # SUCCESS (verified)
 tests/type-check/good/data-higherOrder-instantiate.arr  # UNKNOWN: line=8 content='| my-empty()    => my-empty<B>()...'
 tests/type-check/good/double-rename.arr  # type in provide (provide: type T end)
-tests/type-check/good/type-instantiation.arr  # SUCCESS (verified)
-tests/type-check/good/function-tuple-bool-to-any.arr  # SUCCESS (verified)
 tests/type-check/good/_plus.arr  # UNKNOWN: line=23 content='| bar1(a :: Number) with:...'
 tests/type-check/good/tests.arr  # UNKNOWN: line=20 content='func() satisfies {(x): true}...'
-tests/type-check/good/map.arr  # SUCCESS (verified)
-tests/type-check/good/imports.arr  # UNKNOWN: "field": "RuntimeError",
-tests/type-check/good/polymorphic-newtype.arr  # SUCCESS (verified)
+tests/type-check/good/spy.arr  # UNKNOWN: line=52 content='spy "iteration " + to-string(i):...'
 tests/type-check/good/data-polymorphic-instantiate.arr  # UNKNOWN: line=13 content='a-synth                    = my-link<Number>(1, my-empty<Num...'
-tests/type-check/good/letrec.arr  # UNKNOWN: line=1 content='a = letrec b = 5: b end...'
-tests/type-check/good/polymorphic-type-alias-transitive-application.arr  # SUCCESS (verified)
 tests/type-check/good/export.arr  # UNKNOWN: Error: General { location: "10:14:139", message: "provide-types with specific ty
-tests/type-check/good/tuple-matches-function-ann.arr  # SUCCESS (verified)
 tests/type-check/good/data-constructorAsSingleton-infer.arr  # UNKNOWN: line=19 content='my-link(v, my-empty<A>)...'
 tests/type-check/good/data-methods.arr  # UNKNOWN: line=2 content='| foo1(x :: Number) with:...'
 tests/type-check/good/set-include.arr  # UNKNOWN: line=1 content='use context global...'
-tests/type-check/good/obj-methods.arr  # UNKNOWN: line=1 content='obj-checked :: { x :: Number, m :: (Number -> Number) } =...'
-tests/type-check/good/polymorphic-type-alias-application.arr  # SUCCESS (verified)
 tests/type-check/good/shadowing-doesnt-change-type.arr  # UNKNOWN: line=4 content='shadow a = "hello"...'
 tests/type-check/good/provide-data.arr  # UNKNOWN: line=6 content='| d1 with:...'
 tests/type-check/good/data-polymorphic-ref.arr  # UNKNOWN: line=6 content='n1!v...'
 tests/type-check/good/tests-because.arr  # UNKNOWN: line=32 content='67 does-not-raise...'
-tests/type-check/good/a-pred.arr  # SUCCESS (verified)
 tests/type-check/good/subtyping-and-bottom.arr  # UNKNOWN: line=17 content='app = lam<a, b>(x :: (a -> b), y :: a) -> b:...'
 tests/type-check/good/good-reactor.arr  # UNKNOWN: line=3 content='reactor:...'
 tests/type-check/good/let.arr  # UNKNOWN: line=4 content='a :: Boolean = let x = 5, r = "goodbye", z = "hello" block:...'
 tests/type-check/good/raw-array.arr  # UNKNOWN: line=21 content='make: lam<A>(arr :: RawArray<A>) -> RawArray<A>:...'
 tests/type-check/good/tuple-regression.arr  # UNKNOWN: line=50 content='{a;b;c;d;e} = {10; 214; 124; 62; 12}...'
 tests/type-check/good/forall-lub.arr  # UNKNOWN: line=3 content='lam<A>(a :: A, b :: A) -> A:...'
-tests/type-check/good/use-param.arr  # SUCCESS (verified)
-tests/type-check/good/module-alias.arr  # SUCCESS (verified)
 tests/type-check/good/lazy-maker.arr  # SUCCESS (verified)
 tests/type-check/good/lam-forall-check.arr  # UNKNOWN: line=6 content='five :: Number = apply-num(lam<A>(a :: A): a end, 5)...'
 tests/type-check/good/data-polymorphic-recursive-infer.arr  # SUCCESS (verified)
-tests/type-check/good/id.arr  # SUCCESS (verified)
 tests/type-check/good/references.arr  # UNKNOWN: line=20 content='e :: Number = my-foo!bar # Checking...'
-tests/type-check/good/table.arr  # table literal (table: col row: val end)
 tests/type-check/good/data-polymorphic-recursive-instantiate.arr  # SUCCESS (verified)
 tests/type-check/good/ref-set.arr  # UNKNOWN: line=6 content='e!{parent: none}...'
 tests/type-check/good/data-constructorAsFun-infer.arr  # UNKNOWN: line=28 content='zero-list-list-synth                              = my-map(m...'
-tests/type-check/good/obj-fun-check.arr  # UNKNOWN: line=2 content='obj :: ({ a :: Number, b :: Number } -> Number) = if true:...'
-tests/type-check/good/underscore.arr  # SUCCESS (verified)
-tests/type-check/good/lam.arr  # SUCCESS (verified)
 tests/type-check/good/data-constructorAsFun-instantiate.arr  # UNKNOWN: line=13 content='| my-empty()    => my-empty<B>()...'
 pyret-ast-repr.arr  # UNKNOWN: line=11 content='doc: "Parse a Pyret file and return its AST as a string repr...'
 ast-json-simple.arr  # UNKNOWN: line=9 content='doc: "Convert an AST node to JSON string"...'
-examples/parse-and-print.arr  # UNKNOWN: "value": "Error: "
 examples/point.arr  # UNKNOWN: line=27 content='with: method torgb(_): rgb(255, 0, 0) end...'
 examples/queue.arr  # SUCCESS (verified)
 examples/ralist.arr  # UNKNOWN: line=36 content='| ra-empty with:...'
-examples/htdp/types.arr  # UNKNOWN: line=6 content='o :: {x :: Number} = {x:10}...'
 examples/htdp/struct.arr  # SUCCESS (verified)
 examples/heap.arr  # UNKNOWN: Error: General { location: "15:14:229", message: "provide-types with specific ty
 examples/call-flat-local.arr  # SUCCESS (verified)
-examples/loop.arr  # UNKNOWN: line=11 content='fun loop(f, i :: { init :: Any, test :: (Any -> Boolean), ne...'
-test-type-alias.arr  # SUCCESS (verified)
+examples/loop.arr  # UNKNOWN: line=12 content='doc: "A C-like loop construct."...'
 ast-to-json-v2.arr  # SUCCESS (verified)
 ast-to-json-final.arr  # SUCCESS (verified)
 src/arr/trove/valueskeleton.arr  # SUCCESS (verified)
-src/arr/trove/reactor-events.arr  # UNKNOWN: line=7 content='shift :: Boolean,...'
+src/arr/trove/reactor-events.arr  # SUCCESS (verified)
 src/arr/trove/timing.arr  # UNKNOWN: line=10 content='time-only :: <T> (( -> T) -> Number)...'
 src/arr/trove/sets.arr  # UNKNOWN: line=27 content='| leaf with:...'
 src/arr/trove/charts.arr  # UNKNOWN: line=102 content='posn = {(x :: Number, y :: Number): [raw-array: x, y]}...'
@@ -246,8 +194,8 @@ src/arr/trove/essentials2020.arr  # UNKNOWN: line=1 content='use context empty-c
 src/arr/trove/error-display.arr  # UNKNOWN: line=68 content='shadow error = sequence...'
 src/arr/trove/ast.arr  # UNKNOWN: line=112 content='| s-underscore(l :: Loc) with:...'
 src/arr/trove/render-error-display.arr  # UNKNOWN: "field": "ErrorDisplay",
-src/arr/trove/csv.arr  # UNKNOWN: line=28 content='header-row :: Boolean,...'
-src/arr/trove/data-source.arr  # UNKNOWN: line=29 content='load :: (RawArray<String>, RawArray<DataSourceLoaderOption#|...'
+src/arr/trove/csv.arr  # UNKNOWN: line=49 content='doc: ```...'
+src/arr/trove/data-source.arr  # ask expression (ask: | cond then: body end)
 src/arr/trove/contracts.arr  # UNKNOWN: line=15 content='| ok with:...'
 src/arr/trove/json-structs.arr  # UNKNOWN: line=10 content='doc: ```Escapes a string for JSON serialization according to...'
 src/arr/trove/internal-image-shared.arr  # SUCCESS (verified)
@@ -261,7 +209,7 @@ src/arr/compiler/flatness.arr  # UNKNOWN: line=38 content='doc: ```...'
 src/arr/compiler/ast-anf.arr  # UNKNOWN: line=47 content='| a-program(l :: Loc, provides :: A.ProvideBlock, imports ::...'
 src/arr/compiler/concat-lists.arr  # UNKNOWN: line=5 content='| concat-empty with:...'
 src/arr/compiler/js-of-pyret.arr  # UNKNOWN: line=27 content='| ccp-dict(dict :: SD.StringDict) with:...'
-src/arr/compiler/ast-util.arr  # UNKNOWN: line=166 content='s-letrec-bind :: (A.LetrecBind, a -> a),...'
+src/arr/compiler/ast-util.arr  # UNKNOWN: line=394 content='with-params.{env: args-env}.option(_check)...'
 src/arr/compiler/desugar.arr  # UNKNOWN: line=117 content='doc: ```...'
 src/arr/compiler/compile-structs.arr  # UNKNOWN: line=49 content='with:...'
 src/arr/compiler/desugar-post-tc.arr  # UNKNOWN: line=45 content='doc: ```...'
@@ -272,13 +220,13 @@ src/arr/compiler/locators/jsfile.arr  # SUCCESS (verified)
 src/arr/compiler/locators/url.arr  # UNKNOWN: "value": "Error fetching "
 src/arr/compiler/anf.arr  # UNKNOWN: line=139 content='shadow advs = for map2(name from needs-value.map(_.name), ad...'
 src/arr/compiler/desugar-check.arr  # UNKNOWN: line=35 content='fun check-op-cause(shadow cause, fieldname):...'
-src/arr/compiler/compile-lib.arr  # UNKNOWN: line=116 content='get-modified-time :: (-> Number),...'
+src/arr/compiler/compile-lib.arr  # UNKNOWN: line=234 content='fun visit(shadow locator :: Locator, shadow context :: a, cu...'
 src/arr/compiler/base.arr  # SUCCESS (verified)
-src/arr/compiler/js-ast.arr  # type alias (type Name = Type)
+src/arr/compiler/js-ast.arr  # UNKNOWN: line=63 content='| j-block(stmts :: CList<JStmt>) with:...'
 src/arr/compiler/cli-module-loader.arr  # UNKNOWN: line=118 content='{static-path; module-path} = cases(CachedType) cache-type:...'
-src/arr/compiler/resolve-scope.arr  # UNKNOWN: line=28 content='fun mk-id(loc, base) -> { id :: A.Expr, id-b :: A.Expr, id-e...'
+src/arr/compiler/resolve-scope.arr  # UNKNOWN: line=34 content='doc: ```...'
 src/arr/compiler/well-formed.arr  # ask expression (ask: | cond then: body end)
-src/arr/compiler/type-check.arr  # UNKNOWN: line=106 content='var test-inference-data :: Option<{name :: Name,...'
+src/arr/compiler/type-check.arr  # UNKNOWN: line=171 content='shadow context = globvs.fold-keys(lam(g, shadow context):...'
 src/arr/compiler/list-aux.arr  # UNKNOWN: line=7 content='doc: ```...'
 src/arr/compiler/anf-loop-compiler.arr  # UNKNOWN: line=438 content='[clist:...'
 src/arr/compiler/js-dag-utils.arr  # UNKNOWN: line=125 content='shadow so-far = declared-vars-jblock(consq, so-far)...'
