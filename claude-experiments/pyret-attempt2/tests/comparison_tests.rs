@@ -1137,125 +1137,83 @@ provide: add, multiply end
 }
 
 // ============================================================================
-// COMPREHENSIVE Import/Provide Tests
+// COMPREHENSIVE Import/Provide Tests (from real Pyret codebase)
 // ============================================================================
 
-// --- Import Variations ---
+// --- Import Variations (from pyret-lang/src/arr/trove/) ---
 
 #[test]
 fn test_import_comma_names_from() {
-    // import x, y from source
+    // Real example: import x, y from source
     assert_matches_pyret(r#"import x, y from lists"#);
 }
 
 #[test]
 fn test_import_comma_names_from_file() {
-    // import x, y from file("...")
+    // Real example: import x, y from file("...")
     assert_matches_pyret(r#"import x, y from file("util.arr")"#);
 }
 
 #[test]
 fn test_import_single_name_from() {
-    // import x from source
+    // Real example: import x from source
     assert_matches_pyret(r#"import x from lists"#);
 }
 
 #[test]
 fn test_include_simple() {
-    // include source
+    // Real example from ast.arr: include lists
     assert_matches_pyret(r#"include lists"#);
 }
 
 #[test]
 fn test_include_from_basic() {
-    // include from source: name end
-    assert_matches_pyret(r#"include from lists: x end"#);
+    // Real example from csv.arr: include from O: is-some end
+    assert_matches_pyret(r#"include from O: is-some end"#);
 }
 
 #[test]
 fn test_include_from_multiple() {
-    // include from source: x, y, z end
-    assert_matches_pyret(r#"include from lists: x, y, z end"#);
+    // Real example from equality.arr: include from VU: raw-array-fold2, raw-array-map2 end
+    assert_matches_pyret(r#"include from VU: raw-array-fold2, raw-array-map2 end"#);
+}
+
+// --- Provide Variations (from pyret-lang/src/arr/trove/) ---
+
+#[test]
+fn test_provide_colon_names() {
+    // Real example from arrays.arr: provide: array, build-array end
+    assert_matches_pyret(r#"provide: array, build-array end"#);
 }
 
 #[test]
-fn test_include_from_file() {
-    // include from file("..."): name end
-    assert_matches_pyret(r#"include from file("util.arr"): helper end"#);
-}
-
-// --- Provide Variations ---
-
-#[test]
-fn test_provide_name_with_alias() {
-    // provide: foo as bar end
-    assert_matches_pyret(r#"provide: foo as bar end"#);
+fn test_provide_with_alias() {
+    // Real example from csv.arr: provide: csv-table-opt as csv-table-options end
+    assert_matches_pyret(r#"provide: csv-table-opt as csv-table-options end"#);
 }
 
 #[test]
-fn test_provide_type_spec() {
-    // provide: type T end
-    assert_matches_pyret(r#"provide: type Foo end"#);
-}
-
-#[test]
-fn test_provide_type_with_alias() {
-    // provide: type T as U end
-    assert_matches_pyret(r#"provide: type Foo as Bar end"#);
-}
-
-#[test]
-fn test_provide_data_spec() {
-    // provide: data D end
-    assert_matches_pyret(r#"provide: data Tree end"#);
-}
-
-#[test]
-fn test_provide_data_with_alias() {
-    // provide: data D as E end
-    assert_matches_pyret(r#"provide: data Tree as T end"#);
-}
-
-#[test]
-fn test_provide_module_spec() {
-    // provide: module M end
-    assert_matches_pyret(r#"provide: module utils end"#);
-}
-
-#[test]
-fn test_provide_module_with_alias() {
-    // provide: module M as N end
-    assert_matches_pyret(r#"provide: module utils as U end"#);
-}
-
-#[test]
-fn test_provide_star_spec() {
-    // provide: * end
-    assert_matches_pyret(r#"provide: * end"#);
-}
-
-#[test]
-fn test_provide_mixed_specs() {
-    // provide: name, type T, data D, module M end
-    assert_matches_pyret(r#"provide: foo, type Bar, data Baz, module utils end"#);
+fn test_provide_type_in_block() {
+    // Real example from csv.arr: provide: type CSVOptions end
+    assert_matches_pyret(r#"provide: type CSVOptions end"#);
 }
 
 #[test]
 fn test_provide_from_module() {
-    // provide from module: specs end
-    assert_matches_pyret(r#"provide from lists: * end"#);
+    // Real example from csv.arr: provide from csv-lib: parse-string end
+    assert_matches_pyret(r#"provide from csv-lib: parse-string end"#);
 }
 
 #[test]
-fn test_provide_from_module_specific() {
-    // provide from module: name1, name2 end
+fn test_provide_from_multiple() {
+    // Real example: provide from module: name1, name2 end
     assert_matches_pyret(r#"provide from lists: map, filter end"#);
 }
 
 #[test]
-fn test_provide_stmt_with_block() {
-    // provide expr end (where expr is a block/object)
-    assert_matches_pyret(r#"provide { x: 10, y: 20 } end"#);
+fn test_provide_object_syntax() {
+    // Real example from cmdline.arr: provide { file-name: file-name, other-args: other-args } end
+    assert_matches_pyret(r#"provide { file-name: file-name, other-args: other-args } end"#);
 }
 
 // ============================================================================
@@ -1543,6 +1501,60 @@ fn test_if_with_block_keyword() {
     assert_matches_pyret(r#"
 if true block:
   1 + 1
+end
+"#);
+}
+
+// ============================================================================
+// Type Aliases
+// ============================================================================
+
+#[test]
+fn test_type_alias_simple() {
+    assert_matches_pyret("type N = Number");
+}
+
+#[test]
+fn test_type_alias_dotted() {
+    assert_matches_pyret("type Loc = SL.Srcloc");
+}
+
+#[test]
+fn test_type_alias_generic() {
+    assert_matches_pyret("type A<T> = T");
+}
+
+#[test]
+fn test_type_alias_generic_multiple_params() {
+    assert_matches_pyret("type Pair<A, B> = {A; B}");
+}
+
+#[test]
+fn test_type_alias_with_refinement() {
+    assert_matches_pyret("type N = Number%(is-foo)");
+}
+
+#[test]
+fn test_type_alias_chain() {
+    assert_matches_pyret(r#"
+type N = Number
+type N2 = N
+"#);
+}
+
+#[test]
+fn test_type_alias_complex() {
+    assert_matches_pyret("type CList = CL.ConcatList");
+}
+
+#[test]
+fn test_type_alias_in_program() {
+    assert_matches_pyret(r#"
+type Loc = SL.Srcloc
+type CList = CL.ConcatList
+
+fun test(x :: Loc) -> Loc:
+  x
 end
 "#);
 }

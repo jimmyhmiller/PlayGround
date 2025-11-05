@@ -268,7 +268,13 @@ impl Parser {
             if self.matches(&TokenType::ProvideColon) {
                 provides.push(self.parse_provide_block()?);
             } else if self.matches(&TokenType::Provide) {
-                _provide = self.parse_provide_stmt()?;
+                // Peek ahead to check if this is "provide from" (which creates a ProvideBlock)
+                // or a regular provide statement
+                if self.peek_ahead(1).token_type == TokenType::From {
+                    provides.push(self.parse_provide_from_block()?);
+                } else {
+                    _provide = self.parse_provide_stmt()?;
+                }
             } else if self.matches(&TokenType::ProvideTypes) {
                 provided_types = self.parse_provide_types_stmt()?;
             } else if self.matches(&TokenType::Import) || self.matches(&TokenType::Include) {
@@ -555,6 +561,7 @@ impl Parser {
     /// Parses provide statements like:
     /// - provide *
     /// - provide: expr end
+    /// - provide from module: specs end
     fn parse_provide_stmt(&mut self) -> ParseResult<Provide> {
         let start = self.expect(TokenType::Provide)?;
 
@@ -565,9 +572,42 @@ impl Parser {
             Ok(Provide::SProvideAll {
                 l: self.make_loc(&start, &start),
             })
-        } else {
-            // provide: block end
+        } else if self.matches(&TokenType::From) {
+            // provide from module: specs end
+            // This is actually a provide-block, not a provide-stmt
+            // We need to parse it here anyway since we already consumed PROVIDE
+            self.advance(); // consume FROM
+
+            // Parse module-ref (just a name for now)
+            let module_name = self.parse_name()?;
+
             self.expect(TokenType::Colon)?;
+
+            // Parse provide-specs
+            let mut specs = Vec::new();
+
+            if !self.matches(&TokenType::End) {
+                specs.push(self.parse_provide_spec()?);
+
+                while self.matches(&TokenType::Comma) {
+                    self.advance(); // consume comma
+
+                    if self.matches(&TokenType::End) {
+                        break;
+                    }
+
+                    specs.push(self.parse_provide_spec()?);
+                }
+            }
+
+            let end = self.expect(TokenType::End)?;
+
+            // This case is now handled by parse_provide_from_block()
+            // which is called from parse_prelude()
+            unreachable!("provide from should be handled by parse_provide_from_block");
+        } else if self.matches(&TokenType::Colon) {
+            // provide: block end
+            self.advance(); // consume :
 
             // Parse the provide block
             let mut block_stmts = Vec::new();
@@ -586,6 +626,16 @@ impl Parser {
             Ok(Provide::SProvide {
                 l: self.make_loc(&start, &end),
                 block,
+            })
+        } else {
+            // provide stmt end (e.g., provide { x: 10 } end)
+            let stmt = self.parse_block_statement()?;
+            let end = self.expect(TokenType::End)?;
+
+            // The provide block is the statement itself, not wrapped in s-block
+            Ok(Provide::SProvide {
+                l: self.make_loc(&start, &end),
+                block: Box::new(stmt),
             })
         }
     }
@@ -652,11 +702,78 @@ impl Parser {
         })
     }
 
+    /// provide from module: specs end
+    /// Parses provide-from-block statements like:
+    /// - provide from csv-lib: parse-string end
+    /// - provide from lists: map, filter end
+    fn parse_provide_from_block(&mut self) -> ParseResult<ProvideBlock> {
+        let start = self.expect(TokenType::Provide)?;
+        self.expect(TokenType::From)?;
+
+        // Parse module-ref (just a name for now)
+        let module_name = self.parse_name()?;
+
+        self.expect(TokenType::Colon)?;
+
+        // Parse provide-specs
+        let mut specs = Vec::new();
+
+        if !self.matches(&TokenType::End) {
+            specs.push(self.parse_provide_spec()?);
+
+            while self.matches(&TokenType::Comma) {
+                self.advance(); // consume comma
+
+                if self.matches(&TokenType::End) {
+                    break;
+                }
+
+                specs.push(self.parse_provide_spec()?);
+            }
+        }
+
+        let end = self.expect(TokenType::End)?;
+
+        Ok(ProvideBlock {
+            node_type: "s-provide-block".to_string(),
+            l: self.make_loc(&start, &end),
+            path: vec![module_name], // Module path for provide-from
+            specs,
+        })
+    }
+
     /// Parse a single provide-spec
     /// provide-spec: provide-name-spec | provide-type-spec | provide-data-spec | provide-module-spec
     fn parse_provide_spec(&mut self) -> ParseResult<ProvideSpec> {
-        // For now, just handle provide-name-spec (simple names)
-        // TODO: Handle TYPE, DATA, MODULE keywords
+        // Check for TYPE, DATA, or MODULE keywords
+        if self.matches(&TokenType::Type) {
+            self.advance(); // consume TYPE
+            let name_spec = self.parse_name_spec()?;
+            return Ok(ProvideSpec::SProvideType {
+                l: self.current_loc(),
+                name: name_spec,
+            });
+        }
+
+        if self.matches(&TokenType::Data) {
+            self.advance(); // consume DATA
+            let name_spec = self.parse_name_spec()?;
+            return Ok(ProvideSpec::SProvideData {
+                l: self.current_loc(),
+                name: name_spec,
+            });
+        }
+
+        if self.matches(&TokenType::Module) {
+            self.advance(); // consume MODULE
+            let name_spec = self.parse_name_spec()?;
+            return Ok(ProvideSpec::SProvideModule {
+                l: self.current_loc(),
+                name: name_spec,
+            });
+        }
+
+        // Otherwise, parse as provide-name-spec
         let name_spec = self.parse_name_spec()?;
 
         Ok(ProvideSpec::SProvideName {
@@ -668,16 +785,31 @@ impl Parser {
     /// Parse a name-spec
     /// name-spec: (STAR|TIMES) [hiding-spec] | module-ref | module-ref AS NAME
     fn parse_name_spec(&mut self) -> ParseResult<NameSpec> {
-        // For now, just handle simple module-ref (single name)
-        // TODO: Handle * and AS NAME variants
+        // Check for * (star)
+        if self.matches(&TokenType::Times) || self.matches(&TokenType::Star) {
+            let start = self.peek().clone();
+            self.advance();
+            return Ok(NameSpec::SStar {
+                l: self.make_loc(&start, &start),
+            });
+        }
+
+        // Parse module-ref (simple name for now, could be dotted path)
         let name = self.parse_name()?;
 
+        // Check for AS NAME
+        let as_name = if self.matches(&TokenType::As) {
+            self.advance(); // consume AS
+            Some(self.parse_name()?)
+        } else {
+            None
+        };
+
         // The JSON format shows: "name-spec": {"type": "s-module-ref", "path": [{"type": "s-name", "name": "add"}], "as-name": null}
-        // But our AST has: SModuleRef { l: Loc, name: Name }
-        // We need to match the serialization, so let's use SModuleRef
         Ok(NameSpec::SModuleRef {
             l: self.current_loc(),
-            name,
+            path: vec![name],
+            as_name,
         })
     }
 
@@ -704,13 +836,83 @@ impl Parser {
     /// ann: name-ann | record-ann | arrow-ann | ...
     fn parse_ann(&mut self) -> ParseResult<Ann> {
         // Handle simple name annotations like "Either", "Number", "Any", etc.
-        // Full implementation would handle arrows, records, tuples, etc.
+        // Also handles dotted names like "E.Either", "List.T", etc.
+        // Also handles arrow types like "(A -> B)" and "(A, B -> C)"
+        // Also handles tuple annotations like "{A; B}"
+
+        // Handle tuple annotations: {A; B; C}
+        if self.matches(&TokenType::LBrace) {
+            let start = self.advance().clone(); // consume {
+
+            let mut fields = Vec::new();
+
+            // Parse annotations separated by semicolons
+            if !self.matches(&TokenType::RBrace) {
+                fields.push(self.parse_ann()?);
+
+                while self.matches(&TokenType::Semi) {
+                    self.advance(); // consume semicolon
+                    // Allow trailing semicolon
+                    if self.matches(&TokenType::RBrace) {
+                        break;
+                    }
+                    fields.push(self.parse_ann()?);
+                }
+            }
+
+            let end = self.expect(TokenType::RBrace)?;
+            return Ok(Ann::ATuple {
+                l: self.make_loc(&start, &end),
+                fields,
+            });
+        }
+
+        // Handle parenthesized arrow types: (A -> B), (A, B -> C), etc.
+        if self.matches(&TokenType::LParen) || self.matches(&TokenType::ParenSpace) {
+            let start = self.advance().clone(); // consume (
+
+            // Parse argument types (comma-separated)
+            let mut args = Vec::new();
+            if !self.matches(&TokenType::RParen) {
+                args.push(self.parse_ann()?);
+
+                // Check for arrow or comma
+                while self.matches(&TokenType::Comma) {
+                    self.advance(); // consume comma
+                    args.push(self.parse_ann()?);
+                }
+            }
+
+            // Expect arrow
+            if self.matches(&TokenType::ThinArrow) {
+                self.advance(); // consume ->
+
+                // Parse return type
+                let ret = Box::new(self.parse_ann()?);
+
+                let end = self.expect(TokenType::RParen)?;
+                let loc = self.make_loc(&start, &end);
+
+                return Ok(Ann::AArrow {
+                    l: loc,
+                    args,
+                    ret,
+                    use_parens: true,
+                });
+            } else {
+                // Just a parenthesized annotation, not an arrow
+                let end = self.expect(TokenType::RParen)?;
+                // Return the single annotation (unwrap the parens)
+                return Ok(args.into_iter().next().unwrap_or(Ann::ABlank));
+            }
+        }
+
         if self.matches(&TokenType::Name) {
             let name_token = self.advance().clone();
-            let loc = self.make_loc(&name_token, &name_token);
+            let mut loc = self.make_loc(&name_token, &name_token);
 
-            // Check if it's the special "Any" type
-            if name_token.value == "Any" {
+            // Check if it's the special "Any" type (before processing dots)
+            if name_token.value == "Any" && !self.matches(&TokenType::Dot) {
                 return Ok(Ann::AAny { l: loc });
             }
 
@@ -719,25 +921,83 @@ impl Parser {
                 s: name_token.value.clone(),
             };
 
-            let base_ann = Ann::AName {
+            // Handle dotted names: E.Either, Module.Type, etc.
+            // Build up nested ADot nodes for chains like A.B.C
+            let mut base_ann: Ann = Ann::AName {
                 l: loc.clone(),
                 id: name,
             };
 
+            while self.matches(&TokenType::Dot) {
+                self.advance(); // consume dot
+                let field_token = self.expect(TokenType::Name)?;
+                loc = self.make_loc(&name_token, &field_token);
+
+                // For ADot, we need the obj to be a Name, not an Ann
+                // So extract the Name from the current annotation
+                let obj_name = match &base_ann {
+                    Ann::AName { id, .. } => id.clone(),
+                    Ann::ADot { obj, field, .. } => {
+                        // For nested dots like A.B.C, we need to create a Name from A.B
+                        // The official parser represents this as nested ADot nodes
+                        // For now, we'll create a dotted name
+                        match obj {
+                            Name::SName { l, s } => Name::SName {
+                                l: l.clone(),
+                                s: format!("{}.{}", s, field),
+                            },
+                            other => other.clone(),
+                        }
+                    }
+                    _ => return Err(ParseError::general(&field_token, "Invalid dotted type annotation")),
+                };
+
+                base_ann = Ann::ADot {
+                    l: loc.clone(),
+                    obj: obj_name,
+                    field: field_token.value.clone(),
+                };
+            }
+
             // Check for type application: List<T>, Map<K, V>, etc.
-            if self.matches(&TokenType::Lt) {
+            let mut result_ann = if self.matches(&TokenType::Lt) {
                 self.advance(); // consume '<'
                 let type_args = self.parse_comma_list(|p| p.parse_ann())?;
                 let end_token = self.expect(TokenType::Gt)?; // consume '>'
                 let app_loc = self.make_loc(&name_token, &end_token);
-                Ok(Ann::AApp {
+                Ann::AApp {
                     l: app_loc,
                     ann: Box::new(base_ann),
                     args: type_args,
-                })
+                }
             } else {
-                Ok(base_ann)
+                base_ann
+            };
+
+            // Check for refinement: %(predicate)
+            if self.matches(&TokenType::Percent) {
+                self.advance(); // consume '%'
+                // Expect opening paren (can be LParen, ParenSpace, or ParenNoSpace)
+                let paren_token = self.peek().clone();
+                match paren_token.token_type {
+                    TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace => {
+                        self.advance();
+                    }
+                    _ => {
+                        return Err(ParseError::expected(TokenType::LParen, paren_token));
+                    }
+                }
+                let predicate = self.parse_expr()?;
+                let end_token = self.expect(TokenType::RParen)?; // consume ')'
+                let pred_loc = self.make_loc(&name_token, &end_token);
+                result_ann = Ann::APred {
+                    l: pred_loc,
+                    ann: Box::new(result_ann),
+                    exp: Box::new(predicate),
+                };
             }
+
+            Ok(result_ann)
         } else {
             // Default to blank annotation
             Ok(Ann::ABlank)
@@ -1601,6 +1861,7 @@ impl Parser {
             TokenType::LBrace => self.parse_obj_expr(),
             TokenType::Lam => self.parse_lambda_expr(),
             TokenType::Fun => self.parse_fun_expr(),
+            TokenType::Type => self.parse_type_expr(),
             TokenType::Data => self.parse_data_expr(),
             TokenType::Block => self.parse_block_expr(),
             TokenType::If => self.parse_if_expr(),
@@ -2394,7 +2655,10 @@ impl Parser {
     /// Helper function to parse a single statement in a block context
     /// This handles let bindings, var bindings, and other statements
     fn parse_block_statement(&mut self) -> ParseResult<Expr> {
-        if self.matches(&TokenType::Let) {
+        if self.matches(&TokenType::Type) {
+            // Type alias: type Name = Type or type Name<T> = Type
+            self.parse_type_expr()
+        } else if self.matches(&TokenType::Let) {
             // Explicit let binding: let x = 5
             self.parse_let_expr()
         } else if self.matches(&TokenType::Var) {
@@ -3022,8 +3286,14 @@ impl Parser {
         // Parse the test expression
         let test = self.parse_expr()?;
 
-        // Expect colon
-        self.expect(TokenType::Colon)?;
+        // Expect colon or block
+        let blocky = if self.matches(&TokenType::Block) {
+            self.advance();
+            true
+        } else {
+            self.expect(TokenType::Colon)?;
+            false
+        };
 
         // Parse the block (statements until end)
         let mut block_stmts = Vec::new();
@@ -3045,7 +3315,7 @@ impl Parser {
             l: loc,
             test: Box::new(test),
             block: Box::new(block),
-            blocky: false,
+            blocky,
         })
     }
 }
@@ -3057,6 +3327,47 @@ impl Parser {
 impl Parser {
     /// fun-expr: FUN name<typarams>(args) ann: doc body where END
     /// Parses function declarations like: fun f(x): x + 1 end
+    /// type-expr: TYPE NAME ty-params EQUALS ann
+    /// Parses type alias declarations like:
+    /// - type N = Number
+    /// - type Loc = SL.Srcloc
+    /// - type A<T> = T
+    fn parse_type_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::Type)?;
+
+        // Parse type alias name
+        let name = self.parse_name()?;
+
+        // Parse optional type parameters <T, U, V>
+        let params: Vec<Name> = if self.matches(&TokenType::Lt) {
+            self.advance(); // consume '<'
+            let type_params = self.parse_comma_list(|p| p.parse_name())?;
+            self.expect(TokenType::Gt)?; // consume '>'
+            type_params
+        } else {
+            Vec::new()
+        };
+
+        // Expect equals
+        self.expect(TokenType::Equals)?;
+
+        // Parse the type annotation
+        let ann = self.parse_ann()?;
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        Ok(Expr::SType {
+            l: self.make_loc(&start, &end),
+            name,
+            params,
+            ann,
+        })
+    }
+
     fn parse_fun_expr(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::Fun)?;
 
@@ -3196,19 +3507,35 @@ impl Parser {
             Ann::ABlank
         };
 
-        // Expect colon before body
-        self.expect(TokenType::Colon)?;
+        // Expect colon or block before body
+        let blocky = if self.matches(&TokenType::Block) {
+            self.advance();
+            true
+        } else {
+            self.expect(TokenType::Colon)?;
+            false
+        };
 
-        // Parse body expression
-        let body_expr = self.parse_expr()?;
+        // Parse doc string (optional, we'll skip for now)
+        // TODO: Parse doc strings
+
+        // Parse body as a block of statements
+        let mut stmts = Vec::new();
+        while !self.matches(&TokenType::End) && !self.matches(&TokenType::Where) && !self.is_at_end() {
+            let stmt = self.parse_block_statement()?;
+            stmts.push(Box::new(stmt));
+        }
+
+        // Parse optional where clause
+        // TODO: Handle where clauses in lambdas
 
         // Expect end keyword
         let end = self.expect(TokenType::End)?;
 
-        // Wrap body in SBlock (required by Pyret AST format)
+        // Body is the block of statements
         let body = Expr::SBlock {
             l: self.current_loc(),
-            stmts: vec![Box::new(body_expr)],
+            stmts,
         };
 
         Ok(Expr::SLam {
@@ -3221,7 +3548,7 @@ impl Parser {
             body: Box::new(body),
             check_loc: None,
             check: None,
-            blocky: false,
+            blocky,
         })
     }
 

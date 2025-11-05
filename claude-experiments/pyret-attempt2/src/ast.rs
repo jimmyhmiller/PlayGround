@@ -1082,7 +1082,13 @@ pub enum NameSpec {
     SStar { l: Loc },
 
     #[serde(rename = "s-module-ref")]
-    SModuleRef { l: Loc, name: Name },
+    SModuleRef {
+        l: Loc,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        path: Vec<Name>,
+        #[serde(rename = "as-name")]
+        as_name: Option<Name>,
+    },
 
     #[serde(rename = "s-remote-ref")]
     SRemoteRef { l: Loc, uri: String, name: Name },
@@ -1135,7 +1141,7 @@ pub struct ProvideBlock {
     #[serde(rename = "type")]
     pub node_type: String, // "s-provide-block"
     pub l: Loc,
-    pub path: Vec<String>,
+    pub path: Vec<Name>,
     pub specs: Vec<ProvideSpec>,
 }
 
@@ -1144,16 +1150,32 @@ pub struct ProvideBlock {
 #[serde(tag = "type")]
 pub enum ProvideSpec {
     #[serde(rename = "s-provide-name")]
-    SProvideName { l: Loc, name: NameSpec },
+    SProvideName {
+        l: Loc,
+        #[serde(rename = "name-spec")]
+        name: NameSpec,
+    },
 
     #[serde(rename = "s-provide-type")]
-    SProvideType { l: Loc, name: Ann },
+    SProvideType {
+        l: Loc,
+        #[serde(rename = "name-spec")]
+        name: NameSpec,
+    },
 
     #[serde(rename = "s-provide-data")]
-    SProvideData { l: Loc, name: Ann },
+    SProvideData {
+        l: Loc,
+        #[serde(rename = "name-spec")]
+        name: NameSpec,
+    },
 
     #[serde(rename = "s-provide-module")]
-    SProvideModule { l: Loc, name: Name },
+    SProvideModule {
+        l: Loc,
+        #[serde(rename = "name-spec")]
+        name: NameSpec,
+    },
 }
 
 // ============================================================================
