@@ -315,6 +315,14 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "keyword-val": keyword_val
             })
         }
+        Expr::SLetrec { binds, body, blocky, .. } => {
+            json!({
+                "type": "s-letrec",
+                "binds": binds.iter().map(|b| letrec_bind_to_pyret_json(b)).collect::<Vec<_>>(),
+                "body": expr_to_pyret_json(body),
+                "blocky": blocky
+            })
+        }
         Expr::SVar { name, value, .. } => {
             json!({
                 "type": "s-var",
@@ -397,6 +405,27 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "fields": fields.iter().map(|f| member_to_pyret_json(f)).collect::<Vec<_>>()
             })
         }
+        Expr::SSpyBlock { message, contents, .. } => {
+            json!({
+                "type": "s-spy-block",
+                "message": message.as_ref().map(|m| expr_to_pyret_json(m)),
+                "contents": contents.iter().map(|f| spy_field_to_pyret_json(f)).collect::<Vec<_>>()
+            })
+        }
+        Expr::STable { headers, rows, .. } => {
+            json!({
+                "type": "s-table",
+                "headers": headers.iter().map(|h| json!({
+                    "type": "s-field-name",
+                    "name": h.name,
+                    "value": ann_to_pyret_json(&h.ann)
+                })).collect::<Vec<_>>(),
+                "rows": rows.iter().map(|r| json!({
+                    "type": "s-table-row",
+                    "elems": r.elems.iter().map(|e| expr_to_pyret_json(e)).collect::<Vec<_>>()
+                })).collect::<Vec<_>>()
+            })
+        }
         _ => {
             json!({
                 "type": "UNSUPPORTED",
@@ -450,6 +479,15 @@ fn member_to_pyret_json(member: &pyret_attempt2::Member) -> Value {
             })
         }
     }
+}
+
+fn spy_field_to_pyret_json(field: &pyret_attempt2::SpyField) -> Value {
+    json!({
+        "type": "s-spy-expr",
+        "name": field.name.as_ref(),
+        "value": expr_to_pyret_json(&field.value),
+        "implicit-label": field.implicit_label
+    })
 }
 
 fn variant_to_pyret_json(variant: &pyret_attempt2::Variant) -> Value {
@@ -522,6 +560,14 @@ fn ann_to_pyret_json(ann: &pyret_attempt2::Ann) -> Value {
         Ann::ATuple { fields, .. } => json!({
             "type": "a-tuple",
             "fields": fields.iter().map(ann_to_pyret_json).collect::<Vec<_>>()
+        }),
+        Ann::ARecord { fields, .. } => json!({
+            "type": "a-record",
+            "fields": fields.iter().map(|f| json!({
+                "type": "a-field",
+                "name": f.name,
+                "ann": ann_to_pyret_json(&f.ann)
+            })).collect::<Vec<_>>()
         }),
         _ => json!({
             "type": "UNSUPPORTED",
@@ -686,6 +732,14 @@ fn let_bind_to_pyret_json(let_bind: &pyret_attempt2::LetBind) -> Value {
             })
         }
     }
+}
+
+fn letrec_bind_to_pyret_json(letrec_bind: &pyret_attempt2::LetrecBind) -> Value {
+    json!({
+        "type": "s-letrec-bind",
+        "bind": bind_to_pyret_json(&letrec_bind.b),
+        "value": expr_to_pyret_json(&letrec_bind.value)
+    })
 }
 
 fn program_to_pyret_json(program: &Program) -> Value {

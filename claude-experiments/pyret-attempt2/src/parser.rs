@@ -840,15 +840,76 @@ impl Parser {
         // Also handles arrow types like "(A -> B)" and "(A, B -> C)"
         // Also handles tuple annotations like "{A; B}"
 
-        // Handle tuple annotations: {A; B; C}
+        // Handle braced annotations: tuples {A; B; C} or records { field :: Type, ... }
         if self.matches(&TokenType::LBrace) {
             let start = self.advance().clone(); // consume {
 
-            let mut fields = Vec::new();
+            // Empty braces - just return empty tuple
+            if self.matches(&TokenType::RBrace) {
+                let end = self.advance().clone();
+                return Ok(Ann::ATuple {
+                    l: self.make_loc(&start, &end),
+                    fields: vec![],
+                });
+            }
 
-            // Parse annotations separated by semicolons
-            if !self.matches(&TokenType::RBrace) {
-                fields.push(self.parse_ann()?);
+            // Look ahead to distinguish record from tuple
+            // Record: starts with Name followed by ::
+            // Tuple: starts with annotation followed by ; or }
+            let is_record = self.matches(&TokenType::Name) && {
+                let saved_pos = self.current;
+                self.advance(); // skip name
+                let has_coloncolon = self.matches(&TokenType::ColonColon);
+                self.current = saved_pos; // restore position
+                has_coloncolon
+            };
+
+            if is_record {
+                // Parse record annotation: { field :: Type, field :: Type }
+                let mut record_fields = Vec::new();
+
+                loop {
+                    // Parse field name
+                    let field_name_token = self.expect(TokenType::Name)?;
+                    let field_name = field_name_token.value.clone();
+
+                    // Expect ::
+                    self.expect(TokenType::ColonColon)?;
+
+                    // Parse field type annotation
+                    let field_ann = self.parse_ann()?;
+
+                    // Create AField
+                    let field_loc = self.make_loc(&field_name_token, &field_name_token);
+                    record_fields.push(AField {
+                        node_type: "a-field".to_string(),
+                        l: field_loc,
+                        name: field_name,
+                        ann: field_ann,
+                    });
+
+                    // Check for comma (continue) or closing brace (done)
+                    if self.matches(&TokenType::Comma) {
+                        self.advance(); // consume comma
+                        // Allow trailing comma
+                        if self.matches(&TokenType::RBrace) {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                let end = self.expect(TokenType::RBrace)?;
+                return Ok(Ann::ARecord {
+                    l: self.make_loc(&start, &end),
+                    fields: record_fields,
+                });
+            } else {
+                // Parse tuple annotation: {A; B; C}
+                let mut tuple_fields = Vec::new();
+
+                tuple_fields.push(self.parse_ann()?);
 
                 while self.matches(&TokenType::Semi) {
                     self.advance(); // consume semicolon
@@ -856,15 +917,15 @@ impl Parser {
                     if self.matches(&TokenType::RBrace) {
                         break;
                     }
-                    fields.push(self.parse_ann()?);
+                    tuple_fields.push(self.parse_ann()?);
                 }
-            }
 
-            let end = self.expect(TokenType::RBrace)?;
-            return Ok(Ann::ATuple {
-                l: self.make_loc(&start, &end),
-                fields,
-            });
+                let end = self.expect(TokenType::RBrace)?;
+                return Ok(Ann::ATuple {
+                    l: self.make_loc(&start, &end),
+                    fields: tuple_fields,
+                });
+            }
         }
 
         // Handle parenthesized arrow types: (A -> B), (A, B -> C), etc.
@@ -1869,10 +1930,13 @@ impl Parser {
             TokenType::When => self.parse_when_expr(),
             TokenType::For => self.parse_for_expr(),
             TokenType::Let => self.parse_let_expr(),
+            TokenType::Letrec => self.parse_letrec_expr(),
             TokenType::Var => self.parse_var_expr(),
             TokenType::CheckColon => self.parse_check_expr(),
             TokenType::Check => self.parse_check_expr(),
+            TokenType::Spy => self.parse_spy_stmt(),
             TokenType::Method => self.parse_method_expr(),
+            TokenType::Table => self.parse_table_expr(),
             _ => Err(ParseError::unexpected(token)),
         }
     }
@@ -3034,6 +3098,75 @@ impl Parser {
         })
     }
 
+    /// letrec-expr: LETREC let-expr (COMMA let-expr)* (BLOCK|COLON) block END
+    /// Parses recursive let bindings: letrec f = lam(n): ... end: body end
+    fn parse_letrec_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::Letrec)?;
+
+        // Parse first binding
+        let mut binds = Vec::new();
+
+        // Parse first let-expr: binding = expr
+        let bind = self.parse_bind()?;
+        self.expect(TokenType::Equals)?;
+        let value = self.parse_expr()?;
+
+        binds.push(LetrecBind {
+            node_type: "s-letrec-bind".to_string(),
+            l: self.current_loc(),
+            b: bind,
+            value: Box::new(value),
+        });
+
+        // Parse additional bindings if present (COMMA let-expr)*
+        while self.matches(&TokenType::Comma) {
+            self.advance();
+
+            let bind = self.parse_bind()?;
+            self.expect(TokenType::Equals)?;
+            let value = self.parse_expr()?;
+
+            binds.push(LetrecBind {
+                node_type: "s-letrec-bind".to_string(),
+                l: self.current_loc(),
+                b: bind,
+                value: Box::new(value),
+            });
+        }
+
+        // Parse body: (BLOCK|COLON) block END
+        // Note: TokenType::Block is "block:" as a single token
+        let blocky = if self.matches(&TokenType::Block) {
+            self.advance(); // Consume "block:"
+            true
+        } else {
+            self.expect(TokenType::Colon)?; // Consume ":"
+            false
+        };
+
+        // Parse block body
+        let mut body_stmts = Vec::new();
+        while !self.matches(&TokenType::End) && !self.is_at_end() {
+            let stmt = self.parse_expr()?;
+            body_stmts.push(Box::new(stmt));
+        }
+
+        let end = self.expect(TokenType::End)?;
+
+        // Body is always wrapped in an s-block
+        let body = Expr::SBlock {
+            l: self.current_loc(),
+            stmts: body_stmts,
+        };
+
+        Ok(Expr::SLetrec {
+            l: self.make_loc(&start, &end),
+            binds,
+            body: Box::new(body),
+            blocky,
+        })
+    }
+
     /// Implicit let binding: x = value (no "let" keyword)
     /// Creates an s-let statement (not s-let-expr)
     /// Used in block contexts where we want statement-style bindings
@@ -3892,7 +4025,74 @@ impl Parser {
 impl Parser {
     /// table-expr: table: headers row: ... end
     fn parse_table_expr(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_table_expr")
+        // table: col1, col2, col3
+        //   row: val1, val2, val3
+        //   row: val1, val2, val3
+        // end
+        let start = self.expect(TokenType::Table)?; // consume "table:"
+
+        // Parse column headers (comma-separated field names)
+        let mut headers = Vec::new();
+
+        // Empty table is allowed
+        if !self.matches(&TokenType::Row) && !self.matches(&TokenType::End) {
+            loop {
+                let name_token = self.expect(TokenType::Name)?;
+                let name = name_token.value.clone();
+                let field_loc = self.make_loc(&name_token, &name_token);
+
+                // For now, headers don't have type annotations in basic tables
+                // The annotation field is just a-blank
+                headers.push(FieldName {
+                    node_type: "s-field-name".to_string(),
+                    l: field_loc,
+                    name,
+                    ann: Ann::ABlank,
+                });
+
+                // Check for comma (more headers) or row/end (done with headers)
+                if self.matches(&TokenType::Comma) {
+                    self.advance(); // consume comma
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Parse rows
+        let mut rows = Vec::new();
+        while self.matches(&TokenType::Row) {
+            let row_start = self.advance().clone(); // consume "row:"
+
+            // Parse row elements (comma-separated expressions)
+            let mut elems = Vec::new();
+            if !self.matches(&TokenType::Row) && !self.matches(&TokenType::End) {
+                loop {
+                    let expr = self.parse_binop_expr()?;
+                    elems.push(Box::new(expr));
+
+                    if self.matches(&TokenType::Comma) {
+                        self.advance(); // consume comma
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            // Use row_start for location - good enough for now
+            rows.push(TableRow {
+                node_type: "s-table-row".to_string(),
+                l: self.make_loc(&row_start, &row_start),
+                elems,
+            });
+        }
+
+        let end = self.expect(TokenType::End)?;
+        Ok(Expr::STable {
+            l: self.make_loc(&start, &end),
+            headers,
+            rows,
+        })
     }
 
     /// table-select: select columns from table
@@ -3984,9 +4184,194 @@ impl Parser {
         self.parse_expr()
     }
 
-    /// spy-stmt: spy: contents END
+    /// spy-stmt: SPY [string] COLON spy-contents END
+    /// spy-contents: spy-expr [COMMA spy-expr]* [COMMA]
+    /// spy-expr: NAME COLON expr | expr (where expr is NAME creates implicit label)
     fn parse_spy_stmt(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_spy_stmt")
+        let start = self.expect(TokenType::Spy)?;
+
+        // Check for optional string message
+        let message = if self.matches(&TokenType::String) {
+            let str_tok = self.advance().clone();
+            let str_value = str_tok.value.clone();
+            let str_loc = self.make_loc(&str_tok, &str_tok);
+            Some(Box::new(Expr::SStr {
+                l: str_loc,
+                s: str_value,
+            }))
+        } else {
+            None
+        };
+
+        self.expect(TokenType::Colon)?;
+
+        // Parse spy contents (comma-separated list of spy-expr)
+        let mut contents = Vec::new();
+
+        if !self.matches(&TokenType::End) {
+            // Parse first spy-expr
+            contents.push(self.parse_spy_expr()?);
+
+            // Parse additional spy-exprs with comma separators
+            while self.matches(&TokenType::Comma) {
+                self.advance(); // consume comma
+
+                // Allow optional trailing comma
+                if self.matches(&TokenType::End) {
+                    break;
+                }
+
+                contents.push(self.parse_spy_expr()?);
+            }
+        }
+
+        let end = self.expect(TokenType::End)?;
+
+        Ok(Expr::SSpyBlock {
+            l: self.make_loc(&start, &end),
+            message,
+            contents,
+        })
+    }
+
+    /// Parse a single spy expression: either "name: expr" or just "expr"
+    /// If just "expr" and expr is an identifier, use implicit label
+    fn parse_spy_expr(&mut self) -> ParseResult<SpyField> {
+        let start_pos = self.current;
+
+        // Try to parse as "name: expr" pattern
+        // We need to look ahead to see if there's a colon after the name
+        if self.matches(&TokenType::Name) {
+            let name_tok = self.peek();
+            let next = self.peek_ahead(1);
+
+            if next.token_type == TokenType::Colon {
+                // This is "name: expr" pattern
+                let name_tok = self.advance();
+                let name = name_tok.value.clone();
+                let name_loc = name_tok.location.clone();
+                self.expect(TokenType::Colon)?;
+                let value_expr = self.parse_binop_expr()?;
+                let value_loc = self.extract_loc(&value_expr);
+                let value = Box::new(value_expr);
+
+                // Build the location manually
+                let l = Loc::new(
+                    self.file_name.clone(),
+                    name_loc.start_line,
+                    name_loc.start_col,
+                    name_loc.start_pos,
+                    value_loc.end_line,
+                    value_loc.end_column,
+                    value_loc.end_char,
+                );
+
+                return Ok(SpyField {
+                    node_type: "s-spy-expr".to_string(),
+                    l,
+                    name: Some(name),
+                    value,
+                    implicit_label: false,
+                });
+            }
+        }
+
+        // Otherwise, parse as just an expression
+        let expr = self.parse_binop_expr()?;
+
+        // If the expression is an identifier, use its name as implicit label
+        let (name, implicit_label) = if let Expr::SId { id, .. } = &expr {
+            // id is a Name enum, extract the string from it
+            let name_str = match id {
+                Name::SName { s, .. } => Some(s.clone()),
+                Name::SUnderscore { .. } => Some("_".to_string()),
+                _ => None,
+            };
+            (name_str, true)
+        } else {
+            (None, false)
+        };
+
+        Ok(SpyField {
+            node_type: "s-spy-expr".to_string(),
+            l: self.extract_loc(&expr),
+            name,
+            value: Box::new(expr),
+            implicit_label,
+        })
+    }
+
+    /// Extract location from an expression
+    fn extract_loc(&self, expr: &Expr) -> Loc {
+        match expr {
+            Expr::SId { l, .. } => l.clone(),
+            Expr::SIdVar { l, .. } => l.clone(),
+            Expr::SIdLetrec { l, .. } => l.clone(),
+            Expr::SNum { l, .. } => l.clone(),
+            Expr::SFrac { l, .. } => l.clone(),
+            Expr::SRfrac { l, .. } => l.clone(),
+            Expr::SStr { l, .. } => l.clone(),
+            Expr::SBool { l, .. } => l.clone(),
+            Expr::SParen { l, .. } => l.clone(),
+            Expr::SLam { l, .. } => l.clone(),
+            Expr::SMethod { l, .. } => l.clone(),
+            Expr::SExtend { l, .. } => l.clone(),
+            Expr::SUpdate { l, .. } => l.clone(),
+            Expr::SObj { l, .. } => l.clone(),
+            Expr::SArray { l, .. } => l.clone(),
+            Expr::SConstruct { l, .. } => l.clone(),
+            Expr::SApp { l, .. } => l.clone(),
+            Expr::SPrimApp { l, .. } => l.clone(),
+            Expr::SAssign { l, .. } => l.clone(),
+            Expr::SIf { l, .. } => l.clone(),
+            Expr::SIfElse { l, .. } => l.clone(),
+            Expr::SCases { l, .. } => l.clone(),
+            Expr::SCasesElse { l, .. } => l.clone(),
+            Expr::SOp { l, .. } => l.clone(),
+            Expr::SCheckTest { l, .. } => l.clone(),
+            Expr::SCheckExpr { l, .. } => l.clone(),
+            Expr::SDot { l, .. } => l.clone(),
+            Expr::SGetBang { l, .. } => l.clone(),
+            Expr::SBracket { l, .. } => l.clone(),
+            Expr::SData { l, .. } => l.clone(),
+            Expr::SDataExpr { l, .. } => l.clone(),
+            Expr::SFor { l, .. } => l.clone(),
+            Expr::SBlock { l, .. } => l.clone(),
+            Expr::SUserBlock { l, .. } => l.clone(),
+            Expr::SFun { l, .. } => l.clone(),
+            Expr::SType { l, .. } => l.clone(),
+            Expr::SNewtype { l, .. } => l.clone(),
+            Expr::SVar { l, .. } => l.clone(),
+            Expr::SRec { l, .. } => l.clone(),
+            Expr::SLet { l, .. } => l.clone(),
+            Expr::SLetrec { l, .. } => l.clone(),
+            Expr::SInstantiate { l, .. } => l.clone(),
+            Expr::SLetExpr { l, .. } => l.clone(),
+            Expr::SCheck { l, .. } => l.clone(),
+            Expr::SReactor { l, .. } => l.clone(),
+            Expr::STuple { l, .. } => l.clone(),
+            Expr::STupleGet { l, .. } => l.clone(),
+            Expr::SWhen { l, .. } => l.clone(),
+            Expr::SContract { l, .. } => l.clone(),
+            Expr::SSpyBlock { l, .. } => l.clone(),
+            Expr::SIfPipe { l, .. } => l.clone(),
+            Expr::SIfPipeElse { l, .. } => l.clone(),
+            Expr::STypeLetExpr { l, .. } => l.clone(),
+            Expr::STemplate { l, .. } => l.clone(),
+            Expr::STableExtend { l, .. } => l.clone(),
+            Expr::STableUpdate { l, .. } => l.clone(),
+            Expr::STableSelect { l, .. } => l.clone(),
+            Expr::STableOrder { l, .. } => l.clone(),
+            Expr::STableFilter { l, .. } => l.clone(),
+            Expr::STableExtract { l, .. } => l.clone(),
+            Expr::STable { l, .. } => l.clone(),
+            Expr::SLoadTable { l, .. } => l.clone(),
+            _ => {
+                // For any other variants, we'll need to add them explicitly
+                // This is a temporary catch-all
+                panic!("extract_loc not implemented for this Expr variant")
+            }
+        }
     }
 }
 

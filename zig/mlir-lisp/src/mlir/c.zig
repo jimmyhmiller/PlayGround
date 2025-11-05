@@ -14,6 +14,9 @@ pub const c = @cImport({
     @cInclude("mlir-c/Transforms.h");
     @cInclude("mlir-c/Conversion.h");
     @cInclude("mlir-c/ExecutionEngine.h");
+    @cInclude("mlir-c/Dialect/IRDL.h");
+    @cInclude("mlir-c/Dialect/Transform.h");
+    @cInclude("mlir-c/Dialect/Transform/Interpreter.h");
 });
 
 // Re-export common types for convenience
@@ -122,6 +125,141 @@ pub const Module = struct {
         _ = userData;
         const slice = str.data[0..str.length];
         std.debug.print("{s}", .{slice});
+    }
+
+    /// Load IRDL dialects defined in this module into the context
+    pub fn loadIRDLDialects(self: *Module) !void {
+        const result = c.mlirLoadIRDLDialects(self.module);
+        if (mlirLogicalResultIsFailure(result)) {
+            return error.IRDLLoadFailed;
+        }
+    }
+
+    /// Walk all operations in module and collect those matching predicate
+    /// Caller owns returned slice and must free it
+    pub fn collectOperations(
+        self: *Module,
+        allocator: std.mem.Allocator,
+        predicate: *const fn(MlirOperation) bool,
+    ) ![]MlirOperation {
+        var ops = std.ArrayList(MlirOperation){};
+        defer ops.deinit(allocator);
+
+        const mod_op = self.getOperation();
+        try walkOperations(mod_op, &ops, allocator, predicate);
+
+        return ops.toOwnedSlice(allocator);
+    }
+
+    /// Find all operations with a specific name prefix (e.g., "irdl.", "transform.")
+    pub fn collectOperationsByPrefix(
+        self: *Module,
+        allocator: std.mem.Allocator,
+        prefix: []const u8,
+    ) ![]MlirOperation {
+        const Ctx = struct {
+            prefix: []const u8,
+            fn matches(op: MlirOperation, ctx_prefix: []const u8) bool {
+                const name = Operation.getName(op);
+                return std.mem.startsWith(u8, name, ctx_prefix);
+            }
+        };
+
+        var ops = std.ArrayList(MlirOperation){};
+        defer ops.deinit(allocator);
+
+        const mod_op = self.getOperation();
+        try walkOperationsWithContext(mod_op, &ops, allocator, prefix, Ctx.matches);
+
+        return ops.toOwnedSlice(allocator);
+    }
+
+    /// Find all operations with a specific exact name
+    pub fn collectOperationsByName(
+        self: *Module,
+        allocator: std.mem.Allocator,
+        name: []const u8,
+    ) ![]MlirOperation {
+        const Ctx = struct {
+            name: []const u8,
+            fn matches(op: MlirOperation, ctx_name: []const u8) bool {
+                const op_name = Operation.getName(op);
+                return std.mem.eql(u8, op_name, ctx_name);
+            }
+        };
+
+        var ops = std.ArrayList(MlirOperation){};
+        defer ops.deinit(allocator);
+
+        const mod_op = self.getOperation();
+        try walkOperationsWithContext(mod_op, &ops, allocator, name, Ctx.matches);
+
+        return ops.toOwnedSlice(allocator);
+    }
+
+    /// Helper: recursively walk all operations
+    fn walkOperations(
+        op: MlirOperation,
+        list: *std.ArrayList(MlirOperation),
+        allocator: std.mem.Allocator,
+        predicate: *const fn(MlirOperation) bool,
+    ) !void {
+        if (predicate(op)) {
+            try list.append(allocator, op);
+        }
+
+        const num_regions = Operation.getNumRegions(op);
+        var i: usize = 0;
+        while (i < num_regions) : (i += 1) {
+            const region = Operation.getRegion(op, i);
+            if (Region.isNull(region)) continue;
+
+            const first_block = c.mlirRegionGetFirstBlock(region);
+            if (Block.isNull(first_block)) continue;
+
+            var block = first_block;
+            while (!Block.isNull(block)) {
+                var child_op = c.mlirBlockGetFirstOperation(block);
+                while (!c.mlirOperationIsNull(child_op)) {
+                    try walkOperations(child_op, list, allocator, predicate);
+                    child_op = c.mlirOperationGetNextInBlock(child_op);
+                }
+                block = c.mlirBlockGetNextInRegion(block);
+            }
+        }
+    }
+
+    /// Helper: recursively walk with context
+    fn walkOperationsWithContext(
+        op: MlirOperation,
+        list: *std.ArrayList(MlirOperation),
+        allocator: std.mem.Allocator,
+        context: []const u8,
+        predicate: *const fn(MlirOperation, []const u8) bool,
+    ) !void {
+        if (predicate(op, context)) {
+            try list.append(allocator, op);
+        }
+
+        const num_regions = Operation.getNumRegions(op);
+        var i: usize = 0;
+        while (i < num_regions) : (i += 1) {
+            const region = Operation.getRegion(op, i);
+            if (Region.isNull(region)) continue;
+
+            const first_block = c.mlirRegionGetFirstBlock(region);
+            if (Block.isNull(first_block)) continue;
+
+            var block = first_block;
+            while (!Block.isNull(block)) {
+                var child_op = c.mlirBlockGetFirstOperation(block);
+                while (!c.mlirOperationIsNull(child_op)) {
+                    try walkOperationsWithContext(child_op, list, allocator, context, predicate);
+                    child_op = c.mlirOperationGetNextInBlock(child_op);
+                }
+                block = c.mlirBlockGetNextInRegion(block);
+            }
+        }
     }
 };
 
@@ -497,5 +635,64 @@ pub const ExecutionEngine = struct {
     pub fn dumpToObjectFile(self: *ExecutionEngine, filename: []const u8) void {
         const name_ref = c.mlirStringRefCreate(filename.ptr, filename.len);
         c.mlirExecutionEngineDumpToObjectFile(self.engine, name_ref);
+    }
+};
+
+/// TransformOptions wrapper for transform dialect interpreter
+pub const TransformOptions = struct {
+    options: c.MlirTransformOptions,
+
+    pub fn create() TransformOptions {
+        return TransformOptions{
+            .options = c.mlirTransformOptionsCreate()
+        };
+    }
+
+    pub fn destroy(self: *TransformOptions) void {
+        c.mlirTransformOptionsDestroy(self.options);
+    }
+
+    pub fn enableExpensiveChecks(self: *TransformOptions, enable: bool) void {
+        c.mlirTransformOptionsEnableExpensiveChecks(self.options, enable);
+    }
+
+    pub fn enforceSingleTopLevelTransformOp(self: *TransformOptions, enable: bool) void {
+        c.mlirTransformOptionsEnforceSingleTopLevelTransformOp(self.options, enable);
+    }
+};
+
+/// Transform API wrapper
+pub const Transform = struct {
+    /// Apply a transform sequence to a payload operation
+    /// payload: The operation to transform
+    /// transformRoot: The root transform operation (e.g., transform.sequence)
+    /// transformModule: The module containing the transform
+    /// options: Transform options
+    pub fn applyNamedSequence(
+        payload: MlirOperation,
+        transformRoot: MlirOperation,
+        transformModule: MlirOperation,
+        options: *TransformOptions,
+    ) !void {
+        const result = c.mlirTransformApplyNamedSequence(
+            payload,
+            transformRoot,
+            transformModule,
+            options.options,
+        );
+        if (mlirLogicalResultIsFailure(result)) {
+            return error.TransformApplyFailed;
+        }
+    }
+
+    /// Merge symbols from one module into another
+    pub fn mergeSymbolsIntoFromClone(
+        target: MlirOperation,
+        other: MlirOperation,
+    ) !void {
+        const result = c.mlirMergeSymbolsIntoFromClone(target, other);
+        if (mlirLogicalResultIsFailure(result)) {
+            return error.SymbolMergeFailed;
+        }
     }
 };

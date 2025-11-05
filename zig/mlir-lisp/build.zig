@@ -59,6 +59,9 @@ pub fn build(b: *std.Build) void {
             step.linkSystemLibrary("MLIRCAPIRegisterEverything");
             step.linkSystemLibrary("MLIRCAPIConversion");
             step.linkSystemLibrary("MLIRCAPITransforms");
+            step.linkSystemLibrary("MLIRCAPIIRDL");
+            step.linkSystemLibrary("MLIRCAPITransformDialect");
+            step.linkSystemLibrary("MLIRCAPITransformDialectTransforms");
 
             // MLIR libraries
             step.linkSystemLibrary("MLIRExecutionEngine");

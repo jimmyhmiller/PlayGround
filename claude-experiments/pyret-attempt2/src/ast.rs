@@ -1319,6 +1319,7 @@ pub enum CheckOp {
 pub struct SpyField {
     #[serde(rename = "type")]
     pub node_type: String, // "s-spy-expr"
+    #[serde(skip)]
     pub l: Loc,
     pub name: Option<String>,
     pub value: Box<Expr>,

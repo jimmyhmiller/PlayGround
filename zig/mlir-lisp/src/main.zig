@@ -10,6 +10,7 @@ const Executor = mlir_lisp.Executor;
 const Repl = mlir_lisp.Repl;
 const MacroExpander = mlir_lisp.MacroExpander;
 const builtin_macros = mlir_lisp.builtin_macros;
+const DialectRegistry = mlir_lisp.DialectRegistry;
 
 /// Helper function to wrap multiple top-level forms in an implicit list
 fn createImplicitList(allocator: std.mem.Allocator, forms: PersistentVector(*Value)) !*Value {
@@ -19,6 +20,19 @@ fn createImplicitList(allocator: std.mem.Allocator, forms: PersistentVector(*Val
         .data = .{ .list = forms },
     };
     return value;
+}
+
+/// Predicate: Check if operation is IRDL or Transform metadata
+/// Note: builtin.module is also included since transform operations need module wrappers
+fn isIRDLorTransform(op_name: []const u8) bool {
+    return std.mem.startsWith(u8, op_name, "irdl.") or
+           std.mem.startsWith(u8, op_name, "transform.") or
+           std.mem.eql(u8, op_name, "builtin.module");
+}
+
+/// Predicate: Check if operation is regular application code
+fn isRegularCode(op_name: []const u8) bool {
+    return !isIRDLorTransform(op_name);
 }
 
 pub fn main() !void {
@@ -125,6 +139,8 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
     try ctx.getOrLoadDialect("memref");
     try ctx.getOrLoadDialect("affine");
     try ctx.getOrLoadDialect("cf");
+    try ctx.getOrLoadDialect("irdl");
+    try ctx.getOrLoadDialect("transform");
 
     // Parse the program
     std.debug.print("Parsing...\n", .{});
@@ -142,6 +158,7 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
         printErrorLocation(source, pos.line, pos.column);
         return err;
     };
+
     // If there's only one form, use it directly; otherwise wrap in a list
     const value = if (forms.len() == 1)
         forms.at(0)
@@ -150,15 +167,12 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
     // No need to manually free - arena handles it
 
     // Macro expansion
-    std.debug.print("Expanding macros...\n", .{});
     var macro_expander = MacroExpander.init(allocator);
     defer macro_expander.deinit();
     try builtin_macros.registerBuiltinMacros(&macro_expander);
 
     const expanded_value = try macro_expander.expandAll(value);
 
-    // Operation flattening (convert nested operations to flat SSA form)
-    std.debug.print("Flattening operations...\n", .{});
     const OperationFlattener = mlir_lisp.OperationFlattener;
     var flattener = OperationFlattener.init(allocator);
     const flattened_value = try flattener.flattenModule(expanded_value);
@@ -168,13 +182,54 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
     var parsed_module = try parser.parseModule(flattened_value);
     defer parsed_module.deinit();
 
-    // Build MLIR IR
+    // ========== 2-PASS COMPILATION: IRDL + TRANSFORM SUPPORT ==========
+
     std.debug.print("Building MLIR IR...\n", .{});
     var builder = Builder.init(allocator, &ctx);
     defer builder.deinit();
 
-    var mlir_module = try builder.buildModule(&parsed_module);
+    // PASS 1: Extract and load dialect definitions (IRDL + Transform metadata)
+    std.debug.print("Pass 1: Processing dialect definitions...\n", .{});
+    std.debug.print("  DEBUG: Parsed module has {} operations\n", .{parsed_module.operations.len});
+    for (parsed_module.operations, 0..) |*op, i| {
+        const matches = isIRDLorTransform(op.name);
+        std.debug.print("    Op {}: {s} (metadata={})\n", .{i, op.name, matches});
+    }
+    var metadata_module = try builder.buildModuleFiltered(&parsed_module, isIRDLorTransform);
+    defer metadata_module.destroy();
+
+    // Scan for IRDL and transform operations
+    var dialect_registry = DialectRegistry.init(allocator);
+    defer dialect_registry.deinit();
+
+    std.debug.print("  DEBUG: Scanning metadata module for IRDL/transforms...\n", .{});
+    metadata_module.printGeneric();
+
+    try dialect_registry.scanModule(&metadata_module);
+
+    std.debug.print("  Found {} IRDL ops and {} transform ops\n", .{
+        dialect_registry.getIRDLOperations().len,
+        dialect_registry.getTransformOperations().len,
+    });
+
+    // Load IRDL dialects if found
+    if (dialect_registry.hasIRDLDialects()) {
+        std.debug.print("  Found {} IRDL dialect definition(s), loading...\n", .{dialect_registry.getIRDLOperations().len});
+        try metadata_module.loadIRDLDialects();
+        std.debug.print("  ✓ IRDL dialects loaded into context\n", .{});
+    }
+
+    // Store transforms for later
+    if (dialect_registry.hasTransforms()) {
+        std.debug.print("  Found {} transform operation(s) for compilation\n", .{dialect_registry.getTransformOperations().len});
+    }
+
+    // PASS 2: Build application code (excluding IRDL/transform metadata)
+    std.debug.print("Pass 2: Building application code...\n", .{});
+    std.debug.print("  DEBUG: Application module (should only have main function):\n", .{});
+    var mlir_module = try builder.buildModuleFiltered(&parsed_module, isRegularCode);
     defer mlir_module.destroy();
+    mlir_module.print();
 
     std.debug.print("✓ MLIR module created successfully!\n", .{});
 
@@ -221,6 +276,11 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
 
     var executor = Executor.init(allocator, &ctx, executor_config);
     defer executor.deinit();
+
+    // Set transforms if any were found
+    if (dialect_registry.hasTransforms()) {
+        executor.setTransforms(dialect_registry.getTransformOperations());
+    }
 
     std.debug.print("Compiling with JIT (optimization level: O2)...\n", .{});
     try executor.compile(&mlir_module);

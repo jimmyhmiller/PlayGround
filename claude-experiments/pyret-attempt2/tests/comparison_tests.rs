@@ -1010,7 +1010,6 @@ end
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Table literals not implemented
 fn test_simple_table() {
     // Real pattern: data tables
     assert_matches_pyret(r#"
@@ -1244,7 +1243,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Record annotations not yet implemented
 fn test_record_annotation() {
     // Real pattern: record type annotations
     assert_matches_pyret(r#"
@@ -1255,7 +1253,6 @@ end
 }
 
 #[test]
-#[ignore] // TODO: Arrow annotations in records not yet implemented
 fn test_record_annotation_with_arrow() {
     // Real pattern: record with function types (from loop.arr)
     assert_matches_pyret(r#"
@@ -1290,7 +1287,6 @@ x._plus(y)
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Spy not implemented
 fn test_spy_expression() {
     // Real pattern: debugging output
     assert_matches_pyret(r#"

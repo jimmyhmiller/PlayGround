@@ -826,6 +826,9 @@ pub const Parser = struct {
         const first = list.at(0);
         if (first.type != .identifier) return error.ExpectedIdentifier;
         if (!std.mem.eql(u8, first.data.atom, "block")) {
+            std.debug.print("ERROR: Expected 'block' but got '{s}'\n", .{first.data.atom});
+            std.debug.print("This suggests a region contains operations directly instead of blocks\n", .{});
+            std.debug.print("Regions must contain (block ...) wrappers\n", .{});
             return error.UnexpectedStructure;
         }
 

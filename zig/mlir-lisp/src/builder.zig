@@ -84,6 +84,34 @@ pub const Builder = struct {
         return mod;
     }
 
+    /// Build a filtered MLIR module from our parsed AST
+    /// Only includes operations where predicate(operation.name) returns true
+    pub fn buildModuleFiltered(
+        self: *Builder,
+        parsed_module: *parser.MlirModule,
+        predicate: *const fn ([]const u8) bool,
+    ) BuildError!mlir.Module {
+        // Register all type aliases and attribute aliases first
+        try self.registerTypeAliases(parsed_module.type_aliases);
+        try self.registerAttributeAliases(parsed_module.attribute_aliases);
+
+        // Create a new module
+        var mod = try mlir.Module.create(self.location);
+
+        // Get the module's body block
+        const body = mod.getBody();
+
+        // Build only operations that match the predicate
+        for (parsed_module.operations) |*operation| {
+            if (predicate(operation.name)) {
+                const mlir_op = try self.buildOperation(operation);
+                mlir.Block.appendOperation(body, mlir_op);
+            }
+        }
+
+        return mod;
+    }
+
     /// Register type aliases in the builder context
     fn registerTypeAliases(self: *Builder, type_aliases: []const parser.TypeAlias) BuildError!void {
         for (type_aliases) |alias| {
@@ -524,6 +552,12 @@ pub const Builder = struct {
     /// Build an attribute value
     fn buildAttributeValue(self: *Builder, attr_expr: *const parser.AttrExpr, attr_key: []const u8) BuildError!mlir.MlirAttribute {
         const value = attr_expr.value;
+
+        // Handle bare types - wrap them in TypeAttr for IRDL operations
+        if (value.type == .type) {
+            const mlir_type = try self.buildTypeFromValue(value);
+            return mlir.c.mlirTypeAttrGet(mlir_type);
+        }
 
         // Handle typed literals: (: value type)
         if (value.type == .has_type) {
