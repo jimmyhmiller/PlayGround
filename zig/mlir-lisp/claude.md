@@ -183,3 +183,254 @@ bug-tracker add --title "Bug title" --description "Bug details" --validate
 ```
 
 The `--validate` flag triggers AI-powered quality checking to ensure bug reports contain sufficient information before recording.
+
+# Ongoing Work
+
+## Migration: Value (Tagged Union) → CValueLayout (C-Compatible Struct)
+
+### Current State (2025-01-04)
+
+We currently have **two parallel representations** for values in the codebase:
+
+1. **`Value`** (`src/reader.zig`) - Zig tagged union
+   - Used throughout parser, printer, macro expander, builder
+   - Ergonomic pattern matching: `switch (value.type)`
+   - Type-safe field access: `value.data.atom`, `value.data.list`
+   - Variable size (~16-24 bytes for atoms)
+
+2. **`CValueLayout`** (`src/reader/c_value_layout.zig`) - C-compatible extern struct
+   - Used at JIT macro boundary
+   - Fixed 56-byte size, flat memory layout
+   - C ABI compatible for MLIR FFI
+   - Now has ergonomic methods: `asAtom()`, `asList()`, `match()`
+
+**Current conversion happens in**: `src/jit_macro_wrapper.zig`
+- `convertValueToCValueLayout()` - recursively converts Value → CValueLayout
+- `convertCValueLayoutToValue()` - recursively converts CValueLayout → Value
+- Only needed at JIT macro boundary (not in hot paths)
+
+### Why Migrate?
+
+**Benefits of using CValueLayout everywhere:**
+1. **Single source of truth** - No dual representations
+2. **No conversions** - Eliminate conversion overhead at JIT boundary
+3. **MLIR integration** - Direct memory layout for FFI without translation
+4. **Consistency** - Same type in Zig and JIT-compiled code
+
+**Challenges:**
+- ~50+ files use `Value` extensively
+- Pattern matching becomes more verbose
+- Need to thread allocators for collection access
+- Lose compile-time tagged union safety
+
+### New Ergonomic API (Completed ✓)
+
+`CValueLayout` now has inline methods making it nearly as ergonomic as tagged unions:
+
+```zig
+// Type checking
+if (layout.isAtom()) { ... }
+if (layout.isCollection()) { ... }
+const vtype = layout.getType(); // Returns ValueType enum
+
+// Type-safe accessors (return optionals)
+if (layout.asAtom()) |atom| {
+    std.debug.print("Atom: {s}\n", .{atom});
+}
+
+if (layout.asList()) |list| {
+    for (list) |elem| { ... }
+}
+
+// Pattern matching via visitor
+try layout.match(.{
+    .onAtom = struct {
+        fn call(atom: []const u8) !void { ... }
+    }.call,
+    .onList = struct {
+        fn call(list: []*CValueLayout) !void { ... }
+    }.call,
+});
+```
+
+**All methods are `inline fn` - zero runtime overhead!**
+
+### Migration Plan
+
+#### Phase 1: Preparation (Current)
+- [x] Add ergonomic methods to CValueLayout
+- [x] Add comprehensive tests for new API
+- [x] Document usage patterns
+- [ ] Audit all Value usage sites (~50+ files)
+- [ ] Create migration helper utilities
+
+#### Phase 2: Core Types (Parser/Printer/Reader)
+Files to update:
+- `src/reader.zig` - Change public API to return `*CValueLayout`
+- `src/parser.zig` - Update to work with CValueLayout
+- `src/printer.zig` - Update to work with CValueLayout
+- `src/tokenizer.zig` - May need updates depending on Value usage
+
+Pattern to follow:
+```zig
+// OLD
+const value = try allocator.create(Value);
+value.* = Value{
+    .type = .identifier,
+    .data = .{ .atom = "name" },
+};
+
+// NEW
+const layout = try allocator.create(CValueLayout);
+layout.* = CValueLayout.empty(.identifier);
+layout.data_ptr = @constCast("name".ptr);
+layout.data_len = "name".len;
+
+// OR use constructor helper (to be added)
+const layout = try CValueLayout.createAtom(allocator, .identifier, "name");
+```
+
+#### Phase 3: Macro System
+Files to update:
+- `src/macro_expander.zig` - Update pattern matching to use `.match()` or switch
+- `src/builtin_macros.zig` - Update macro implementations
+- Remove conversion code from `src/jit_macro_wrapper.zig`
+
+Key change - pattern matching:
+```zig
+// OLD
+switch (value.type) {
+    .list => {
+        const list = value.data.list;
+        // ...
+    },
+    .identifier => {
+        const name = value.data.atom;
+        // ...
+    },
+}
+
+// NEW (Option 1: inline switch)
+switch (layout.getType()) {
+    .list => {
+        if (layout.asList()) |list| {
+            // ...
+        }
+    },
+    .identifier => {
+        if (layout.asAtom()) |name| {
+            // ...
+        }
+    },
+}
+
+// NEW (Option 2: visitor pattern)
+try layout.match(.{
+    .onList = handleList,
+    .onAtom = handleAtom,
+});
+```
+
+#### Phase 4: Builder and Operation Types
+Files to update:
+- `src/builder.zig` - Update to work with CValueLayout
+- `src/operation_flattener.zig` - Update Value usage
+- `src/c_api_transform.zig` - May simplify with single type
+
+#### Phase 5: Tests and Examples
+- Update all test files to use CValueLayout
+- Update example programs
+- Run full test suite
+- Performance testing to verify no regressions
+
+#### Phase 6: Cleanup
+- Remove old `Value` type from `src/reader.zig`
+- Remove `valueToCLayout()` and `cLayoutToValue()` from `src/reader/c_value_layout.zig`
+- Update documentation
+- Remove conversion functions from `src/jit_macro_wrapper.zig`
+
+### Helper Utilities to Add
+
+To make migration easier, add these constructors to `CValueLayout`:
+
+```zig
+// src/reader/c_value_layout.zig
+
+/// Create an atom value (identifier, number, string, etc.)
+pub fn createAtom(
+    allocator: std.mem.Allocator,
+    vtype: reader.ValueType,
+    atom: []const u8,
+) !*CValueLayout {
+    const layout = try allocator.create(CValueLayout);
+    layout.* = CValueLayout.empty(vtype);
+    layout.data_ptr = @constCast(atom.ptr);
+    layout.data_len = atom.len;
+    return layout;
+}
+
+/// Create a list from slice of CValueLayout pointers
+pub fn createList(
+    allocator: std.mem.Allocator,
+    elements: []*CValueLayout,
+) !*CValueLayout {
+    const layout = try allocator.create(CValueLayout);
+    layout.* = CValueLayout.empty(.list);
+    layout.data_ptr = @ptrCast(elements.ptr);
+    layout.data_len = elements.len;
+    layout.data_capacity = elements.len;
+    layout.data_elem_size = @sizeOf(*CValueLayout);
+    return layout;
+}
+
+// Similar for createVector, createMap, etc.
+```
+
+### Testing Strategy
+
+1. **Parallel implementation** - Keep both types working during migration
+2. **File-by-file testing** - Migrate one file at a time, ensure tests pass
+3. **Integration tests** - Run full test suite after each phase
+4. **Performance benchmarks** - Verify no regressions from conversion removal
+
+### Rollback Plan
+
+If migration causes issues:
+1. Keep git commits atomic (one file/module per commit)
+2. Can revert individual files if needed
+3. Both representations will work during transition
+4. Conversion functions remain until Phase 6
+
+### Estimated Effort
+
+- **Phase 1**: ✓ Complete (2-3 hours)
+- **Phase 2**: ~1 day (core types are complex)
+- **Phase 3**: ~1 day (macro system is critical)
+- **Phase 4**: ~0.5 days (builder is straightforward)
+- **Phase 5**: ~0.5 days (update tests)
+- **Phase 6**: ~0.5 days (cleanup)
+
+**Total**: ~4 days of focused work
+
+### Success Criteria
+
+- [ ] All tests pass
+- [ ] No Value type remains in codebase
+- [ ] No conversion functions needed
+- [ ] JIT macros work without conversions
+- [ ] Performance is same or better
+- [ ] Code remains readable and maintainable
+
+### Open Questions
+
+1. **PersistentVector integration** - Does it need updates to store CValueLayout efficiently?
+2. **Memory management** - Are there lifetime issues with 56-byte structs vs pointers?
+3. **Error handling** - Do we need better error messages for type mismatches?
+4. **Builder API** - Does the builder need a fluent interface for CValueLayout construction?
+
+### Notes
+
+- This migration is **optional** - current dual-type system works fine
+- Main benefit is eliminating conversions at JIT boundary
+- Ergonomic API makes CValueLayout nearly as nice to use as Value
+- Decision to proceed should be based on actual performance profiling of conversions

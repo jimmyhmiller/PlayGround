@@ -22,6 +22,12 @@ pub struct Parser {
 
 impl Parser {
     pub fn new(tokens: Vec<Token>, file_name: String) -> Self {
+        // Filter out comments and block comments as they're not part of the AST
+        let tokens: Vec<Token> = tokens
+            .into_iter()
+            .filter(|t| !matches!(t.token_type, TokenType::Comment | TokenType::BlockComment))
+            .collect();
+
         Parser {
             tokens,
             current: 0,
@@ -247,35 +253,30 @@ impl Parser {
     )> {
         let _use = None; // TODO: parse use statements
 
-        // Parse provide-blocks FIRST: provide: name1, name2 end
-        // (must be before regular provide to avoid consuming the token)
         let mut provides = Vec::new();
-        while self.matches(&TokenType::ProvideColon) {
-            provides.push(self.parse_provide_block()?);
-        }
-
-        // Parse provide statements
+        let mut imports = Vec::new();
         let mut _provide = Provide::SProvideNone {
             l: self.current_loc(),
         };
-
-        if self.matches(&TokenType::Provide) {
-            _provide = self.parse_provide_stmt()?;
-        }
-
-        // Parse provide-types statements
         let mut provided_types = ProvideTypes::SProvideTypesNone {
             l: self.current_loc(),
         };
 
-        if self.matches(&TokenType::ProvideTypes) {
-            provided_types = self.parse_provide_types_stmt()?;
-        }
-
-        // Parse import statements
-        let mut imports = Vec::new();
-        while self.matches(&TokenType::Import) || self.matches(&TokenType::Include) {
-            imports.push(self.parse_import_stmt()?);
+        // Parse provide and import statements in any order
+        // per grammar: (provide-stmt|import-stmt)*
+        loop {
+            if self.matches(&TokenType::ProvideColon) {
+                provides.push(self.parse_provide_block()?);
+            } else if self.matches(&TokenType::Provide) {
+                _provide = self.parse_provide_stmt()?;
+            } else if self.matches(&TokenType::ProvideTypes) {
+                provided_types = self.parse_provide_types_stmt()?;
+            } else if self.matches(&TokenType::Import) || self.matches(&TokenType::Include) {
+                imports.push(self.parse_import_stmt()?);
+            } else {
+                // No more prelude statements
+                break;
+            }
         }
 
         Ok((_use, _provide, provided_types, provides, imports))
@@ -331,17 +332,24 @@ impl Parser {
             TokenType::Import => {
                 self.advance(); // consume IMPORT
 
-                // Check for field imports: import { fields } from module
-                if self.matches(&TokenType::LBrace) {
-                    self.expect(TokenType::LBrace)?;
+                // We need to peek ahead to determine which import syntax we have:
+                // 1. import x, y from source (comma-separated names)
+                // 2. import source as name (regular import)
 
-                    // Parse field names
-                    let fields = self.parse_comma_list(|p| p.parse_name())?;
+                // Try to parse the first name
+                let first_name = self.parse_name()?;
 
-                    self.expect(TokenType::RBrace)?;
+                // Check what comes after the first name
+                if self.matches(&TokenType::Comma) {
+                    // import x, y, z from source
+                    let mut fields = vec![first_name];
+
+                    while self.matches(&TokenType::Comma) {
+                        self.advance(); // consume comma
+                        fields.push(self.parse_name()?);
+                    }
+
                     self.expect(TokenType::From)?;
-
-                    // Parse module name
                     let module = self.parse_import_source()?;
 
                     let end = if self.current > 0 {
@@ -355,9 +363,66 @@ impl Parser {
                         fields,
                         import: module,
                     })
-                } else {
-                    // Regular import: import module as name
+                } else if self.matches(&TokenType::From) {
+                    // import x from source (single name)
+                    self.advance(); // consume FROM
                     let module = self.parse_import_source()?;
+
+                    let end = if self.current > 0 {
+                        self.tokens[self.current - 1].clone()
+                    } else {
+                        start.clone()
+                    };
+
+                    Ok(Import::SImportFields {
+                        l: self.make_loc(&start, &end),
+                        fields: vec![first_name],
+                        import: module,
+                    })
+                } else {
+                    // import source as name (regular import)
+                    // The first_name we parsed is actually the import source
+                    // Extract location and string from Name enum
+                    let (name_loc, name_str) = match &first_name {
+                        Name::SName { l, s } => (l.clone(), s.clone()),
+                        _ => return Err(ParseError::general(
+                            self.peek(),
+                            "Expected identifier for import source",
+                        )),
+                    };
+
+                    // Check for special import like file("...")
+                    // If next token is ParenNoSpace, we need to parse it as special import
+                    let module = if self.matches(&TokenType::ParenNoSpace) {
+                        self.advance(); // consume (
+
+                        let kind = name_str;
+                        let mut args = Vec::new();
+
+                        // Parse first string argument
+                        let first_arg = self.expect(TokenType::String)?;
+                        args.push(first_arg.value);
+
+                        // Parse optional additional string arguments
+                        while self.matches(&TokenType::Comma) {
+                            self.advance(); // consume ,
+                            let arg = self.expect(TokenType::String)?;
+                            args.push(arg.value);
+                        }
+
+                        let end_paren = self.expect(TokenType::RParen)?;
+
+                        ImportType::SSpecialImport {
+                            l: self.make_loc(&start, &end_paren),
+                            kind,
+                            args,
+                        }
+                    } else {
+                        ImportType::SConstImport {
+                            l: name_loc,
+                            module: name_str,
+                        }
+                    };
 
                     // Expect AS keyword
                     if !self.matches(&TokenType::As) {
@@ -841,18 +906,23 @@ impl Parser {
                 // Function application (no whitespace before paren)
                 left = self.parse_app_expr(left)?;
             } else if self.matches(&TokenType::Dot) {
-                // Dot access or tuple access
+                // Dot access, tuple access, or object extension
                 let _dot_token = self.expect(TokenType::Dot)?;
 
-                // Check if this is tuple access: .{number}
+                // Check if this is tuple access (.{number}) or object extension (.{fields})
                 if self.matches(&TokenType::LBrace) {
-                    // Tuple access: x.{2}
                     self.expect(TokenType::LBrace)?;
-                    let index_token = self.expect(TokenType::Number)?;
-                    let index: usize = index_token.value.parse()
-                        .map_err(|_| ParseError::invalid("tuple index", &index_token, "Invalid number"))?;
-                    let index_loc = self.make_loc(&index_token, &index_token);
-                    let end = self.expect(TokenType::RBrace)?;
+
+                    // Distinguish between tuple access and object extension
+                    // Tuple access: .{number}
+                    // Object extension: .{field: value, ...}
+                    if self.matches(&TokenType::Number) {
+                        // Tuple access: x.{2}
+                        let index_token = self.expect(TokenType::Number)?;
+                        let index: usize = index_token.value.parse()
+                            .map_err(|_| ParseError::invalid("tuple index", &index_token, "Invalid number"))?;
+                        let index_loc = self.make_loc(&index_token, &index_token);
+                        let end = self.expect(TokenType::RBrace)?;
 
                     let start_loc = match &left {
                         Expr::SNum { l, .. } => l.clone(),
@@ -882,20 +952,91 @@ impl Parser {
                         _ => self.current_loc(),
                     };
 
-                    left = Expr::STupleGet {
-                        l: Loc::new(
-                            self.file_name.clone(),
-                            start_loc.start_line,
-                            start_loc.start_column,
-                            start_loc.start_char,
-                            end.location.end_line,
-                            end.location.end_col,
-                            end.location.end_pos,
-                        ),
-                        tup: Box::new(left),
-                        index,
-                        index_loc,
-                    };
+                        left = Expr::STupleGet {
+                            l: Loc::new(
+                                self.file_name.clone(),
+                                start_loc.start_line,
+                                start_loc.start_column,
+                                start_loc.start_char,
+                                end.location.end_line,
+                                end.location.end_col,
+                                end.location.end_pos,
+                            ),
+                            tup: Box::new(left),
+                            index,
+                            index_loc,
+                        };
+                    } else {
+                        // Object extension: obj.{ x: 1, y: 2 }
+                        // Parse object fields (same as parse_obj_expr_fields but return fields)
+                        let mut fields = Vec::new();
+
+                        // Handle empty extension
+                        if !self.matches(&TokenType::RBrace) {
+                            loop {
+                                fields.push(self.parse_obj_field()?);
+
+                                if !self.matches(&TokenType::Comma) {
+                                    break;
+                                }
+                                self.advance(); // consume comma
+
+                                // Check for trailing comma
+                                if self.matches(&TokenType::RBrace) {
+                                    break;
+                                }
+                            }
+                        }
+
+                        let end = self.expect(TokenType::RBrace)?;
+
+                        let start_loc = match &left {
+                            Expr::SNum { l, .. } => l.clone(),
+                            Expr::SBool { l, .. } => l.clone(),
+                            Expr::SStr { l, .. } => l.clone(),
+                            Expr::SId { l, .. } => l.clone(),
+                            Expr::SOp { l, .. } => l.clone(),
+                            Expr::SParen { l, .. } => l.clone(),
+                            Expr::SApp { l, .. } => l.clone(),
+                            Expr::SConstruct { l, .. } => l.clone(),
+                            Expr::SDot { l, .. } => l.clone(),
+                            Expr::SBracket { l, .. } => l.clone(),
+                            Expr::SObj { l, .. } => l.clone(),
+                            Expr::STuple { l, .. } => l.clone(),
+                            Expr::STupleGet { l, .. } => l.clone(),
+                            Expr::SLam { l, .. } => l.clone(),
+                            Expr::SBlock { l, .. } => l.clone(),
+                            Expr::SUserBlock { l, .. } => l.clone(),
+                            Expr::SIf { l, .. } => l.clone(),
+                            Expr::SIfElse { l, .. } => l.clone(),
+                            Expr::SWhen { l, .. } => l.clone(),
+                            Expr::SFor { l, .. } => l.clone(),
+                            Expr::SLetExpr { l, .. } => l.clone(),
+                            Expr::SLet { l, .. } => l.clone(),
+                            Expr::SVar { l, .. } => l.clone(),
+                            Expr::SAssign { l, .. } => l.clone(),
+                            Expr::SExtend { l, .. } => l.clone(),
+                            Expr::SUpdate { l, .. } => l.clone(),
+                            _ => self.current_loc(),
+                        };
+
+                        // In Pyret, both extension and update use the same syntax: obj.{fields}
+                        // The semantic difference is: extension adds NEW fields, update MODIFIES existing fields
+                        // We use SExtend as the default; the type checker determines the actual semantics
+                        left = Expr::SExtend {
+                            l: Loc::new(
+                                self.file_name.clone(),
+                                start_loc.start_line,
+                                start_loc.start_column,
+                                start_loc.start_char,
+                                end.location.end_line,
+                                end.location.end_col,
+                                end.location.end_pos,
+                            ),
+                            supe: Box::new(left),
+                            fields,
+                        };
+                    }
                 } else {
                     // Regular dot access: obj.field
                     let field_token = self.parse_field_name()?;
@@ -1069,59 +1210,36 @@ impl Parser {
         if self.is_check_op() {
             let op = self.parse_check_op()?;
 
-            // Parse the right-hand side (if needed)
-            // Some check operators may not have a right side (e.g., "raises" without specific error)
-            // The right side should allow function calls and other postfix operations
-            let right = if !self.is_at_end() && !matches!(self.peek().token_type, TokenType::Eof) {
-                // Parse primitive expression first
-                let mut right_expr = self.parse_prim_expr()?;
-
-                // Then apply postfix operators (function calls, dot access, bracket access)
-                loop {
-                    if self.matches(&TokenType::ParenNoSpace) {
-                        right_expr = self.parse_app_expr(right_expr)?;
-                    } else if self.matches(&TokenType::Dot) {
-                        let _dot_token = self.expect(TokenType::Dot)?;
-                        let field_token = self.parse_field_name()?;
-
-                        let start_loc = match &right_expr {
-                            Expr::SNum { l, .. } => l.clone(),
-                            Expr::SBool { l, .. } => l.clone(),
-                            Expr::SStr { l, .. } => l.clone(),
-                            Expr::SId { l, .. } => l.clone(),
-                            Expr::SOp { l, .. } => l.clone(),
-                            Expr::SParen { l, .. } => l.clone(),
-                            Expr::SApp { l, .. } => l.clone(),
-                            Expr::SConstruct { l, .. } => l.clone(),
-                            Expr::SDot { l, .. } => l.clone(),
-                            Expr::SBracket { l, .. } => l.clone(),
-                            Expr::SObj { l, .. } => l.clone(),
-                            Expr::STuple { l, .. } => l.clone(),
-                            Expr::STupleGet { l, .. } => l.clone(),
-                            Expr::SLam { l, .. } => l.clone(),
-                            _ => self.current_loc(),
-                        };
-
-                        right_expr = Expr::SDot {
-                            l: Loc::new(
-                                self.file_name.clone(),
-                                start_loc.start_line,
-                                start_loc.start_column,
-                                start_loc.start_char,
-                                field_token.location.end_line,
-                                field_token.location.end_col,
-                                field_token.location.end_pos,
-                            ),
-                            obj: Box::new(right_expr),
-                            field: field_token.value.clone(),
-                        };
-                    } else if self.matches(&TokenType::LBrack) {
-                        right_expr = self.parse_bracket_expr(right_expr)?;
-                    } else {
-                        break;
-                    }
+            // Parse optional refinement: is%(refinement-fn)
+            let refinement = if self.matches(&TokenType::Percent) {
+                self.advance(); // consume %
+                // Refinement is a parenthesized expression (function call)
+                if self.matches(&TokenType::ParenNoSpace) || self.matches(&TokenType::ParenSpace) {
+                    let refinement_expr = self.parse_prim_expr()?;
+                    // Unwrap SParen to get the inner expression
+                    let unwrapped = match refinement_expr {
+                        Expr::SParen { expr, .. } => *expr,
+                        other => other,
+                    };
+                    Some(Box::new(unwrapped))
+                } else {
+                    let token = self.peek().clone();
+                    return Err(ParseError::general(
+                        &token,
+                        "Expected parenthesized expression after % in check operator",
+                    ));
                 }
+            } else {
+                None
+            };
 
+            // Parse the right-hand side (if needed)
+            // The right side is a full binary expression (can include +, *, etc.)
+            // but check operators have lower precedence, so we DON'T recursively parse more check ops
+            let right = if !self.is_at_end() && !matches!(self.peek().token_type, TokenType::Eof) && !self.is_check_op() {
+                // Parse a binary expression (which includes primitives, postfix ops, and binary ops)
+                // But don't parse another check operator (they're at the same/lower precedence level)
+                let right_expr = self.parse_binop_expr_no_check()?;
                 Some(Box::new(right_expr))
             } else {
                 None
@@ -1156,7 +1274,8 @@ impl Parser {
                 _ => self.current_loc(),
             };
 
-            // Get end location from right expression if it exists, otherwise from operator
+            // Get end location, considering refinement and right expression
+            // Priority: right > refinement > operator
             let end_loc = if let Some(ref right_expr) = right {
                 match right_expr.as_ref() {
                     Expr::SNum { l, .. } => l.clone(),
@@ -1181,8 +1300,33 @@ impl Parser {
                 Expr::SVar { l, .. } => l.clone(),
                     _ => self.current_loc(),
                 }
+            } else if let Some(ref refinement_expr) = refinement {
+                // If no right expression but has refinement, use refinement location
+                match refinement_expr.as_ref() {
+                    Expr::SNum { l, .. } => l.clone(),
+                    Expr::SBool { l, .. } => l.clone(),
+                    Expr::SStr { l, .. } => l.clone(),
+                    Expr::SId { l, .. } => l.clone(),
+                    Expr::SOp { l, .. } => l.clone(),
+                    Expr::SParen { l, .. } => l.clone(),
+                    Expr::SApp { l, .. } => l.clone(),
+                    Expr::SConstruct { l, .. } => l.clone(),
+                    Expr::SDot { l, .. } => l.clone(),
+                    Expr::SBracket { l, .. } => l.clone(),
+                    Expr::SObj { l, .. } => l.clone(),
+                    Expr::STuple { l, .. } => l.clone(),
+                    Expr::STupleGet { l, .. } => l.clone(),
+                    Expr::SLam { l, .. } => l.clone(),
+                    Expr::SBlock { l, .. } => l.clone(),
+                    Expr::SUserBlock { l, .. } => l.clone(),
+                    Expr::SFor { l, .. } => l.clone(),
+                    Expr::SLetExpr { l, .. } => l.clone(),
+                    Expr::SLet { l, .. } => l.clone(),
+                    Expr::SVar { l, .. } => l.clone(),
+                    _ => self.current_loc(),
+                }
             } else {
-                // If no right expression, use operator location
+                // If no right expression and no refinement, use operator location
                 match &op {
                     CheckOp::SOpIs { l } => l.clone(),
                     CheckOp::SOpIsRoughly { l } => l.clone(),
@@ -1200,6 +1344,224 @@ impl Parser {
                 }
             };
 
+            // Check for optional 'because' clause
+            let cause = if self.matches(&TokenType::Because) {
+                self.advance(); // consume 'because'
+                Some(Box::new(self.parse_expr()?))
+            } else {
+                None
+            };
+
+            // Update end location if there's a cause
+            let final_end_loc = if let Some(ref cause_expr) = cause {
+                match cause_expr.as_ref() {
+                    Expr::SNum { l, .. } => l.clone(),
+                    Expr::SBool { l, .. } => l.clone(),
+                    Expr::SStr { l, .. } => l.clone(),
+                    Expr::SId { l, .. } => l.clone(),
+                    Expr::SOp { l, .. } => l.clone(),
+                    Expr::SParen { l, .. } => l.clone(),
+                    Expr::SApp { l, .. } => l.clone(),
+                    Expr::SConstruct { l, .. } => l.clone(),
+                    Expr::SDot { l, .. } => l.clone(),
+                    Expr::SBracket { l, .. } => l.clone(),
+                    Expr::SObj { l, .. } => l.clone(),
+                    Expr::STuple { l, .. } => l.clone(),
+                    Expr::STupleGet { l, .. } => l.clone(),
+                    Expr::SLam { l, .. } => l.clone(),
+                    Expr::SBlock { l, .. } => l.clone(),
+                    Expr::SUserBlock { l, .. } => l.clone(),
+                    Expr::SFor { l, .. } => l.clone(),
+                    Expr::SLetExpr { l, .. } => l.clone(),
+                    Expr::SLet { l, .. } => l.clone(),
+                    Expr::SVar { l, .. } => l.clone(),
+                    _ => self.current_loc(),
+                }
+            } else {
+                end_loc
+            };
+
+            let loc = Loc::new(
+                self.file_name.clone(),
+                start_loc.start_line,
+                start_loc.start_column,
+                start_loc.start_char,
+                final_end_loc.end_line,
+                final_end_loc.end_column,
+                final_end_loc.end_char,
+            );
+
+            left = Expr::SCheckTest {
+                l: loc,
+                op,
+                refinement,
+                left: Box::new(left),
+                right,
+                cause,
+            };
+        }
+
+        Ok(left)
+    }
+
+    /// Same as parse_binop_expr but stops before parsing check operators
+    /// Used for parsing the right-hand side of check operators
+    fn parse_binop_expr_no_check(&mut self) -> ParseResult<Expr> {
+        // Start with a primary expression
+        let mut left = self.parse_prim_expr()?;
+
+        // Check for postfix operators (function application, dot access, and bracket access)
+        loop {
+            if self.matches(&TokenType::ParenNoSpace) {
+                left = self.parse_app_expr(left)?;
+            } else if self.matches(&TokenType::Dot) {
+                let _dot_token = self.expect(TokenType::Dot)?;
+                if self.matches(&TokenType::LBrace) {
+                    // Tuple access
+                    self.expect(TokenType::LBrace)?;
+                    let index_token = self.expect(TokenType::Number)?;
+                    let index: usize = index_token.value.parse()
+                        .map_err(|_| ParseError::invalid("tuple index", &index_token, "Invalid number"))?;
+                    let index_loc = self.make_loc(&index_token, &index_token);
+                    let end = self.expect(TokenType::RBrace)?;
+                    let start_loc = match &left {
+                        Expr::SNum { l, .. } => l.clone(),
+                        Expr::SBool { l, .. } => l.clone(),
+                        Expr::SId { l, .. } => l.clone(),
+                        Expr::SOp { l, .. } => l.clone(),
+                        Expr::SParen { l, .. } => l.clone(),
+                        Expr::SApp { l, .. } => l.clone(),
+                        Expr::SDot { l, .. } => l.clone(),
+                        Expr::SBracket { l, .. } => l.clone(),
+                        Expr::STupleGet { l, .. } => l.clone(),
+                        _ => self.current_loc(),
+                    };
+                    left = Expr::STupleGet {
+                        l: Loc::new(
+                            self.file_name.clone(),
+                            start_loc.start_line,
+                            start_loc.start_column,
+                            start_loc.start_char,
+                            end.location.end_line,
+                            end.location.end_col,
+                            end.location.end_pos,
+                        ),
+                        tup: Box::new(left),
+                        index,
+                        index_loc,
+                    };
+                } else {
+                    // Regular dot access
+                    let field_token = self.parse_field_name()?;
+                    let start_loc = match &left {
+                        Expr::SNum { l, .. } => l.clone(),
+                        Expr::SBool { l, .. } => l.clone(),
+                        Expr::SId { l, .. } => l.clone(),
+                        Expr::SOp { l, .. } => l.clone(),
+                        Expr::SParen { l, .. } => l.clone(),
+                        Expr::SApp { l, .. } => l.clone(),
+                        Expr::SDot { l, .. } => l.clone(),
+                        Expr::SBracket { l, .. } => l.clone(),
+                        Expr::STupleGet { l, .. } => l.clone(),
+                        _ => self.current_loc(),
+                    };
+                    left = Expr::SDot {
+                        l: Loc::new(
+                            self.file_name.clone(),
+                            start_loc.start_line,
+                            start_loc.start_column,
+                            start_loc.start_char,
+                            field_token.location.end_line,
+                            field_token.location.end_col,
+                            field_token.location.end_pos,
+                        ),
+                        obj: Box::new(left),
+                        field: field_token.value.clone(),
+                    };
+                }
+            } else if self.matches(&TokenType::LBrack) {
+                left = self.parse_bracket_expr(left)?;
+            } else {
+                break;
+            }
+        }
+
+        // Parse binary operators (but NOT check operators)
+        while self.is_binop() {
+            let op_token = self.peek().clone();
+            let op = self.parse_binop()?;
+            let mut right = self.parse_prim_expr()?;
+
+            // Postfix operators on right side
+            loop {
+                if self.matches(&TokenType::ParenNoSpace) {
+                    right = self.parse_app_expr(right)?;
+                } else if self.matches(&TokenType::Dot) {
+                    let _dot_token = self.expect(TokenType::Dot)?;
+                    let field_token = self.parse_field_name()?;
+                    let start_loc = match &right {
+                        Expr::SNum { l, .. } => l.clone(),
+                        Expr::SBool { l, .. } => l.clone(),
+                        Expr::SId { l, .. } => l.clone(),
+                        Expr::SOp { l, .. } => l.clone(),
+                        Expr::SParen { l, .. } => l.clone(),
+                        Expr::SApp { l, .. } => l.clone(),
+                        Expr::SDot { l, .. } => l.clone(),
+                        Expr::SBracket { l, .. } => l.clone(),
+                        Expr::STupleGet { l, .. } => l.clone(),
+                        _ => self.current_loc(),
+                    };
+                    right = Expr::SDot {
+                        l: Loc::new(
+                            self.file_name.clone(),
+                            start_loc.start_line,
+                            start_loc.start_column,
+                            start_loc.start_char,
+                            field_token.location.end_line,
+                            field_token.location.end_col,
+                            field_token.location.end_pos,
+                        ),
+                        obj: Box::new(right),
+                        field: field_token.value.clone(),
+                    };
+                } else if self.matches(&TokenType::LBrack) {
+                    right = self.parse_bracket_expr(right)?;
+                } else {
+                    break;
+                }
+            }
+
+            let op_l = Loc::new(
+                self.file_name.clone(),
+                op_token.location.start_line,
+                op_token.location.start_col,
+                op_token.location.start_pos,
+                op_token.location.end_line,
+                op_token.location.end_col,
+                op_token.location.end_pos,
+            );
+            let start_loc = match &left {
+                Expr::SNum { l, .. } => l.clone(),
+                Expr::SBool { l, .. } => l.clone(),
+                Expr::SId { l, .. } => l.clone(),
+                Expr::SOp { l, .. } => l.clone(),
+                Expr::SParen { l, .. } => l.clone(),
+                Expr::SApp { l, .. } => l.clone(),
+                Expr::SDot { l, .. } => l.clone(),
+                Expr::SBracket { l, .. } => l.clone(),
+                _ => self.current_loc(),
+            };
+            let end_loc = match &right {
+                Expr::SNum { l, .. } => l.clone(),
+                Expr::SBool { l, .. } => l.clone(),
+                Expr::SId { l, .. } => l.clone(),
+                Expr::SOp { l, .. } => l.clone(),
+                Expr::SParen { l, .. } => l.clone(),
+                Expr::SApp { l, .. } => l.clone(),
+                Expr::SDot { l, .. } => l.clone(),
+                Expr::SBracket { l, .. } => l.clone(),
+                _ => self.current_loc(),
+            };
             let loc = Loc::new(
                 self.file_name.clone(),
                 start_loc.start_line,
@@ -1210,13 +1572,12 @@ impl Parser {
                 end_loc.end_char,
             );
 
-            left = Expr::SCheckTest {
+            left = Expr::SOp {
                 l: loc,
+                op_l,
                 op,
-                refinement: None,
                 left: Box::new(left),
-                right,
-                cause: None,
+                right: Box::new(right),
             };
         }
 
@@ -1229,6 +1590,7 @@ impl Parser {
 
         match token.token_type {
             TokenType::Number => self.parse_num(),
+            TokenType::RoughNumber => self.parse_rough_num(),
             TokenType::Rational => self.parse_rational(),
             TokenType::RoughRational => self.parse_rough_rational(),
             TokenType::True | TokenType::False => self.parse_bool(),
@@ -1249,6 +1611,7 @@ impl Parser {
             TokenType::Var => self.parse_var_expr(),
             TokenType::CheckColon => self.parse_check_expr(),
             TokenType::Check => self.parse_check_expr(),
+            TokenType::Method => self.parse_method_expr(),
             _ => Err(ParseError::unexpected(token)),
         }
     }
@@ -1278,6 +1641,31 @@ impl Parser {
             .map_err(|_| ParseError::invalid("number", &token, "Invalid number format"))?;
 
         // Store original string to preserve precision for large integers
+        Ok(Expr::SNum { l: loc, n, original: Some(token.value.clone()) })
+    }
+
+    /// rough-num-expr: ROUGHNUMBER
+    /// Parses rough (approximate) numbers like ~0.8 or ~42
+    /// Represented as SNum with the tilde preserved in the original string
+    fn parse_rough_num(&mut self) -> ParseResult<Expr> {
+        let token = self.expect(TokenType::RoughNumber)?;
+        let loc = Loc::new(
+            self.file_name.clone(),
+            token.location.start_line,
+            token.location.start_col,
+            token.location.start_pos,
+            token.location.end_line,
+            token.location.end_col,
+            token.location.end_pos,
+        );
+
+        // Parse the number part (skip the ~)
+        let num_str = token.value.trim_start_matches('~');
+        let n: f64 = num_str
+            .parse()
+            .map_err(|_| ParseError::invalid("rough number", &token, "Invalid number format"))?;
+
+        // Store original string INCLUDING the tilde
         Ok(Expr::SNum { l: loc, n, original: Some(token.value.clone()) })
     }
 
@@ -1320,10 +1708,8 @@ impl Parser {
             ));
         }
 
-        // Simplify the fraction
-        let gcd = Self::gcd(num.abs(), den.abs());
-        let (num, den) = (num / gcd, den / gcd);
-
+        // Note: We don't simplify fractions to match official Pyret parser behavior
+        // The official parser keeps fractions in their original form (e.g., 8/10 not 4/5)
         Ok(Expr::SFrac { l: loc, num, den })
     }
 
@@ -1369,10 +1755,8 @@ impl Parser {
             ));
         }
 
-        // Simplify the fraction
-        let gcd = Self::gcd(num.abs(), den.abs());
-        let (num, den) = (num / gcd, den / gcd);
-
+        // Note: We don't simplify fractions to match official Pyret parser behavior
+        // The official parser keeps fractions in their original form (e.g., ~8/10 not ~4/5)
         Ok(Expr::SRfrac { l: loc, num, den })
     }
 
@@ -1482,6 +1866,12 @@ impl Parser {
                 | TokenType::IsRoughly
                 | TokenType::IsNot
                 | TokenType::IsNotRoughly
+                | TokenType::IsSpaceship
+                | TokenType::IsEqualEqual
+                | TokenType::IsEqualTilde
+                | TokenType::IsNotSpaceship
+                | TokenType::IsNotEqualEqual
+                | TokenType::IsNotEqualTilde
                 | TokenType::Satisfies
                 | TokenType::Violates
                 | TokenType::Raises
@@ -1535,6 +1925,15 @@ impl Parser {
             TokenType::IsRoughly => CheckOp::SOpIsRoughly { l },
             TokenType::IsNot => CheckOp::SOpIsNot { l },
             TokenType::IsNotRoughly => CheckOp::SOpIsNotRoughly { l },
+            // is<op> variants
+            TokenType::IsSpaceship => CheckOp::SOpIsOp { l, op: "op<=>".to_string() },
+            TokenType::IsEqualEqual => CheckOp::SOpIsOp { l, op: "op==".to_string() },
+            TokenType::IsEqualTilde => CheckOp::SOpIsOp { l, op: "op=~".to_string() },
+            // is-not<op> variants
+            TokenType::IsNotSpaceship => CheckOp::SOpIsNotOp { l, op: "op<=>".to_string() },
+            TokenType::IsNotEqualEqual => CheckOp::SOpIsNotOp { l, op: "op==".to_string() },
+            TokenType::IsNotEqualTilde => CheckOp::SOpIsNotOp { l, op: "op=~".to_string() },
+            // other check operators
             TokenType::Satisfies => CheckOp::SOpSatisfies { l },
             TokenType::Violates => CheckOp::SOpSatisfiesNot { l }, // violates = satisfies-not
             TokenType::Raises => CheckOp::SOpRaises { l },
@@ -1882,7 +2281,7 @@ impl Parser {
             && !self.matches(&TokenType::Where)
             && !self.is_at_end()
         {
-            let stmt = self.parse_expr()?;
+            let stmt = self.parse_block_statement()?;
             body_stmts.push(Box::new(stmt));
         }
 
@@ -2069,7 +2468,16 @@ impl Parser {
 
         // Parse the first branch (always present)
         let test = self.parse_expr()?;
-        self.expect(TokenType::Colon)?;
+
+        // Check if using block: or just :
+        // Note: TokenType::Block already includes the colon ("block:")
+        let blocky = if self.matches(&TokenType::Block) {
+            self.advance(); // Consume "block:" token
+            true
+        } else {
+            self.expect(TokenType::Colon)?;
+            false
+        };
 
         // Parse the body (statements until else/elseif/end)
         let mut then_stmts = Vec::new();
@@ -2152,13 +2560,13 @@ impl Parser {
                 l: loc,
                 branches,
                 _else: else_body,
-                blocky: false,
+                blocky,
             })
         } else {
             Ok(Expr::SIf {
                 l: loc,
                 branches,
-                blocky: false,
+                blocky,
             })
         }
     }
@@ -2819,7 +3227,103 @@ impl Parser {
 
     /// method-expr: METHOD(args) ann: doc body where END
     fn parse_method_expr(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_method_expr")
+        let start = self.expect(TokenType::Method)?;
+
+        // Expect opening paren (can be LParen, ParenSpace, or ParenNoSpace)
+        let paren_token = self.peek().clone();
+        match paren_token.token_type {
+            TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace => {
+                self.advance();
+            }
+            _ => {
+                return Err(ParseError::expected(TokenType::LParen, paren_token));
+            }
+        }
+
+        // Parse parameters (comma-separated bindings)
+        // First should be `self`
+        let args = if self.matches(&TokenType::RParen) {
+            Vec::new()
+        } else {
+            self.parse_comma_list(|p| p.parse_bind())?
+        };
+
+        // Expect closing paren
+        self.expect(TokenType::RParen)?;
+
+        // Optional return type annotation: -> ann
+        let ann = if self.matches(&TokenType::ThinArrow) {
+            self.expect(TokenType::ThinArrow)?;
+            self.parse_ann()?
+        } else {
+            Ann::ABlank
+        };
+
+        // Parse body separator (COLON or BLOCK)
+        let blocky = if self.matches(&TokenType::Block) {
+            self.advance();
+            true
+        } else {
+            self.expect(TokenType::Colon)?;
+            false
+        };
+
+        // Parse doc string (skip for now, typically empty)
+        let doc = String::new();
+
+        // Parse method body (statements until END or WHERE)
+        let mut body_stmts = Vec::new();
+        while !self.matches(&TokenType::End)
+            && !self.matches(&TokenType::Where)
+            && !self.is_at_end()
+        {
+            let stmt = self.parse_block_statement()?;
+            body_stmts.push(Box::new(stmt));
+        }
+
+        // Parse optional where clause
+        let (check, check_loc) = if self.matches(&TokenType::Where) {
+            let where_token = self.advance().clone();
+            // The check-loc should just point to the WHERE keyword itself
+            let check_loc = self.make_loc(&where_token, &where_token);
+            let mut where_stmts = Vec::new();
+            while !self.matches(&TokenType::End) && !self.is_at_end() {
+                let stmt = self.parse_expr()?;
+                where_stmts.push(Box::new(stmt));
+            }
+            let check_block = Box::new(Expr::SBlock {
+                l: check_loc.clone(),
+                stmts: where_stmts,
+            });
+            (Some(check_block), Some(check_loc))
+        } else {
+            (None, None)
+        };
+
+        // Expect closing END
+        let end = self.expect(TokenType::End)?;
+
+        // Create location spanning entire method expression
+        let loc = self.make_loc(&start, &end);
+
+        // Create block body
+        let body = Box::new(Expr::SBlock {
+            l: loc.clone(),
+            stmts: body_stmts,
+        });
+
+        Ok(Expr::SMethod {
+            l: loc,
+            name: String::new(), // Methods have no name
+            params: Vec::new(),  // Methods have no type parameters
+            args,
+            ann,
+            doc,
+            body,
+            check_loc,
+            check,
+            blocky,
+        })
     }
 
     /// Shared helper for function headers
@@ -3116,12 +3620,12 @@ impl Parser {
             ));
         };
 
-        // Parse the body as a block of check-test statements
+        // Parse the body as a block of statements (can include let bindings and check tests)
         let mut stmts = Vec::new();
 
         while !self.matches(&TokenType::End) && !self.is_at_end() {
-            // Each statement in a check block should be a check-test
-            let stmt = self.parse_check_test()?;
+            // Parse as block statement to handle both let bindings and check tests
+            let stmt = self.parse_block_statement()?;
             stmts.push(Box::new(stmt));
         }
 

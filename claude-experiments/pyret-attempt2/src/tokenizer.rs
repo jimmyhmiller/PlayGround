@@ -169,6 +169,7 @@ pub enum TokenType {
 
     // Literals
     Number,
+    RoughNumber,      // Rough (approximate) numbers like ~0.8 or ~42
     RoughRational,
     Rational,
     String,
@@ -677,7 +678,8 @@ impl Tokenizer {
         let value: String = self.input[start_pos..self.pos].iter().collect();
         self.paren_is_for_exp = false;
         self.prior_whitespace = false;
-        Some(Token::new(TokenType::Number, value, loc))
+        let token_type = if rough { TokenType::RoughNumber } else { TokenType::Number };
+        Some(Token::new(token_type, value, loc))
     }
 
     fn tokenize_name_or_keyword(&mut self) -> Option<Token> {
@@ -688,6 +690,51 @@ impl Tokenizer {
         let start_line = self.line;
         let start_col = self.col;
         let start_pos = self.pos;
+
+        // Check for special keywords with operators before scanning as identifier
+        // These need to be checked first because '=' and '<' are not valid identifier chars
+        if self.starts_with("is-not<=>") {
+            for _ in 0..9 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::IsNotSpaceship, "is-not<=>".to_string(), loc));
+        }
+        if self.starts_with("is-not==") {
+            for _ in 0..8 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::IsNotEqualEqual, "is-not==".to_string(), loc));
+        }
+        if self.starts_with("is-not=~") {
+            for _ in 0..8 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::IsNotEqualTilde, "is-not=~".to_string(), loc));
+        }
+        if self.starts_with("is<=>") {
+            for _ in 0..5 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::IsSpaceship, "is<=>".to_string(), loc));
+        }
+        if self.starts_with("is==") {
+            for _ in 0..4 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::IsEqualEqual, "is==".to_string(), loc));
+        }
+        if self.starts_with("is=~") {
+            for _ in 0..4 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::IsEqualTilde, "is=~".to_string(), loc));
+        }
 
         // Check for special keyword-colon combinations before scanning as identifier
         if self.starts_with("block:") {

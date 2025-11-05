@@ -2,18 +2,50 @@ const std = @import("std");
 const reader = @import("../reader.zig");
 const vector = @import("../collections/vector.zig");
 
-/// Flat C-compatible layout for Value types
-/// All fields are always present; interpretation depends on type_tag
+/// C-compatible flat layout for Value representation.
+/// This struct maintains C ABI compatibility (extern struct) while providing
+/// ergonomic Zig methods for type-safe access.
 ///
-/// Memory layout: 56 bytes total
-/// - type_tag: 1 byte (ValueType enum)
-/// - padding: 7 bytes (alignment)
-/// - data_ptr: 8 bytes (universal pointer field)
-/// - data_len: 8 bytes (universal length field)
-/// - data_capacity: 8 bytes (for collections)
-/// - data_elem_size: 8 bytes (for collections)
-/// - extra_ptr1: 8 bytes (for complex types)
-/// - extra_ptr2: 8 bytes (for complex types)
+/// Memory layout (56 bytes total):
+/// - Bytes 0-0: type_tag (u8) - ValueType enum
+/// - Bytes 1-7: padding for alignment
+/// - Bytes 8-15: data_ptr (nullable pointer to data)
+/// - Bytes 16-23: data_len (length of data)
+/// - Bytes 24-31: data_capacity (for collections)
+/// - Bytes 32-39: data_elem_size (element size for collections)
+/// - Bytes 40-47: extra_ptr1 (for complex types)
+/// - Bytes 48-55: extra_ptr2 (for complex types)
+///
+/// ## Ergonomic Usage
+///
+/// This type provides zero-cost inline methods for ergonomic access:
+///
+/// ```zig
+/// // Type-safe accessors return optionals
+/// if (layout.asAtom()) |atom| {
+///     std.debug.print("Atom: {s}\n", .{atom});
+/// }
+///
+/// // Pattern matching via visitor
+/// try layout.match(.{
+///     .onAtom = struct {
+///         fn call(atom: []const u8) !void {
+///             // handle atom
+///         }
+///     }.call,
+///     .onList = struct {
+///         fn call(list: []*CValueLayout) !void {
+///             // handle list
+///         }
+///     }.call,
+/// });
+/// ```
+///
+/// ## C ABI Compatibility
+///
+/// The extern struct layout is guaranteed to match C representation.
+/// Methods don't affect the ABI - they're just namespaced functions.
+/// Can be safely passed to/from C functions expecting this layout.
 pub const CValueLayout = extern struct {
     /// Type tag indicating which Value variant this represents
     type_tag: u8,
@@ -87,6 +119,98 @@ pub const CValueLayout = extern struct {
             .list, .vector, .map => true,
             else => false,
         };
+    }
+
+    /// Get the ValueType enum from this layout
+    pub inline fn getType(self: *const CValueLayout) reader.ValueType {
+        return @enumFromInt(self.type_tag);
+    }
+
+    /// Access as atom (identifier, number, string, etc.)
+    /// Returns null if this layout is not an atom type
+    pub inline fn asAtom(self: *const CValueLayout) ?[]const u8 {
+        if (!self.isAtom()) return null;
+        if (self.data_ptr) |ptr| {
+            return ptr[0..self.data_len];
+        }
+        return null;
+    }
+
+    /// Access as list
+    /// Returns null if this layout is not a list
+    /// Note: Returns slice of CValueLayout pointers, not Value pointers
+    pub inline fn asList(self: *const CValueLayout) ?[]*CValueLayout {
+        if (self.type_tag != @intFromEnum(reader.ValueType.list)) return null;
+        if (self.data_ptr) |ptr| {
+            const elem_ptr: [*]*CValueLayout = @ptrCast(@alignCast(ptr));
+            return elem_ptr[0..self.data_len];
+        }
+        return null;
+    }
+
+    /// Access as vector
+    /// Returns null if this layout is not a vector
+    /// Note: Returns slice of CValueLayout pointers, not Value pointers
+    pub inline fn asVector(self: *const CValueLayout) ?[]*CValueLayout {
+        if (self.type_tag != @intFromEnum(reader.ValueType.vector)) return null;
+        if (self.data_ptr) |ptr| {
+            const elem_ptr: [*]*CValueLayout = @ptrCast(@alignCast(ptr));
+            return elem_ptr[0..self.data_len];
+        }
+        return null;
+    }
+
+    /// Access as map
+    /// Returns null if this layout is not a map
+    /// Note: Returns slice of CValueLayout pointers, not Value pointers
+    pub inline fn asMap(self: *const CValueLayout) ?[]*CValueLayout {
+        if (self.type_tag != @intFromEnum(reader.ValueType.map)) return null;
+        if (self.data_ptr) |ptr| {
+            const elem_ptr: [*]*CValueLayout = @ptrCast(@alignCast(ptr));
+            return elem_ptr[0..self.data_len];
+        }
+        return null;
+    }
+
+    /// Pattern matching helper - call appropriate visitor method based on type
+    /// The visitor should have optional methods: onAtom, onList, onVector, onMap, onOther
+    pub fn match(self: *const CValueLayout, visitor: anytype) !void {
+        const vtype = self.getType();
+        switch (vtype) {
+            .identifier, .number, .string, .value_id, .block_id,
+            .symbol, .keyword, .type, .true_lit, .false_lit => {
+                if (@hasDecl(@TypeOf(visitor), "onAtom")) {
+                    const atom = self.asAtom() orelse "";
+                    try visitor.onAtom(atom);
+                }
+            },
+            .list => {
+                if (@hasDecl(@TypeOf(visitor), "onList")) {
+                    if (self.asList()) |list| {
+                        try visitor.onList(list);
+                    }
+                }
+            },
+            .vector => {
+                if (@hasDecl(@TypeOf(visitor), "onVector")) {
+                    if (self.asVector()) |vec| {
+                        try visitor.onVector(vec);
+                    }
+                }
+            },
+            .map => {
+                if (@hasDecl(@TypeOf(visitor), "onMap")) {
+                    if (self.asMap()) |map| {
+                        try visitor.onMap(map);
+                    }
+                }
+            },
+            else => {
+                if (@hasDecl(@TypeOf(visitor), "onOther")) {
+                    try visitor.onOther(self);
+                }
+            },
+        }
     }
 };
 
@@ -384,4 +508,89 @@ test "valueToCLayout - list" {
     try std.testing.expectEqual(@as(usize, @sizeOf(*reader.Value)), layout.data_elem_size);
     try std.testing.expect(!layout.isAtom());
     try std.testing.expect(layout.isCollection());
+}
+
+test "CValueLayout - ergonomic accessor methods" {
+    const allocator = std.testing.allocator;
+
+    // Test atom accessor
+    {
+        const str = "test_identifier";
+        var layout = CValueLayout.empty(.identifier);
+        layout.data_ptr = @constCast(str.ptr);
+        layout.data_len = str.len;
+
+        // Test type checking
+        try std.testing.expect(layout.isAtom());
+        try std.testing.expect(!layout.isCollection());
+        try std.testing.expectEqual(reader.ValueType.identifier, layout.getType());
+
+        // Test accessor
+        if (layout.asAtom()) |atom| {
+            try std.testing.expectEqualStrings("test_identifier", atom);
+        } else {
+            return error.ExpectedAtom;
+        }
+
+        // Test that wrong accessor returns null
+        try std.testing.expect(layout.asList() == null);
+        try std.testing.expect(layout.asVector() == null);
+    }
+
+    // Test pattern matching
+    {
+        const str = "hello";
+        var layout = CValueLayout.empty(.string);
+        layout.data_ptr = @constCast(str.ptr);
+        layout.data_len = str.len;
+
+        var matched_atom = false;
+        var matched_value: []const u8 = undefined;
+
+        const Visitor = struct {
+            matched: *bool,
+            value: *[]const u8,
+
+            pub fn onAtom(self: @This(), atom: []const u8) !void {
+                self.matched.* = true;
+                self.value.* = atom;
+            }
+
+            pub fn onList(_: @This(), _: []*CValueLayout) !void {
+                return error.UnexpectedList;
+            }
+        };
+
+        const visitor = Visitor{
+            .matched = &matched_atom,
+            .value = &matched_value,
+        };
+
+        try layout.match(visitor);
+        try std.testing.expect(matched_atom);
+        try std.testing.expectEqualStrings("hello", matched_value);
+    }
+
+    _ = allocator;
+}
+
+test "CValueLayout - collection accessor methods" {
+    // Note: This test just verifies the API works with null pointers
+    // Full collection tests are in valueToCLayout tests
+
+    var layout = CValueLayout.empty(.list);
+
+    // Empty list
+    try std.testing.expect(layout.isCollection());
+    try std.testing.expect(!layout.isAtom());
+
+    // asAtom should return null for collections
+    try std.testing.expect(layout.asAtom() == null);
+
+    // asList should return null when data_ptr is null
+    try std.testing.expect(layout.asList() == null);
+
+    // Wrong collection type should return null
+    try std.testing.expect(layout.asVector() == null);
+    try std.testing.expect(layout.asMap() == null);
 }

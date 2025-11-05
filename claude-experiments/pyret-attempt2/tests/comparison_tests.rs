@@ -974,6 +974,37 @@ end
 "#);
 }
 
+#[test]
+fn test_for_each() {
+    // Real pattern: for each iteration
+    assert_matches_pyret(r#"
+for each(x from list):
+  x + 1
+end
+"#);
+}
+
+#[test]
+fn test_for_each2() {
+    // Real pattern: for each with two bindings
+    assert_matches_pyret(r#"
+for each2(x from list, y from list2):
+  {x; y}
+end
+"#);
+}
+
+#[test]
+fn test_for_each_with_complex_body() {
+    // Real pattern: for each with block body
+    assert_matches_pyret(r#"
+for each(item from items):
+  print(item)
+  item + 1
+end
+"#);
+}
+
 // ============================================================================
 // CATEGORY: Table Expressions
 // ============================================================================
@@ -1012,7 +1043,6 @@ my-table.filter(lam(r): r.age > 25 end)
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Object refinement
 fn test_object_extension() {
     // Real pattern: extending objects
     assert_matches_pyret(r#"
@@ -1025,12 +1055,29 @@ point.{ z: 0 }
 // The parser fails with: Parse failed, next token is ('RBRACK "]")
 
 #[test]
-#[ignore] // TODO: Object with update
 fn test_object_update_syntax() {
     // Real pattern: immutable updates
     assert_matches_pyret(r#"
 point = { x: 0, y: 0 }
 point.{ x: 10 }
+"#);
+}
+
+#[test]
+fn test_method_expression() {
+    // Real pattern: method as a standalone expression
+    assert_matches_pyret(r#"
+m = method(self): "no-op" end
+m
+"#);
+}
+
+#[test]
+fn test_method_expression_with_args() {
+    // Real pattern: method with arguments
+    assert_matches_pyret(r#"
+add = method(self, x, y): x + y end
+add
 "#);
 }
 
@@ -1090,6 +1137,128 @@ provide: add, multiply end
 }
 
 // ============================================================================
+// COMPREHENSIVE Import/Provide Tests
+// ============================================================================
+
+// --- Import Variations ---
+
+#[test]
+fn test_import_comma_names_from() {
+    // import x, y from source
+    assert_matches_pyret(r#"import x, y from lists"#);
+}
+
+#[test]
+fn test_import_comma_names_from_file() {
+    // import x, y from file("...")
+    assert_matches_pyret(r#"import x, y from file("util.arr")"#);
+}
+
+#[test]
+fn test_import_single_name_from() {
+    // import x from source
+    assert_matches_pyret(r#"import x from lists"#);
+}
+
+#[test]
+fn test_include_simple() {
+    // include source
+    assert_matches_pyret(r#"include lists"#);
+}
+
+#[test]
+fn test_include_from_basic() {
+    // include from source: name end
+    assert_matches_pyret(r#"include from lists: x end"#);
+}
+
+#[test]
+fn test_include_from_multiple() {
+    // include from source: x, y, z end
+    assert_matches_pyret(r#"include from lists: x, y, z end"#);
+}
+
+#[test]
+fn test_include_from_file() {
+    // include from file("..."): name end
+    assert_matches_pyret(r#"include from file("util.arr"): helper end"#);
+}
+
+// --- Provide Variations ---
+
+#[test]
+fn test_provide_name_with_alias() {
+    // provide: foo as bar end
+    assert_matches_pyret(r#"provide: foo as bar end"#);
+}
+
+#[test]
+fn test_provide_type_spec() {
+    // provide: type T end
+    assert_matches_pyret(r#"provide: type Foo end"#);
+}
+
+#[test]
+fn test_provide_type_with_alias() {
+    // provide: type T as U end
+    assert_matches_pyret(r#"provide: type Foo as Bar end"#);
+}
+
+#[test]
+fn test_provide_data_spec() {
+    // provide: data D end
+    assert_matches_pyret(r#"provide: data Tree end"#);
+}
+
+#[test]
+fn test_provide_data_with_alias() {
+    // provide: data D as E end
+    assert_matches_pyret(r#"provide: data Tree as T end"#);
+}
+
+#[test]
+fn test_provide_module_spec() {
+    // provide: module M end
+    assert_matches_pyret(r#"provide: module utils end"#);
+}
+
+#[test]
+fn test_provide_module_with_alias() {
+    // provide: module M as N end
+    assert_matches_pyret(r#"provide: module utils as U end"#);
+}
+
+#[test]
+fn test_provide_star_spec() {
+    // provide: * end
+    assert_matches_pyret(r#"provide: * end"#);
+}
+
+#[test]
+fn test_provide_mixed_specs() {
+    // provide: name, type T, data D, module M end
+    assert_matches_pyret(r#"provide: foo, type Bar, data Baz, module utils end"#);
+}
+
+#[test]
+fn test_provide_from_module() {
+    // provide from module: specs end
+    assert_matches_pyret(r#"provide from lists: * end"#);
+}
+
+#[test]
+fn test_provide_from_module_specific() {
+    // provide from module: name1, name2 end
+    assert_matches_pyret(r#"provide from lists: map, filter end"#);
+}
+
+#[test]
+fn test_provide_stmt_with_block() {
+    // provide expr end (where expr is a block/object)
+    assert_matches_pyret(r#"provide { x: 10, y: 20 } end"#);
+}
+
+// ============================================================================
 // CATEGORY: Type Annotations
 // ============================================================================
 
@@ -1112,6 +1281,28 @@ fn test_generic_function() {
     assert_matches_pyret(r#"
 fun identity<T>(x :: T) -> T:
   x
+end
+"#);
+}
+
+#[test]
+#[ignore] // TODO: Record annotations not yet implemented
+fn test_record_annotation() {
+    // Real pattern: record type annotations
+    assert_matches_pyret(r#"
+fun foo(x :: { a :: Number, b :: String }):
+  x.a + 1
+end
+"#);
+}
+
+#[test]
+#[ignore] // TODO: Arrow annotations in records not yet implemented
+fn test_record_annotation_with_arrow() {
+    // Real pattern: record with function types (from loop.arr)
+    assert_matches_pyret(r#"
+fun loop(f, i :: { init :: Any, test :: (Any -> Boolean), next :: (Any -> Any) }) -> Nothing:
+  nothing
 end
 "#);
 }
@@ -1183,16 +1374,92 @@ end
 "#);
 }
 
+#[test]
+fn test_check_refinement_is() {
+    // Check operators can have refinements specified with %
+    // Syntax: is%(refinement-fn)
+    // Using integers to avoid decimal precision issues
+    assert_matches_pyret(r#"
+check:
+  3 is%(within(1)) 4
+end
+"#);
+}
+
+#[test]
+fn test_check_refinement_is_not() {
+    // is-not% also supports refinements
+    // Using integers to avoid decimal precision issues
+    assert_matches_pyret(r#"
+check:
+  3 is-not%(within(1)) 10
+end
+"#);
+}
+
+#[test]
+fn test_check_refinement_complex() {
+    // Refinements with function calls
+    // Multiple check tests with different refinements
+    assert_matches_pyret(r#"
+check:
+  3 is%(within-rel(1)) 4
+  3 is-not%(within-rel(2)) 10
+end
+"#);
+}
+
+#[test]
+fn test_check_operator_is_spaceship() {
+    // Check operators with custom comparators: is<=>
+    assert_matches_pyret(r#"
+check:
+  x is<=> y
+end
+"#);
+}
+
+#[test]
+fn test_check_operator_is_equal_equal() {
+    // Check operators with custom comparators: is==
+    assert_matches_pyret(r#"
+check:
+  x is== y
+end
+"#);
+}
+
+#[test]
+fn test_check_operator_is_not_spaceship() {
+    // Check operators with custom comparators: is-not<=>
+    assert_matches_pyret(r#"
+check:
+  x is-not<=> y
+end
+"#);
+}
+
+#[test]
+fn test_check_operator_with_object_extension() {
+    // Complex case: object extension with check operator
+    assert_matches_pyret(r#"
+check:
+  {x:1, y:2}.{y:3} is-not<=> {x:1, y:3}
+end
+"#);
+}
+
 // ============================================================================
 // CATEGORY: Complex Real-World Patterns
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Multiple advanced features combined
 fn test_realistic_module_structure() {
     // Real pattern: typical module structure
     assert_matches_pyret(r#"
 import lists as L
+
+provide: Tree, make-tree end
 
 data Tree:
   | leaf(value :: Number)
@@ -1215,8 +1482,6 @@ fun make-tree(lst):
 where:
   make-tree([list: 1, 2, 3]).sum() is 6
 end
-
-provide { Tree, make-tree } end
 "#);
 }
 
@@ -1271,3 +1536,13 @@ x :: Any = 42
 // - Contracts (1 test)
 // - Complex real-world patterns (2 tests)
 // - Gradual typing (1 test)
+
+#[test]
+fn test_if_with_block_keyword() {
+    // Real pattern: if with block: instead of just :
+    assert_matches_pyret(r#"
+if true block:
+  1 + 1
+end
+"#);
+}
