@@ -337,6 +337,14 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "blocky": blocky
             })
         }
+        Expr::SType { name, params, ann, .. } => {
+            json!({
+                "type": "s-type",
+                "name": name_to_pyret_json(name),
+                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
+                "ann": ann_to_pyret_json(ann)
+            })
+        }
         Expr::SData { name, params, mixins, variants, shared_members, check_loc, check, .. } => {
             json!({
                 "type": "s-data",
@@ -490,10 +498,30 @@ fn ann_to_pyret_json(ann: &pyret_attempt2::Ann) -> Value {
             "type": "a-name",
             "id": name_to_pyret_json(id)
         }),
+        Ann::ADot { obj, field, .. } => json!({
+            "type": "a-dot",
+            "obj": name_to_pyret_json(obj),
+            "field": field
+        }),
+        Ann::AArrow { args, ret, use_parens, .. } => json!({
+            "type": "a-arrow",
+            "args": args.iter().map(ann_to_pyret_json).collect::<Vec<_>>(),
+            "ret": ann_to_pyret_json(ret),
+            "use-parens": use_parens
+        }),
         Ann::AApp { ann, args, .. } => json!({
             "type": "a-app",
             "ann": ann_to_pyret_json(ann),
             "args": args.iter().map(ann_to_pyret_json).collect::<Vec<_>>()
+        }),
+        Ann::APred { ann, exp, .. } => json!({
+            "type": "a-pred",
+            "ann": ann_to_pyret_json(ann),
+            "exp": expr_to_pyret_json(exp)
+        }),
+        Ann::ATuple { fields, .. } => json!({
+            "type": "a-tuple",
+            "fields": fields.iter().map(ann_to_pyret_json).collect::<Vec<_>>()
         }),
         _ => json!({
             "type": "UNSUPPORTED",
@@ -725,7 +753,7 @@ fn provide_types_to_pyret_json(provide_types: &pyret_attempt2::ProvideTypes) -> 
 fn provide_block_to_pyret_json(provide_block: &pyret_attempt2::ProvideBlock) -> Value {
     json!({
         "type": "s-provide-block",
-        "path": provide_block.path,
+        "path": provide_block.path.iter().map(|n| name_to_pyret_json(n)).collect::<Vec<_>>(),
         "specs": provide_block.specs.iter().map(|s| provide_spec_to_pyret_json(s)).collect::<Vec<_>>()
     })
 }
@@ -742,19 +770,19 @@ fn provide_spec_to_pyret_json(spec: &pyret_attempt2::ProvideSpec) -> Value {
         ProvideSpec::SProvideType { name, .. } => {
             json!({
                 "type": "s-provide-type",
-                "ann": ann_to_pyret_json(name)
+                "name-spec": name_spec_to_pyret_json(name)
             })
         }
         ProvideSpec::SProvideData { name, .. } => {
             json!({
                 "type": "s-provide-data",
-                "ann": ann_to_pyret_json(name)
+                "name-spec": name_spec_to_pyret_json(name)
             })
         }
         ProvideSpec::SProvideModule { name, .. } => {
             json!({
                 "type": "s-provide-module",
-                "name": name_to_pyret_json(name)
+                "name-spec": name_spec_to_pyret_json(name)
             })
         }
     }
@@ -869,11 +897,11 @@ fn name_spec_to_pyret_json(name_spec: &pyret_attempt2::NameSpec) -> Value {
                 "type": "s-star"
             })
         }
-        NameSpec::SModuleRef { name, .. } => {
+        NameSpec::SModuleRef { path, as_name, .. } => {
             json!({
                 "type": "s-module-ref",
-                "path": vec![name_to_pyret_json(name)],
-                "as-name": Value::Null
+                "path": path.iter().map(|n| name_to_pyret_json(n)).collect::<Vec<_>>(),
+                "as-name": as_name.as_ref().map(|n| name_to_pyret_json(n)).unwrap_or(Value::Null)
             })
         }
         NameSpec::SRemoteRef { uri, name, .. } => {
