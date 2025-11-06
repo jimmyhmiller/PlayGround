@@ -23,11 +23,9 @@ fn createImplicitList(allocator: std.mem.Allocator, forms: PersistentVector(*Val
 }
 
 /// Predicate: Check if operation is IRDL or Transform metadata
-/// Note: builtin.module is also included since transform operations need module wrappers
 fn isIRDLorTransform(op_name: []const u8) bool {
     return std.mem.startsWith(u8, op_name, "irdl.") or
-           std.mem.startsWith(u8, op_name, "transform.") or
-           std.mem.eql(u8, op_name, "builtin.module");
+           std.mem.startsWith(u8, op_name, "transform.");
 }
 
 /// Predicate: Check if operation is regular application code
@@ -196,7 +194,6 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
         std.debug.print("    Op {}: {s} (metadata={})\n", .{i, op.name, matches});
     }
     var metadata_module = try builder.buildModuleFiltered(&parsed_module, isIRDLorTransform);
-    defer metadata_module.destroy();
 
     // Scan for IRDL and transform operations
     var dialect_registry = DialectRegistry.init(allocator);
@@ -213,7 +210,8 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
     });
 
     // Load IRDL dialects if found
-    if (dialect_registry.hasIRDLDialects()) {
+    const has_irdl = dialect_registry.hasIRDLDialects();
+    if (has_irdl) {
         std.debug.print("  Found {} IRDL dialect definition(s), loading...\n", .{dialect_registry.getIRDLOperations().len});
         try metadata_module.loadIRDLDialects();
         std.debug.print("  ✓ IRDL dialects loaded into context\n", .{});
@@ -229,6 +227,13 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
     std.debug.print("  DEBUG: Application module (should only have main function):\n", .{});
     var mlir_module = try builder.buildModuleFiltered(&parsed_module, isRegularCode);
     defer mlir_module.destroy();
+
+    // NOTE: Don't destroy metadata_module if it contains IRDL dialects!
+    // After loadIRDLDialects(), the context holds references to the module's operations.
+    // Destroying it causes a segfault. The arena allocator will clean it up instead.
+    if (!has_irdl) {
+        defer metadata_module.destroy();
+    }
     mlir_module.print();
 
     std.debug.print("✓ MLIR module created successfully!\n", .{});

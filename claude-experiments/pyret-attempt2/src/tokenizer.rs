@@ -792,6 +792,13 @@ impl Tokenizer {
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Sharing, "sharing:".to_string(), loc));
         }
+        if self.starts_with("load-table:") {
+            for _ in 0..11 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.prior_whitespace = false;
+            self.paren_is_for_exp = true;
+            return Some(Token::new(TokenType::LoadTable, "load-table:".to_string(), loc));
+        }
         if self.starts_with("table:") {
             for _ in 0..6 { self.advance(); }
             let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
@@ -1030,6 +1037,13 @@ impl Tokenizer {
             let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::SourceColon, "source:".to_string(), loc));
+        }
+        if self.starts_with("load-table:") {
+            for _ in 0..11 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.prior_whitespace = false;
+            self.paren_is_for_exp = true;
+            return Some(Token::new(TokenType::LoadTable, "load-table:".to_string(), loc));
         }
         if self.starts_with("table:") {
             for _ in 0..6 { self.advance(); }

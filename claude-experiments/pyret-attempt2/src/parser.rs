@@ -251,7 +251,7 @@ impl Parser {
         Vec<ProvideBlock>,
         Vec<Import>,
     )> {
-        let _use = None; // TODO: parse use statements
+        let mut _use = None;
 
         let mut provides = Vec::new();
         let mut imports = Vec::new();
@@ -261,6 +261,11 @@ impl Parser {
         let mut provided_types = ProvideTypes::SProvideTypesNone {
             l: self.current_loc(),
         };
+
+        // Parse use statement (can only appear once, at the beginning)
+        if self.matches(&TokenType::Use) {
+            _use = Some(self.parse_use_stmt()?);
+        }
 
         // Parse provide and import statements in any order
         // per grammar: (provide-stmt|import-stmt)*
@@ -323,7 +328,22 @@ impl Parser {
 impl Parser {
     /// use-stmt: USE NAME import-source
     fn parse_use_stmt(&mut self) -> ParseResult<Use> {
-        todo!("Implement parse_use_stmt")
+        let start = self.expect(TokenType::Use)?;
+        let name = self.parse_name()?;
+        let module = self.parse_import_source()?;
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        Ok(Use {
+            node_type: "s-use".to_string(),
+            l: self.make_loc(&start, &end),
+            name,
+            module,
+        })
     }
 
     /// import-stmt: INCLUDE | IMPORT | ...
@@ -789,8 +809,10 @@ impl Parser {
         if self.matches(&TokenType::Times) || self.matches(&TokenType::Star) {
             let start = self.peek().clone();
             self.advance();
+            // TODO: Parse optional hiding-spec
             return Ok(NameSpec::SStar {
                 l: self.make_loc(&start, &start),
+                hidden: Vec::new(),
             });
         }
 
@@ -817,14 +839,64 @@ impl Parser {
     /// include-spec: include-name-spec | include-type-spec | include-data-spec | include-module-spec
     /// For now, just handles include-name-spec (simple names)
     fn parse_include_spec(&mut self) -> ParseResult<IncludeSpec> {
-        // TODO: Check for TYPE, DATA, MODULE keywords
-        // For now, just parse as include-name-spec
-        let name_spec = self.parse_name_spec()?;
+        let start = self.peek().clone();
 
-        Ok(IncludeSpec::SIncludeName {
-            l: self.current_loc(),
-            name: name_spec,
-        })
+        // Check for TYPE, DATA, or MODULE keywords
+        if self.matches(&TokenType::Type) {
+            // include-type-spec: TYPE name-spec
+            self.advance(); // consume TYPE
+            let name = self.parse_name_spec()?;
+            let end = if self.current > 0 {
+                self.tokens[self.current - 1].clone()
+            } else {
+                start.clone()
+            };
+
+            Ok(IncludeSpec::SIncludeType {
+                l: self.make_loc(&start, &end),
+                name,
+            })
+        } else if self.matches(&TokenType::Data) {
+            // include-data-spec: DATA data-name-spec [hiding-spec]
+            self.advance(); // consume DATA
+            let name = self.parse_name_spec()?;
+
+            // TODO: Parse optional hiding-spec when needed
+            // For now, just handle the name
+
+            let end = if self.current > 0 {
+                self.tokens[self.current - 1].clone()
+            } else {
+                start.clone()
+            };
+
+            Ok(IncludeSpec::SIncludeData {
+                l: self.make_loc(&start, &end),
+                name,
+            })
+        } else if self.matches(&TokenType::Module) {
+            // include-module-spec: MODULE name-spec
+            self.advance(); // consume MODULE
+            let name = self.parse_name_spec()?;
+            let end = if self.current > 0 {
+                self.tokens[self.current - 1].clone()
+            } else {
+                start.clone()
+            };
+
+            Ok(IncludeSpec::SIncludeModule {
+                l: self.make_loc(&start, &end),
+                name,
+            })
+        } else {
+            // include-name-spec: name-spec
+            let name_spec = self.parse_name_spec()?;
+
+            Ok(IncludeSpec::SIncludeName {
+                l: self.current_loc(),
+                name: name_spec,
+            })
+        }
     }
 }
 
@@ -1146,7 +1218,39 @@ impl Parser {
 
     /// tuple-binding: { id; ... }
     fn parse_tuple_bind(&mut self) -> ParseResult<Bind> {
-        todo!("Implement parse_tuple_bind")
+        let start = self.expect(TokenType::LBrace)?;
+
+        // Parse fields: name1; name2; name3
+        let mut fields = Vec::new();
+
+        // Parse first field
+        let first_name = self.parse_name()?;
+        fields.push(Bind::SBind {
+            l: self.current_loc(),
+            shadows: false,
+            id: first_name,
+            ann: Ann::ABlank,
+        });
+
+        // Parse remaining fields
+        while self.matches(&TokenType::Semi) {
+            self.advance(); // consume semicolon
+            let name = self.parse_name()?;
+            fields.push(Bind::SBind {
+                l: self.current_loc(),
+                shadows: false,
+                id: name,
+                ann: Ann::ABlank,
+            });
+        }
+
+        let end = self.expect(TokenType::RBrace)?;
+
+        Ok(Bind::STupleBind {
+            l: self.make_loc(&start, &end),
+            fields,
+            as_name: None,
+        })
     }
 
     /// let-binding: LET | VAR binding = expr
@@ -1923,20 +2027,26 @@ impl Parser {
             TokenType::Lam => self.parse_lambda_expr(),
             TokenType::Fun => self.parse_fun_expr(),
             TokenType::Type => self.parse_type_expr(),
+            TokenType::Newtype => self.parse_newtype_expr(),
             TokenType::Data => self.parse_data_expr(),
             TokenType::Block => self.parse_block_expr(),
             TokenType::If => self.parse_if_expr(),
+            TokenType::Ask => self.parse_ask_expr(),
             TokenType::Cases => self.parse_cases_expr(),
             TokenType::When => self.parse_when_expr(),
             TokenType::For => self.parse_for_expr(),
             TokenType::Let => self.parse_let_expr(),
+            TokenType::Rec => self.parse_rec_expr(),
             TokenType::Letrec => self.parse_letrec_expr(),
             TokenType::Var => self.parse_var_expr(),
             TokenType::CheckColon => self.parse_check_expr(),
             TokenType::Check => self.parse_check_expr(),
+            TokenType::ExamplesColon => self.parse_check_expr(),
             TokenType::Spy => self.parse_spy_stmt(),
             TokenType::Method => self.parse_method_expr(),
             TokenType::Table => self.parse_table_expr(),
+            TokenType::LoadTable => self.parse_load_table_expr(),
+            TokenType::Reactor => self.parse_reactor_expr(),
             _ => Err(ParseError::unexpected(token)),
         }
     }
@@ -2722,15 +2832,38 @@ impl Parser {
         if self.matches(&TokenType::Type) {
             // Type alias: type Name = Type or type Name<T> = Type
             self.parse_type_expr()
+        } else if self.matches(&TokenType::Newtype) {
+            // Newtype: newtype Foo as FooT
+            self.parse_newtype_expr()
         } else if self.matches(&TokenType::Let) {
             // Explicit let binding: let x = 5
             self.parse_let_expr()
+        } else if self.matches(&TokenType::Rec) {
+            // Rec binding: rec x = { foo: 1 }
+            self.parse_rec_expr()
         } else if self.matches(&TokenType::Var) {
             // Var binding: var x := 5
             self.parse_var_expr()
-        } else if self.matches(&TokenType::CheckColon) || self.matches(&TokenType::Check) {
-            // Check block: check: ... end or check "name": ... end
+        } else if self.matches(&TokenType::CheckColon) || self.matches(&TokenType::Check) || self.matches(&TokenType::ExamplesColon) {
+            // Check block: check: ... end or check "name": ... end or examples: ... end
             self.parse_check_expr()
+        } else if self.matches(&TokenType::LBrace) {
+            // Check if this is a tuple destructuring: {a; b} = {1; 2}
+            // We need to look ahead to see if there's an = after the tuple
+            let checkpoint = self.checkpoint();
+
+            // Try to parse the tuple pattern and see if = follows
+            if let Ok(_) = self.parse_tuple_for_destructure() {
+                if self.matches(&TokenType::Equals) {
+                    // Yes! This is tuple destructuring
+                    self.restore(checkpoint);
+                    return self.parse_tuple_destructure_expr();
+                }
+            }
+
+            // Not tuple destructuring, restore and parse as expression
+            self.restore(checkpoint);
+            self.parse_expr()
         } else if self.matches(&TokenType::Name) {
             // Check if this is an implicit let binding: x = value or x :: Type = value
             // Look ahead to see if there's a :: or = or := after the name
@@ -2895,6 +3028,112 @@ impl Parser {
                 l: loc,
                 branches,
                 blocky,
+            })
+        }
+    }
+
+    /// ask-expr: ASK COLON [PIPE test THENCOLON block]+ [PIPE OTHERWISECOLON block] END
+    /// Parses ask expressions (if-pipe-else in AST):
+    /// ask:
+    ///   | x > 0 then: "positive"
+    ///   | x < 0 then: "negative"
+    ///   | otherwise: "zero"
+    /// end
+    fn parse_ask_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::Ask)?;
+        self.expect(TokenType::Colon)?;
+
+        let mut branches = Vec::new();
+        let mut else_branch = None;
+
+        // Parse branches (at least one required)
+        while self.matches(&TokenType::Bar) {
+            self.advance(); // consume |
+
+            // Check if this is an "otherwise" branch
+            let is_otherwise = if self.matches(&TokenType::OtherwiseColon) {
+                self.advance(); // consume "otherwise:"
+                true
+            } else if self.peek().token_type == TokenType::Name && self.peek().value == "otherwise" {
+                self.advance(); // consume "otherwise"
+                self.expect(TokenType::Colon)?; // consume ":"
+                true
+            } else {
+                false
+            };
+
+            if is_otherwise {
+                // Parse the else body
+                let mut else_stmts = Vec::new();
+                while !self.matches(&TokenType::End)
+                    && !self.matches(&TokenType::Bar)
+                    && !self.is_at_end()
+                {
+                    let stmt = self.parse_block_statement()?;
+                    else_stmts.push(Box::new(stmt));
+                }
+
+                else_branch = Some(Box::new(Expr::SBlock {
+                    l: self.current_loc(),
+                    stmts: else_stmts,
+                }));
+
+                // After otherwise, we should be at end
+                break;
+            } else {
+                // Parse test expression
+                let test = self.parse_expr()?;
+
+                // Expect "then:" - could be ThenColon token or Name("then") + Colon
+                if self.matches(&TokenType::ThenColon) {
+                    self.advance();
+                } else if self.peek().token_type == TokenType::Name && self.peek().value == "then" {
+                    self.advance(); // consume "then"
+                    self.expect(TokenType::Colon)?; // consume ":"
+                } else {
+                    return Err(ParseError::general(self.peek(), "Expected 'then:' after test expression"));
+                }
+
+                // Parse the body
+                let mut body_stmts = Vec::new();
+                while !self.matches(&TokenType::End)
+                    && !self.matches(&TokenType::Bar)
+                    && !self.is_at_end()
+                {
+                    let stmt = self.parse_block_statement()?;
+                    body_stmts.push(Box::new(stmt));
+                }
+
+                let body = Expr::SBlock {
+                    l: self.current_loc(),
+                    stmts: body_stmts,
+                };
+
+                branches.push(IfPipeBranch {
+                    node_type: "s-if-pipe-branch".to_string(),
+                    l: self.current_loc(),
+                    test: Box::new(test),
+                    body: Box::new(body),
+                });
+            }
+        }
+
+        let end = self.expect(TokenType::End)?;
+        let loc = self.make_loc(&start, &end);
+
+        // Return SIfPipeElse if there's an else clause, otherwise SIfPipe
+        if let Some(else_body) = else_branch {
+            Ok(Expr::SIfPipeElse {
+                l: loc,
+                branches,
+                _else: else_body,
+                blocky: false,
+            })
+        } else {
+            Ok(Expr::SIfPipe {
+                l: loc,
+                branches,
+                blocky: false,
             })
         }
     }
@@ -3095,6 +3334,80 @@ impl Parser {
             l: self.make_loc(&start, &end),
             name: bind,
             value: Box::new(value),
+        })
+    }
+
+    /// rec-expr: REC toplevel-binding EQUALS binop-expr
+    /// Parses recursive bindings: rec x = { foo: 1 }
+    fn parse_rec_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::Rec)?;
+
+        // Parse binding: name [:: type]
+        let bind = self.parse_bind()?;
+
+        // Expect =
+        self.expect(TokenType::Equals)?;
+
+        // Parse value expression
+        let value = self.parse_expr()?;
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        // Rec bindings are s-rec statements
+        Ok(Expr::SRec {
+            l: self.make_loc(&start, &end),
+            name: bind,
+            value: Box::new(value),
+        })
+    }
+
+    /// Helper function to parse a tuple pattern for destructuring (lookahead only)
+    /// Returns Ok(()) if it successfully parses a tuple pattern, Err otherwise
+    fn parse_tuple_for_destructure(&mut self) -> ParseResult<()> {
+        self.expect(TokenType::LBrace)?;
+
+        // Parse at least one field
+        self.parse_name()?;
+
+        // Parse remaining fields
+        while self.matches(&TokenType::Semi) {
+            self.advance();
+            self.parse_name()?;
+        }
+
+        self.expect(TokenType::RBrace)?;
+        Ok(())
+    }
+
+    /// Parses tuple destructuring: {a; b; c} = {1; 2; 3}
+    fn parse_tuple_destructure_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.peek().clone();
+
+        // Parse the tuple bind pattern: {a; b; c}
+        let tuple_bind = self.parse_tuple_bind()?;
+
+        // Expect =
+        self.expect(TokenType::Equals)?;
+
+        // Parse the value expression
+        let value = self.parse_expr()?;
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        // Create an s-let with tuple bind
+        Ok(Expr::SLet {
+            l: self.make_loc(&start, &end),
+            name: tuple_bind,
+            value: Box::new(value),
+            keyword_val: false,
         })
     }
 
@@ -3498,6 +3811,34 @@ impl Parser {
             name,
             params,
             ann,
+        })
+    }
+
+    /// newtype-expr: NEWTYPE NAME AS NAME
+    /// Creates a type alias with a new name (newtype semantics)
+    /// Example: newtype Foo as FooT
+    fn parse_newtype_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::Newtype)?;
+
+        // Parse the source type name
+        let name = self.parse_name()?;
+
+        // Expect 'as'
+        self.expect(TokenType::As)?;
+
+        // Parse the new type name
+        let namet = self.parse_name()?;
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        Ok(Expr::SNewtype {
+            l: self.make_loc(&start, &end),
+            name,
+            namet,
         })
     }
 
@@ -4100,9 +4441,83 @@ impl Parser {
         todo!("Implement parse_table_select")
     }
 
-    /// load-table-expr: load-table: headers source: ... end
+    /// load-table-expr: LOAD-TABLE COLON headers spec* END
+    /// Parses a load-table expression like:
+    ///   load-table: name, age
+    ///     source: "data.csv"
+    ///     sanitize name: string-sanitizer
+    ///   end
     fn parse_load_table_expr(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_load_table_expr")
+        let start = self.expect(TokenType::LoadTable)?;
+        // Note: LoadTable token already includes the colon, like "load-table:"
+
+        // Parse comma-separated column headers
+        let mut headers = Vec::new();
+        if !self.matches(&TokenType::SourceColon) && !self.matches(&TokenType::Sanitize) && !self.matches(&TokenType::End) {
+            loop {
+                let name_token = self.expect(TokenType::Name)?;
+                let name = name_token.value.clone();
+
+                // Optional type annotation
+                let ann = if self.matches(&TokenType::ColonColon) {
+                    self.expect(TokenType::ColonColon)?;
+                    self.parse_ann()?
+                } else {
+                    Ann::ABlank
+                };
+
+                headers.push(FieldName {
+                    node_type: "s-field-name".to_string(),
+                    l: self.make_loc(&name_token, &name_token),
+                    name,
+                    ann,
+                });
+
+                if !self.matches(&TokenType::Comma) {
+                    break;
+                }
+                self.advance(); // consume comma
+            }
+        }
+
+        // Parse spec lines (source, sanitize, etc.)
+        let mut spec = Vec::new();
+        while !self.matches(&TokenType::End) && !self.is_at_end() {
+            if self.matches(&TokenType::SourceColon) {
+                // source: expr
+                let source_tok = self.expect(TokenType::SourceColon)?;
+                let src_expr = self.parse_expr()?;
+                spec.push(LoadTableSpec::STableSrc {
+                    l: self.make_loc(&source_tok, &source_tok),
+                    src: Box::new(src_expr),
+                });
+            } else if self.matches(&TokenType::Sanitize) {
+                // sanitize name: expr
+                let sanitize_tok = self.expect(TokenType::Sanitize)?;
+                let name_token = self.expect(TokenType::Name)?;
+                self.expect(TokenType::Colon)?;
+                let sanitizer_expr = self.parse_expr()?;
+
+                spec.push(LoadTableSpec::SSanitize {
+                    l: self.make_loc(&sanitize_tok, &name_token),
+                    name: Name::SName {
+                        l: self.make_loc(&name_token, &name_token),
+                        s: name_token.value.clone(),
+                    },
+                    sanitizer: Box::new(sanitizer_expr),
+                });
+            } else {
+                break;
+            }
+        }
+
+        let end = self.expect(TokenType::End)?;
+
+        Ok(Expr::SLoadTable {
+            l: self.make_loc(&start, &end),
+            headers,
+            spec,
+        })
     }
 }
 
@@ -4111,6 +4526,44 @@ impl Parser {
 // ============================================================================
 
 impl Parser {
+    /// reactor-expr: REACTOR COLON fields END
+    /// Parses a reactor expression like:
+    ///   reactor:
+    ///     init: 0,
+    ///     on-tick: lam(state): state + 1 end
+    ///   end
+    fn parse_reactor_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::Reactor)?;
+        self.expect(TokenType::Colon)?;
+
+        // Parse comma-separated fields (same as object fields)
+        let mut fields = Vec::new();
+
+        // Check if there are any fields
+        if !self.matches(&TokenType::End) {
+            loop {
+                fields.push(self.parse_obj_field()?);
+
+                if !self.matches(&TokenType::Comma) {
+                    break;
+                }
+                self.advance(); // consume comma
+
+                // Check for trailing comma
+                if self.matches(&TokenType::End) {
+                    break;
+                }
+            }
+        }
+
+        let end = self.expect(TokenType::End)?;
+
+        Ok(Expr::SReactor {
+            l: self.make_loc(&start, &end),
+            fields,
+        })
+    }
+
     /// check-expr: CHECK [name] COLON body END
     /// Parses a check block like:
     ///   check:
@@ -4123,12 +4576,16 @@ impl Parser {
     fn parse_check_expr(&mut self) -> ParseResult<Expr> {
         let start_token = self.peek().clone();
 
-        // Check for two patterns:
+        // Check for three patterns:
         // 1. check: ... end (CheckColon token)
         // 2. check "string": ... end (Check String Colon tokens)
+        // 3. examples: ... end (ExamplesColon token) - keyword-check is false for examples
         let (start, name, keyword_check) = if self.matches(&TokenType::CheckColon) {
             let tok = self.advance().clone();
             (tok, None, true)
+        } else if self.matches(&TokenType::ExamplesColon) {
+            let tok = self.advance().clone();
+            (tok, None, false) // examples: has keyword-check = false
         } else if self.matches(&TokenType::Check) {
             self.advance(); // consume CHECK
 
@@ -4143,7 +4600,7 @@ impl Parser {
         } else {
             return Err(ParseError::general(
                 &start_token,
-                "Expected 'check:' or 'check \"name\":'",
+                "Expected 'check:', 'examples:', or 'check \"name\":'",
             ));
         };
 

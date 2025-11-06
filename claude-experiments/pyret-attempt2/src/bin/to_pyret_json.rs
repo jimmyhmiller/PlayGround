@@ -182,6 +182,12 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "cause": cause.as_ref().map(|e| expr_to_pyret_json(e))
             })
         }
+        Expr::SReactor { fields, .. } => {
+            json!({
+                "type": "s-reactor",
+                "fields": fields.iter().map(|f| member_to_pyret_json(f)).collect::<Vec<_>>()
+            })
+        }
         Expr::SObj { fields, .. } => {
             json!({
                 "type": "s-obj",
@@ -270,6 +276,21 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "blocky": blocky
             })
         }
+        Expr::SIfPipe { branches, blocky, .. } => {
+            json!({
+                "type": "s-if-pipe",
+                "branches": branches.iter().map(|b| if_pipe_branch_to_pyret_json(b)).collect::<Vec<_>>(),
+                "blocky": blocky
+            })
+        }
+        Expr::SIfPipeElse { branches, _else, blocky, .. } => {
+            json!({
+                "type": "s-if-pipe-else",
+                "branches": branches.iter().map(|b| if_pipe_branch_to_pyret_json(b)).collect::<Vec<_>>(),
+                "else": expr_to_pyret_json(_else),
+                "blocky": blocky
+            })
+        }
         Expr::SFor { iterator, bindings, ann, body, blocky, .. } => {
             json!({
                 "type": "s-for",
@@ -330,6 +351,13 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "value": expr_to_pyret_json(value)
             })
         }
+        Expr::SRec { name, value, .. } => {
+            json!({
+                "type": "s-rec",
+                "name": bind_to_pyret_json(name),
+                "value": expr_to_pyret_json(value)
+            })
+        }
         Expr::SAssign { id, value, .. } => {
             json!({
                 "type": "s-assign",
@@ -351,6 +379,13 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "name": name_to_pyret_json(name),
                 "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
                 "ann": ann_to_pyret_json(ann)
+            })
+        }
+        Expr::SNewtype { name, namet, .. } => {
+            json!({
+                "type": "s-newtype",
+                "name": name_to_pyret_json(name),
+                "namet": name_to_pyret_json(namet)
             })
         }
         Expr::SData { name, params, mixins, variants, shared_members, check_loc, check, .. } => {
@@ -424,6 +459,17 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                     "type": "s-table-row",
                     "elems": r.elems.iter().map(|e| expr_to_pyret_json(e)).collect::<Vec<_>>()
                 })).collect::<Vec<_>>()
+            })
+        }
+        Expr::SLoadTable { headers, spec, .. } => {
+            json!({
+                "type": "s-load-table",
+                "headers": headers.iter().map(|h| json!({
+                    "type": "s-field-name",
+                    "name": h.name,
+                    "value": ann_to_pyret_json(&h.ann)
+                })).collect::<Vec<_>>(),
+                "spec": spec.iter().map(|s| load_table_spec_to_pyret_json(s)).collect::<Vec<_>>()
             })
         }
         _ => {
@@ -674,6 +720,14 @@ fn if_branch_to_pyret_json(branch: &pyret_attempt2::IfBranch) -> Value {
     })
 }
 
+fn if_pipe_branch_to_pyret_json(branch: &pyret_attempt2::IfPipeBranch) -> Value {
+    json!({
+        "type": "s-if-pipe-branch",
+        "test": expr_to_pyret_json(&branch.test),
+        "body": expr_to_pyret_json(&branch.body)
+    })
+}
+
 fn for_bind_to_pyret_json(for_bind: &pyret_attempt2::ForBind) -> Value {
     json!({
         "type": "s-for-bind",
@@ -761,10 +815,11 @@ fn program_to_pyret_json(program: &Program) -> Value {
     obj
 }
 
-fn use_to_pyret_json(_use_stmt: &pyret_attempt2::Use) -> Value {
+fn use_to_pyret_json(use_stmt: &pyret_attempt2::Use) -> Value {
     json!({
-        "type": "UNSUPPORTED",
-        "debug": "Use statement not yet implemented"
+        "type": "s-use",
+        "name": name_to_pyret_json(&use_stmt.name),
+        "mod": import_type_to_pyret_json(&use_stmt.module)
     })
 }
 
@@ -925,19 +980,19 @@ fn include_spec_to_pyret_json(spec: &pyret_attempt2::IncludeSpec) -> Value {
         IncludeSpec::SIncludeType { name, .. } => {
             json!({
                 "type": "s-include-type",
-                "name": name_to_pyret_json(name)
+                "name-spec": name_spec_to_pyret_json(name)
             })
         }
         IncludeSpec::SIncludeData { name, .. } => {
             json!({
                 "type": "s-include-data",
-                "name": name_to_pyret_json(name)
+                "name-spec": name_spec_to_pyret_json(name)
             })
         }
         IncludeSpec::SIncludeModule { name, .. } => {
             json!({
                 "type": "s-include-module",
-                "name": name_to_pyret_json(name)
+                "name-spec": name_spec_to_pyret_json(name)
             })
         }
     }
@@ -946,9 +1001,10 @@ fn include_spec_to_pyret_json(spec: &pyret_attempt2::IncludeSpec) -> Value {
 fn name_spec_to_pyret_json(name_spec: &pyret_attempt2::NameSpec) -> Value {
     use pyret_attempt2::NameSpec;
     match name_spec {
-        NameSpec::SStar { .. } => {
+        NameSpec::SStar { hidden, .. } => {
             json!({
-                "type": "s-star"
+                "type": "s-star",
+                "hidden": hidden.iter().map(|n| name_to_pyret_json(n)).collect::<Vec<_>>()
             })
         }
         NameSpec::SModuleRef { path, as_name, .. } => {
@@ -969,6 +1025,25 @@ fn name_spec_to_pyret_json(name_spec: &pyret_attempt2::NameSpec) -> Value {
             json!({
                 "type": "s-local-ref",
                 "name": name_to_pyret_json(name)
+            })
+        }
+    }
+}
+
+fn load_table_spec_to_pyret_json(spec: &pyret_attempt2::LoadTableSpec) -> Value {
+    use pyret_attempt2::LoadTableSpec;
+    match spec {
+        LoadTableSpec::SSanitize { name, sanitizer, .. } => {
+            json!({
+                "type": "s-sanitize",
+                "name": name_to_pyret_json(name),
+                "sanitizer": expr_to_pyret_json(sanitizer)
+            })
+        }
+        LoadTableSpec::STableSrc { src, .. } => {
+            json!({
+                "type": "s-table-src",
+                "src": expr_to_pyret_json(src)
             })
         }
     }

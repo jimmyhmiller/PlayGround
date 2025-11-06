@@ -1565,7 +1565,6 @@ end
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Not yet implemented - 5+ files failing
 fn test_ask_expression_simple() {
     assert_matches_pyret(r#"
 ask:
@@ -1577,7 +1576,6 @@ end
 }
 
 #[test]
-#[ignore] // Not yet implemented - 5+ files failing
 fn test_ask_expression_in_check() {
     assert_matches_pyret(r#"
 check:
@@ -1590,7 +1588,6 @@ end
 }
 
 #[test]
-#[ignore] // Not yet implemented - 10+ files failing
 fn test_provide_block_with_type() {
     assert_matches_pyret(r#"
 provide:
@@ -1601,7 +1598,6 @@ end
 }
 
 #[test]
-#[ignore] // Not yet implemented - 10+ files failing
 fn test_provide_block_with_type_alias() {
     assert_matches_pyret(r#"
 provide:
@@ -1612,7 +1608,6 @@ end
 }
 
 #[test]
-#[ignore] // Not yet implemented - 10+ files failing
 fn test_include_from_with_type_keyword() {
     assert_matches_pyret(r#"
 include from M:
@@ -1624,13 +1619,11 @@ end
 }
 
 #[test]
-#[ignore] // Not yet implemented - 5+ files failing
 fn test_use_context_statement() {
     assert_matches_pyret("use context essentials2020");
 }
 
 #[test]
-#[ignore] // Not yet implemented - 5+ files failing
 fn test_use_context_with_code() {
     assert_matches_pyret(r#"
 use context global
@@ -1655,7 +1648,7 @@ fun test(): 5 end
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Not yet implemented
+#[ignore] // Reference parser has JSON issues with load-table
 fn test_load_table_simple() {
     assert_matches_pyret(r#"
 load-table: name, age
@@ -1665,7 +1658,7 @@ end
 }
 
 #[test]
-#[ignore] // Not yet implemented
+#[ignore] // Reference parser has JSON issues with load-table
 fn test_load_table_with_url() {
     assert_matches_pyret(r#"
 load-table: name, species, age
@@ -1675,7 +1668,7 @@ end
 }
 
 #[test]
-#[ignore] // Not yet implemented
+#[ignore] // Reference parser has JSON issues with load-table
 fn test_load_table_with_options() {
     assert_matches_pyret(r#"
 load-table: name, age
@@ -1690,7 +1683,6 @@ end
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Not yet implemented
 fn test_reactor_simple() {
     assert_matches_pyret(r#"
 reactor:
@@ -1701,7 +1693,6 @@ end
 }
 
 #[test]
-#[ignore] // Not yet implemented
 fn test_reactor_complete() {
     assert_matches_pyret(r#"
 reactor:
@@ -1717,7 +1708,6 @@ end
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Not yet implemented
 fn test_examples_simple() {
     assert_matches_pyret(r#"
 examples:
@@ -1728,7 +1718,6 @@ end
 }
 
 #[test]
-#[ignore] // Not yet implemented
 fn test_examples_with_function() {
     assert_matches_pyret(r#"
 fun f(x):
@@ -1747,7 +1736,6 @@ end
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Not yet implemented
 fn test_include_from_with_type() {
     assert_matches_pyret(r#"
 include from M:
@@ -1758,7 +1746,6 @@ end
 }
 
 #[test]
-#[ignore] // Not yet implemented
 fn test_include_from_type_star() {
     assert_matches_pyret(r#"
 include from M:
@@ -1773,18 +1760,16 @@ end
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Not yet implemented
 fn test_newtype_simple() {
     assert_matches_pyret("newtype Foo as FooT");
 }
 
 #[test]
-#[ignore] // Not yet implemented
 fn test_newtype_with_code() {
     assert_matches_pyret(r#"
 newtype Array as ArrayT
 
-fun make-array(): [] end
+fun make-array(): [list:] end
 "#);
 }
 
@@ -1793,13 +1778,11 @@ fun make-array(): [] end
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Not yet implemented
 fn test_rec_simple() {
     assert_matches_pyret("rec x = { foo: 1 }");
 }
 
 #[test]
-#[ignore] // Not yet implemented
 fn test_rec_with_reference() {
     assert_matches_pyret(r#"
 rec random-matrix = {
@@ -1813,19 +1796,16 @@ rec random-matrix = {
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Not yet implemented
 fn test_tuple_destructure_simple() {
     assert_matches_pyret("{a; b} = {1; 2}");
 }
 
 #[test]
-#[ignore] // Not yet implemented
 fn test_tuple_destructure_nested() {
     assert_matches_pyret("{a; b; c; d; e} = {10; 214; 124; 62; 12}");
 }
 
 #[test]
-#[ignore] // Not yet implemented
 fn test_tuple_destructure_in_let() {
     assert_matches_pyret(r#"
 {x; y} = {1; 2}

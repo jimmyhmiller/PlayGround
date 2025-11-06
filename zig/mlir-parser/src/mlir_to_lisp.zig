@@ -24,6 +24,7 @@ pub fn main() !void {
         .argv = &[_][]const u8{
             "mlir-opt",
             "--mlir-print-op-generic",
+            "--allow-unregistered-dialect",
             input_file,
         },
         .max_output_bytes = 100 * 1024 * 1024, // 100MB max
