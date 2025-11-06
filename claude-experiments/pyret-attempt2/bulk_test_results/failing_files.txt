@@ -1,240 +1,224 @@
-tools/benchmark/auto-report-programs/recursion-tail-call.arr  # UNKNOWN: line=2 content='fun help(shadow n, sum):...'
-tools/benchmark/auto-report-programs/adding-ones-2000.arr  # FAIL despite earlier success (stack overflow (expression too deep))
-tools/benchmark/auto-report-programs/anf-loop-compiler.arr  # UNKNOWN: line=438 content='[clist:...'
-tools/benchmark/auto-report-programs/ast.arr  # UNKNOWN: line=112 content='| s-underscore(l :: Loc) with:...'
-pyret-ast.arr  # UNKNOWN: line=11 content='doc: "Parse a Pyret file and return its AST"...'
-ast-to-json.arr  # UNKNOWN: line=764 content='method s-srcloc(self, l, shadow loc):...'
-tests/lib-test/lib-test-main.arr  # SUCCESS (verified)
-tests/all.arr  # SUCCESS (verified)
-tests/pyret/test-compile-helper.arr  # UNKNOWN: "value": "Unexpected compile error for "
-tests/pyret/tests/test-errors.arr  # UNKNOWN: line=352 content='template-err = get-err(lam(): (lam(): ... end)() end)...'
-tests/pyret/tests/test-each-loop.arr  # SUCCESS (verified)
-tests/pyret/tests/test-matrices.arr  # UNKNOWN: line=39 content='[row-matrix:] raises "Invalid Matrix Input: Cannot construct...'
-tests/pyret/tests/test-file-locators.arr  # UNKNOWN: line=36 content='mtime: self.mtime!v,...'
-tests/pyret/tests/test-examples.arr  # UNKNOWN: line=1 content='examples:...'
-tests/pyret/tests/test-modules.arr  # UNKNOWN: line=28 content='| some({ saved-time; has-static; static-stuff; dyn-stuff }) ...'
-tests/pyret/tests/test-lists.arr  # UNKNOWN: line=12 content='[list: 1, 2, 3, 4, 5, 6].take(3) is [list: 1, 2, 3]...'
-tests/pyret/tests/test-contracts.arr  # SUCCESS (verified)
-tests/pyret/tests/test-compile-lib.arr  # SUCCESS (verified)
-tests/pyret/tests/test-tail-call.arr  # UNKNOWN: line=40 content='tester(0) does-not-raise...'
-tests/pyret/tests/test-matrices2.arr  # UNKNOWN: line=4 content='rec random-matrix = {...'
-tests/pyret/tests/test-roughnum.arr  # SUCCESS (verified)
-tests/pyret/tests/test-timing.arr  # UNKNOWN: line=16 content='t-only = time-only({(): fib(28)})...'
-tests/pyret/tests/test-sets.arr  # UNKNOWN: line=6 content='[set: 1, 2, 3, 2].member(3) is true...'
-tests/pyret/tests/test-string-dict.arr  # UNKNOWN: line=62 content='[SD.mutable-string-dict: "a", 5] is-not [SD.mutable-string-d...'
-tests/pyret/tests/test-error-rendering.arr  # SUCCESS (verified)
-tests/pyret/tests/test-parse-errors.arr  # UNKNOWN: line=133 content=']...'
-tests/pyret/tests/test-flatness.arr  # SUCCESS (verified)
-tests/pyret/tests/test-rounding.arr  # SUCCESS (verified)
-tests/pyret/tests/test-parse.arr  # SUCCESS (verified)
-tests/pyret/tests/test-cases.arr  # UNKNOWN: line=13 content='| mpair(ref car, cdr) => car + cdr...'
-tests/pyret/tests/test-statistics.arr  # SUCCESS (verified)
-tests/pyret/tests/test-file.arr  # SUCCESS (verified)
-tests/pyret/tests/test-reactor.arr  # UNKNOWN: line=14 content='r1 = reactor:...'
-tests/pyret/tests/use/test-essentials.arr  # UNKNOWN: line=1 content='use context essentials2020...'
-tests/pyret/tests/use/test-simple-use.arr  # UNKNOWN: line=1 content='use context global...'
-tests/pyret/tests/test-builtin-locator.arr  # SUCCESS (verified)
-tests/pyret/tests/test-include.arr  # UNKNOWN: "value": "Expected an answer, but got compilation errors:"
-tests/pyret/tests/test-math.arr  # UNKNOWN: line=14 content='min([list: 1/10, 1/100, 1/100000000000000000000000]) is 1/10...'
-tests/pyret/tests/test-output.arr  # UNKNOWN: line=22 content='| x-sing with:...'
-tests/pyret/tests/test-include-block.arr  # type in provide (provide: type T end)
-tests/pyret/tests/test-rec.arr  # SUCCESS (verified)
-tests/pyret/tests/test-compile-errors.arr  # SUCCESS (verified)
-tests/pyret/tests/test-filesystem.arr  # SUCCESS (verified)
-tests/pyret/tests/test-refs.arr  # UNKNOWN: line=7 content='b1!v is 5...'
-tests/pyret/tests/provide-modules.arr  # type in provide (provide: type T end)
-tests/pyret/tests/test-csv-table.arr  # UNKNOWN: line=18 content='t = load-table: x, y, z...'
-tests/pyret/tests/modules/test-double-rename.arr  # type in provide (provide: type T end)
-tests/pyret/tests/modules/double-rename.arr  # type in provide (provide: type T end)
-tests/pyret/tests/modules/provide-data-with-provide-star.arr  # UNKNOWN: line=5 content='| d1 with:...'
-tests/pyret/tests/modules/re-re-provide-data.arr  # provide from (provide from M: x end)
-tests/pyret/tests/modules/test-import-data-from-data-star.arr  # data in provide (provide: data D end)
-tests/pyret/tests/modules/provide-data-star.arr  # SUCCESS (verified)
-tests/pyret/tests/modules/provide-data.arr  # SUCCESS (verified)
-tests/pyret/tests/modules/re-provide-data.arr  # provide from (provide from M: x end)
-tests/pyret/tests/modules/provide-datatype-as-type-alias.arr  # SUCCESS (verified)
-tests/pyret/tests/modules/test-aliased-names-same-type.arr  # type in provide (provide: type T end)
-tests/pyret/tests/modules/test-provide-type-as-simple.arr  # type in provide (provide: type T end)
-tests/pyret/tests/modules/import-re-provided.arr  # provide from (provide from M: x end)
-tests/pyret/tests/test-adaptive-simpson.arr  # SUCCESS (verified)
-tests/pyret/tests/test-array.arr  # UNKNOWN: line=350 content='[array: 1, 2, 3] is=~ [array: 1, 2, 3]...'
-tests/pyret/tests/test-s-exp.arr  # UNKNOWN: line=104 content='doc: "Parse an s-expr in Paret's concrete syntax into an Exp...'
-tests/pyret/tests/test-numbers.arr  # UNKNOWN: line=300 content='rough-p-over-q = ~812687218752923223460064283612774865041325...'
-tests/pyret/tests/test-within.arr  # UNKNOWN: line=127 content='b1!{v: 10}...'
-tests/pyret/tests/test-images.arr  # UNKNOWN: line=10 content='| right(shadow diff) => diff < n...'
-tests/pyret/tests/test-pprint.arr  # UNKNOWN: line=15 content='shadow path = path + "/" + f...'
-tests/pyret/tests/test-bar-chart.arr  # UNKNOWN: line=1 content='use context essentials2020...'
-tests/pyret/tests/test-repl.arr  # UNKNOWN: line=31 content='| left(shadow res) =>...'
-tests/pyret/tests/test-tuple.arr  # UNKNOWN: line=88 content='{a;b;c;d;e} = {10; 214; 124; 62; 12}...'
-tests/pyret/tests/test-constructors.arr  # UNKNOWN: line=23 content='[every-other: 1, 2, 3, 4, 5, 6, 7] is link(1, link(3, link(5...'
-tests/pyret/tests/test-module-syntax.arr  # type in provide (provide: type T end)
-tests/pyret/tests/test-well-formed.arr  # UNKNOWN: "value": "Expected at least one error for running \n\n "
-tests/pyret/tests/test-str-dict.arr  # UNKNOWN: line=63 content='[SD.mutable-string-dict: {"a"; 5}] is-not [SD.mutable-string...'
-tests/pyret/main2.arr  # SUCCESS (verified)
-tests/pyret/regression/weave-tuple.arr  # UNKNOWN: line=1 content='tuply-contract :: {Number;Number} -> {Number;Number}...'
-tests/pyret/regression/duplicate-check-block-report.arr  # SUCCESS (verified)
-tests/pyret/regression/curried-funs.arr  # SUCCESS (verified)
-tests/pyret/regression/toplevel-data.arr  # SUCCESS (verified)
-tests/pyret/regression/seq-of-lettable.arr  # UNKNOWN: line=4 content='k((lam(shadow k):...'
-tests/pyret/regression/render-reason-wrong-op.arr  # UNKNOWN: line=18 content='exn-unwrap(ans.v).render-reason() does-not-raise...'
-tests/pyret/regression/escaping-module-uris.arr  # SUCCESS (verified)
-tests/pyret/regression/named-arrow-ann.arr  # SUCCESS (verified)
-tests/pyret/regression/sloppy-list-filter.arr  # UNKNOWN: line=5 content='[list: "hello", "", "world", "a"].filter(lam(x): x end)...'
-tests/pyret/regression/immediate-app-return-ann.arr  # UNKNOWN: line=3 content='(lam() -> Number: "a" end)() raises-satisfies C.is-fail...'
-tests/pyret/regression/parens-after-comments.arr  # SUCCESS (verified)
-tests/pyret/regression/empty-check-block.arr  # SUCCESS (verified)
-tests/pyret/regression/tc-internal-err.arr  # UNKNOWN: line=2 content='use context base...'
-tests/pyret/regression/tail-recursion-arg-order.arr  # UNKNOWN: line=20 content='examples:...'
-tests/pyret/regression/random-bogus-range.arr  # SUCCESS (verified)
-tests/pyret/regression.arr  # SUCCESS (verified)
-tests/pyret/test-parse-helper.arr  # UNKNOWN: "field": "ParseError",
-tests/io-tests/tests/test-csv-table-file-with-url.arr  # UNKNOWN: line=5 content='load-table: name, species, sex, age, fixed, legs, pounds, we...'
-tests/io-tests/tests/test-csv-table-url-with-path.arr  # UNKNOWN: line=5 content='load-table: name, species, sex, age, fixed, legs, pounds, we...'
-tests/io-tests/tests/test-csv-table-url.arr  # UNKNOWN: line=42 content='load-table: name, species, sex, age, fixed, legs, pounds, we...'
-tests/type-check/main.arr  # UNKNOWN: "field": "is-unann-failed-test-inference",
-tests/type-check/should-not/data-contravariant.arr  # SUCCESS (verified)
-tests/type-check/should-not/data-phantom.arr  # SUCCESS (verified)
-tests/type-check/should-not/obj-update.arr  # UNKNOWN: line=8 content='b :: Foo = a!{a : 6}...'
-tests/type-check/bad/ask.arr  # UNKNOWN: line=12 content='a = ask:...'
-tests/type-check/bad/obj-update-non-ref.arr  # UNKNOWN: line=7 content='a!{a : 6}...'
-tests/type-check/bad/bad-reactor.arr  # UNKNOWN: line=2 content='reactor:...'
-tests/type-check/bad/lambda-instantiate.arr  # UNKNOWN: line=1 content='tru  = lam<A>(t :: A): lam<B>(f :: B): t end end...'
-tests/type-check/bad/obj-update-incorrect-type.arr  # UNKNOWN: line=7 content='a!{a : "hello"}...'
-tests/type-check/bad/test-refinement.arr  # UNKNOWN: line=4 content='func() is%({(x :: Number): false}) 0...'
-tests/type-check/bad/local-function.arr  # UNKNOWN: line=2 content='fun h(shadow l, rv):...'
-tests/type-check/bad/ref-not-ref.arr  # UNKNOWN: line=6 content='e!{val: 8}...'
-tests/type-check/bad/newtype.arr  # UNKNOWN: line=2 content='newtype Foo as FooT...'
-tests/type-check/bad/tuple-length-binding.arr  # UNKNOWN: line=3 content='{y;z} = x...'
-tests/type-check/bad/forall-lub.arr  # UNKNOWN: line=3 content='lam<A>(a :: A, b :: A):...'
-tests/type-check/bad/obj-glb.arr  # SUCCESS (verified)
-tests/type-check/bad/lib/provide-data.arr  # UNKNOWN: line=6 content='| d1 with:...'
-tests/type-check/bad/no-maker.arr  # UNKNOWN: line=4 content='[a: 1]...'
-tests/type-check/bad/cases-singleton-1.arr  # SUCCESS (verified)
-tests/type-check/bad/mutual-rec.arr  # SUCCESS (verified)
-tests/type-check/bad/ref-fail.arr  # UNKNOWN: line=6 content='e!{parent: 8}...'
-tests/type-check/bad/data-unify-methods.arr  # UNKNOWN: line=2 content='| noneM with:...'
-tests/type-check/should/lambda-test-inference.arr  # UNKNOWN: line=1 content='tru  = lam<A>(t :: A) -> A: lam(f :: A): t end end...'
-tests/type-check/should/lambda-instantiate.arr  # UNKNOWN: line=1 content='tru  = lam<A>(t :: A): lam<B>(f :: B): t end end...'
-tests/type-check/should/lambda-infer.arr  # UNKNOWN: line=1 content='tru  = lam <A>(t :: A): lam <B>(f :: B): t end end...'
-tests/type-check/should/obj-glb.arr  # SUCCESS (verified)
-tests/type-check/should/underscore.arr  # UNKNOWN: line=9 content='example<Number,Number>(5, (_ + 2), (_ + 2))...'
-tests/type-check/good/d-dx.arr  # UNKNOWN: line=8 content='lam(x :: Number) -> Number:...'
-tests/type-check/good/data-constructorAsSingleton-instantiate.arr  # UNKNOWN: line=14 content='| my-link(a, r) =>...'
-tests/type-check/good/data-higherOrder-infer.arr  # SUCCESS (verified)
-tests/type-check/good/test-double-rename.arr  # type in provide (provide: type T end)
-tests/type-check/good/int-list-map.arr  # SUCCESS (verified)
-tests/type-check/good/lazy-lists.arr  # UNKNOWN: line=4 content='lam(x :: Number) -> (Number -> Number):...'
-tests/type-check/good/data-higherOrder-instantiate.arr  # UNKNOWN: line=8 content='| my-empty()    => my-empty<B>()...'
-tests/type-check/good/double-rename.arr  # type in provide (provide: type T end)
-tests/type-check/good/_plus.arr  # UNKNOWN: line=23 content='| bar1(a :: Number) with:...'
-tests/type-check/good/tests.arr  # UNKNOWN: line=20 content='func() satisfies {(x): true}...'
-tests/type-check/good/spy.arr  # UNKNOWN: line=52 content='spy "iteration " + to-string(i):...'
-tests/type-check/good/data-polymorphic-instantiate.arr  # UNKNOWN: line=13 content='a-synth                    = my-link<Number>(1, my-empty<Num...'
-tests/type-check/good/export.arr  # UNKNOWN: Error: General { location: "10:14:139", message: "provide-types with specific ty
-tests/type-check/good/data-constructorAsSingleton-infer.arr  # UNKNOWN: line=19 content='my-link(v, my-empty<A>)...'
-tests/type-check/good/data-methods.arr  # UNKNOWN: line=2 content='| foo1(x :: Number) with:...'
-tests/type-check/good/set-include.arr  # UNKNOWN: line=1 content='use context global...'
-tests/type-check/good/shadowing-doesnt-change-type.arr  # UNKNOWN: line=4 content='shadow a = "hello"...'
-tests/type-check/good/provide-data.arr  # UNKNOWN: line=6 content='| d1 with:...'
-tests/type-check/good/data-polymorphic-ref.arr  # UNKNOWN: line=6 content='n1!v...'
-tests/type-check/good/tests-because.arr  # UNKNOWN: line=32 content='67 does-not-raise...'
-tests/type-check/good/subtyping-and-bottom.arr  # UNKNOWN: line=17 content='app = lam<a, b>(x :: (a -> b), y :: a) -> b:...'
-tests/type-check/good/good-reactor.arr  # UNKNOWN: line=3 content='reactor:...'
-tests/type-check/good/let.arr  # UNKNOWN: line=4 content='a :: Boolean = let x = 5, r = "goodbye", z = "hello" block:...'
-tests/type-check/good/raw-array.arr  # UNKNOWN: line=21 content='make: lam<A>(arr :: RawArray<A>) -> RawArray<A>:...'
-tests/type-check/good/tuple-regression.arr  # UNKNOWN: line=50 content='{a;b;c;d;e} = {10; 214; 124; 62; 12}...'
-tests/type-check/good/forall-lub.arr  # UNKNOWN: line=3 content='lam<A>(a :: A, b :: A) -> A:...'
-tests/type-check/good/lazy-maker.arr  # SUCCESS (verified)
-tests/type-check/good/lam-forall-check.arr  # UNKNOWN: line=6 content='five :: Number = apply-num(lam<A>(a :: A): a end, 5)...'
-tests/type-check/good/data-polymorphic-recursive-infer.arr  # SUCCESS (verified)
-tests/type-check/good/references.arr  # UNKNOWN: line=20 content='e :: Number = my-foo!bar # Checking...'
-tests/type-check/good/data-polymorphic-recursive-instantiate.arr  # SUCCESS (verified)
-tests/type-check/good/ref-set.arr  # UNKNOWN: line=6 content='e!{parent: none}...'
-tests/type-check/good/data-constructorAsFun-infer.arr  # UNKNOWN: line=28 content='zero-list-list-synth                              = my-map(m...'
-tests/type-check/good/data-constructorAsFun-instantiate.arr  # UNKNOWN: line=13 content='| my-empty()    => my-empty<B>()...'
-pyret-ast-repr.arr  # UNKNOWN: line=11 content='doc: "Parse a Pyret file and return its AST as a string repr...'
-ast-json-simple.arr  # UNKNOWN: line=9 content='doc: "Convert an AST node to JSON string"...'
-examples/point.arr  # UNKNOWN: line=27 content='with: method torgb(_): rgb(255, 0, 0) end...'
-examples/queue.arr  # SUCCESS (verified)
-examples/ralist.arr  # UNKNOWN: line=36 content='| ra-empty with:...'
-examples/htdp/struct.arr  # SUCCESS (verified)
-examples/heap.arr  # UNKNOWN: Error: General { location: "15:14:229", message: "provide-types with specific ty
-examples/call-flat-local.arr  # SUCCESS (verified)
-examples/loop.arr  # UNKNOWN: line=12 content='doc: "A C-like loop construct."...'
-ast-to-json-v2.arr  # SUCCESS (verified)
-ast-to-json-final.arr  # SUCCESS (verified)
-src/arr/trove/valueskeleton.arr  # SUCCESS (verified)
-src/arr/trove/reactor-events.arr  # SUCCESS (verified)
-src/arr/trove/timing.arr  # UNKNOWN: line=10 content='time-only :: <T> (( -> T) -> Number)...'
-src/arr/trove/sets.arr  # UNKNOWN: line=27 content='| leaf with:...'
-src/arr/trove/charts.arr  # UNKNOWN: line=102 content='posn = {(x :: Number, y :: Number): [raw-array: x, y]}...'
-src/arr/trove/either.arr  # SUCCESS (verified)
-src/arr/trove/vector-util.arr  # UNKNOWN: line=39 content='doc: "Adaptation of lists.fold2 to work with RawArrays"...'
-src/arr/trove/checker.arr  # ask expression (ask: | cond then: body end)
-src/arr/trove/system.arr  # SUCCESS (verified)
-src/arr/trove/pick.arr  # SUCCESS (verified)
-src/arr/trove/file.arr  # UNKNOWN: line=21 content='| in-fd(inner-file :: Any) with:...'
-src/arr/trove/matrices.arr  # data in provide (provide: data D end)
-src/arr/trove/cmdline.arr  # UNKNOWN: line=51 content='| read-number with:...'
-src/arr/trove/arrays.arr  # UNKNOWN: line=33 content='newtype Array as ArrayT...'
-src/arr/trove/equality.arr  # ask expression (ask: | cond then: body end)
-src/arr/trove/particle-shim-structs.arr  # UNKNOWN: line=27 content='| enters(min :: Number, max :: Number) with:...'
-src/arr/trove/option.arr  # UNKNOWN: line=9 content='| none with:...'
-src/arr/trove/color.arr  # SUCCESS (verified)
-src/arr/trove/lists.arr  # UNKNOWN: line=12 content='| empty with:...'
-src/arr/trove/image-structs.arr  # SUCCESS (verified)
-src/arr/trove/tables.arr  # UNKNOWN: Error: Expected { expected: End, found: Hiding, location: "2:4:13" }
-src/arr/trove/statistics.arr  # UNKNOWN: line=43 content='doc: "Find the average of a list of numbers"...'
-src/arr/trove/srcloc.arr  # UNKNOWN: line=10 content='| builtin(module-name) with:...'
-src/arr/trove/matrix-util.arr  # type in provide (provide: type T end)
-src/arr/trove/constants.arr  # SUCCESS (verified)
-src/arr/trove/error.arr  # UNKNOWN: line=84 content='^ and-maybe({(ast):...'
-src/arr/trove/math.arr  # UNKNOWN: line=17 content='doc: "Find the minimum element of a list according to the bu...'
-src/arr/trove/essentials2020.arr  # UNKNOWN: line=1 content='use context empty-context...'
-src/arr/trove/error-display.arr  # UNKNOWN: line=68 content='shadow error = sequence...'
-src/arr/trove/ast.arr  # UNKNOWN: line=112 content='| s-underscore(l :: Loc) with:...'
-src/arr/trove/render-error-display.arr  # UNKNOWN: "field": "ErrorDisplay",
-src/arr/trove/csv.arr  # UNKNOWN: line=49 content='doc: ```...'
-src/arr/trove/data-source.arr  # ask expression (ask: | cond then: body end)
-src/arr/trove/contracts.arr  # UNKNOWN: line=15 content='| ok with:...'
-src/arr/trove/json-structs.arr  # UNKNOWN: line=10 content='doc: ```Escapes a string for JSON serialization according to...'
-src/arr/trove/internal-image-shared.arr  # SUCCESS (verified)
-src/arr/trove/image.arr  # SUCCESS (verified)
-src/arr/trove/pprint.arr  # UNKNOWN: line=74 content='end,...'
-src/arr/trove/image-typed.arr  # SUCCESS (verified)
-src/arr/trove/s-exp-structs.arr  # SUCCESS (verified)
-src/arr/compiler/server.arr  # SUCCESS (verified)
-src/arr/compiler/pyret.arr  # UNKNOWN: line=94 content=']...'
-src/arr/compiler/flatness.arr  # UNKNOWN: line=38 content='doc: ```...'
-src/arr/compiler/ast-anf.arr  # UNKNOWN: line=47 content='| a-program(l :: Loc, provides :: A.ProvideBlock, imports ::...'
-src/arr/compiler/concat-lists.arr  # UNKNOWN: line=5 content='| concat-empty with:...'
-src/arr/compiler/js-of-pyret.arr  # UNKNOWN: line=27 content='| ccp-dict(dict :: SD.StringDict) with:...'
-src/arr/compiler/ast-util.arr  # UNKNOWN: line=394 content='with-params.{env: args-env}.option(_check)...'
-src/arr/compiler/desugar.arr  # UNKNOWN: line=117 content='doc: ```...'
-src/arr/compiler/compile-structs.arr  # UNKNOWN: line=49 content='with:...'
-src/arr/compiler/desugar-post-tc.arr  # UNKNOWN: line=45 content='doc: ```...'
-src/arr/compiler/locators/builtin.arr  # ask expression (ask: | cond then: body end)
-src/arr/compiler/locators/file.arr  # SUCCESS (verified)
-src/arr/compiler/locators/npm.arr  # SUCCESS (verified)
-src/arr/compiler/locators/jsfile.arr  # SUCCESS (verified)
-src/arr/compiler/locators/url.arr  # UNKNOWN: "value": "Error fetching "
-src/arr/compiler/anf.arr  # UNKNOWN: line=139 content='shadow advs = for map2(name from needs-value.map(_.name), ad...'
-src/arr/compiler/desugar-check.arr  # UNKNOWN: line=35 content='fun check-op-cause(shadow cause, fieldname):...'
-src/arr/compiler/compile-lib.arr  # UNKNOWN: line=234 content='fun visit(shadow locator :: Locator, shadow context :: a, cu...'
-src/arr/compiler/base.arr  # SUCCESS (verified)
-src/arr/compiler/js-ast.arr  # UNKNOWN: line=63 content='| j-block(stmts :: CList<JStmt>) with:...'
-src/arr/compiler/cli-module-loader.arr  # UNKNOWN: line=118 content='{static-path; module-path} = cases(CachedType) cache-type:...'
-src/arr/compiler/resolve-scope.arr  # UNKNOWN: line=34 content='doc: ```...'
-src/arr/compiler/well-formed.arr  # ask expression (ask: | cond then: body end)
-src/arr/compiler/type-check.arr  # UNKNOWN: line=171 content='shadow context = globvs.fold-keys(lam(g, shadow context):...'
-src/arr/compiler/list-aux.arr  # UNKNOWN: line=7 content='doc: ```...'
-src/arr/compiler/anf-loop-compiler.arr  # UNKNOWN: line=438 content='[clist:...'
-src/arr/compiler/js-dag-utils.arr  # UNKNOWN: line=125 content='shadow so-far = declared-vars-jblock(consq, so-far)...'
-src/arr/compiler/type-check-structs.arr  # UNKNOWN: line=90 content='end,...'
-src/arr/compiler/libs.arr  # SUCCESS (verified)
-src/arr/compiler/repl.arr  # UNKNOWN: line=155 content='fun make-definitions-locator(get-defs, shadow globals):...'
-src/arr/compiler/type-defaults.arr  # UNKNOWN: line=255 content=']...'
-src/arr/compiler/type-structs.arr  # UNKNOWN: line=79 content='| link({field-name; field-type}, rest) =>...'
-src/scripts/time-obj-vs-tup.arr  # UNKNOWN: line=19 content='{fsum; fprod} = for fold(totals from {0; 1}, item from l):...'
-src/scripts/time-string-dict.arr  # UNKNOWN: line=80 content='sum := sum + tup.{1}...'
-src/scripts/show-compilation.arr  # UNKNOWN: line=131 content='{_; traces} = v...'
+tools/benchmark/auto-report-programs/recursion-tail-call.arr
+tools/benchmark/auto-report-programs/adding-ones-2000.arr
+tools/benchmark/auto-report-programs/anf-loop-compiler.arr
+tools/benchmark/auto-report-programs/ast.arr
+pyret-ast.arr
+ast-to-json.arr
+tests/lib-test/lib-test-main.arr
+tests/all.arr
+tests/pyret/test-compile-helper.arr
+tests/pyret/tests/test-errors.arr
+tests/pyret/tests/test-each-loop.arr
+tests/pyret/tests/test-matrices.arr
+tests/pyret/tests/test-file-locators.arr
+tests/pyret/tests/test-examples.arr
+tests/pyret/tests/test-modules.arr
+tests/pyret/tests/test-lists.arr
+tests/pyret/tests/test-compile-lib.arr
+tests/pyret/tests/test-tail-call.arr
+tests/pyret/tests/test-matrices2.arr
+tests/pyret/tests/test-roughnum.arr
+tests/pyret/tests/test-timing.arr
+tests/pyret/tests/test-sets.arr
+tests/pyret/tests/test-string-dict.arr
+tests/pyret/tests/test-error-rendering.arr
+tests/pyret/tests/test-parse-errors.arr
+tests/pyret/tests/test-rounding.arr
+tests/pyret/tests/test-cases.arr
+tests/pyret/tests/test-statistics.arr
+tests/pyret/tests/test-file.arr
+tests/pyret/tests/test-reactor.arr
+tests/pyret/tests/test-builtin-locator.arr
+tests/pyret/tests/test-include.arr
+tests/pyret/tests/test-math.arr
+tests/pyret/tests/test-output.arr
+tests/pyret/tests/test-filesystem.arr
+tests/pyret/tests/test-refs.arr
+tests/pyret/tests/modules/provide-data-with-provide-star.arr
+tests/pyret/tests/modules/re-re-provide-data.arr
+tests/pyret/tests/modules/test-import-data-from-data-star.arr
+tests/pyret/tests/modules/provide-data-star.arr
+tests/pyret/tests/modules/provide-data.arr
+tests/pyret/tests/modules/re-provide-data.arr
+tests/pyret/tests/modules/import-re-provided.arr
+tests/pyret/tests/test-adaptive-simpson.arr
+tests/pyret/tests/test-array.arr
+tests/pyret/tests/test-s-exp.arr
+tests/pyret/tests/test-numbers.arr
+tests/pyret/tests/test-within.arr
+tests/pyret/tests/test-images.arr
+tests/pyret/tests/test-pprint.arr
+tests/pyret/tests/test-bar-chart.arr
+tests/pyret/tests/test-repl.arr
+tests/pyret/tests/test-tuple.arr
+tests/pyret/tests/test-constructors.arr
+tests/pyret/tests/test-module-syntax.arr
+tests/pyret/tests/test-well-formed.arr
+tests/pyret/tests/test-str-dict.arr
+tests/pyret/main2.arr
+tests/pyret/regression/weave-tuple.arr
+tests/pyret/regression/curried-funs.arr
+tests/pyret/regression/seq-of-lettable.arr
+tests/pyret/regression/render-reason-wrong-op.arr
+tests/pyret/regression/sloppy-list-filter.arr
+tests/pyret/regression/immediate-app-return-ann.arr
+tests/pyret/regression/tc-internal-err.arr
+tests/pyret/regression/tail-recursion-arg-order.arr
+tests/pyret/regression/random-bogus-range.arr
+tests/pyret/regression.arr
+tests/pyret/test-parse-helper.arr
+tests/io-tests/tests/test-csv-table-file-with-url.arr
+tests/io-tests/tests/test-csv-table-url-with-path.arr
+tests/io-tests/tests/test-input-incorrect-prompt-input-type.arr
+tests/io-tests/tests/test-import-url-both-present-all-remote.arr
+tests/io-tests/tests/test-csv-table-url.arr
+tests/io-tests/tests/library-code.arr
+tests/io-tests/tests/test-input-missing-prompt-input.arr
+tests/io-tests/tests/test-import-url-both-present.arr
+tests/io-tests/tests/test-import-url-remote.arr
+tests/io-tests/tests/test-input-empty-prompt.arr
+tests/io-tests/tests/test-input-non-empty-prompt.arr
+tests/io-tests/tests/test-import-url.arr
+tests/io-tests/tests/nested/library-code.arr
+tests/type-check/main.arr
+tests/type-check/should-not/data-covariant.arr
+tests/type-check/should-not/basic-check.arr
+tests/type-check/should-not/data-invariant.arr
+tests/type-check/should-not/data-contravariant.arr
+tests/type-check/should-not/data-phantom.arr
+tests/type-check/should-not/obj-update.arr
+tests/type-check/bad/magic-plus-2.arr
+tests/type-check/bad/data-unncessary-constructor.arr
+tests/type-check/bad/ask.arr
+tests/type-check/bad/too-few-args.arr
+tests/type-check/bad/list-of-options-conflict-2.arr
+tests/type-check/bad/obj-update-non-ref.arr
+tests/type-check/bad/lambda-instantiate.arr
+tests/type-check/bad/obj-update-incorrect-type.arr
+tests/type-check/bad/test-refinement.arr
+tests/type-check/bad/local-function.arr
+tests/type-check/bad/ref-not-ref.arr
+tests/type-check/bad/forall-lub.arr
+tests/type-check/bad/obj-glb.arr
+tests/type-check/bad/lib/provide-data.arr
+tests/type-check/bad/no-maker.arr
+tests/type-check/bad/cases-singleton-1.arr
+tests/type-check/bad/mutual-rec.arr
+tests/type-check/bad/ref-fail.arr
+tests/type-check/bad/data-unify-methods.arr
+tests/type-check/should/lambda-test-inference.arr
+tests/type-check/should/lambda-instantiate.arr
+tests/type-check/should/lambda-infer.arr
+tests/type-check/should/obj-glb.arr
+tests/type-check/should/underscore.arr
+tests/type-check/good/d-dx.arr
+tests/type-check/good/data-constructorAsSingleton-instantiate.arr
+tests/type-check/good/data-higherOrder-infer.arr
+tests/type-check/good/int-list-map.arr
+tests/type-check/good/lazy-lists.arr
+tests/type-check/good/data-higherOrder-instantiate.arr
+tests/type-check/good/_plus.arr
+tests/type-check/good/tests.arr
+tests/type-check/good/spy.arr
+tests/type-check/good/data-polymorphic-instantiate.arr
+tests/type-check/good/export.arr
+tests/type-check/good/data-constructorAsSingleton-infer.arr
+tests/type-check/good/data-methods.arr
+tests/type-check/good/provide-data.arr
+tests/type-check/good/data-polymorphic-ref.arr
+tests/type-check/good/tests-because.arr
+tests/type-check/good/subtyping-and-bottom.arr
+tests/type-check/good/let.arr
+tests/type-check/good/raw-array.arr
+tests/type-check/good/tuple-regression.arr
+tests/type-check/good/forall-lub.arr
+tests/type-check/good/lazy-maker.arr
+tests/type-check/good/lam-forall-check.arr
+tests/type-check/good/data-polymorphic-recursive-infer.arr
+tests/type-check/good/references.arr
+tests/type-check/good/data-polymorphic-recursive-instantiate.arr
+tests/type-check/good/ref-set.arr
+tests/type-check/good/data-constructorAsFun-infer.arr
+tests/type-check/good/data-constructorAsFun-instantiate.arr
+pyret-ast-repr.arr
+examples/point.arr
+examples/queue.arr
+examples/ralist.arr
+examples/htdp/struct.arr
+examples/heap.arr
+examples/call-flat-local.arr
+examples/loop.arr
+ast-to-json-v2.arr
+ast-to-json-final.arr
+src/arr/trove/valueskeleton.arr
+src/arr/trove/reactor-events.arr
+src/arr/trove/timing.arr
+src/arr/trove/sets.arr
+src/arr/trove/charts.arr
+src/arr/trove/either.arr
+src/arr/trove/vector-util.arr
+src/arr/trove/checker.arr
+src/arr/trove/system.arr
+src/arr/trove/pick.arr
+src/arr/trove/file.arr
+src/arr/trove/matrices.arr
+src/arr/trove/cmdline.arr
+src/arr/trove/arrays.arr
+src/arr/trove/equality.arr
+src/arr/trove/particle-shim-structs.arr
+src/arr/trove/option.arr
+src/arr/trove/color.arr
+src/arr/trove/lists.arr
+src/arr/trove/image-structs.arr
+src/arr/trove/tables.arr
+src/arr/trove/statistics.arr
+src/arr/trove/srcloc.arr
+src/arr/trove/matrix-util.arr
+src/arr/trove/constants.arr
+src/arr/trove/error.arr
+src/arr/trove/math.arr
+src/arr/trove/error-display.arr
+src/arr/trove/ast.arr
+src/arr/trove/render-error-display.arr
+src/arr/trove/csv.arr
+src/arr/trove/data-source.arr
+src/arr/trove/contracts.arr
+src/arr/trove/json-structs.arr
+src/arr/trove/internal-image-shared.arr
+src/arr/trove/image.arr
+src/arr/trove/pprint.arr
+src/arr/trove/image-typed.arr
+src/arr/trove/s-exp-structs.arr
+src/arr/compiler/server.arr
+src/arr/compiler/pyret.arr
+src/arr/compiler/flatness.arr
+src/arr/compiler/ast-anf.arr
+src/arr/compiler/concat-lists.arr
+src/arr/compiler/js-of-pyret.arr
+src/arr/compiler/ast-util.arr
+src/arr/compiler/desugar.arr
+src/arr/compiler/compile-structs.arr
+src/arr/compiler/desugar-post-tc.arr
+src/arr/compiler/locators/builtin.arr
+src/arr/compiler/locators/file.arr
+src/arr/compiler/locators/npm.arr
+src/arr/compiler/locators/jsfile.arr
+src/arr/compiler/anf.arr
+src/arr/compiler/desugar-check.arr
+src/arr/compiler/compile-lib.arr
+src/arr/compiler/base.arr
+src/arr/compiler/js-ast.arr
+src/arr/compiler/cli-module-loader.arr
+src/arr/compiler/resolve-scope.arr
+src/arr/compiler/well-formed.arr
+src/arr/compiler/type-check.arr
+src/arr/compiler/anf-loop-compiler.arr
+src/arr/compiler/js-dag-utils.arr
+src/arr/compiler/type-check-structs.arr
+src/arr/compiler/libs.arr
+src/arr/compiler/repl.arr
+src/arr/compiler/type-defaults.arr
+src/arr/compiler/type-structs.arr
+src/scripts/time-obj-vs-tup.arr
+src/scripts/time-string-dict.arr
+src/scripts/show-compilation.arr

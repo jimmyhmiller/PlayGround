@@ -568,7 +568,9 @@ impl Tokenizer {
             } else {
                 ""
             };
-            let value = self.fix_escapes(without_quotes);
+            // Trim leading/trailing whitespace (Pyret behavior for triple-backtick strings)
+            let trimmed = without_quotes.trim();
+            let value = self.fix_escapes(trimmed);
             Some(Token::new(TokenType::String, value, loc))
         } else {
             Some(Token::new(TokenType::UnterminatedString, raw_value, loc))
@@ -792,6 +794,12 @@ impl Tokenizer {
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Sharing, "sharing:".to_string(), loc));
         }
+        if self.starts_with("source:") {
+            for _ in 0..7 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::SourceColon, "source:".to_string(), loc));
+        }
         if self.starts_with("load-table:") {
             for _ in 0..11 { self.advance(); }
             let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
@@ -920,7 +928,7 @@ impl Tokenizer {
             "lazy" => TokenType::Lazy,
             "let" => TokenType::Let,
             "letrec" => TokenType::Letrec,
-            "load-table" => TokenType::LoadTable,
+            // "load-table" => TokenType::LoadTable, // Removed - should only match "load-table:" with colon
             "method" => TokenType::Method,
             "module" => TokenType::Module,
             "newtype" => TokenType::Newtype,

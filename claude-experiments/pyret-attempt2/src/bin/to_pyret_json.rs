@@ -157,6 +157,13 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "field": field
             })
         }
+        Expr::SGetBang { obj, field, .. } => {
+            json!({
+                "type": "s-get-bang",
+                "obj": expr_to_pyret_json(obj),
+                "field": field
+            })
+        }
         Expr::SBracket { obj, field, .. } => {
             json!({
                 "type": "s-bracket",
@@ -763,6 +770,7 @@ fn cases_bind_to_pyret_json(cases_bind: &pyret_attempt2::CasesBind) -> Value {
         "field-type": format!("s-cases-bind-{}", match cases_bind.field_type {
             pyret_attempt2::CasesBindType::SNormal => "normal",
             pyret_attempt2::CasesBindType::SMutable => "mutable",
+            pyret_attempt2::CasesBindType::SRef => "ref",
         }),
         "bind": bind_to_pyret_json(&cases_bind.bind)
     })

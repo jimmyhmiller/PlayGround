@@ -998,6 +998,9 @@ pub enum CasesBindType {
 
     #[serde(rename = "s-mutable")]
     SMutable,
+
+    #[serde(rename = "s-cases-bind-ref")]
+    SRef,
 }
 
 // ============================================================================
