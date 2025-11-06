@@ -43,58 +43,6 @@ MLIR Module with llvm.*, arith.*, func.* (no mlsp.*)
 [JIT Execution] → Runtime functions handle values
 ```
 
----
-
-## Runtime Library (Zig)
-
-The runtime library receives pointers to strings (doesn't care if global or stack):
-
-```zig
-const std = @import("std");
-
-pub const MlspValue = extern struct {
-    tag: u8,  // 0 = identifier, 1 = list
-    data: ?*anyopaque,
-};
-
-var runtime_arena: ?std.heap.ArenaAllocator = null;
-
-pub export fn mlsp_runtime_init() callconv(.C) void {
-    runtime_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-}
-
-pub export fn mlsp_runtime_deinit() callconv(.C) void {
-    if (runtime_arena) |*arena| {
-        arena.deinit();
-        runtime_arena = null;
-    }
-}
-
-pub export fn mlsp_create_identifier(str: [*:0]const u8) callconv(.C) *MlspValue {
-    const allocator = runtime_arena.?.allocator();
-    const value = allocator.create(MlspValue) catch unreachable;
-    value.* = .{ .tag = 0, .data = @ptrCast(@constCast(str)) };
-    return value;
-}
-
-pub export fn mlsp_create_list(length: usize, elements: [*]*MlspValue) callconv(.C) *MlspValue {
-    const allocator = runtime_arena.?.allocator();
-    const value = allocator.create(MlspValue) catch unreachable;
-    const owned = allocator.alloc(*MlspValue, length) catch unreachable;
-    for (0..length) |i| owned[i] = elements[i];
-    value.* = .{ .tag = 1, .data = @ptrCast(owned.ptr) };
-    return value;
-}
-
-pub export fn mlsp_get_element_static(list: *MlspValue, index: i64) callconv(.C) *MlspValue {
-    const slice: [*]*MlspValue = @ptrCast(@alignCast(list.data));
-    return slice[@intCast(index)];
-}
-
-pub export fn mlsp_get_element_dynamic(list: *MlspValue, index: i64) callconv(.C) *MlspValue {
-    return mlsp_get_element_static(list, index);
-}
-```
 
 ---
 
@@ -345,7 +293,6 @@ pdl.pattern @lower_mlsp_get_element_dyn : benefit(1) {
 
 The executor needs to:
 
-1. **Add runtime function declarations** (Zig helper - same as before)
 2. **Load PDL patterns** from `transforms/mlsp_lowering.pdl`
 3. **Apply patterns** to the module before LLVM lowering
 4. **Register runtime symbols** with the JIT execution engine
@@ -368,13 +315,6 @@ pub fn compile(self: *Executor, module: *mlir.Module) !void {
 
     // Step 4: Create execution engine
     self.engine = try mlir.ExecutionEngine.create(module, ...);
-
-    // Step 5: Register runtime functions
-    const runtime = @import("mlsp_runtime.zig");
-    self.engine.?.registerSymbol("mlsp_create_identifier", @ptrCast(&runtime.mlsp_create_identifier));
-    self.engine.?.registerSymbol("mlsp_create_list", @ptrCast(&runtime.mlsp_create_list));
-    self.engine.?.registerSymbol("mlsp_get_element_static", @ptrCast(&runtime.mlsp_get_element_static));
-    self.engine.?.registerSymbol("mlsp_get_element_dynamic", @ptrCast(&runtime.mlsp_get_element_dynamic));
 }
 
 fn applyPDLPatterns(self: *Executor, module: *mlir.Module, pattern_file: []const u8) !void {

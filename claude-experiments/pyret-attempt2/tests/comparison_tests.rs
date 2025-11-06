@@ -1120,7 +1120,7 @@ import file("util.arr") as U
 }
 
 #[test]
-fn test_provide_with_types() {
+fn test_provide_with_specific_types() {
     // Real pattern: exporting types and values
     assert_matches_pyret(r#"
 provide-types *
@@ -1648,7 +1648,6 @@ fun test(): 5 end
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Reference parser has JSON issues with load-table
 fn test_load_table_simple() {
     assert_matches_pyret(r#"
 load-table: name, age
@@ -1658,7 +1657,6 @@ end
 }
 
 #[test]
-#[ignore] // Reference parser has JSON issues with load-table
 fn test_load_table_with_url() {
     assert_matches_pyret(r#"
 load-table: name, species, age
@@ -1668,12 +1666,11 @@ end
 }
 
 #[test]
-#[ignore] // Reference parser has JSON issues with load-table
 fn test_load_table_with_options() {
     assert_matches_pyret(r#"
 load-table: name, age
   source: "data.csv"
-  sanitize name: string-sanitizer
+  sanitize name using string-sanitizer
 end
 "#);
 }
@@ -1811,4 +1808,364 @@ fn test_tuple_destructure_in_let() {
 {x; y} = {1; 2}
 x + y
 "#);
+}
+// ============================================================================
+// BULK TEST FAILURES - Missing Features from Real Pyret Code
+// ============================================================================
+// These tests are based on actual failures found when parsing the Pyret 
+// standard library and test suite. They represent features that are commonly 
+// used in real Pyret programs but not yet implemented in our parser.
+
+// ----------------------------------------------------------------------------
+// 13. Data Variants with "with:" Shared Methods
+// ----------------------------------------------------------------------------
+// Data variants can have shared methods defined using "with:" clauses.
+// This is the most common failure pattern in the bulk tests.
+
+#[test]
+#[ignore] // Missing feature: with clauses on data variants
+fn test_data_variant_with_methods() {
+    assert_matches_pyret(r#"
+data Option:
+  | none with:
+    method get-or-else(self, default):
+      default
+    end
+  | some(value) with:
+    method get-or-else(self, default):
+      self.value
+    end
+end
+"#);
+}
+
+#[test]
+#[ignore] // Missing feature: with clauses with multiple methods
+fn test_data_variant_with_multiple_methods() {
+    assert_matches_pyret(r#"
+data List:
+  | empty with:
+    method length(self): 0 end,
+    method append(self, item): link(item, self) end
+  | link(first, rest)
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 14. Documentation Strings (doc:)
+// ----------------------------------------------------------------------------
+// Pyret supports doc: strings for documenting functions, methods, and types
+
+#[test]
+fn test_doc_string_simple() {
+    assert_matches_pyret(r#"
+fun square(n):
+  doc: "Compute the square of a number"
+  n * n
+end
+"#);
+}
+
+#[test]
+#[ignore] // Missing feature: data variant with methods
+fn test_doc_string_in_method() {
+    assert_matches_pyret(r#"
+data Point:
+  | pt(x, y) with:
+    method distance(self):
+      doc: "Calculate distance from origin"
+      num-sqrt((self.x * self.x) + (self.y * self.y))
+    end
+end
+"#);
+}
+
+#[test]
+fn test_doc_string_multiline() {
+    assert_matches_pyret(r#"
+fun factorial(n):
+  doc: ```
+    Compute the factorial of n.
+    Returns n! = n * (n-1) * ... * 1
+  ```
+  if n == 0: 1 else: n * factorial(n - 1) end
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 15. Shadow Keyword for Variable Rebinding
+// ----------------------------------------------------------------------------
+// The shadow keyword explicitly marks variable shadowing
+
+#[test]
+fn test_shadow_simple() {
+    assert_matches_pyret(r#"
+x = 5
+shadow x = 10
+x
+"#);
+}
+
+#[test]
+fn test_shadow_in_params() {
+    assert_matches_pyret(r#"
+fun help(shadow n, sum):
+  if n == 0:
+    sum
+  else:
+    help(n - 1, sum + n)
+  end
+end
+"#);
+}
+
+#[test]
+fn test_shadow_in_cases() {
+    assert_matches_pyret(r#"
+cases(Either) x:
+  | left(shadow x) => x + 1
+  | right(y) => y
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 16. Bang Operator for Ref Fields (!)
+// ----------------------------------------------------------------------------
+// The ! operator accesses and updates ref (mutable) fields
+
+#[test]
+fn test_bang_field_access() {
+    assert_matches_pyret(r#"
+data Box:
+  | box(ref value)
+end
+b = box(5)
+b!value
+"#);
+}
+
+#[test]
+fn test_bang_field_update() {
+    assert_matches_pyret(r#"
+data Counter:
+  | counter(ref count)
+end
+c = counter(0)
+c!{count: c!count + 1}
+"#);
+}
+
+#[test]
+fn test_bang_multiple_fields() {
+    assert_matches_pyret(r#"
+data State:
+  | state(ref x, ref y)
+end
+s = state(1, 2)
+s!{x: 10, y: 20}
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 17. Ref Keyword in Pattern Matching
+// ----------------------------------------------------------------------------
+// The ref keyword in cases patterns indicates ref field destructuring
+
+#[test]
+fn test_ref_in_cases_pattern() {
+    assert_matches_pyret(r#"
+data MutPair:
+  | mpair(ref car, cdr)
+end
+m = mpair(1, 2)
+cases(MutPair) m:
+  | mpair(ref car, cdr) => car + cdr
+end
+"#);
+}
+
+#[test]
+fn test_ref_pattern_multiple() {
+    assert_matches_pyret(r#"
+data MutPair:
+  | mpair(ref car, ref cdr)
+end
+m = mpair(1, 2)
+cases(MutPair) m:
+  | mpair(ref car, ref cdr) => car + cdr
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 18. Additional Constructor Types
+// ----------------------------------------------------------------------------
+// Pyret has many built-in constructor types besides [list:]
+
+#[test]
+#[ignore] // Missing feature: set constructor
+fn test_set_constructor() {
+    assert_matches_pyret("[set: 1, 2, 3, 2]");
+}
+
+#[test]
+#[ignore] // Missing feature: tree-set constructor  
+fn test_tree_set_constructor() {
+    assert_matches_pyret("[tree-set: 1, 2, 3]");
+}
+
+#[test]
+#[ignore] // Missing feature: array constructor
+fn test_array_constructor() {
+    assert_matches_pyret("[array: 1, 2, 3]");
+}
+
+#[test]
+#[ignore] // Missing feature: raw-array constructor
+fn test_raw_array_constructor() {
+    assert_matches_pyret("[raw-array: 1, 2, 3]");
+}
+
+// ----------------------------------------------------------------------------
+// 19. Advanced Test Operators
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // TODO: test infrastructure issue with multiline check blocks
+fn test_does_not_raise() {
+    assert_matches_pyret(r#"
+check:
+  fun f(x): x + 1 end
+  f(5) does-not-raise
+end
+"#);
+}
+
+#[test]
+#[ignore] // Missing feature: raises-satisfies
+fn test_raises_satisfies() {
+    assert_matches_pyret(r#"
+check:
+  (lam(): raise("error") end)() raises-satisfies is-string
+end
+"#);
+}
+
+#[test]
+#[ignore] // Missing feature: raises-other-than
+fn test_raises_other_than() {
+    assert_matches_pyret(r#"
+check:
+  (lam(): raise("error") end)() raises-other-than "different"
+end
+"#);
+}
+
+#[test]
+#[ignore] // Missing feature: satisfies with custom predicate
+fn test_satisfies_predicate() {
+    assert_matches_pyret(r#"
+check:
+  5 satisfies {(x): x > 0}
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 20. Generic Lambda Expressions
+// ----------------------------------------------------------------------------
+// Lambdas can have type parameters
+
+#[test]
+#[ignore] // Missing feature: generic lambda
+fn test_generic_lambda() {
+    assert_matches_pyret("lam<A>(x :: A): x end");
+}
+
+#[test]
+#[ignore] // Missing feature: generic lambda with multiple params
+fn test_generic_lambda_multiple_params() {
+    assert_matches_pyret("lam<A, B>(x :: A, f :: (A -> B)): f(x) end");
+}
+
+#[test]
+#[ignore] // Missing feature: generic lambda with return type
+fn test_generic_lambda_return_type() {
+    assert_matches_pyret("lam<A>(x :: A) -> A: x end");
+}
+
+// ----------------------------------------------------------------------------
+// 21. Advanced Module Features
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // Missing feature: provide-types star
+fn test_provide_types_star() {
+    assert_matches_pyret(r#"
+provide *
+provide-types *
+
+data Foo: | foo end
+"#);
+}
+
+#[test]
+#[ignore] // Missing feature: provide-types with braces
+fn test_provide_types_with_braces() {
+    assert_matches_pyret(r#"
+provide-types { Foo }
+
+data Foo: | foo end
+"#);
+}
+
+#[test]
+#[ignore] // Missing feature: import hiding
+fn test_import_hiding() {
+    assert_matches_pyret("import lists as L hiding(map, filter)");
+}
+
+// ----------------------------------------------------------------------------
+// 22. Curly Brace Shorthand Syntax
+// ----------------------------------------------------------------------------
+// Curly braces can be used for various shorthands
+
+#[test]
+#[ignore] // Missing feature: curly brace object shorthand
+fn test_curly_brace_function_arg() {
+    assert_matches_pyret(r#"
+lists.map({(x): x + 1}, [list: 1, 2, 3])
+"#);
+}
+
+#[test]
+#[ignore] // Missing feature: tuple in object
+fn test_tuple_in_dict_constructor() {
+    assert_matches_pyret(r#"
+[SD.string-dict: {"a"; 5}, {"b"; 10}]
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 23. Special Operators and Syntax
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // Missing feature: ellipsis in construct
+fn test_ellipsis_operator() {
+    assert_matches_pyret("[list: 1, 2, ...rest]");
+}
+
+#[test]
+fn test_caret_operator() {
+    assert_matches_pyret("a ^ b");
+}
+
+#[test]
+#[ignore] // TODO: double-bang needs special investigation
+fn test_double_bang() {
+    assert_matches_pyret("list!!get(0)");
 }
