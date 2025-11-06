@@ -1554,3 +1554,281 @@ fun test(x :: Loc) -> Loc:
 end
 "#);
 }
+
+// ============================================================================
+// Remaining Features - TODO (From bulk test analysis)
+// ============================================================================
+// Note: Tests for provide-from already exist above and are working.
+
+// ----------------------------------------------------------------------------
+// High Priority - Appear in bulk failures but have no (or incomplete) tests
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // Not yet implemented - 5+ files failing
+fn test_ask_expression_simple() {
+    assert_matches_pyret(r#"
+ask:
+  | x > 0 then: "positive"
+  | x < 0 then: "negative"
+  | otherwise: "zero"
+end
+"#);
+}
+
+#[test]
+#[ignore] // Not yet implemented - 5+ files failing
+fn test_ask_expression_in_check() {
+    assert_matches_pyret(r#"
+check:
+  ask:
+    | string-to-upper("hello") == "TRUE" then: true
+    | otherwise: false
+  end is false
+end
+"#);
+}
+
+#[test]
+#[ignore] // Not yet implemented - 10+ files failing
+fn test_provide_block_with_type() {
+    assert_matches_pyret(r#"
+provide:
+  type StringDict,
+  string-dict
+end
+"#);
+}
+
+#[test]
+#[ignore] // Not yet implemented - 10+ files failing
+fn test_provide_block_with_type_alias() {
+    assert_matches_pyret(r#"
+provide:
+  type StringDict as SD,
+  type MutableStringDict as MSD
+end
+"#);
+}
+
+#[test]
+#[ignore] // Not yet implemented - 10+ files failing
+fn test_include_from_with_type_keyword() {
+    assert_matches_pyret(r#"
+include from M:
+  foo,
+  type Bar,
+  type *
+end
+"#);
+}
+
+#[test]
+#[ignore] // Not yet implemented - 5+ files failing
+fn test_use_context_statement() {
+    assert_matches_pyret("use context essentials2020");
+}
+
+#[test]
+#[ignore] // Not yet implemented - 5+ files failing
+fn test_use_context_with_code() {
+    assert_matches_pyret(r#"
+use context global
+
+fun test(): 5 end
+"#);
+}
+
+// Doc strings with triple backticks require tokenizer changes
+// #[test]
+// #[ignore] // Not yet implemented - 6+ files failing
+// fn test_doc_string_triple_backtick() {
+//     assert_matches_pyret(r#"
+// doc: ```
+// Multi-line documentation
+// ```
+// "#);
+// }
+
+// ----------------------------------------------------------------------------
+// 6. Load Table Expressions (3 files affected)
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_load_table_simple() {
+    assert_matches_pyret(r#"
+load-table: name, age
+  source: "data.csv"
+end
+"#);
+}
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_load_table_with_url() {
+    assert_matches_pyret(r#"
+load-table: name, species, age
+  source: url("https://example.com/data.csv")
+end
+"#);
+}
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_load_table_with_options() {
+    assert_matches_pyret(r#"
+load-table: name, age
+  source: "data.csv"
+  sanitize name: string-sanitizer
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 7. Reactor Expressions (2 files affected)
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_reactor_simple() {
+    assert_matches_pyret(r#"
+reactor:
+  init: 0,
+  on-tick: lam(state): state + 1 end
+end
+"#);
+}
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_reactor_complete() {
+    assert_matches_pyret(r#"
+reactor:
+  init: 0,
+  on-tick: lam(state): state + 1 end,
+  to-draw: lam(state): circle(state, "solid", "red") end
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 8. Examples Blocks (2 files affected)
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_examples_simple() {
+    assert_matches_pyret(r#"
+examples:
+  f(1) is 2
+  f(2) is 3
+end
+"#);
+}
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_examples_with_function() {
+    assert_matches_pyret(r#"
+fun f(x):
+  x + 1
+where:
+  examples:
+    f(1) is 2
+    f(2) is 3
+  end
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 9. Include From with Type (from bulk test analysis)
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_include_from_with_type() {
+    assert_matches_pyret(r#"
+include from M:
+  foo,
+  type Bar
+end
+"#);
+}
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_include_from_type_star() {
+    assert_matches_pyret(r#"
+include from M:
+  *,
+  type *
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 10. Newtype Declarations (1 file affected)
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_newtype_simple() {
+    assert_matches_pyret("newtype Foo as FooT");
+}
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_newtype_with_code() {
+    assert_matches_pyret(r#"
+newtype Array as ArrayT
+
+fun make-array(): [] end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 11. Rec Bindings (Alternative to letrec)
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_rec_simple() {
+    assert_matches_pyret("rec x = { foo: 1 }");
+}
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_rec_with_reference() {
+    assert_matches_pyret(r#"
+rec random-matrix = {
+  make: lam(): random-matrix end
+}
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 12. Tuple Destructuring in Bindings
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_tuple_destructure_simple() {
+    assert_matches_pyret("{a; b} = {1; 2}");
+}
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_tuple_destructure_nested() {
+    assert_matches_pyret("{a; b; c; d; e} = {10; 214; 124; 62; 12}");
+}
+
+#[test]
+#[ignore] // Not yet implemented
+fn test_tuple_destructure_in_let() {
+    assert_matches_pyret(r#"
+{x; y} = {1; 2}
+x + y
+"#);
+}
