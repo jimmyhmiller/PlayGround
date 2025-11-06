@@ -1,0 +1,156 @@
+
+
+(operation
+ (name irdl.dialect)
+ (attributes {:sym_name @mlsp})
+ (regions
+  (region
+   (block
+    (arguments [])
+    (operation
+     (name irdl.operation)
+     (attributes {:sym_name @identifier})
+     (regions
+      (region
+       (block
+        (arguments [])
+        (operation
+         (name irdl.any)
+         (result-bindings [%13])
+         (result-types !irdl.attribute))
+        (operation
+         (name irdl.attributes)
+         (operand-uses %13)
+         (attributes {:attributeValueNames ["value"]}))
+        (operation
+         (name irdl.is)
+         (result-bindings [%14])
+         (result-types !irdl.attribute)
+         (attributes {:expected !llvm.ptr}))
+        (operation
+         (name irdl.results)
+         (operand-uses %14)
+         (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))
+    (operation
+     (name irdl.operation)
+     (attributes {:sym_name @list})
+     (regions
+      (region
+       (block
+        (arguments [])
+        (operation
+         (name irdl.is)
+         (result-bindings [%12])
+         (result-types !irdl.attribute)
+         (attributes {:expected !llvm.ptr}))
+        (operation
+         (name irdl.operands)
+         (operand-uses %12)
+         (attributes {:names ["elements"] :variadicity #irdl<variadicity_array[ variadic]>}))
+        (operation
+         (name irdl.results)
+         (operand-uses %12)
+         (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})))))
+    (operation
+     (name irdl.operation)
+     (attributes {:sym_name @get_element})
+     (regions
+      (region
+       (block
+        (arguments [])
+        (operation
+         (name irdl.is)
+         (result-bindings [%10])
+         (result-types !irdl.attribute)
+         (attributes {:expected !llvm.ptr}))
+        (operation
+         (name irdl.operands)
+         (operand-uses %10)
+         (attributes {:names ["list"] :variadicity #irdl<variadicity_array[ single]>}))
+        (operation
+         (name irdl.is)
+         (result-bindings [%11])
+         (result-types !irdl.attribute)
+         (attributes {:expected i64}))
+        (operation
+         (name irdl.attributes)
+         (operand-uses %11)
+         (attributes {:attributeValueNames ["index"]}))
+        (operation
+         (name irdl.results)
+         (operand-uses %10)
+         (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})))))
+    (operation
+     (name irdl.operation)
+     (attributes {:sym_name @get_element_dyn})
+     (regions
+      (region
+       (block
+        (arguments [])
+        (operation
+         (name irdl.is)
+         (result-bindings [%8])
+         (result-types !irdl.attribute)
+         (attributes {:expected !llvm.ptr}))
+        (operation
+         (name irdl.is)
+         (result-bindings [%9])
+         (result-types !irdl.attribute)
+         (attributes {:expected i64}))
+        (operation
+         (name irdl.operands)
+         (operand-uses %8 %9)
+         (attributes {:names ["list" "index"] :variadicity #irdl<variadicity_array[ single,  single]>}))
+        (operation
+         (name irdl.results)
+         (operand-uses %8)
+         (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})))))))))
+
+
+(operation
+ (name func.func)
+ (attributes {:function_type (!function (inputs) (results i64)) :sym_name @main})
+ (regions
+  (region
+   (block
+    (arguments [])
+    (operation
+     (name mlsp.identifier)
+     (result-bindings [%0])
+     (result-types !llvm.ptr)
+     (attributes {:value "a"}))
+    (operation
+     (name mlsp.identifier)
+     (result-bindings [%1])
+     (result-types !llvm.ptr)
+     (attributes {:value "b"}))
+    (operation
+     (name mlsp.list)
+     (result-bindings [%2])
+     (result-types !llvm.ptr)
+     (operand-uses %0 %1))
+    (operation
+     (name mlsp.get_element)
+     (result-bindings [%3])
+     (result-types !llvm.ptr)
+     (operand-uses %2)
+     (attributes {:index (: 0 i64)}))
+    (operation
+     (name arith.constant)
+     (result-bindings [%4])
+     (result-types i64)
+     (attributes {:value (: 1 i64)}))
+    (operation
+     (name mlsp.get_element_dyn)
+     (result-bindings [%5])
+     (result-types !llvm.ptr)
+     (operand-uses %2 %4))
+    (operation
+     (name arith.constant)
+     (result-bindings [%6])
+     (result-types i64)
+     (attributes {:value (: 42 i64)}))
+    (operation
+     (name func.return)
+     (operand-uses %6))))))
+

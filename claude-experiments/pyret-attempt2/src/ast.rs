@@ -1065,13 +1065,13 @@ pub enum IncludeSpec {
     SIncludeName { l: Loc, name: NameSpec },
 
     #[serde(rename = "s-include-type")]
-    SIncludeType { l: Loc, name: Name },
+    SIncludeType { l: Loc, name: NameSpec },
 
     #[serde(rename = "s-include-data")]
-    SIncludeData { l: Loc, name: Name },
+    SIncludeData { l: Loc, name: NameSpec },
 
     #[serde(rename = "s-include-module")]
-    SIncludeModule { l: Loc, name: Name },
+    SIncludeModule { l: Loc, name: NameSpec },
 }
 
 /// Name specification
@@ -1079,7 +1079,7 @@ pub enum IncludeSpec {
 #[serde(tag = "type")]
 pub enum NameSpec {
     #[serde(rename = "s-star")]
-    SStar { l: Loc },
+    SStar { l: Loc, hidden: Vec<Name> },
 
     #[serde(rename = "s-module-ref")]
     SModuleRef {
