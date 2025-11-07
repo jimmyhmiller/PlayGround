@@ -890,10 +890,11 @@ fn provide_spec_to_pyret_json(spec: &pyret_attempt2::ProvideSpec) -> Value {
                 "name-spec": name_spec_to_pyret_json(name)
             })
         }
-        ProvideSpec::SProvideData { name, .. } => {
+        ProvideSpec::SProvideData { name, hidden, .. } => {
             json!({
                 "type": "s-provide-data",
-                "name-spec": name_spec_to_pyret_json(name)
+                "name-spec": name_spec_to_pyret_json(name),
+                "hidden": hidden.iter().map(|h| name_to_pyret_json(h)).collect::<Vec<_>>()
             })
         }
         ProvideSpec::SProvideModule { name, .. } => {

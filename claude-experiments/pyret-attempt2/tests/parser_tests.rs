@@ -100,6 +100,30 @@ fn test_parse_rational_simplification() {
 }
 
 #[test]
+fn test_invalid_decimal_without_leading_digit() {
+    // Pyret requires at least one digit before the decimal point
+    // .5 is invalid (must be 0.5)
+    // .0 is invalid (must be 0.0)
+    // This matches official Pyret parser behavior: "BAD-NUMBER"
+
+    let result = parse_expr(".5");
+    assert!(result.is_err(), "Expected .5 to be invalid, but it parsed successfully");
+
+    let result = parse_expr(".0");
+    assert!(result.is_err(), "Expected .0 to be invalid, but it parsed successfully");
+
+    let result = parse_expr(".123");
+    assert!(result.is_err(), "Expected .123 to be invalid, but it parsed successfully");
+
+    // Valid version with leading digit should work
+    let expr = parse_expr("0.5").expect("Failed to parse");
+    match expr {
+        Expr::SNum { .. } | Expr::SFrac { .. } => {}, // Success - either is valid
+        _ => panic!("Expected SNum or SFrac for 0.5, got {:?}", expr),
+    }
+}
+
+#[test]
 fn test_parse_string() {
     let expr = parse_expr("\"hello\"").expect("Failed to parse");
 

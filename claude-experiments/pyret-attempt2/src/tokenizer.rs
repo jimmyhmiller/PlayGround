@@ -820,6 +820,13 @@ impl Tokenizer {
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Where, "where:".to_string(), loc));
         }
+        if self.starts_with("with:") {
+            for _ in 0..5 { self.advance(); }
+            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            self.paren_is_for_exp = true;
+            self.prior_whitespace = false;
+            return Some(Token::new(TokenType::With, "with:".to_string(), loc));
+        }
 
         // First character
         self.advance();
@@ -1425,7 +1432,7 @@ mod tests {
         assert_eq!(tokens[1].value, "3.14");
         assert_eq!(tokens[2].token_type, TokenType::Rational);
         assert_eq!(tokens[2].value, "1/2");
-        assert_eq!(tokens[3].token_type, TokenType::Number);
+        assert_eq!(tokens[3].token_type, TokenType::RoughNumber);
         assert_eq!(tokens[3].value, "~3.14");
     }
 

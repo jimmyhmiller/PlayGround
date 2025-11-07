@@ -1823,7 +1823,6 @@ x + y
 // This is the most common failure pattern in the bulk tests.
 
 #[test]
-#[ignore] // Missing feature: with clauses on data variants
 fn test_data_variant_with_methods() {
     assert_matches_pyret(r#"
 data Option:
@@ -1840,7 +1839,6 @@ end
 }
 
 #[test]
-#[ignore] // Missing feature: with clauses with multiple methods
 fn test_data_variant_with_multiple_methods() {
     assert_matches_pyret(r#"
 data List:
@@ -1868,7 +1866,6 @@ end
 }
 
 #[test]
-#[ignore] // Missing feature: data variant with methods
 fn test_doc_string_in_method() {
     assert_matches_pyret(r#"
 data Point:
@@ -2006,25 +2003,21 @@ end
 // Pyret has many built-in constructor types besides [list:]
 
 #[test]
-#[ignore] // Missing feature: set constructor
 fn test_set_constructor() {
     assert_matches_pyret("[set: 1, 2, 3, 2]");
 }
 
 #[test]
-#[ignore] // Missing feature: tree-set constructor  
 fn test_tree_set_constructor() {
     assert_matches_pyret("[tree-set: 1, 2, 3]");
 }
 
 #[test]
-#[ignore] // Missing feature: array constructor
 fn test_array_constructor() {
     assert_matches_pyret("[array: 1, 2, 3]");
 }
 
 #[test]
-#[ignore] // Missing feature: raw-array constructor
 fn test_raw_array_constructor() {
     assert_matches_pyret("[raw-array: 1, 2, 3]");
 }
@@ -2034,7 +2027,6 @@ fn test_raw_array_constructor() {
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // TODO: test infrastructure issue with multiline check blocks
 fn test_does_not_raise() {
     assert_matches_pyret(r#"
 check:
@@ -2045,7 +2037,6 @@ end
 }
 
 #[test]
-#[ignore] // Missing feature: raises-satisfies
 fn test_raises_satisfies() {
     assert_matches_pyret(r#"
 check:
@@ -2055,7 +2046,6 @@ end
 }
 
 #[test]
-#[ignore] // Missing feature: raises-other-than
 fn test_raises_other_than() {
     assert_matches_pyret(r#"
 check:
@@ -2065,7 +2055,6 @@ end
 }
 
 #[test]
-#[ignore] // Missing feature: satisfies with custom predicate
 fn test_satisfies_predicate() {
     assert_matches_pyret(r#"
 check:
@@ -2080,19 +2069,16 @@ end
 // Lambdas can have type parameters
 
 #[test]
-#[ignore] // Missing feature: generic lambda
 fn test_generic_lambda() {
     assert_matches_pyret("lam<A>(x :: A): x end");
 }
 
 #[test]
-#[ignore] // Missing feature: generic lambda with multiple params
 fn test_generic_lambda_multiple_params() {
     assert_matches_pyret("lam<A, B>(x :: A, f :: (A -> B)): f(x) end");
 }
 
 #[test]
-#[ignore] // Missing feature: generic lambda with return type
 fn test_generic_lambda_return_type() {
     assert_matches_pyret("lam<A>(x :: A) -> A: x end");
 }
@@ -2102,7 +2088,6 @@ fn test_generic_lambda_return_type() {
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Missing feature: provide-types star
 fn test_provide_types_star() {
     assert_matches_pyret(r#"
 provide *
@@ -2112,21 +2097,13 @@ data Foo: | foo end
 "#);
 }
 
-#[test]
-#[ignore] // Missing feature: provide-types with braces
-fn test_provide_types_with_braces() {
-    assert_matches_pyret(r#"
-provide-types { Foo }
+// Removed: test_provide_types_with_braces - `provide-types { Foo }` is NOT valid Pyret syntax
+// The official Pyret parser fails with: "Parse failed, next token is ('RBRACE "}")"
+// The correct syntax is `provide-types *` without braces
 
-data Foo: | foo end
-"#);
-}
-
-#[test]
-#[ignore] // Missing feature: import hiding
-fn test_import_hiding() {
-    assert_matches_pyret("import lists as L hiding(map, filter)");
-}
+// Removed: test_import_hiding - `import lists as L hiding(map, filter)` is NOT valid Pyret syntax
+// The official Pyret parser fails with: "Parse failed, next token is ('HIDING "hiding")"
+// The `hiding` keyword does not exist in Pyret import statements
 
 // ----------------------------------------------------------------------------
 // 22. Curly Brace Shorthand Syntax
@@ -2134,7 +2111,6 @@ fn test_import_hiding() {
 // Curly braces can be used for various shorthands
 
 #[test]
-#[ignore] // Missing feature: curly brace object shorthand
 fn test_curly_brace_function_arg() {
     assert_matches_pyret(r#"
 lists.map({(x): x + 1}, [list: 1, 2, 3])
@@ -2142,7 +2118,6 @@ lists.map({(x): x + 1}, [list: 1, 2, 3])
 }
 
 #[test]
-#[ignore] // Missing feature: tuple in object
 fn test_tuple_in_dict_constructor() {
     assert_matches_pyret(r#"
 [SD.string-dict: {"a"; 5}, {"b"; 10}]
@@ -2153,19 +2128,177 @@ fn test_tuple_in_dict_constructor() {
 // 23. Special Operators and Syntax
 // ----------------------------------------------------------------------------
 
-#[test]
-#[ignore] // Missing feature: ellipsis in construct
-fn test_ellipsis_operator() {
-    assert_matches_pyret("[list: 1, 2, ...rest]");
-}
+// Removed: test_ellipsis_operator - `[list: 1, 2, ...rest]` is NOT valid Pyret syntax
+// The official Pyret parser fails with: "Parse failed, next token is ('NAME "rest")"
+// The `...` ellipsis operator does not exist in Pyret construct expressions
 
 #[test]
 fn test_caret_operator() {
     assert_matches_pyret("a ^ b");
 }
 
+// Removed: test_double_bang - `list!!get(0)` is NOT valid Pyret syntax
+// The official Pyret parser fails with: "Parse failed, next token is ('BANG "!")"
+
+// ----------------------------------------------------------------------------
+// 24. Missing Features from Bulk Test Results
+// ----------------------------------------------------------------------------
+// These tests expose failures found when parsing the entire Pyret codebase
+
 #[test]
-#[ignore] // TODO: double-bang needs special investigation
-fn test_double_bang() {
-    assert_matches_pyret("list!!get(0)");
+#[ignore] // Missing feature: provide-types with specific type mappings
+fn test_provide_types_with_specific_types() {
+    assert_matches_pyret(r#"
+provide-types {
+  Foo:: Foo,
+  Bar:: Bar
+}
+
+data Foo: | foo end
+data Bar: | bar end
+"#);
+}
+
+#[test]
+#[ignore] // Missing feature: data hiding in provide statements
+fn test_data_hiding_in_provide() {
+    assert_matches_pyret(r#"
+provide:
+  data Foo hiding(foo)
+end
+
+data Foo:
+  | foo(x)
+  | bar(y)
+end
+"#);
+}
+
+#[test]
+fn test_tuple_destructuring() {
+    assert_matches_pyret(r#"
+{a; b} = {1; 2}
+a + b
+"#);
+}
+
+#[test]
+fn test_tuple_destructuring_shadow() {
+    assert_matches_pyret(r#"
+{shadow a; shadow b} = {1; 2; 3; 4; 5}
+a + b
+"#);
+}
+
+#[test]
+#[ignore] // Missing feature: tuple destructuring in cases patterns
+fn test_tuple_destructuring_in_cases() {
+    assert_matches_pyret(r#"
+data Result:
+  | some({ x; y; z })
+  | none
+end
+
+cases(Result) some({1; 2; 3}):
+  | some({ a; b; c }) => a + b + c
+  | none => 0
+end
+"#);
+}
+
+#[test]
+#[ignore] // Missing feature: extract from expression
+fn test_extract_from() {
+    assert_matches_pyret(r#"
+extract state from obj end
+"#);
+}
+
+#[test]
+fn test_underscore_partial_application() {
+    assert_matches_pyret(r#"
+f = (_ + 2)
+f(5)
+"#);
+}
+
+#[test]
+fn test_underscore_multiple() {
+    assert_matches_pyret(r#"
+f = (_ + _)
+f(3, 4)
+"#);
+}
+
+#[test]
+fn test_provide_from_module_multiple_items() {
+    assert_matches_pyret(r#"
+provide from lists: map, filter end
+"#);
+}
+
+#[test]
+fn test_provide_from_data() {
+    assert_matches_pyret(r#"
+provide from M: x, data Foo end
+"#);
+}
+
+#[test]
+#[ignore] // Missing feature: tuple type annotations
+fn test_tuple_type_annotation() {
+    assert_matches_pyret(r#"
+f :: {Number; Number} -> {Number; Number} = lam(t): t end
+f({1; 2})
+"#);
+}
+
+
+#[test]
+fn test_method_with_trailing_comma() {
+    assert_matches_pyret(r#"
+{
+  method m(self): 42 end,
+  method n(self): 43 end
+}
+"#);
+}
+
+#[test]
+fn test_spy_with_string() {
+    assert_matches_pyret(r#"
+spy "debug message": x end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 25. Full File Tests from Pyret Codebase
+// ----------------------------------------------------------------------------
+// These are complete files from the Pyret codebase that currently fail to parse
+
+#[test]
+#[ignore] // Full file test - multiple missing features
+fn test_full_file_let_arr() {
+    // From tests/type-check/good/let.arr
+    // Features: let with multiple bindings and block
+    let code = include_str!("pyret-files/let.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+#[ignore] // Full file test - tuple destructuring and type annotations
+fn test_full_file_weave_tuple_arr() {
+    // From tests/pyret/regression/weave-tuple.arr
+    // Features: tuple type annotations, tuple destructuring in function parameters
+    let code = include_str!("pyret-files/weave-tuple.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+#[ignore] // Full file test - real-world library code
+fn test_full_file_option_arr() {
+    // From src/arr/trove/option.arr
+    // Features: generic types, methods with trailing commas, data with methods
+    let code = include_str!("pyret-files/option.arr");
+    assert_matches_pyret(code);
 }

@@ -1,6 +1,3 @@
-=== tools/benchmark/auto-report-programs/recursion-tail-call.arr ===
-Error: General { location: "2:11:28", message: "Unexpected tokens after program end" }
-
 === tools/benchmark/auto-report-programs/adding-ones-2000.arr ===
 SUCCESS: File parses correctly
 
@@ -8,13 +5,13 @@ SUCCESS: File parses correctly
 Error: General { location: "438:8:12381", message: "Unexpected tokens after program end" }
 
 === tools/benchmark/auto-report-programs/ast.arr ===
-Error: General { location: "112:27:3060", message: "Unexpected tokens after program end" }
+Error: General { location: "160:61:5206", message: "Unexpected tokens after program end" }
 
 === pyret-ast.arr ===
-Error: General { location: "11:2:159", message: "Unexpected tokens after program end" }
+                          "value": "Error: "
 
 === ast-to-json.arr ===
-Error: General { location: "764:27:19371", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === tests/lib-test/lib-test-main.arr ===
 SUCCESS: File parses correctly
@@ -35,7 +32,7 @@ SUCCESS: File parses correctly
 Error: General { location: "39:13:909", message: "Unexpected tokens after program end" }
 
 === tests/pyret/tests/test-file-locators.arr ===
-Error: General { location: "36:25:814", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === tests/pyret/tests/test-examples.arr ===
 SUCCESS: File parses correctly
@@ -46,23 +43,14 @@ Error: General { location: "28:13:872", message: "Unexpected tokens after progra
 === tests/pyret/tests/test-lists.arr ===
 Error: General { location: "12:7:147", message: "Unexpected tokens after program end" }
 
-=== tests/pyret/tests/test-contracts.arr ===
-SUCCESS: File parses correctly
-
 === tests/pyret/tests/test-compile-lib.arr ===
 SUCCESS: File parses correctly
 
-=== tests/pyret/tests/test-tail-call.arr ===
-Error: General { location: "40:12:711", message: "Unexpected tokens after program end" }
-
 === tests/pyret/tests/test-matrices2.arr ===
-Error: General { location: "11:32:448", message: "Unexpected tokens after program end" }
+Error: General { location: "27:13:1065", message: "Unexpected tokens after program end" }
 
 === tests/pyret/tests/test-roughnum.arr ===
 SUCCESS: File parses correctly
-
-=== tests/pyret/tests/test-timing.arr ===
-Error: General { location: "16:22:238", message: "Unexpected tokens after program end" }
 
 === tests/pyret/tests/test-sets.arr ===
 Error: General { location: "6:6:103", message: "Unexpected tokens after program end" }
@@ -76,17 +64,8 @@ SUCCESS: File parses correctly
 === tests/pyret/tests/test-parse-errors.arr ===
 Error: General { location: "133:0:2996", message: "Unexpected tokens after program end" }
 
-=== tests/pyret/tests/test-flatness.arr ===
-SUCCESS: File parses correctly
-
 === tests/pyret/tests/test-rounding.arr ===
 SUCCESS: File parses correctly
-
-=== tests/pyret/tests/test-parse.arr ===
-SUCCESS: File parses correctly
-
-=== tests/pyret/tests/test-cases.arr ===
-Error: General { location: "13:12:186", message: "Unexpected tokens after program end" }
 
 === tests/pyret/tests/test-statistics.arr ===
 SUCCESS: File parses correctly
@@ -106,26 +85,8 @@ SUCCESS: File parses correctly
 === tests/pyret/tests/test-math.arr ===
 Error: General { location: "14:52:309", message: "Unexpected tokens after program end" }
 
-=== tests/pyret/tests/test-output.arr ===
-Error: General { location: "22:11:438", message: "Unexpected tokens after program end" }
-
-=== tests/pyret/tests/test-rec.arr ===
-SUCCESS: File parses correctly
-
-=== tests/pyret/tests/test-compile-errors.arr ===
-SUCCESS: File parses correctly
-
 === tests/pyret/tests/test-filesystem.arr ===
 SUCCESS: File parses correctly
-
-=== tests/pyret/tests/test-refs.arr ===
-Error: General { location: "7:4:69", message: "Unexpected tokens after program end" }
-
-=== tests/pyret/tests/test-csv-table.arr ===
-SUCCESS: File parses correctly
-
-=== tests/pyret/tests/modules/provide-data-with-provide-star.arr ===
-Error: General { location: "5:7:42", message: "Unexpected tokens after program end" }
 
 === tests/pyret/tests/modules/re-re-provide-data.arr ===
 Error: Expected { expected: End, found: Dot, location: "3:10:20" }
@@ -152,25 +113,22 @@ SUCCESS: File parses correctly
 Error: General { location: "350:8:6974", message: "Unexpected tokens after program end" }
 
 === tests/pyret/tests/test-s-exp.arr ===
-Error: General { location: "104:2:2446", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === tests/pyret/tests/test-numbers.arr ===
 Error: General { location: "300:2:11284", message: "Unexpected tokens after program end" }
 
 === tests/pyret/tests/test-within.arr ===
-Error: General { location: "127:4:3387", message: "Unexpected tokens after program end" }
-
-=== tests/pyret/tests/test-images.arr ===
-Error: General { location: "10:14:208", message: "Unexpected tokens after program end" }
+Error: General { location: "164:947:5633", message: "Unexpected tokens after program end" }
 
 === tests/pyret/tests/test-pprint.arr ===
-Error: General { location: "15:6:376", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === tests/pyret/tests/test-bar-chart.arr ===
-Error: General { location: "119:34:11517", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === tests/pyret/tests/test-repl.arr ===
-Error: General { location: "31:11:886", message: "Unexpected tokens after program end" }
+                            "value": "Expected an answer, but got compilation errors:"
 
 === tests/pyret/tests/test-tuple.arr ===
 Error: General { location: "103:5:1731", message: "Unexpected tokens after program end" }
@@ -193,44 +151,17 @@ SUCCESS: File parses correctly
 === tests/pyret/regression/weave-tuple.arr ===
 Error: General { location: "1:34:34", message: "Unexpected tokens after program end" }
 
-=== tests/pyret/regression/duplicate-check-block-report.arr ===
-SUCCESS: File parses correctly
-
 === tests/pyret/regression/curried-funs.arr ===
 SUCCESS: File parses correctly
 
-=== tests/pyret/regression/toplevel-data.arr ===
-SUCCESS: File parses correctly
-
 === tests/pyret/regression/seq-of-lettable.arr ===
-Error: General { location: "4:13:90", message: "Unexpected tokens after program end" }
-
-=== tests/pyret/regression/render-reason-wrong-op.arr ===
-Error: General { location: "18:36:405", message: "Unexpected tokens after program end" }
-
-=== tests/pyret/regression/escaping-module-uris.arr ===
-SUCCESS: File parses correctly
-
-=== tests/pyret/regression/named-arrow-ann.arr ===
-SUCCESS: File parses correctly
+Error: General { location: "43:9:710", message: "Unexpected tokens after program end" }
 
 === tests/pyret/regression/sloppy-list-filter.arr ===
 Error: General { location: "5:7:82", message: "Unexpected tokens after program end" }
 
-=== tests/pyret/regression/immediate-app-return-ann.arr ===
-Error: General { location: "3:9:38", message: "Unexpected tokens after program end" }
-
-=== tests/pyret/regression/parens-after-comments.arr ===
-SUCCESS: File parses correctly
-
-=== tests/pyret/regression/empty-check-block.arr ===
-SUCCESS: File parses correctly
-
-=== tests/pyret/regression/tc-internal-err.arr ===
-Error: General { location: "6:10:97", message: "Unexpected tokens after program end" }
-
 === tests/pyret/regression/tail-recursion-arg-order.arr ===
-Error: General { location: "59:6:1104", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === tests/pyret/regression/random-bogus-range.arr ===
 SUCCESS: File parses correctly
@@ -250,35 +181,14 @@ SUCCESS: File parses correctly
 === tests/type-check/should-not/data-phantom.arr ===
 SUCCESS: File parses correctly
 
-=== tests/type-check/should-not/obj-update.arr ===
-Error: General { location: "8:12:82", message: "Unexpected tokens after program end" }
-
-=== tests/type-check/bad/obj-update-non-ref.arr ===
-Error: General { location: "7:1:49", message: "Unexpected tokens after program end" }
-
 === tests/type-check/bad/lambda-instantiate.arr ===
-Error: General { location: "1:10:10", message: "Unexpected tokens after program end" }
-
-=== tests/type-check/bad/obj-update-incorrect-type.arr ===
-Error: General { location: "7:1:53", message: "Unexpected tokens after program end" }
-
-=== tests/type-check/bad/test-refinement.arr ===
-Error: General { location: "4:14:47", message: "Unexpected tokens after program end" }
-
-=== tests/type-check/bad/local-function.arr ===
-Error: General { location: "2:8:45", message: "Unexpected tokens after program end" }
-
-=== tests/type-check/bad/ref-not-ref.arr ===
-Error: General { location: "6:1:111", message: "Unexpected tokens after program end" }
-
-=== tests/type-check/bad/forall-lub.arr ===
-Error: General { location: "3:5:19", message: "Unexpected tokens after program end" }
+Error: General { location: "9:2:330", message: "Unexpected tokens after program end" }
 
 === tests/type-check/bad/obj-glb.arr ===
 SUCCESS: File parses correctly
 
 === tests/type-check/bad/lib/provide-data.arr ===
-Error: General { location: "6:7:38", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === tests/type-check/bad/no-maker.arr ===
 Error: General { location: "4:2:12", message: "Unexpected tokens after program end" }
@@ -289,29 +199,17 @@ SUCCESS: File parses correctly
 === tests/type-check/bad/mutual-rec.arr ===
 SUCCESS: File parses correctly
 
-=== tests/type-check/bad/ref-fail.arr ===
-Error: General { location: "6:1:111", message: "Unexpected tokens after program end" }
-
-=== tests/type-check/bad/data-unify-methods.arr ===
-Error: General { location: "2:10:27", message: "Unexpected tokens after program end" }
-
 === tests/type-check/should/lambda-test-inference.arr ===
-Error: General { location: "1:10:10", message: "Unexpected tokens after program end" }
+Error: General { location: "9:12:336", message: "Unexpected tokens after program end" }
 
 === tests/type-check/should/lambda-instantiate.arr ===
-Error: General { location: "1:10:10", message: "Unexpected tokens after program end" }
-
-=== tests/type-check/should/lambda-infer.arr ===
-Error: General { location: "1:11:11", message: "Unexpected tokens after program end" }
+Error: General { location: "9:2:328", message: "Unexpected tokens after program end" }
 
 === tests/type-check/should/obj-glb.arr ===
 SUCCESS: File parses correctly
 
 === tests/type-check/should/underscore.arr ===
 Error: General { location: "9:14:126", message: "Unexpected tokens after program end" }
-
-=== tests/type-check/good/d-dx.arr ===
-Error: General { location: "8:19:185", message: "Unexpected tokens after program end" }
 
 === tests/type-check/good/data-constructorAsSingleton-instantiate.arr ===
 Error: General { location: "14:4:260", message: "Unexpected tokens after program end" }
@@ -323,16 +221,13 @@ SUCCESS: File parses correctly
 SUCCESS: File parses correctly
 
 === tests/type-check/good/lazy-lists.arr ===
-Error: General { location: "4:19:107", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === tests/type-check/good/data-higherOrder-instantiate.arr ===
 Error: General { location: "8:35:251", message: "Unexpected tokens after program end" }
 
-=== tests/type-check/good/_plus.arr ===
-Error: General { location: "23:22:365", message: "Unexpected tokens after program end" }
-
 === tests/type-check/good/tests.arr ===
-Error: General { location: "20:20:386", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === tests/type-check/good/spy.arr ===
 Error: General { location: "52:19:750", message: "Unexpected tokens after program end" }
@@ -347,52 +242,28 @@ Error: General { location: "10:14:139", message: "provide-types with specific ty
 Error: General { location: "19:24:381", message: "Unexpected tokens after program end" }
 
 === tests/type-check/good/data-methods.arr ===
-Error: General { location: "2:22:32", message: "Unexpected tokens after program end" }
-
-=== tests/type-check/good/shadowing-doesnt-change-type.arr ===
-Error: General { location: "4:2:30", message: "Unexpected tokens after program end" }
+Error: General { location: "30:15:533", message: "Unexpected tokens after program end" }
 
 === tests/type-check/good/provide-data.arr ===
-Error: General { location: "6:7:38", message: "Unexpected tokens after program end" }
-
-=== tests/type-check/good/data-polymorphic-ref.arr ===
-Error: General { location: "6:2:52", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === tests/type-check/good/tests-because.arr ===
-Error: General { location: "32:5:718", message: "Unexpected tokens after program end" }
-
-=== tests/type-check/good/subtyping-and-bottom.arr ===
-Error: General { location: "17:9:133", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === tests/type-check/good/let.arr ===
 Error: General { location: "4:24:47", message: "Unexpected tokens after program end" }
 
-=== tests/type-check/good/raw-array.arr ===
-Error: General { location: "21:13:478", message: "Unexpected tokens after program end" }
-
 === tests/type-check/good/tuple-regression.arr ===
 Error: General { location: "82:13:1146", message: "Unexpected tokens after program end" }
-
-=== tests/type-check/good/forall-lub.arr ===
-Error: General { location: "3:5:19", message: "Unexpected tokens after program end" }
 
 === tests/type-check/good/lazy-maker.arr ===
 SUCCESS: File parses correctly
 
-=== tests/type-check/good/lam-forall-check.arr ===
-Error: General { location: "6:30:106", message: "Unexpected tokens after program end" }
-
 === tests/type-check/good/data-polymorphic-recursive-infer.arr ===
 SUCCESS: File parses correctly
 
-=== tests/type-check/good/references.arr ===
-Error: General { location: "20:20:181", message: "Unexpected tokens after program end" }
-
 === tests/type-check/good/data-polymorphic-recursive-instantiate.arr ===
 SUCCESS: File parses correctly
-
-=== tests/type-check/good/ref-set.arr ===
-Error: General { location: "6:1:111", message: "Unexpected tokens after program end" }
 
 === tests/type-check/good/data-constructorAsFun-infer.arr ===
 Error: General { location: "28:80:765", message: "Unexpected tokens after program end" }
@@ -401,19 +272,13 @@ Error: General { location: "28:80:765", message: "Unexpected tokens after progra
 Error: General { location: "13:35:305", message: "Unexpected tokens after program end" }
 
 === pyret-ast-repr.arr ===
-Error: General { location: "11:2:161", message: "Unexpected tokens after program end" }
-
-=== ast-json-simple.arr ===
-Error: General { location: "9:2:167", message: "Unexpected tokens after program end" }
-
-=== examples/point.arr ===
-Error: General { location: "27:4:424", message: "Unexpected tokens after program end" }
+                          "value": "Error: "
 
 === examples/queue.arr ===
 SUCCESS: File parses correctly
 
 === examples/ralist.arr ===
-Error: General { location: "36:13:662", message: "Unexpected tokens after program end" }
+Error: General { location: "41:38:910", message: "Unexpected tokens after program end" }
 
 === examples/htdp/struct.arr ===
 SUCCESS: File parses correctly
@@ -425,7 +290,7 @@ Error: General { location: "15:14:229", message: "provide-types with specific ty
 SUCCESS: File parses correctly
 
 === examples/loop.arr ===
-Error: General { location: "12:2:552", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === ast-to-json-v2.arr ===
 SUCCESS: File parses correctly
@@ -443,19 +308,19 @@ SUCCESS: File parses correctly
 Error: General { location: "10:13:103", message: "Unexpected tokens after program end" }
 
 === src/arr/trove/sets.arr ===
-Error: General { location: "27:9:515", message: "Unexpected tokens after program end" }
+Error: General { location: "161:5:6761", message: "Unexpected tokens after program end" }
 
 === src/arr/trove/charts.arr ===
-Error: General { location: "102:8:2512", message: "Unexpected tokens after program end" }
+Error: General { location: "295:37:9529", message: "Unexpected tokens after program end" }
 
 === src/arr/trove/either.arr ===
 SUCCESS: File parses correctly
 
 === src/arr/trove/vector-util.arr ===
-Error: General { location: "39:2:1026", message: "Unexpected tokens after program end" }
+Error: General { location: "94:14:2942", message: "Unexpected tokens after program end" }
 
 === src/arr/trove/checker.arr ===
-Error: General { location: "34:12:633", message: "Unexpected tokens after program end" }
+Error: General { location: "62:5:1731", message: "Unexpected tokens after program end" }
 
 === src/arr/trove/system.arr ===
 SUCCESS: File parses correctly
@@ -464,13 +329,13 @@ SUCCESS: File parses correctly
 SUCCESS: File parses correctly
 
 === src/arr/trove/file.arr ===
-Error: General { location: "21:29:374", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/trove/matrices.arr ===
 Error: Expected { expected: End, found: Hiding, location: "137:14:2856" }
 
 === src/arr/trove/cmdline.arr ===
-Error: General { location: "51:16:1053", message: "Unexpected tokens after program end" }
+                                                                "value": "Parsing command line options for ~a failed: Option ~a ~a, and it has already been used"
 
 === src/arr/trove/arrays.arr ===
 Error: General { location: "50:14:1103", message: "Unexpected tokens after program end" }
@@ -479,16 +344,16 @@ Error: General { location: "50:14:1103", message: "Unexpected tokens after progr
 SUCCESS: File parses correctly
 
 === src/arr/trove/particle-shim-structs.arr ===
-Error: General { location: "27:41:464", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/trove/option.arr ===
-Error: General { location: "9:9:85", message: "Unexpected tokens after program end" }
+Error: General { location: "14:19:226", message: "Unexpected tokens after program end" }
 
 === src/arr/trove/color.arr ===
 SUCCESS: File parses correctly
 
 === src/arr/trove/lists.arr ===
-Error: General { location: "12:10:176", message: "Unexpected tokens after program end" }
+Error: General { location: "30:16:1008", message: "Unexpected tokens after program end" }
 
 === src/arr/trove/image-structs.arr ===
 SUCCESS: File parses correctly
@@ -497,43 +362,43 @@ SUCCESS: File parses correctly
 Error: Expected { expected: End, found: Hiding, location: "2:4:13" }
 
 === src/arr/trove/statistics.arr ===
-Error: General { location: "43:2:712", message: "Unexpected tokens after program end" }
+Error: General { location: "75:56:1634", message: "Unexpected tokens after program end" }
 
 === src/arr/trove/srcloc.arr ===
-Error: General { location: "10:25:133", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/trove/matrix-util.arr ===
-Error: General { location: "60:22:1029", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/trove/constants.arr ===
 SUCCESS: File parses correctly
 
 === src/arr/trove/error.arr ===
-Error: General { location: "84:17:1823", message: "Unexpected tokens after program end" }
+Error: General { location: "113:8:3065", message: "Unexpected tokens after program end" }
 
 === src/arr/trove/math.arr ===
-Error: General { location: "17:2:272", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/trove/error-display.arr ===
-Error: General { location: "68:0:3209", message: "Unexpected tokens after program end" }
+Error: General { location: "156:37:6173", message: "Unexpected tokens after program end" }
 
 === src/arr/trove/ast.arr ===
-Error: General { location: "112:27:3060", message: "Unexpected tokens after program end" }
+Error: General { location: "160:61:5206", message: "Unexpected tokens after program end" }
 
 === src/arr/trove/render-error-display.arr ===
               "field": "ErrorDisplay",
 
 === src/arr/trove/csv.arr ===
-Error: General { location: "49:2:897", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/trove/data-source.arr ===
 SUCCESS: File parses correctly
 
 === src/arr/trove/contracts.arr ===
-Error: General { location: "15:7:229", message: "Unexpected tokens after program end" }
+Error: General { location: "70:15:2345", message: "Unexpected tokens after program end" }
 
 === src/arr/trove/json-structs.arr ===
-Error: General { location: "10:2:150", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/trove/internal-image-shared.arr ===
 SUCCESS: File parses correctly
@@ -557,28 +422,28 @@ SUCCESS: File parses correctly
 Error: General { location: "94:2:4394", message: "Unexpected tokens after program end" }
 
 === src/arr/compiler/flatness.arr ===
-Error: General { location: "38:2:1132", message: "Unexpected tokens after program end" }
+Error: General { location: "557:47:20669", message: "Unexpected tokens after program end" }
 
 === src/arr/compiler/ast-anf.arr ===
-Error: General { location: "47:94:1106", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/compiler/concat-lists.arr ===
-Error: General { location: "5:17:64", message: "Unexpected tokens after program end" }
+Error: General { location: "115:5:4985", message: "Unexpected tokens after program end" }
 
 === src/arr/compiler/js-of-pyret.arr ===
-Error: General { location: "27:36:634", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/compiler/ast-util.arr ===
 Error: General { location: "394:20:15187", message: "Unexpected tokens after program end" }
 
 === src/arr/compiler/desugar.arr ===
-Error: General { location: "117:2:3453", message: "Unexpected tokens after program end" }
+                                        "value": "s-load-table missing source: Well-formedness should have failed"
 
 === src/arr/compiler/compile-structs.arr ===
-Error: General { location: "49:4:1337", message: "Unexpected tokens after program end" }
+Error: General { location: "195:5:5248", message: "Unexpected tokens after program end" }
 
 === src/arr/compiler/desugar-post-tc.arr ===
-Error: General { location: "45:2:1541", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/compiler/locators/builtin.arr ===
 SUCCESS: File parses correctly
@@ -593,40 +458,37 @@ SUCCESS: File parses correctly
 SUCCESS: File parses correctly
 
 === src/arr/compiler/anf.arr ===
-Error: General { location: "139:8:3540", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/compiler/desugar-check.arr ===
-Error: General { location: "35:23:891", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/compiler/compile-lib.arr ===
-Error: General { location: "234:12:6190", message: "Unexpected tokens after program end" }
+Error: General { location: "309:16:8807", message: "Unexpected tokens after program end" }
 
 === src/arr/compiler/base.arr ===
 SUCCESS: File parses correctly
 
 === src/arr/compiler/js-ast.arr ===
-Error: General { location: "63:35:1235", message: "Unexpected tokens after program end" }
+Error: General { location: "80:5:1889", message: "Unexpected tokens after program end" }
 
 === src/arr/compiler/cli-module-loader.arr ===
 Error: General { location: "118:29:3120", message: "Unexpected tokens after program end" }
 
 === src/arr/compiler/resolve-scope.arr ===
-Error: General { location: "34:2:763", message: "Unexpected tokens after program end" }
+Error: General { location: "60:9:1836", message: "Unexpected tokens after program end" }
 
 === src/arr/compiler/well-formed.arr ===
-Error: General { location: "424:15:13831", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/compiler/type-check.arr ===
-Error: General { location: "171:2:5024", message: "Unexpected tokens after program end" }
-
-=== src/arr/compiler/list-aux.arr ===
-Error: General { location: "7:2:154", message: "Unexpected tokens after program end" }
+Error: General { location: "1051:44:47652", message: "Unexpected tokens after program end" }
 
 === src/arr/compiler/anf-loop-compiler.arr ===
 Error: General { location: "438:8:12381", message: "Unexpected tokens after program end" }
 
 === src/arr/compiler/js-dag-utils.arr ===
-Error: General { location: "125:6:3287", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/compiler/type-check-structs.arr ===
 Error: General { location: "90:5:2606", message: "Unexpected tokens after program end" }
@@ -635,7 +497,7 @@ Error: General { location: "90:5:2606", message: "Unexpected tokens after progra
 SUCCESS: File parses correctly
 
 === src/arr/compiler/repl.arr ===
-Error: General { location: "155:41:5408", message: "Unexpected tokens after program end" }
+SUCCESS: File parses correctly
 
 === src/arr/compiler/type-defaults.arr ===
 Error: General { location: "255:12:13013", message: "Unexpected tokens after program end" }

@@ -7,7 +7,7 @@
   (regions
     (region
       (block
-        (arguments [[%arg0 i64] [%arg1 i64]])
+        (arguments [(: %arg0 i64) (: %arg1 i64)])
         (operation
           (name arith.addi)
           (result-bindings [%sum])

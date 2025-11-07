@@ -25,12 +25,17 @@ fn createImplicitList(allocator: std.mem.Allocator, forms: PersistentVector(*Val
 /// Predicate: Check if operation is IRDL or Transform metadata
 fn isIRDLorTransform(op_name: []const u8) bool {
     return std.mem.startsWith(u8, op_name, "irdl.") or
-           std.mem.startsWith(u8, op_name, "transform.");
+           std.mem.startsWith(u8, op_name, "transform.") or
+           std.mem.eql(u8, op_name, "builtin.module"); // Include modules that may contain transforms
 }
 
 /// Predicate: Check if operation is regular application code
 fn isRegularCode(op_name: []const u8) bool {
-    return !isIRDLorTransform(op_name);
+    // Regular code is anything except IRDL and transform operations
+    // Note: We DON'T filter builtin.module here because we can't tell if it contains
+    // transforms or application code without inspecting its contents
+    return !std.mem.startsWith(u8, op_name, "irdl.") and
+           !std.mem.startsWith(u8, op_name, "transform.");
 }
 
 pub fn main() !void {
@@ -188,19 +193,11 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
 
     // PASS 1: Extract and load dialect definitions (IRDL + Transform metadata)
     std.debug.print("Pass 1: Processing dialect definitions...\n", .{});
-    std.debug.print("  DEBUG: Parsed module has {} operations\n", .{parsed_module.operations.len});
-    for (parsed_module.operations, 0..) |*op, i| {
-        const matches = isIRDLorTransform(op.name);
-        std.debug.print("    Op {}: {s} (metadata={})\n", .{i, op.name, matches});
-    }
     var metadata_module = try builder.buildModuleFiltered(&parsed_module, isIRDLorTransform);
 
     // Scan for IRDL and transform operations
     var dialect_registry = DialectRegistry.init(allocator);
     defer dialect_registry.deinit();
-
-    std.debug.print("  DEBUG: Scanning metadata module for IRDL/transforms...\n", .{});
-    metadata_module.printGeneric();
 
     try dialect_registry.scanModule(&metadata_module);
 
@@ -224,7 +221,6 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
 
     // PASS 2: Build application code (excluding IRDL/transform metadata)
     std.debug.print("Pass 2: Building application code...\n", .{});
-    std.debug.print("  DEBUG: Application module (should only have main function):\n", .{});
     var mlir_module = try builder.buildModuleFiltered(&parsed_module, isRegularCode);
     defer mlir_module.destroy();
 
@@ -283,9 +279,17 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
     defer executor.deinit();
 
     // Set transforms if any were found
-    if (dialect_registry.hasTransforms()) {
-        executor.setTransforms(dialect_registry.getTransformOperations());
-    }
+    // Only use root transforms (e.g., transform.named_sequence, transform.with_pdl_patterns)
+    // Nested transforms (e.g., transform.sequence inside with_pdl_patterns) shouldn't be applied directly
+    const root_transforms = if (dialect_registry.hasTransforms())
+        try dialect_registry.getRootTransforms(allocator)
+    else
+        &[_]mlir.MlirOperation{};
+
+    // Note: Don't free root_transforms until after compilation! The executor holds a reference to this slice.
+    defer if (root_transforms.len > 0) allocator.free(root_transforms);
+
+    executor.setTransforms(root_transforms);
 
     std.debug.print("Compiling with JIT (optimization level: O2)...\n", .{});
     try executor.compile(&mlir_module);

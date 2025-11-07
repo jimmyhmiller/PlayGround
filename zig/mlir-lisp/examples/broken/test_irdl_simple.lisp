@@ -22,8 +22,8 @@
                 ;; Result type: i32
                 (op %i32_type (: !irdl.attribute) (irdl.is {:expected i32} []))
 
-                ;; Attributes: value (i32 attribute)
-                (op %attr_type (: !irdl.attribute) (irdl.is {:expected i32} []))
+                ;; Attributes: value (any attribute - accepts integer attributes)
+                (op %attr_type (: !irdl.attribute) (irdl.any []))
                 (operation
                   (name irdl.attributes)
                   (attributes {:attributeValueNames ["value"]})
@@ -38,9 +38,9 @@
 ;; Step 2: Use the demo.constant operation
 (defn main [] i64
   ;; Use our custom operation
-  (op %val (: i32) (demo.constant {:value (: 42 i32)}))
+  (op %val (: i32) (demo.constant {:value (: 42 i32)} []))
 
   ;; Convert to i64 for return
-  (op %result (: i64) (arith.extsi [%val] {:fastmath #arith.fastmath<none>}))
+  (op %result (: i64) (arith.extsi {:fastmath #arith.fastmath<none>} [%val]))
 
   (return %result))

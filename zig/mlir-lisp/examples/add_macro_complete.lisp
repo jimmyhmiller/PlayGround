@@ -125,11 +125,11 @@
   ;; ========== PART 2: CREATE IDENTIFIER VALUES ==========
 
   ;; Get string pointers from globals
-  (op %str_operation_ptr (: !llvm.ptr) (llvm.mlir.addressof [@str_operation]))
-  (op %str_name_ptr (: !llvm.ptr) (llvm.mlir.addressof [@str_name]))
-  (op %str_arith_addi_ptr (: !llvm.ptr) (llvm.mlir.addressof [@str_arith_addi]))
-  (op %str_result_types_ptr (: !llvm.ptr) (llvm.mlir.addressof [@str_result_types]))
-  (op %str_operands_ptr (: !llvm.ptr) (llvm.mlir.addressof [@str_operands]))
+  (op %str_operation_ptr (: !llvm.ptr) (llvm.mlir.addressof {:global_name @str_operation} []))
+  (op %str_name_ptr (: !llvm.ptr) (llvm.mlir.addressof {:global_name @str_name} []))
+  (op %str_arith_addi_ptr (: !llvm.ptr) (llvm.mlir.addressof {:global_name @str_arith_addi} []))
+  (op %str_result_types_ptr (: !llvm.ptr) (llvm.mlir.addressof {:global_name @str_result_types} []))
+  (op %str_operands_ptr (: !llvm.ptr) (llvm.mlir.addressof {:global_name @str_operands} []))
 
   ;; Create "operation" identifier
   (op %operation_id (: !llvm.ptr) (llvm.alloca [%value_size]))

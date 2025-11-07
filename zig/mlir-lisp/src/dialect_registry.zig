@@ -1,7 +1,36 @@
 /// Dialect Registry
 /// Tracks IRDL dialect definitions and transform operations discovered during compilation
+///
+/// Architecture:
+/// - Scans MLIR modules for irdl.* operations (dialect definitions)
+/// - Scans for transform.* operations (rewrite patterns and lowerings)
+/// - Supports multiple transform types: named_sequence, with_pdl_patterns, sequence
+/// - Validates that transforms are properly structured for application
 const std = @import("std");
 const mlir = @import("mlir/c.zig");
+
+/// Types of transform operations we support
+pub const TransformType = enum {
+    named_sequence,      // transform.named_sequence (MLIR standard)
+    with_pdl_patterns,   // transform.with_pdl_patterns (PDL-based transforms)
+    sequence,            // transform.sequence (transform sequences)
+
+    /// Classify a transform operation by its name
+    pub fn fromOpName(op_name: []const u8) ?TransformType {
+        if (std.mem.eql(u8, op_name, "transform.named_sequence")) return .named_sequence;
+        if (std.mem.eql(u8, op_name, "transform.with_pdl_patterns")) return .with_pdl_patterns;
+        if (std.mem.eql(u8, op_name, "transform.sequence")) return .sequence;
+        return null;
+    }
+
+    /// Check if this is a valid root transform (can be applied at top-level)
+    pub fn isRootTransform(self: TransformType) bool {
+        return switch (self) {
+            .named_sequence, .with_pdl_patterns => true,
+            .sequence => false, // Usually nested inside other transforms
+        };
+    }
+};
 
 pub const DialectRegistry = struct {
     allocator: std.mem.Allocator,
@@ -42,12 +71,18 @@ pub const DialectRegistry = struct {
             try self.irdl_ops.append(self.allocator, op);
         }
 
-        // Find all transform operations
-        const transform_ops = try module.collectOperationsByPrefix(self.allocator, "transform.");
-        defer self.allocator.free(transform_ops);
+        // Find all transform.* operations
+        const all_transform_ops = try module.collectOperationsByPrefix(self.allocator, "transform.");
+        defer self.allocator.free(all_transform_ops);
 
-        for (transform_ops) |op| {
-            try self.transform_ops.append(self.allocator, op);
+        // Filter to only supported transform types
+        for (all_transform_ops) |op| {
+            const op_name = mlir.Operation.getName(op);
+
+            // Check if this is a supported transform type
+            if (TransformType.fromOpName(op_name)) |_| {
+                try self.transform_ops.append(self.allocator, op);
+            }
         }
     }
 
@@ -86,6 +121,34 @@ pub const DialectRegistry = struct {
     pub fn clear(self: *DialectRegistry) void {
         self.irdl_ops.clearRetainingCapacity();
         self.transform_ops.clearRetainingCapacity();
+    }
+
+    /// Get the type of a transform operation
+    pub fn getTransformType(op: mlir.MlirOperation) ?TransformType {
+        const op_name = mlir.Operation.getName(op);
+        return TransformType.fromOpName(op_name);
+    }
+
+    /// Check if a transform operation is a valid root transform
+    pub fn isRootTransform(op: mlir.MlirOperation) bool {
+        if (getTransformType(op)) |transform_type| {
+            return transform_type.isRootTransform();
+        }
+        return false;
+    }
+
+    /// Get all root transforms (suitable for top-level application)
+    pub fn getRootTransforms(self: *DialectRegistry, allocator: std.mem.Allocator) ![]mlir.MlirOperation {
+        var roots = std.ArrayList(mlir.MlirOperation){};
+        errdefer roots.deinit(allocator);
+
+        for (self.transform_ops.items) |op| {
+            if (isRootTransform(op)) {
+                try roots.append(allocator, op);
+            }
+        }
+
+        return try roots.toOwnedSlice(allocator);
     }
 };
 
