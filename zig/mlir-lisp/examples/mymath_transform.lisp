@@ -1,0 +1,83 @@
+(mlir
+  (operation
+    (name builtin.module)
+    (attributes {:transform.with_named_sequence true})
+    (regions
+      (region
+        (block
+          (arguments [])
+          (operation
+            (name transform.named_sequence)
+            (attributes {:function_type (!function (inputs !transform.any_op) (results)) :sym_name @__transform_main})
+            (regions
+              (region
+                (block [^bb0]
+                  (arguments [(: %arg0 !transform.any_op)])
+                  (operation
+                    (name transform.with_pdl_patterns)
+                    (operand-uses %arg0)
+                    (regions
+                      (region
+                        (block [^bb0]
+                          (arguments [(: %arg1 !transform.any_op)])
+                          (operation
+                            (name pdl.pattern)
+                            (attributes {:benefit (: 1 i16) :sym_name @mymath_to_arith})
+                            (regions
+                              (region
+                                (block
+                                  (arguments [])
+                                  (operation
+                                    (name pdl.operand)
+                                    (result-bindings [%1])
+                                    (result-types !pdl.value))
+                                  (operation
+                                    (name pdl.operand)
+                                    (result-bindings [%2])
+                                    (result-types !pdl.value))
+                                  (operation
+                                    (name pdl.type)
+                                    (result-bindings [%3])
+                                    (result-types !pdl.type))
+                                  (operation
+                                    (name pdl.operation)
+                                    (result-bindings [%4])
+                                    (result-types !pdl.operation)
+                                    (operand-uses %1 %2 %3)
+                                    (attributes {:attributeValueNames [] :opName "mymath.add" :operandSegmentSizes array<i32: 2, 0, 1>}))
+                                  (operation
+                                    (name pdl.rewrite)
+                                    (operand-uses %4)
+                                    (attributes {:operandSegmentSizes array<i32: 1, 0>})
+                                    (regions
+                                      (region
+                                        (block
+                                          (arguments [])
+                                          (operation
+                                            (name pdl.operation)
+                                            (result-bindings [%5])
+                                            (result-types !pdl.operation)
+                                            (operand-uses %1 %2 %3)
+                                            (attributes {:attributeValueNames [] :opName "arith.addi" :operandSegmentSizes array<i32: 2, 0, 1>}))
+                                          (operation
+                                            (name pdl.replace)
+                                            (operand-uses %4 %5)
+                                            (attributes {:operandSegmentSizes array<i32: 1, 1, 0>}))))))))))
+                          (operation
+                            (name transform.sequence)
+                            (operand-uses %arg1)
+                            (attributes {:failure_propagation_mode (: 1 i32) :operandSegmentSizes array<i32: 1, 0>})
+                            (regions
+                              (region
+                                (block [^bb0]
+                                  (arguments [(: %arg2 !transform.any_op)])
+                                  (operation
+                                    (name transform.pdl_match)
+                                    (result-bindings [%0])
+                                    (result-types !transform.any_op)
+                                    (operand-uses %arg2)
+                                    (attributes {:pattern_name @mymath_to_arith}))
+                                  (operation
+                                    (name transform.yield))))))))))
+                  (operation
+                    (name transform.yield)))))))))))

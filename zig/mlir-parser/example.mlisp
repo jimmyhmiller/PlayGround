@@ -1,0 +1,131 @@
+(mlir
+  (operation
+    (name builtin.module)
+    (regions
+      (region
+        (block
+          (arguments [])
+          (operation
+            (name irdl.dialect)
+            (attributes {:sym_name @mlsp})
+            (regions
+              (region
+                (block
+                  (arguments [])
+                  (operation
+                    (name irdl.operation)
+                    (attributes {:sym_name @identifier})
+                    (regions
+                      (region
+                        (block
+                          (arguments [])
+                          (operation
+                            (name irdl.any)
+                            (result-bindings [%6])
+                            (result-types !irdl.attribute))
+                          (operation
+                            (name irdl.attributes)
+                            (operand-uses %6)
+                            (attributes {:attributeValueNames ["value"]}))
+                          (operation
+                            (name irdl.is)
+                            (result-bindings [%7])
+                            (result-types !irdl.attribute)
+                            (attributes {:expected !llvm.ptr}))
+                          (operation
+                            (name irdl.results)
+                            (operand-uses %7)
+                            (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))
+                  (operation
+                    (name irdl.operation)
+                    (attributes {:sym_name @list})
+                    (regions
+                      (region
+                        (block
+                          (arguments [])
+                          (operation
+                            (name irdl.is)
+                            (result-bindings [%5])
+                            (result-types !irdl.attribute)
+                            (attributes {:expected !llvm.ptr}))
+                          (operation
+                            (name irdl.operands)
+                            (operand-uses %5)
+                            (attributes {:names ["elements"] :variadicity #irdl<variadicity_array[ variadic]>}))
+                          (operation
+                            (name irdl.results)
+                            (operand-uses %5)
+                            (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))
+                  (operation
+                    (name irdl.operation)
+                    (attributes {:sym_name @get_element})
+                    (regions
+                      (region
+                        (block
+                          (arguments [])
+                          (operation
+                            (name irdl.is)
+                            (result-bindings [%3])
+                            (result-types !irdl.attribute)
+                            (attributes {:expected !llvm.ptr}))
+                          (operation
+                            (name irdl.operands)
+                            (operand-uses %3)
+                            (attributes {:names ["list"] :variadicity #irdl<variadicity_array[ single]>}))
+                          (operation
+                            (name irdl.any)
+                            (result-bindings [%4])
+                            (result-types !irdl.attribute))
+                          (operation
+                            (name irdl.attributes)
+                            (operand-uses %4)
+                            (attributes {:attributeValueNames ["index"]}))
+                          (operation
+                            (name irdl.results)
+                            (operand-uses %3)
+                            (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))
+                  (operation
+                    (name irdl.operation)
+                    (attributes {:sym_name @get_element_dyn})
+                    (regions
+                      (region
+                        (block
+                          (arguments [])
+                          (operation
+                            (name irdl.is)
+                            (result-bindings [%1])
+                            (result-types !irdl.attribute)
+                            (attributes {:expected !llvm.ptr}))
+                          (operation
+                            (name irdl.is)
+                            (result-bindings [%2])
+                            (result-types !irdl.attribute)
+                            (attributes {:expected i64}))
+                          (operation
+                            (name irdl.operands)
+                            (operand-uses %1 %2)
+                            (attributes {:names ["list" "index"] :variadicity #irdl<variadicity_array[ single,  single]>}))
+                          (operation
+                            (name irdl.results)
+                            (operand-uses %1)
+                            (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))
+                  (operation
+                    (name irdl.operation)
+                    (attributes {:sym_name @build_operation})
+                    (regions
+                      (region
+                        (block
+                          (arguments [])
+                          (operation
+                            (name irdl.is)
+                            (result-bindings [%0])
+                            (result-types !irdl.attribute)
+                            (attributes {:expected !llvm.ptr}))
+                          (operation
+                            (name irdl.operands)
+                            (operand-uses %0 %0 %0)
+                            (attributes {:names ["name" "result_types" "operands"] :variadicity #irdl<variadicity_array[ single,  single,  single]>}))
+                          (operation
+                            (name irdl.results)
+                            (operand-uses %0)
+                            (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})))))))))))))))

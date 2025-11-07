@@ -2277,6 +2277,7 @@ impl Parser {
             TokenType::Spy => self.parse_spy_stmt(),
             TokenType::Method => self.parse_method_expr(),
             TokenType::Table => self.parse_table_expr(),
+            TokenType::TableExtract => self.parse_extract_expr(),
             TokenType::LoadTable => self.parse_load_table_expr(),
             TokenType::Reactor => self.parse_reactor_expr(),
             _ => Err(ParseError::unexpected(token)),
@@ -3109,15 +3110,33 @@ impl Parser {
             self.parse_shadow_let_expr()
         } else if self.matches(&TokenType::Name) {
             // Check if this is an implicit let binding: x = value or x :: Type = value
+            // OR a contract statement: x :: Type
             // Look ahead to see if there's a :: or = or := after the name
             let checkpoint = self.checkpoint();
             let _name = self.advance(); // Consume the name
 
             // Check for type annotation first
             if self.matches(&TokenType::ColonColon) {
-                // Has type annotation - must be a let or var binding
-                self.restore(checkpoint);
-                self.parse_implicit_let_expr()
+                // Has type annotation - could be contract or let binding
+                // Need to look further ahead to check for = after the type
+                let _checkpoint2 = self.checkpoint();
+
+                // Try to parse the type annotation
+                if let Ok(_) = self.parse_ann() {
+                    if self.matches(&TokenType::Equals) {
+                        // Has = after type, so it's a let binding: x :: Type = value
+                        self.restore(checkpoint);
+                        self.parse_implicit_let_expr()
+                    } else {
+                        // No = after type, so it's a contract statement: x :: Type
+                        self.restore(checkpoint);
+                        self.parse_contract_stmt()
+                    }
+                } else {
+                    // Failed to parse type annotation, restore and try as expression
+                    self.restore(checkpoint);
+                    self.parse_expr()
+                }
             } else if self.matches(&TokenType::Equals) {
                 // Implicit let binding: x = value
                 self.restore(checkpoint);
@@ -3863,6 +3882,78 @@ impl Parser {
         })
     }
 
+    /// Contract statement: name :: Type
+    /// Grammar: contract-stmt: NAME COLONCOLON ty-params (ann | noparen-arrow-ann)
+    /// Example: foo :: Number -> String
+    fn parse_contract_stmt(&mut self) -> ParseResult<Expr> {
+        let start = self.peek().clone();
+
+        // Parse contract name
+        let name = self.parse_name()?;
+
+        // Expect ::
+        self.expect(TokenType::ColonColon)?;
+
+        // Parse optional type parameters <T, U>
+        let params = if self.matches(&TokenType::LAngle) {
+            self.parse_comma_list(|p| p.parse_name())?
+        } else {
+            Vec::new()
+        };
+
+        // Parse type annotation
+        // Contract statements allow noparen-arrow-ann: args -> ret without parentheses
+        let ann = self.parse_contract_ann()?;
+
+        let end = if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            start.clone()
+        };
+
+        Ok(Expr::SContract {
+            l: self.make_loc(&start, &end),
+            name,
+            params,
+            ann,
+        })
+    }
+
+    /// Parse annotation for contract statements
+    /// Supports noparen-arrow-ann: Type -> Type without requiring parentheses
+    fn parse_contract_ann(&mut self) -> ParseResult<Ann> {
+        let start_pos = self.current;
+
+        // Parse the first annotation
+        let first_ann = self.parse_ann()?;
+
+        // Check if there's an arrow (for noparen-arrow-ann)
+        if self.matches(&TokenType::ThinArrow) {
+            self.advance(); // consume ->
+
+            // Parse return type
+            let ret = Box::new(self.parse_ann()?);
+
+            // The first annotation is the argument
+            // If it was a tuple {A; B}, it becomes the args, otherwise it's a single arg
+            let args = vec![first_ann];
+
+            let end_pos = self.current - 1;
+            let end_token = &self.tokens[end_pos];
+            let loc = self.make_loc(&self.tokens[start_pos], end_token);
+
+            return Ok(Ann::AArrow {
+                l: loc,
+                args,
+                ret,
+                use_parens: false, // Not using parentheses for contract annotations
+            });
+        }
+
+        // No arrow, just return the annotation as-is
+        Ok(first_ann)
+    }
+
     /// Standalone let binding: x = value (no "let" keyword)
     /// Creates an s-let-expr (expression form that returns a value)
     /// Used for standalone expression parsing
@@ -4006,7 +4097,13 @@ impl Parser {
                             CasesBindType::SNormal
                         };
 
-                        let bind = p.parse_bind()?;
+                        // Parse binding - could be tuple bind { x; y } or regular bind
+                        let bind = if p.matches(&TokenType::LBrace) {
+                            p.parse_tuple_bind()?
+                        } else {
+                            p.parse_bind()?
+                        };
+
                         let l = match &bind {
                             Bind::SBind { l, .. } => l.clone(),
                             Bind::STupleBind { l, .. } => l.clone(),
@@ -4758,7 +4855,7 @@ impl Parser {
     }
 
     /// Parse a variant member (parameter in a data constructor)
-    /// Can be: ref binding | binding
+    /// Can be: ref binding | binding | { fields }
     fn parse_variant_member(&mut self) -> ParseResult<VariantMember> {
         let start = self.peek().clone();
 
@@ -4770,8 +4867,14 @@ impl Parser {
             VariantMemberType::SNormal
         };
 
-        // Parse the binding
-        let bind = self.parse_bind()?;
+        // Parse the binding - could be regular bind or tuple bind
+        let bind = if self.matches(&TokenType::LBrace) {
+            // Tuple pattern: { x; y; z }
+            self.parse_tuple_bind()?
+        } else {
+            // Regular binding: x or x :: Number
+            self.parse_bind()?
+        };
 
         let end = if self.current > 0 {
             self.tokens[self.current - 1].clone()
@@ -4884,6 +4987,30 @@ impl Parser {
             l: self.make_loc(&start, &end),
             headers,
             rows,
+        })
+    }
+
+    /// extract-expr: EXTRACT column FROM table END
+    /// Parses extract expressions like: extract state from obj end
+    fn parse_extract_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::TableExtract)?;
+
+        // Parse column name
+        let column = self.parse_name()?;
+
+        // Expect FROM keyword
+        self.expect(TokenType::From)?;
+
+        // Parse table expression
+        let table = Box::new(self.parse_expr()?);
+
+        // Expect END keyword
+        let end = self.expect(TokenType::End)?;
+
+        Ok(Expr::STableExtract {
+            l: self.make_loc(&start, &end),
+            column,
+            table,
         })
     }
 
