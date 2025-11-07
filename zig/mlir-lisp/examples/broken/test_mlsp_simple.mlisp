@@ -1,0 +1,194 @@
+;; MLSP Dialect with Transform-based Lowering
+;; This file demonstrates:
+;; 1. IRDL dialect definition for mlsp operations
+;; 2. Transform patterns to lower mlsp.* → LLVM dialect
+;; 3. Usage example
+
+;; ========== IRDL DIALECT DEFINITION ==========
+
+(operation
+ (name irdl.dialect)
+ (attributes {:sym_name @mlsp})
+ (regions
+  (region
+   (block
+    (arguments [])
+
+    ;; mlsp.identifier - Creates identifier value from string
+    (operation
+     (name irdl.operation)
+     (attributes {:sym_name @identifier})
+     (regions
+      (region
+       (block
+        (arguments [])
+        (operation
+         (name irdl.any)
+         (result-bindings [%0])
+         (result-types !irdl.attribute))
+        (operation
+         (name irdl.attributes)
+         (operand-uses %0)
+         (attributes {:attributeValueNames ["value"]}))
+        (operation
+         (name irdl.is)
+         (result-bindings [%1])
+         (result-types !irdl.attribute)
+         (attributes {:expected !llvm.ptr}))
+        (operation
+         (name irdl.results)
+         (operand-uses %1)
+         (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))
+
+    ;; mlsp.list - Creates list from variadic elements
+    (operation
+     (name irdl.operation)
+     (attributes {:sym_name @list})
+     (regions
+      (region
+       (block
+        (arguments [])
+        (operation
+         (name irdl.is)
+         (result-bindings [%0])
+         (result-types !irdl.attribute)
+         (attributes {:expected !llvm.ptr}))
+        (operation
+         (name irdl.operands)
+         (operand-uses %0)
+         (attributes {:names ["elements"] :variadicity #irdl<variadicity_array[ variadic]>}))
+        (operation
+         (name irdl.results)
+         (operand-uses %0)
+         (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))
+
+    ;; mlsp.get_element - Get element at static index
+    (operation
+     (name irdl.operation)
+     (attributes {:sym_name @get_element})
+     (regions
+      (region
+       (block
+        (arguments [])
+        (operation
+         (name irdl.is)
+         (result-bindings [%0])
+         (result-types !irdl.attribute)
+         (attributes {:expected !llvm.ptr}))
+        (operation
+         (name irdl.operands)
+         (operand-uses %0)
+         (attributes {:names ["list"] :variadicity #irdl<variadicity_array[ single]>}))
+        (operation
+         (name irdl.is)
+         (result-bindings [%1])
+         (result-types !irdl.attribute)
+         (attributes {:expected i64}))
+        (operation
+         (name irdl.attributes)
+         (operand-uses %1)
+         (attributes {:attributeValueNames ["index"]}))
+        (operation
+         (name irdl.results)
+         (operand-uses %0)
+         (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))))))
+
+
+;; ========== TRANSFORM PATTERNS ==========
+
+(operation
+  (name builtin.module)
+  (attributes {:transform.with_named_sequence true})
+  (regions
+    (region
+      (block
+        (arguments [])
+
+        (operation
+          (name transform.named_sequence)
+          (attributes {:function_type (!function (inputs !transform.any_op) (results))
+                       :sym_name @__transform_main})
+  (regions
+    (region
+      (block
+        (arguments [(: %arg0 !transform.any_op)])
+
+        ;; Apply PDL patterns to lower mlsp operations
+        (operation
+          (name transform.apply_patterns)
+          (operand-uses %arg0)
+          (regions
+            (region
+              (block
+                (arguments [])
+
+                ;; PDL pattern: mlsp.identifier → llvm.call @value_create_identifier
+                (operation
+                  (name pdl.pattern)
+                  (attributes {:benefit (: 1 i16)})
+                  (regions
+                    (region
+                      (block
+                        (arguments [])
+
+                        ;; Match: mlsp.identifier {value = "string"}
+                        (operation
+                          (name pdl.attribute)
+                          (result-bindings [%str_attr])
+                          (result-types !pdl.attribute))
+                        (operation
+                          (name pdl.type)
+                          (result-bindings [%ptr_type])
+                          (result-types !pdl.type)
+                          (attributes {:constantType !llvm.ptr}))
+                        (operation
+                          (name pdl.operation)
+                          (result-bindings [%mlsp_id])
+                          (result-types !pdl.operation)
+                          (operand-uses %str_attr %ptr_type)
+                          (attributes {:opName "mlsp.identifier"
+                                     :attributeValueNames ["value"]
+                                     :operandSegmentSizes array<i32: 0, 1, 1>}))
+
+                        ;; Rewrite
+                        (operation
+                          (name pdl.rewrite)
+                          (operand-uses %mlsp_id)
+                          (regions
+                            (region
+                              (block
+                                (arguments [])
+
+                                ;; For now: just erase to prove pattern matches
+                                (operation
+                                  (name pdl.erase)
+                                  (operand-uses %mlsp_id))))))))))))))
+
+        (operation
+          (name transform.yield))))))))))
+
+
+
+;; ========== TEST FUNCTION ==========
+
+(operation
+ (name func.func)
+ (attributes {:function_type (!function (inputs) (results i64)) :sym_name @main})
+ (regions
+  (region
+   (block
+    (arguments [])
+    ;; Test mlsp.identifier - should be erased by transform
+    (operation
+     (name mlsp.identifier)
+     (result-bindings [%0])
+     (result-types !llvm.ptr)
+     (attributes {:value "test"}))
+    (operation
+     (name arith.constant)
+     (result-bindings [%1])
+     (result-types i64)
+     (attributes {:value (: 42 i64)}))
+    (operation
+     (name func.return)
+     (operand-uses %1))))))

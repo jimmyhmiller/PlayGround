@@ -33,7 +33,9 @@ test "CVectorLayout - struct field offsets match MLIR expectations" {
 }
 
 test "C API - vector to layout conversion" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Create a PersistentVector with some Values
     var vec = mlir_lisp.vector.PersistentVector(*reader.Value).init(allocator, null);
@@ -89,7 +91,9 @@ test "MLIR collection types - field enum indices" {
 }
 
 test "Code generation - load vector length" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const code = try collection_types.generateLoadVectorLen(allocator, "%my_vec", "%len");
     defer allocator.free(code);

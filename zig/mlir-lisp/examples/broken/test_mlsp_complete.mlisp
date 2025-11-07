@@ -107,6 +107,22 @@
          (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})))))))))
 
 
+;; ========== RUNTIME HELPER FUNCTIONS ==========
+;; These helpers are called by the lowered mlsp operations
+
+;; Declare malloc for allocating CValueLayout structs
+(operation
+  (name llvm.func)
+  (attributes {:sym_name @malloc
+               :function_type (!function !llvm.func<ptr (i64)>)
+               :linkage #llvm.linkage<external>})
+  (regions
+    (region)))
+
+;; NOTE: For now, we'll skip the runtime helpers and write simpler transform patterns
+;; that inline everything. The helpers would require complex defn macro expansion.
+
+
 (operation
  (name func.func)
  (attributes {:function_type (!function (inputs) (results i64)) :sym_name @main})
@@ -152,5 +168,5 @@
      (attributes {:value (: 42 i64)}))
     (operation
      (name func.return)
-     (operand-uses %6))))))
+     (operand-uses %6)))))))))
 

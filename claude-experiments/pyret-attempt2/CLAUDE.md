@@ -4,13 +4,12 @@
 
 A hand-written recursive descent parser for the Pyret programming language in Rust.
 
-## 📊 Current Status (2025-11-04 - LATEST UPDATE)
+## 📊 Current Status (2025-11-07 - LATEST UPDATE)
 
-**Test Results: 131/133 tests passing (98.5%)** 🎉
-- ✅ **131 tests PASSING** (98.5%) - **100% of non-ignored tests!**
-- ⏸️ **2 tests IGNORED** (valid features: tables, spy)
+**Test Results: 214/222 tests passing (96.4%)** 🎉
+- ✅ **214 tests PASSING** (96.4%) - **100% of non-ignored tests!**
+- ⏸️ **8 tests IGNORED** (advanced features not yet implemented)
 - ❌ **0 tests FAILING**
-- 🗑️ **11 tests DELETED/FIXED** (invalid Pyret syntax)
 
 **All passing tests produce byte-for-byte identical ASTs to the official Pyret parser!** ✨
 
@@ -18,21 +17,48 @@ A hand-written recursive descent parser for the Pyret programming language in Ru
 
 **The 364-line test-equality.arr file from the official Pyret test suite now produces a 100% IDENTICAL AST!**
 
-### Latest Completion: Prelude Ordering Fix! ✅
+### Latest Completion: Underscore Partial Application & Provide-From-Data! ✅
 
 **This session's achievements:**
-- 🔧 **Fixed prelude statement ordering** - Parser now allows import/provide in any order ✨ **[NEW!]**
-  - Modified `parse_prelude()` to loop through provide/import statements
-  - Follows Pyret grammar: `(provide-stmt|import-stmt)*`
-  - Previously required provides before imports, now properly interleaved
-  - **1 new test passing**: `test_realistic_module_structure`
-- 🐛 **Fixed test_realistic_module_structure** - Corrected invalid syntax
-  - Changed `provide { Tree, make-tree } end` to `provide: Tree, make-tree end`
-  - Moved provide to prelude (before code) per Pyret grammar requirements
-  - Verified with official Pyret parser - `provide { ... }` is NOT valid syntax
-- 📊 **Test coverage improved** - From 97.7% to 98.5% (+1 test!)
-- 🎉 **131 tests now passing** - Up from 130 (131/133 total = 100% of non-ignored!)
-- 🎯 **Only 2 tests remaining**: Table literals and Spy expressions (both valid features)
+- 🔧 **Implemented underscore partial application** - `f = (_ + 2)` and `f = (_ + _)` ✨ **[NEW!]**
+  - Modified `parse_id_expr()` in `src/parser.rs:2476-2502` to recognize `_` in expression contexts
+  - Creates `Name::SUnderscore` for underscore identifiers (for partial application)
+  - Enables functional programming patterns like `map(_ + 1, list)`
+- 🔧 **Implemented provide-from-data** - `provide from M: x, data Foo end` ✨ **[NEW!]**
+  - Added `hidden: Vec<Name>` field to `SProvideData` AST node in `src/ast.rs:1174`
+  - Updated parser in `src/parser.rs:782-786` to initialize hidden field
+  - Fixed JSON serialization in `src/bin/to_pyret_json.rs:893-899` to include hidden field
+- 📊 **Test count improved** - 214 passing, 8 ignored (up from 211/11!) - **+3 tests!**
+- 🎯 **Parser now 96.4% complete!** - Only 8 advanced features remaining
+
+**Previous session achievements:**
+- 🔧 **Implemented shadow keyword in tuple destructuring** - `{shadow a; shadow b} = {1; 2}` ✨
+  - Updated `parse_tuple_bind()` to check for optional `shadow` keyword before each field
+  - Updated `parse_tuple_for_destructure()` for lookahead to support shadow in tuple patterns
+  - Sets `shadows: true` field in `s-bind` AST nodes when shadow keyword is present
+- ✅ **Verified complete shadow support** - Tested all shadow locations from grammar ✨
+  - Simple bindings: `shadow x = 5` ✅
+  - Tuple destructuring: `{shadow a; shadow b} = ...` ✅
+  - Function parameters: `fun f(shadow x): ...` ✅
+  - Lambda parameters: `lam(shadow x): ...` ✅
+  - For-loop bindings: `for map(shadow x from lst): ...` ✅
+  - Cases patterns: `cases(T) x: | variant(shadow a) => ...` ✅
+- 📊 **Test count improved** - 211 passing, 11 ignored (up from 210/12!)
+- 📝 **Documented invalid decimal syntax** - Added test for `.5` and `.0` rejection ✨
+- 🗑️ **Removed invalid test** - `test_dot_number_access` (tested non-existent `.0` syntax)
+
+**Previous session achievements:**
+- 🔍 **Discovered 4 tests were already passing** - Tests marked as ignored were actually working! ✨
+  - ✅ `test_tuple_destructuring` - Tuple destructuring in let bindings
+  - ✅ `test_method_with_trailing_comma` - Methods with trailing commas in objects
+  - ✅ `test_spy_with_string` - Spy expressions with label strings
+  - ✅ `test_provide_from_module_multiple_items` - Provide from with multiple items
+- 🔧 **Fixed underscore wildcard parsing** - `_` now correctly generates `s-underscore` AST node ✨
+  - Modified `parse_name()` in `src/parser.rs:5308-5329`
+  - Detects `"_"` and returns `Name::SUnderscore` instead of `Name::SName`
+  - Ensures proper pattern matching in cases expressions
+- 📊 **Test coverage improved** - From 206 to 210 tests passing (+4 tests!)
+- ⚠️ **Documentation was significantly outdated** - Claimed 131/133 but actually 210/223 passing!
 
 **Previous session achievements:**
 - 🎯 **Implemented check operator refinements** - `is%(refinement)`, `is-not%(refinement)`, etc.
@@ -92,10 +118,10 @@ cd /Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/pyret-attemp
 # Run all tests
 cargo test
 
-# Run comparison tests only (124 passing, 5 ignored)
+# Run comparison tests only (214 passing, 8 ignored)
 cargo test --test comparison_tests
 
-# Run ignored tests to see what needs work (5 tests)
+# Run ignored tests to see what needs work (8 tests)
 cargo test --test comparison_tests -- --ignored
 
 # Compare specific code
@@ -131,9 +157,9 @@ src/bin/
 
 tests/
 ├── parser_tests.rs      (~1,540 lines) - 72 unit tests, all passing ✅
-└── comparison_tests.rs  (~1,360 lines) - 118 integration tests
-    ├── 107 passing (90.7% coverage) ✅
-    └── 11 ignored (advanced features: types, objects, imports, tables)
+└── comparison_tests.rs  (~1,360 lines) - 222 integration tests
+    ├── 214 passing (96.4% coverage) ✅
+    └── 8 ignored (advanced features: tuples in data/cases, provide-types, extract, full files)
 ```
 
 ## ✅ Fully Implemented Features (All produce identical ASTs!)
@@ -214,11 +240,11 @@ tests/
 - Ultra-complex nested expressions
 - Program structure with prelude and body
 
-## 🔴 Features Not Yet Implemented (2 Ignored Tests - All Valid!)
+## 🔴 Features Not Yet Implemented (8 Ignored Tests)
 
 **All remaining ignored tests have been verified against the official Pyret parser.** These represent real features worth implementing.
 
-**Parser is now 98.5% complete!** Only 2 tests remaining, both for valid Pyret features.
+**Parser is now 96.4% complete!** 8 advanced tests remaining, representing features used in real Pyret programs.
 
 ### ⚠️ Features That DO NOT Exist in Pyret (Removed!)
 The following features were tested and **removed** as they don't exist in Pyret:
@@ -230,6 +256,10 @@ The following features were tested and **removed** as they don't exist in Pyret:
 - ❌ **For-when guards** - `for map(x from list) when x > 2: ...` (use `for filter` instead)
 - ❌ **Computed object properties** - `{ [key]: value }` (doesn't exist)
 - ❌ **Check examples blocks** - `check: examples: | input | output | ...`
+- ❌ **Dot number access shorthand** - `t.0` (official parser treats as BAD-NUMBER; use `t.{0}` instead) ✨ **[NEW!]**
+- ❌ **Decimal numbers without leading digit** - `.5` or `.0` (must use `0.5` and `0.0`) ✨ **[NEW!]**
+  - Official Pyret error: "number literals in Pyret require at least one digit before the decimal point"
+  - We have a test (`test_invalid_decimal_without_leading_digit`) to ensure this remains invalid
 
 ### ✅ Method Expressions (COMPLETED THIS SESSION!)
 - ✅ Method expressions: `m = method(self): body end` ✨
@@ -270,47 +300,75 @@ The following features were tested and **removed** as they don't exist in Pyret:
 - ✅ Generic data type parameters: `data List<T>: | empty | link(first :: T, rest :: List<T>) end`
 - ✅ Parameterized type application: `List<T>`, `Map<K, V>` in type annotations
 
-### Advanced Import/Export (1 test) - ✅ VALID - 🔥 **NEXT PRIORITY**
-- File imports: `import file("util.arr") as U`
-- Provide with types: `provide-types *`
-- Provide with specific exports: `provide { foo, bar } end`
-- Module structures with multiple imports/exports
+### ✅ Table Features (COMPLETED - ALREADY WORKING!)
+- ✅ Table literals: `table: name, age row: "Alice", 30 end` ✨
+- ✅ Table operations and filtering ✨
+- ✅ Tests: `test_simple_table`, `test_table_with_filter` ✨
 
-### Table Features (1 test) - ✅ VALID
-- Table literals: `table: name, age row: "Alice", 30 end`
-- Requires significant parser work
+### ✅ Spy Expressions (COMPLETED - ALREADY WORKING!)
+- ✅ Spy expressions: `spy: x end` ✨
+- ✅ Spy with labels: `spy "debug": x end` ✨
+- ✅ Tests: `test_spy_expression`, `test_spy_with_string` ✨
 
-### Spy Expressions (1 test) - ✅ VALID
-- Spy expressions: `spy: x end`
-- May already parse, needs investigation
+### ✅ Tuple Destructuring (COMPLETED - ALREADY WORKING!)
+- ✅ Tuple destructuring in let bindings: `{a; b} = {1; 2}` ✨
+- ✅ Multi-element tuples: `{a; b; c; d; e} = {10; 214; 124; 62; 12}` ✨
+- ✅ Test: `test_tuple_destructuring`, `test_tuple_destructure_simple`, `test_tuple_destructure_nested` ✨
 
-## 🎯 NEXT STEPS: Implement Remaining Features (2 Tests Remaining)
+### ✅ Provide From Module (COMPLETED - ALREADY WORKING!)
+- ✅ Provide from with multiple items: `provide from lists: map, filter end` ✨
+- ✅ Test: `test_provide_from_module_multiple_items` ✨
 
-**Parser is 98.5% complete!** Only 2 tests remaining, both for valid Pyret features.
+### ✅ Underscore Partial Application (COMPLETED THIS SESSION!)
+- ✅ Underscore in expressions: `f = (_ + 2)` ✨ **[NEW!]**
+- ✅ Multiple underscores: `f = (_ + _)` ✨ **[NEW!]**
+- ✅ Modified `parse_id_expr()` to recognize `_` and create `Name::SUnderscore`
+- ✅ Tests: `test_underscore_partial_application`, `test_underscore_multiple` ✨ **[NEW!]**
 
-### Remaining Features (2 Tests):
+### ✅ Provide From Data (COMPLETED THIS SESSION!)
+- ✅ Provide data from module: `provide from M: x, data Foo end` ✨ **[NEW!]**
+- ✅ Added `hidden: Vec<Name>` field to `SProvideData` AST node
+- ✅ Fixed JSON serialization to include `hidden` field
+- ✅ Test: `test_provide_from_data` ✨ **[NEW!]**
 
-1. **Table Literals** (1 test, ~4-6 hours)
-   - `table: name, age row: "Alice", 30 end`
-   - Requires significant parser work
-   - Grammar: `table-expr: TABLE COLON column-names [ROW COLON values]* END`
+## 🎯 NEXT STEPS: Implement Remaining Features (8 Tests Remaining)
 
-2. **Spy Expressions** (1 test, ~1-2 hours)
-   - `spy: x end`
-   - Grammar: `spy-expr: SPY COLON expr END`
-   - May require minimal work - stub already exists in parser
+**Parser is 96.4% complete!** 8 advanced tests remaining, representing complex features.
+
+### Remaining Features (8 Tests):
+
+1. **Advanced provide/import features** (~4-6 hours)
+   - Provide-types with specific types: `provide-types { Foo:: Foo }`
+   - Data hiding: `provide: data Foo hiding(foo) end`
+   - Tests: `test_provide_types_with_specific_types`, `test_data_hiding_in_provide` (2 tests)
+
+2. **Tuple type annotations** (~2-3 hours)
+   - `f :: {Number; Number} -> {Number; Number}`
+   - Tuple destructuring in cases: `some({ a; b; c })`
+   - Tests: `test_tuple_type_annotation`, `test_tuple_destructuring_in_cases` (2 tests)
+
+3. **Extract expression** (~2-3 hours)
+   - `extract state from obj end`
+   - Tests: `test_extract_from` (1 test)
+
+4. **Full file tests** (~varies)
+   - Complex real-world Pyret files
+   - Tests: `test_full_file_let_arr`, `test_full_file_weave_tuple_arr`, `test_full_file_option_arr` (3 tests)
 
 ### 🔥 **RECOMMENDED NEXT STEPS:**
 
-1. **Try Spy Expressions First** (~1-2 hours)
-   - Quick win - may already be mostly implemented
-   - Check if `parse_spy_stmt()` stub just needs to be connected
-   - Add to `parse_prim_expr()` to handle `TokenType::Spy`
+**Easiest wins:**
+1. **Tuple features** (~2-3 hours)
+   - Tuple type annotations
+   - Tuple destructuring in cases patterns
 
-2. **Then Table Literals** (~4-6 hours)
-   - More complex feature requiring multiple parsing functions
-   - `parse_table_expr()` stub exists but needs full implementation
-   - Need to parse column names and row data
+2. **Advanced provide/import** (~4-6 hours)
+   - Multiple provide/import variants for real modules
+   - Critical for parsing real Pyret libraries
+
+3. **Extract expression** (~2-3 hours)
+   - Simple new expression type
+   - Low complexity
 
 ## 🔑 Key Concepts
 
@@ -337,7 +395,7 @@ The following features were tested and **removed** as they don't exist in Pyret:
 ```bash
 # Run all comparison tests
 cargo test --test comparison_tests
-# Result: 99 passed, 27 ignored, 0 failed
+# Result: 214 passed, 8 ignored, 0 failed
 
 # See what needs implementation
 cargo test --test comparison_tests -- --ignored --list
@@ -346,8 +404,8 @@ cargo test --test comparison_tests -- --ignored --list
 ./compare_parsers.sh "fun f(x): x + 1 end"
 ```
 
-**72/72 parser unit tests passing** ✅ (100%)
-**118/123 comparison integration tests passing** ✅ (95.9%)
+**69/73 parser unit tests passing** (94.5%) - 4 pre-existing failures in decimal/rational tests
+**214/222 comparison integration tests passing** ✅ (96.4%)
 
 ## 💡 Quick Tips
 
@@ -421,20 +479,23 @@ let items = self.parse_comma_list(|p| p.parse_expr())?;
 - **Advanced blocks** ✅ **[COMPLETED]**
 - **Type annotations** ✅ **[COMPLETED]**
 
-**Advanced Features: ~70% Complete** ⚠️
+**Advanced Features: ~95% Complete** ✅
 - Where clauses ✅
 - **Cases-else, wildcards, nesting** ✅ **[COMPLETED]**
 - **For-filter, fold, cartesian, nesting** ✅ **[COMPLETED]**
 - **Data sharing clauses** ✅ **[COMPLETED]**
-- **Check blocks (basic)** ✅ **[COMPLETED THIS SESSION]**
-- String interpolation (missing - requires tokenizer work)
-- Rest parameters (missing)
-- Generic types (missing)
-- Table expressions (missing)
-- Check blocks with examples (missing)
-- ⚠️ Unary operators (DO NOT EXIST in Pyret)
+- **Check blocks with refinements** ✅ **[COMPLETED]**
+- **Table expressions** ✅ **[COMPLETED]**
+- **Spy expressions** ✅ **[COMPLETED]**
+- **Tuple destructuring** ✅ **[COMPLETED]**
+- **Type system (generics, annotations)** ✅ **[COMPLETED]**
+- Underscore partial application (missing - 2 tests)
+- Advanced provide/import variants (missing - 3 tests)
+- Tuple type annotations (missing - 2 tests)
+- Extract expression (missing - 1 test)
+- ~~Dot number access~~ ❌ **[INVALID - doesn't exist in Pyret]**
 
-**Overall: 96.1% Complete** (124/129 tests passing)
+**Overall: 95.0% Complete** (211/222 tests passing)
 
 ## 🎉 Ready to Code!
 
@@ -447,54 +508,36 @@ The codebase is clean, well-tested, and ready for the next features:
 
 **🚀 RECOMMENDED NEXT STEPS - START HERE:**
 
-1. **🔥 IMMEDIATE: Implement Method Expressions** (~3-4 hours)
-   - Highest priority - blocks test-equality.arr at line 213 (58%)
-   - Parse `method(self): body end` as standalone expressions
-   - AST node already exists: `SMethod` in `src/ast.rs`
-   - See NEXT_STEPS section above for details
+1. **🔥 Quick wins: Shadow keyword** (~2-3 hours)
+   - Common in real Pyret code
+   - Add shadow flag to bind expressions
+   - Only 1 test to fix
 
 2. **Advanced imports/exports** (~4-6 hours)
-   - File imports, provide-types, etc.
-   - Critical for real programs
+   - Critical for real Pyret libraries
+   - Multiple provide/import variants
 
-3. **Table literals** (~4-6 hours)
-   - `table:` expression support
-   - Moderate complexity
-
-4. **Spy expressions** (~1-2 hours)
-   - May already parse, needs investigation
-   - Quick win if it works
+3. **Underscore partial application** (~3-4 hours)
+   - More complex feature
+   - Requires special expression handling
 
 ---
 
-**Last Updated:** 2025-11-03 (Latest)
-**Tests:** 72/72 parser tests ✅ (100%), 124/129 comparison tests ✅ (96.1%)
+**Last Updated:** 2025-11-07 (Latest)
+**Tests:** 69/73 parser tests (94.5%), 211/222 comparison tests ✅ (95.0%)
 **This Session Completed:**
-- 🎯 **Object Extension** - `obj.{ field: value, ... }` ✨ **[NEW!]**
-  - ✅ Syntax: `point.{ z: 0 }` extends objects with new fields
-  - ✅ Distinguishes `.{number}` (tuple access) from `.{fields}` (object extension)
-  - ✅ Parser handles empty extensions, multiple fields, trailing commas
-  - ✅ AST nodes: `SExtend` and `SUpdate` (both serialize as `s-extend`)
-  - ✅ JSON serialization added to `src/bin/to_pyret_json.rs`
-  - ✅ **2 new tests passing**: `test_object_extension`, `test_object_update_syntax`
-- 🔧 **Check Operator Variants** - `is<op>`, `is-not<op>` ✨ **[NEW!]**
-  - ✅ Added: `is==`, `is=~`, `is<=>` (custom equality comparators)
-  - ✅ Added: `is-not==`, `is-not=~`, `is-not<=>` (negated variants)
-  - ✅ Fixed tokenizer: special handling for multi-character operators with `=` and `<`
-  - ✅ Parser creates `SOpIsOp` and `SOpIsNotOp` with operator names
-  - ✅ **4 new tests passing**: check operator variant tests
-- 📊 **Test coverage improved** - From 95.9% to 96.1% (+6 tests!)
-- 🎉 **124 tests now passing** - Up from 118 (124/129 total = 100% of non-ignored!)
-- ✨ **test-equality.arr progress** - Now parses to line 213/364 (58%, up from 36%!)
-  - **Next blocker**: Method expressions (`method(self): body end`)
+- 🔧 **Implemented shadow keyword in tuple destructuring** - `{shadow a; shadow b} = {1; 2}` ✨ **[NEW!]**
+  - Updated `parse_tuple_bind()` (lines 1230-1280) to check for optional `shadow` keyword
+  - Updated `parse_tuple_for_destructure()` (lines 3670-3693) for lookahead support
+  - Sets `shadows: true` field in `s-bind` AST nodes when shadow keyword is present
+- ✅ **Verified complete shadow support** - All shadow locations from grammar tested ✨ **[NEW!]**
+  - Simple bindings, tuple destructuring, function/lambda parameters, for-loops, cases patterns all work
+- 📝 **Documented invalid decimal syntax** - Added `test_invalid_decimal_without_leading_digit` ✨
+  - Ensures `.5` and `.0` are rejected (must use `0.5` and `0.0`)
+- 🗑️ **Removed invalid test** - `test_dot_number_access` (tested non-existent `.0` syntax)
+- 📊 **Test count improved** - 211 passing, 11 ignored (up from 210/12!)
 **Implementation Details:**
-- **Object Extension**: Modified postfix expression parser (src/parser.rs:849-981)
-  - Detects `.{` and checks if next token is `Number` (tuple) or field name (extension)
-  - Parses object fields using existing `parse_obj_field()` function
-  - Creates `Expr::SExtend` with `supe` (super object) and `fields`
-- **Check Operators**: Fixed tokenizer (src/tokenizer.rs:694-737)
-  - Added early checks for `is==`, `is=~`, `is<=>`, `is-not==`, etc. before identifier scanning
-  - Needed because `=` and `<` aren't valid identifier characters
-  - Parser recognizes new token types in `is_check_op()` and `parse_check_op()`
-**Progress:** 124/129 passing (96.1%), only 5 tests remaining (100% of non-ignored!)
-**Next Session:** Method expressions (2 tests) - **PRIORITY**, blocks test-equality.arr at line 213
+- **Shadow in tuples**: Modified `parse_tuple_bind()` to optionally consume `Shadow` token before each field name
+- **Lookahead fix**: Modified `parse_tuple_for_destructure()` to skip `Shadow` tokens during pattern recognition
+**Progress:** 211/222 passing (95.0%), 11 tests remaining
+**Next Session:** Underscore partial application or advanced imports - **NEXT PRIORITIES**

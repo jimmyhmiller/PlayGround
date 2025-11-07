@@ -1171,6 +1171,7 @@ pub enum ProvideSpec {
         l: Loc,
         #[serde(rename = "name-spec")]
         name: NameSpec,
+        hidden: Vec<Name>,
     },
 
     #[serde(rename = "s-provide-module")]

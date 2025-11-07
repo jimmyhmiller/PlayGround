@@ -77,6 +77,17 @@ pub const Executor = struct {
 
         std.debug.print("  Applying {} transform operation(s)...\n", .{transformOps.len});
 
+        // Check transform types - only transform.named_sequence is currently supported
+        for (transformOps) |transform_op| {
+            const op_name = mlir.Operation.getName(transform_op);
+            if (!std.mem.eql(u8, op_name, "transform.named_sequence")) {
+                std.debug.print("  ⚠ Warning: Transform type '{s}' is not yet supported for application\n", .{op_name});
+                std.debug.print("  Only 'transform.named_sequence' transforms can currently be applied.\n", .{});
+                std.debug.print("  Skipping transform application.\n", .{});
+                return;
+            }
+        }
+
         // Create a temporary module to hold the transform operations
         const location = mlir.Location.unknown(self.ctx);
         var transform_module = try mlir.Module.create(location);
@@ -112,19 +123,28 @@ pub const Executor = struct {
         module.print();
 
         // Apply the transform
+        // Note: applyNamedSequence can actually handle different transform types,
+        // not just transform.named_sequence. It works with transform.with_pdl_patterns,
+        // transform.sequence, and other transform dialect operations.
         const payload = module.getOperation();
         const transform_mod_op = transform_module.getOperation();
 
-        try mlir.Transform.applyNamedSequence(
+        std.debug.print("  Applying transform to payload...\n", .{});
+        const result = mlir.Transform.applyNamedSequence(
             payload,
             first_transform,
             transform_mod_op,
             &transform_options,
         );
 
-        std.debug.print("  Module after transform:\n", .{});
-        module.print();
-        std.debug.print("  ✓ Transforms applied successfully\n", .{});
+        if (result) {
+            std.debug.print("  Module after transform:\n", .{});
+            module.print();
+            std.debug.print("  ✓ Transforms applied successfully\n", .{});
+        } else |err| {
+            std.debug.print("  ✗ Transform application failed: {}\n", .{err});
+            return err;
+        }
     }
 
     /// Apply lowering passes to convert high-level MLIR to LLVM IR

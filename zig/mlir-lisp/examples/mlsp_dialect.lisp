@@ -21,7 +21,7 @@
         ;; =====================================
         ;; mlsp.identifier - Create identifier atom
         ;; =====================================
-        ;; Syntax: %val = mlsp.identifier "name"
+        ;; Syntax: %val = mlsp.identifier(%str_ptr)
         ;; Creates CValueLayout with identifier type tag and string data
         (operation
           (name irdl.operation)
@@ -29,15 +29,14 @@
           (regions
             (region
               (block
-                ;; Attribute: value (string literal)
-                (op %str_attr (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
+                ;; Operand: string pointer (runtime value)
+                (op %ptr_type (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
                 (operation
-                  (name irdl.attributes)
-                  (attributes {:attributeValueNames ["value"]})
-                  (operand-uses %str_attr))
+                  (name irdl.operands)
+                  (attributes {:names ["value"] :variadicity #irdl<variadicity_array[ single]>})
+                  (operand-uses %ptr_type))
 
                 ;; Result: !llvm.ptr (CValueLayout*)
-                (op %ptr_type (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
@@ -46,7 +45,7 @@
         ;; =====================================
         ;; mlsp.number - Create number atom
         ;; =====================================
-        ;; Syntax: %val = mlsp.number "42"
+        ;; Syntax: %val = mlsp.number(%str_ptr)
         ;; Creates CValueLayout with number type tag and string data
         (operation
           (name irdl.operation)
@@ -54,15 +53,14 @@
           (regions
             (region
               (block
-                ;; Attribute: value (string representation of number)
-                (op %str_attr (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
+                ;; Operand: string pointer (runtime value)
+                (op %ptr_type (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
                 (operation
-                  (name irdl.attributes)
-                  (attributes {:attributeValueNames ["value"]})
-                  (operand-uses %str_attr))
+                  (name irdl.operands)
+                  (attributes {:names ["value"] :variadicity #irdl<variadicity_array[ single]>})
+                  (operand-uses %ptr_type))
 
                 ;; Result: !llvm.ptr (CValueLayout*)
-                (op %ptr_type (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
@@ -71,7 +69,7 @@
         ;; =====================================
         ;; mlsp.string - Create string atom
         ;; =====================================
-        ;; Syntax: %val = mlsp.string "hello"
+        ;; Syntax: %val = mlsp.string(%str_ptr)
         ;; Creates CValueLayout with string type tag and string data
         (operation
           (name irdl.operation)
@@ -79,15 +77,14 @@
           (regions
             (region
               (block
-                ;; Attribute: value (string literal)
-                (op %str_attr (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
+                ;; Operand: string pointer (runtime value)
+                (op %ptr_type (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
                 (operation
-                  (name irdl.attributes)
-                  (attributes {:attributeValueNames ["value"]})
-                  (operand-uses %str_attr))
+                  (name irdl.operands)
+                  (attributes {:names ["value"] :variadicity #irdl<variadicity_array[ single]>})
+                  (operand-uses %ptr_type))
 
                 ;; Result: !llvm.ptr (CValueLayout*)
-                (op %ptr_type (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
@@ -264,20 +261,20 @@
                   (regions
                     (region
                       (block
-                        ;; Match mlsp.identifier with value attribute
-                        (operation
-                          (name pdl.attribute)
-                          (result-bindings [%str_val])
-                          (result-types !pdl.attribute))
+                        ;; Match mlsp.identifier with value operand
                         (operation
                           (name pdl.type)
                           (result-bindings [%ptr_type])
                           (result-types !pdl.type))
                         (operation
+                          (name pdl.operand)
+                          (operand-uses %ptr_type)
+                          (result-bindings [%str_val])
+                          (result-types !pdl.value))
+                        (operation
                           (name pdl.operation)
                           (attributes {:opName "mlsp.identifier"
-                                     :attributeValueNames ["value"]
-                                     :operandSegmentSizes array<i32: 0, 1, 1>})
+                                     :operandSegmentSizes array<i32: 1, 0, 1>})
                           (operand-uses %str_val %ptr_type)
                           (result-bindings [%mlsp_op])
                           (result-types !pdl.operation))
@@ -302,7 +299,7 @@
                                   (name pdl.operation)
                                   (attributes {:opName "llvm.call"
                                              :attributeValueNames ["callee"]
-                                             :operandSegmentSizes array<i32: 0, 1, 1>})
+                                             :operandSegmentSizes array<i32: 1, 0, 1>})
                                   (operand-uses %str_val %ptr_type)
                                   (result-bindings [%result_op])
                                   (result-types !pdl.operation))

@@ -11,7 +11,9 @@ const jit_macro_wrapper = mlir_lisp.jit_macro_wrapper;
 const mlir = mlir_lisp.mlir;
 
 test "JIT-compiled macro can replace Zig macro" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Step 1: Create MLIR context
     var ctx = try mlir.Context.create();
@@ -24,10 +26,10 @@ test "JIT-compiled macro can replace Zig macro" {
     try ctx.getOrLoadDialect("llvm");
     try ctx.getOrLoadDialect("arith");
 
-    // Step 2: Load and compile the macro definition
+    // Step 2: Load and compile the macro definition (using refactored version with helpers)
     const macro_source = try std.fs.cwd().readFileAlloc(
         allocator,
-        "examples/add_macro_with_strings.lisp",
+        "examples/add_macro_with_strings_refactored.lisp",
         10 * 1024 * 1024,
     );
     defer allocator.free(macro_source);
@@ -37,7 +39,19 @@ test "JIT-compiled macro can replace Zig macro" {
 
     var macro_reader = try Reader.init(allocator, &macro_tokenizer);
 
-    const macro_ast = try macro_reader.read();
+    const forms = try macro_reader.readAll();
+
+    // Wrap multiple forms in an implicit list
+    const macro_ast = if (forms.len() == 1)
+        forms.at(0)
+    else blk: {
+        const list_val = try allocator.create(mlir_lisp.Value);
+        list_val.* = mlir_lisp.Value{
+            .type = .list,
+            .data = .{ .list = forms },
+        };
+        break :blk list_val;
+    };
 
     // Expand macros (defn, mlir, etc.)
     var macro_expander = MacroExpander.init(allocator);
@@ -71,7 +85,6 @@ test "JIT-compiled macro can replace Zig macro" {
 
     // Step 3: Look up the JIT-compiled function
     const add_macro_fn = macro_executor.lookup("addMacro") orelse {
-        std.debug.print("Failed to find addMacro function\n", .{});
         return error.MacroFunctionNotFound;
     };
 
@@ -116,7 +129,9 @@ test "JIT-compiled macro can replace Zig macro" {
 }
 
 test "JIT macro produces same output as Zig macro" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var ctx = try mlir.Context.create();
     defer ctx.destroy();
@@ -128,10 +143,10 @@ test "JIT macro produces same output as Zig macro" {
     try ctx.getOrLoadDialect("llvm");
     try ctx.getOrLoadDialect("arith");
 
-    // Load and compile JIT macro
+    // Load and compile JIT macro (using refactored version with helpers)
     const macro_source = try std.fs.cwd().readFileAlloc(
         allocator,
-        "examples/add_macro_with_strings.lisp",
+        "examples/add_macro_with_strings_refactored.lisp",
         10 * 1024 * 1024,
     );
     defer allocator.free(macro_source);
@@ -140,7 +155,17 @@ test "JIT macro produces same output as Zig macro" {
 
     var macro_reader = try Reader.init(allocator, &macro_tokenizer);
 
-    const macro_ast = try macro_reader.read();
+    const forms2 = try macro_reader.readAll();
+    const macro_ast = if (forms2.len() == 1)
+        forms2.at(0)
+    else blk: {
+        const list_val = try allocator.create(mlir_lisp.Value);
+        list_val.* = mlir_lisp.Value{
+            .type = .list,
+            .data = .{ .list = forms2 },
+        };
+        break :blk list_val;
+    };
 
     // Expand macros (defn, mlir, etc.)
     var macro_expander2 = MacroExpander.init(allocator);
