@@ -2245,10 +2245,12 @@ provide from M: x, data Foo end
 }
 
 #[test]
-#[ignore] // Missing feature: tuple type annotations
 fn test_tuple_type_annotation() {
+    // Arrow types must be parenthesized in bindings (per Pyret grammar)
+    // The syntax `f :: {A; B} -> C` is INVALID and was removed in 2014 (issue #252)
+    // Correct syntax requires: `f :: ({A; B} -> C)`
     assert_matches_pyret(r#"
-f :: {Number; Number} -> {Number; Number} = lam(t): t end
+f :: ({Number; Number} -> {Number; Number}) = lam(t): t end
 f({1; 2})
 "#);
 }

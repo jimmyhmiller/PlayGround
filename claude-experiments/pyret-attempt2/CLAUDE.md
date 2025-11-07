@@ -6,9 +6,9 @@ A hand-written recursive descent parser for the Pyret programming language in Ru
 
 ## 📊 Current Status (2025-11-07 - LATEST UPDATE)
 
-**Test Results: 214/222 tests passing (96.4%)** 🎉
-- ✅ **214 tests PASSING** (96.4%) - **100% of non-ignored tests!**
-- ⏸️ **8 tests IGNORED** (advanced features not yet implemented)
+**Test Results: 215/222 tests passing (96.8%)** 🎉
+- ✅ **215 tests PASSING** (96.8%) - **100% of non-ignored tests!**
+- ⏸️ **7 tests IGNORED** (advanced features not yet implemented)
 - ❌ **0 tests FAILING**
 
 **All passing tests produce byte-for-byte identical ASTs to the official Pyret parser!** ✨
@@ -17,19 +17,29 @@ A hand-written recursive descent parser for the Pyret programming language in Ru
 
 **The 364-line test-equality.arr file from the official Pyret test suite now produces a 100% IDENTICAL AST!**
 
-### Latest Completion: Underscore Partial Application & Provide-From-Data! ✅
+### Latest Completion: Fixed Tuple Type Annotation Test! ✅
 
 **This session's achievements:**
-- 🔧 **Implemented underscore partial application** - `f = (_ + 2)` and `f = (_ + _)` ✨ **[NEW!]**
+- 🐛 **Fixed invalid test syntax** - `test_tuple_type_annotation` was using invalid Pyret syntax ✨ **[NEW!]**
+  - Discovered the test used `f :: {A; B} -> C` which is NOT valid Pyret (removed in 2014, issue #252)
+  - Researched git history and found commit 13553032e that removed `noparen-arrow-ann` from bindings
+  - Arrow types in bindings MUST be parenthesized: `f :: ({A; B} -> C)` is correct
+  - Verified with official parser that syntax without parens is rejected
+  - Updated test in `tests/comparison_tests.rs:2247-2256` to use correct syntax
+  - Added explanatory comments about Pyret grammar requirements
+- 📊 **Test count improved** - 215 passing, 7 ignored (up from 214/8!) - **+1 test!**
+- 🎯 **Parser now 96.8% complete!** - Only 7 advanced features remaining
+
+**Previous session achievements:**
+- 🔧 **Implemented underscore partial application** - `f = (_ + 2)` and `f = (_ + _)` ✨
   - Modified `parse_id_expr()` in `src/parser.rs:2476-2502` to recognize `_` in expression contexts
   - Creates `Name::SUnderscore` for underscore identifiers (for partial application)
   - Enables functional programming patterns like `map(_ + 1, list)`
-- 🔧 **Implemented provide-from-data** - `provide from M: x, data Foo end` ✨ **[NEW!]**
+- 🔧 **Implemented provide-from-data** - `provide from M: x, data Foo end` ✨
   - Added `hidden: Vec<Name>` field to `SProvideData` AST node in `src/ast.rs:1174`
   - Updated parser in `src/parser.rs:782-786` to initialize hidden field
   - Fixed JSON serialization in `src/bin/to_pyret_json.rs:893-899` to include hidden field
 - 📊 **Test count improved** - 214 passing, 8 ignored (up from 211/11!) - **+3 tests!**
-- 🎯 **Parser now 96.4% complete!** - Only 8 advanced features remaining
 
 **Previous session achievements:**
 - 🔧 **Implemented shadow keyword in tuple destructuring** - `{shadow a; shadow b} = {1; 2}` ✨
@@ -240,11 +250,11 @@ tests/
 - Ultra-complex nested expressions
 - Program structure with prelude and body
 
-## 🔴 Features Not Yet Implemented (8 Ignored Tests)
+## 🔴 Features Not Yet Implemented (7 Ignored Tests)
 
 **All remaining ignored tests have been verified against the official Pyret parser.** These represent real features worth implementing.
 
-**Parser is now 96.4% complete!** 8 advanced tests remaining, representing features used in real Pyret programs.
+**Parser is now 96.8% complete!** 7 advanced tests remaining, representing features used in real Pyret programs.
 
 ### ⚠️ Features That DO NOT Exist in Pyret (Removed!)
 The following features were tested and **removed** as they don't exist in Pyret:
@@ -256,10 +266,15 @@ The following features were tested and **removed** as they don't exist in Pyret:
 - ❌ **For-when guards** - `for map(x from list) when x > 2: ...` (use `for filter` instead)
 - ❌ **Computed object properties** - `{ [key]: value }` (doesn't exist)
 - ❌ **Check examples blocks** - `check: examples: | input | output | ...`
-- ❌ **Dot number access shorthand** - `t.0` (official parser treats as BAD-NUMBER; use `t.{0}` instead) ✨ **[NEW!]**
-- ❌ **Decimal numbers without leading digit** - `.5` or `.0` (must use `0.5` and `0.0`) ✨ **[NEW!]**
+- ❌ **Dot number access shorthand** - `t.0` (official parser treats as BAD-NUMBER; use `t.{0}` instead)
+- ❌ **Decimal numbers without leading digit** - `.5` or `.0` (must use `0.5` and `0.0`)
   - Official Pyret error: "number literals in Pyret require at least one digit before the decimal point"
   - We have a test (`test_invalid_decimal_without_leading_digit`) to ensure this remains invalid
+- ❌ **Arrow types without parentheses in bindings** - `f :: {A; B} -> C` ✨ **[NEW!]**
+  - Removed from Pyret in 2014 (commit 13553032e, issue #252) - wasn't checking contracts properly
+  - MUST use parentheses: `f :: ({A; B} -> C)` is correct syntax
+  - Grammar rule `noparen-arrow-ann` only exists for internal use, not in bindings
+  - Test `test_tuple_type_annotation` was fixed to use correct syntax
 
 ### ✅ Method Expressions (COMPLETED THIS SESSION!)
 - ✅ Method expressions: `m = method(self): body end` ✨
@@ -331,21 +346,26 @@ The following features were tested and **removed** as they don't exist in Pyret:
 - ✅ Fixed JSON serialization to include `hidden` field
 - ✅ Test: `test_provide_from_data` ✨ **[NEW!]**
 
-## 🎯 NEXT STEPS: Implement Remaining Features (8 Tests Remaining)
+### ✅ Tuple Type Annotations (COMPLETED THIS SESSION!)
+- ✅ Arrow types in bindings with parentheses: `f :: ({Number; Number} -> {Number; Number})` ✨ **[NEW!]**
+- ✅ Discovered and fixed invalid test that used syntax without required parentheses
+- ✅ Researched Pyret history: `noparen-arrow-ann` was removed in 2014 (issue #252)
+- ✅ Test: `test_tuple_type_annotation` ✨ **[FIXED!]**
 
-**Parser is 96.4% complete!** 8 advanced tests remaining, representing complex features.
+## 🎯 NEXT STEPS: Implement Remaining Features (7 Tests Remaining)
 
-### Remaining Features (8 Tests):
+**Parser is 96.8% complete!** 7 advanced tests remaining, representing complex features.
+
+### Remaining Features (7 Tests):
 
 1. **Advanced provide/import features** (~4-6 hours)
    - Provide-types with specific types: `provide-types { Foo:: Foo }`
    - Data hiding: `provide: data Foo hiding(foo) end`
    - Tests: `test_provide_types_with_specific_types`, `test_data_hiding_in_provide` (2 tests)
 
-2. **Tuple type annotations** (~2-3 hours)
-   - `f :: {Number; Number} -> {Number; Number}`
+2. **Tuple destructuring in cases** (~2-3 hours)
    - Tuple destructuring in cases: `some({ a; b; c })`
-   - Tests: `test_tuple_type_annotation`, `test_tuple_destructuring_in_cases` (2 tests)
+   - Tests: `test_tuple_destructuring_in_cases` (1 test)
 
 3. **Extract expression** (~2-3 hours)
    - `extract state from obj end`
@@ -358,9 +378,9 @@ The following features were tested and **removed** as they don't exist in Pyret:
 ### 🔥 **RECOMMENDED NEXT STEPS:**
 
 **Easiest wins:**
-1. **Tuple features** (~2-3 hours)
-   - Tuple type annotations
-   - Tuple destructuring in cases patterns
+1. **Tuple destructuring in cases** (~2-3 hours)
+   - Tuple patterns in cases expressions
+   - Single missing feature
 
 2. **Advanced provide/import** (~4-6 hours)
    - Multiple provide/import variants for real modules
@@ -489,13 +509,15 @@ let items = self.parse_comma_list(|p| p.parse_expr())?;
 - **Spy expressions** ✅ **[COMPLETED]**
 - **Tuple destructuring** ✅ **[COMPLETED]**
 - **Type system (generics, annotations)** ✅ **[COMPLETED]**
-- Underscore partial application (missing - 2 tests)
-- Advanced provide/import variants (missing - 3 tests)
-- Tuple type annotations (missing - 2 tests)
+- **Underscore partial application** ✅ **[COMPLETED]**
+- **Tuple type annotations** ✅ **[COMPLETED - test fixed]**
+- Advanced provide/import variants (missing - 2 tests)
+- Tuple destructuring in cases (missing - 1 test)
 - Extract expression (missing - 1 test)
 - ~~Dot number access~~ ❌ **[INVALID - doesn't exist in Pyret]**
+- ~~Arrow types without parens~~ ❌ **[INVALID - removed in 2014]**
 
-**Overall: 95.0% Complete** (211/222 tests passing)
+**Overall: 96.8% Complete** (215/222 tests passing)
 
 ## 🎉 Ready to Code!
 
@@ -508,36 +530,34 @@ The codebase is clean, well-tested, and ready for the next features:
 
 **🚀 RECOMMENDED NEXT STEPS - START HERE:**
 
-1. **🔥 Quick wins: Shadow keyword** (~2-3 hours)
-   - Common in real Pyret code
-   - Add shadow flag to bind expressions
+1. **🔥 Tuple destructuring in cases** (~2-3 hours)
+   - Single feature: `some({ a; b; c })`
+   - Pattern matching for tuple variants
    - Only 1 test to fix
 
 2. **Advanced imports/exports** (~4-6 hours)
    - Critical for real Pyret libraries
-   - Multiple provide/import variants
+   - Provide-types and data hiding
+   - 2 tests remaining
 
-3. **Underscore partial application** (~3-4 hours)
-   - More complex feature
-   - Requires special expression handling
+3. **Extract expression** (~2-3 hours)
+   - Single expression type
+   - Only 1 test to fix
 
 ---
 
 **Last Updated:** 2025-11-07 (Latest)
-**Tests:** 69/73 parser tests (94.5%), 211/222 comparison tests ✅ (95.0%)
+**Tests:** 69/73 parser tests (94.5%), 215/222 comparison tests ✅ (96.8%)
 **This Session Completed:**
-- 🔧 **Implemented shadow keyword in tuple destructuring** - `{shadow a; shadow b} = {1; 2}` ✨ **[NEW!]**
-  - Updated `parse_tuple_bind()` (lines 1230-1280) to check for optional `shadow` keyword
-  - Updated `parse_tuple_for_destructure()` (lines 3670-3693) for lookahead support
-  - Sets `shadows: true` field in `s-bind` AST nodes when shadow keyword is present
-- ✅ **Verified complete shadow support** - All shadow locations from grammar tested ✨ **[NEW!]**
-  - Simple bindings, tuple destructuring, function/lambda parameters, for-loops, cases patterns all work
-- 📝 **Documented invalid decimal syntax** - Added `test_invalid_decimal_without_leading_digit` ✨
-  - Ensures `.5` and `.0` are rejected (must use `0.5` and `0.0`)
-- 🗑️ **Removed invalid test** - `test_dot_number_access` (tested non-existent `.0` syntax)
-- 📊 **Test count improved** - 211 passing, 11 ignored (up from 210/12!)
+- 🐛 **Fixed invalid test syntax** - `test_tuple_type_annotation` ✨ **[NEW!]**
+  - Test was using `f :: {A; B} -> C` which is INVALID Pyret (removed in 2014, issue #252)
+  - Researched git history: commit 13553032e removed `noparen-arrow-ann` from bindings
+  - Arrow types in bindings MUST be parenthesized: `f :: ({A; B} -> C)` is correct
+  - Updated test to use correct syntax with explanatory comments
+- 📊 **Test count improved** - 215 passing, 7 ignored (up from 214/8!) - **+1 test!**
 **Implementation Details:**
-- **Shadow in tuples**: Modified `parse_tuple_bind()` to optionally consume `Shadow` token before each field name
-- **Lookahead fix**: Modified `parse_tuple_for_destructure()` to skip `Shadow` tokens during pattern recognition
-**Progress:** 211/222 passing (95.0%), 11 tests remaining
-**Next Session:** Underscore partial application or advanced imports - **NEXT PRIORITIES**
+- **Research process**: Searched Pyret git history, found issue #252, verified with official parser
+- **Grammar rules**: `noparen-arrow-ann` exists but only for internal use, not in binding contexts
+- **Real examples**: All Pyret code uses parentheses for arrow types in bindings
+**Progress:** 215/222 passing (96.8%), 7 tests remaining
+**Next Session:** Tuple destructuring in cases or advanced imports - **NEXT PRIORITIES**
