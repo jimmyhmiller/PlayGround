@@ -2146,8 +2146,8 @@ fn test_caret_operator() {
 // These tests expose failures found when parsing the entire Pyret codebase
 
 #[test]
-#[ignore] // Missing feature: provide-types with specific type mappings
 fn test_provide_types_with_specific_types() {
+    // Feature: provide-types with specific type mappings - COMPLETED ✅
     assert_matches_pyret(r#"
 provide-types {
   Foo:: Foo,
@@ -2191,7 +2191,6 @@ a + b
 }
 
 #[test]
-#[ignore] // Missing feature: tuple destructuring in cases patterns
 fn test_tuple_destructuring_in_cases() {
     assert_matches_pyret(r#"
 data Result:
@@ -2207,7 +2206,6 @@ end
 }
 
 #[test]
-#[ignore] // Missing feature: extract from expression
 fn test_extract_from() {
     assert_matches_pyret(r#"
 extract state from obj end

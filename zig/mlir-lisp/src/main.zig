@@ -22,20 +22,24 @@ fn createImplicitList(allocator: std.mem.Allocator, forms: PersistentVector(*Val
     return value;
 }
 
-/// Predicate: Check if operation is IRDL or Transform metadata
-fn isIRDLorTransform(op_name: []const u8) bool {
-    return std.mem.startsWith(u8, op_name, "irdl.") or
-           std.mem.startsWith(u8, op_name, "transform.") or
-           std.mem.eql(u8, op_name, "builtin.module"); // Include modules that may contain transforms
+/// Predicate: Check if operation is IRDL metadata
+fn isIRDL(op_name: []const u8) bool {
+    return std.mem.startsWith(u8, op_name, "irdl.");
+}
+
+/// Predicate: Check if operation is Transform metadata
+fn isTransform(op_name: []const u8) bool {
+    return std.mem.startsWith(u8, op_name, "transform.") or
+           std.mem.eql(u8, op_name, "builtin.module"); // Transform modules wrapped in builtin.module
 }
 
 /// Predicate: Check if operation is regular application code
 fn isRegularCode(op_name: []const u8) bool {
-    // Regular code is anything except IRDL and transform operations
-    // Note: We DON'T filter builtin.module here because we can't tell if it contains
-    // transforms or application code without inspecting its contents
+    // Regular code is anything except IRDL, transform operations, and builtin.module
+    // (builtin.module wraps transforms and belongs in the metadata module)
     return !std.mem.startsWith(u8, op_name, "irdl.") and
-           !std.mem.startsWith(u8, op_name, "transform.");
+           !std.mem.startsWith(u8, op_name, "transform.") and
+           !std.mem.eql(u8, op_name, "builtin.module");
 }
 
 pub fn main() !void {
@@ -50,6 +54,7 @@ pub fn main() !void {
     // Parse flags
     var use_generic_format = false;
     var file_path: ?[]const u8 = null;
+    var transform_file_path: ?[]const u8 = null;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -60,6 +65,11 @@ pub fn main() !void {
             use_generic_format = true;
         } else if (std.mem.eql(u8, args[i], "-g")) {
             use_generic_format = true;
+        } else if (std.mem.eql(u8, args[i], "--transform") or std.mem.eql(u8, args[i], "-t")) {
+            i += 1;
+            if (i < args.len) {
+                transform_file_path = args[i];
+            }
         } else {
             file_path = args[i];
         }
@@ -69,17 +79,18 @@ pub fn main() !void {
     if (file_path == null) {
         std.debug.print("MLIR-Lisp Compiler/JIT\n", .{});
         std.debug.print("\nUsage:\n", .{});
-        std.debug.print("  {s} [--generic|-g] <file.lisp>  - JIT compile and run a .lisp file\n", .{args[0]});
+        std.debug.print("  {s} [--generic|-g] [-t transform.lisp] <file.lisp>  - JIT compile and run a .lisp file\n", .{args[0]});
         std.debug.print("  {s} --repl                       - Start interactive REPL\n", .{args[0]});
         std.debug.print("  {s}                              - Run basic MLIR tests\n", .{args[0]});
         std.debug.print("\nOptions:\n", .{});
-        std.debug.print("  --generic, -g  Print MLIR in generic form (shows all attributes)\n", .{});
+        std.debug.print("  --generic, -g      Print MLIR in generic form (shows all attributes)\n", .{});
+        std.debug.print("  --transform, -t    Load transform operations from separate file\n", .{});
         std.debug.print("\nRunning basic MLIR tests...\n\n", .{});
         try runBasicTests();
         return;
     }
 
-    try runFile(allocator, file_path.?, use_generic_format);
+    try runFile(allocator, file_path.?, transform_file_path, use_generic_format);
 }
 
 fn printErrorLocation(source: []const u8, line: usize, column: usize) void {
@@ -116,7 +127,7 @@ fn printErrorLocation(source: []const u8, line: usize, column: usize) void {
     }
 }
 
-fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_generic_format: bool) !void {
+fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transform_file_path: ?[]const u8, use_generic_format: bool) !void {
     std.debug.print("Loading file: {s}\n", .{file_path});
 
     // Create an arena for the entire compilation process
@@ -191,44 +202,100 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
     var builder = Builder.init(allocator, &ctx);
     defer builder.deinit();
 
-    // PASS 1: Extract and load dialect definitions (IRDL + Transform metadata)
-    std.debug.print("Pass 1: Processing dialect definitions...\n", .{});
-    var metadata_module = try builder.buildModuleFiltered(&parsed_module, isIRDLorTransform);
+    // PASS 1: Extract and load IRDL dialect definitions
+    std.debug.print("Pass 1: Processing IRDL dialect definitions...\n", .{});
+    var irdl_module = try builder.buildModuleFiltered(&parsed_module, isIRDL);
 
-    // Scan for IRDL and transform operations
+    // Scan for IRDL operations
     var dialect_registry = DialectRegistry.init(allocator);
     defer dialect_registry.deinit();
 
-    try dialect_registry.scanModule(&metadata_module);
-
-    std.debug.print("  Found {} IRDL ops and {} transform ops\n", .{
-        dialect_registry.getIRDLOperations().len,
-        dialect_registry.getTransformOperations().len,
-    });
+    try dialect_registry.scanModule(&irdl_module);
 
     // Load IRDL dialects if found
     const has_irdl = dialect_registry.hasIRDLDialects();
     if (has_irdl) {
         std.debug.print("  Found {} IRDL dialect definition(s), loading...\n", .{dialect_registry.getIRDLOperations().len});
-        try metadata_module.loadIRDLDialects();
+        try irdl_module.loadIRDLDialects();
         std.debug.print("  ✓ IRDL dialects loaded into context\n", .{});
     }
 
-    // Store transforms for later
-    if (dialect_registry.hasTransforms()) {
-        std.debug.print("  Found {} transform operation(s) for compilation\n", .{dialect_registry.getTransformOperations().len});
+    // NOTE: Don't destroy irdl_module if it contains IRDL dialects!
+    // After loadIRDLDialects(), the context holds references to the module's operations.
+    // Destroying it causes a segfault. The arena allocator will clean it up instead.
+    // If no IRDL, clean up the module
+    if (!has_irdl) {
+        defer irdl_module.destroy();
     }
 
-    // PASS 2: Build application code (excluding IRDL/transform metadata)
-    std.debug.print("Pass 2: Building application code...\n", .{});
+    // PASS 2: Load or build transform module
+    std.debug.print("Pass 2: Processing transform operations...\n", .{});
+
+    var transform_module: mlir.Module = undefined;
+    var has_transforms = false;
+
+    if (transform_file_path) |transform_path| {
+        // Load transforms from separate file
+        std.debug.print("  Loading transforms from: {s}\n", .{transform_path});
+
+        const transform_source = try std.fs.cwd().readFileAlloc(allocator, transform_path, 1024 * 1024);
+        std.debug.print("  Transform file loaded ({} bytes)\n", .{transform_source.len});
+
+        // Parse and build the transform module
+        var transform_tok = mlir_lisp.Tokenizer.init(allocator, transform_source);
+        var transform_reader = try Reader.init(allocator, &transform_tok);
+        const transform_forms = try transform_reader.readAll();
+
+        const transform_value = if (transform_forms.len() == 1)
+            transform_forms.at(0)
+        else
+            try createImplicitList(allocator, transform_forms);
+
+        var transform_macro_expander = MacroExpander.init(allocator);
+        defer transform_macro_expander.deinit();
+        try builtin_macros.registerBuiltinMacros(&transform_macro_expander);
+        const expanded_transform = try transform_macro_expander.expandAll(transform_value);
+
+        var transform_flattener = mlir_lisp.OperationFlattener.init(allocator);
+        const flattened_transform = try transform_flattener.flattenModule(expanded_transform);
+
+        var transform_parser = Parser.init(allocator, transform_source);
+        var parsed_transform_module = try transform_parser.parseModule(flattened_transform);
+        defer parsed_transform_module.deinit();
+
+        var transform_builder = Builder.init(allocator, &ctx);
+        defer transform_builder.deinit();
+        transform_module = try transform_builder.buildModule(&parsed_transform_module);
+
+        has_transforms = true;
+        std.debug.print("  ✓ Transform module loaded from file\n", .{});
+    } else {
+        // Build from filtered operations in main file
+        transform_module = try builder.buildModuleFiltered(&parsed_module, isTransform);
+
+        // Check if we have transforms
+        has_transforms = blk: {
+            var temp_registry = DialectRegistry.init(allocator);
+            defer temp_registry.deinit();
+            try temp_registry.scanModule(&transform_module);
+            break :blk temp_registry.hasTransforms();
+        };
+    }
+
+    if (has_transforms) {
+        std.debug.print("  Transform module structure:\n", .{});
+        transform_module.print();
+        std.debug.print("\n", .{});
+    }
+
+    // PASS 3: Build application code (excluding IRDL/transform metadata)
+    std.debug.print("Pass 3: Building application code...\n", .{});
     var mlir_module = try builder.buildModuleFiltered(&parsed_module, isRegularCode);
     defer mlir_module.destroy();
 
-    // NOTE: Don't destroy metadata_module if it contains IRDL dialects!
-    // After loadIRDLDialects(), the context holds references to the module's operations.
-    // Destroying it causes a segfault. The arena allocator will clean it up instead.
-    if (!has_irdl) {
-        defer metadata_module.destroy();
+    // If no transforms, clean up the transform module
+    if (!has_transforms) {
+        defer transform_module.destroy();
     }
     mlir_module.print();
 
@@ -279,17 +346,45 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, use_gene
     defer executor.deinit();
 
     // Set transforms if any were found
-    // Only use root transforms (e.g., transform.named_sequence, transform.with_pdl_patterns)
-    // Nested transforms (e.g., transform.sequence inside with_pdl_patterns) shouldn't be applied directly
-    const root_transforms = if (dialect_registry.hasTransforms())
-        try dialect_registry.getRootTransforms(allocator)
-    else
-        &[_]mlir.MlirOperation{};
+    if (has_transforms) {
+        std.debug.print("  Extracting transform operation...\n", .{});
 
-    // Note: Don't free root_transforms until after compilation! The executor holds a reference to this slice.
-    defer if (root_transforms.len > 0) allocator.free(root_transforms);
+        // Get the first operation from the transform module body
+        const transform_module_op = transform_module.getOperation();
+        const body_region = mlir.c.mlirOperationGetRegion(transform_module_op, 0);
+        const body_block = mlir.c.mlirRegionGetFirstBlock(body_region);
+        const first_op = mlir.c.mlirBlockGetFirstOperation(body_block);
 
-    executor.setTransforms(root_transforms);
+        if (!mlir.c.mlirOperationIsNull(first_op)) {
+            const op_name = mlir.Operation.getName(first_op);
+            std.debug.print("  Found transform operation: {s}\n", .{op_name});
+
+            // If it's a builtin.module with transform.with_named_sequence attribute, extract inner operation
+            if (std.mem.eql(u8, op_name, "builtin.module")) {
+                const attr_name_str = "transform.with_named_sequence";
+                const attr_name_ref = mlir.c.mlirStringRefCreate(attr_name_str.ptr, attr_name_str.len);
+                const attr = mlir.c.mlirOperationGetAttributeByName(first_op, attr_name_ref);
+
+                if (!mlir.c.mlirAttributeIsNull(attr)) {
+                    // This is a transform module, extract the first operation inside it
+                    const inner_region = mlir.c.mlirOperationGetRegion(first_op, 0);
+                    const inner_block = mlir.c.mlirRegionGetFirstBlock(inner_region);
+                    const inner_op = mlir.c.mlirBlockGetFirstOperation(inner_block);
+
+                    if (!mlir.c.mlirOperationIsNull(inner_op)) {
+                        std.debug.print("  Using inner operation: {s}\n", .{mlir.Operation.getName(inner_op)});
+                        executor.setTransform(inner_op, first_op);
+                    }
+                } else {
+                    // Regular builtin.module, use module and first op
+                    executor.setTransform(first_op, transform_module_op);
+                }
+            } else {
+                // Direct transform operation
+                executor.setTransform(first_op, transform_module_op);
+            }
+        }
+    }
 
     std.debug.print("Compiling with JIT (optimization level: O2)...\n", .{});
     try executor.compile(&mlir_module);

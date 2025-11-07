@@ -8,6 +8,7 @@ pub const ExecutorError = error{
     ExecutionEngineCreationFailed,
     LoweringFailed,
     InvokeFailed,
+    PatternApplicationFailed,
 } || std.mem.Allocator.Error;
 
 pub const OptLevel = enum(u32) {
@@ -38,10 +39,8 @@ pub const Executor = struct {
     ctx: *mlir.Context,
     config: ExecutorConfig,
     engine: ?mlir.ExecutionEngine,
-    /// Optional transform operation to apply before lowering
-    transform_op: ?mlir.MlirOperation,
-    /// Optional transform module containing the transform
-    transform_module: ?mlir.MlirOperation,
+    /// Optional transform operations to apply before lowering
+    transform_ops: []const mlir.MlirOperation,
 
     pub fn init(allocator: std.mem.Allocator, ctx: *mlir.Context, config: ExecutorConfig) Executor {
         return Executor{
@@ -49,15 +48,13 @@ pub const Executor = struct {
             .ctx = ctx,
             .config = config,
             .engine = null,
-            .transform_op = null,
-            .transform_module = null,
+            .transform_ops = &.{},
         };
     }
 
-    /// Set transform to apply during compilation
-    pub fn setTransform(self: *Executor, transform_op: mlir.MlirOperation, transform_module: mlir.MlirOperation) void {
-        self.transform_op = transform_op;
-        self.transform_module = transform_module;
+    /// Set transform operations to apply during compilation
+    pub fn setTransforms(self: *Executor, transforms: []const mlir.MlirOperation) void {
+        self.transform_ops = transforms;
     }
 
     pub fn deinit(self: *Executor) void {
@@ -66,54 +63,110 @@ pub const Executor = struct {
         }
     }
 
-    /// Apply transform dialect operation to the module
+    /// Apply transform dialect operations to the module using PDL patterns
+    /// This extracts PDL patterns and applies them using the greedy rewriter
+    /// transformOps: Array of transform operations (should contain PDL patterns)
     pub fn applyTransforms(
         self: *Executor,
         module: *mlir.Module,
+        transformOps: []const mlir.MlirOperation,
     ) !void {
-        if (self.transform_op == null or self.transform_module == null) {
-            // Nothing to do
+        if (transformOps.len == 0) {
             return;
         }
 
-        const transform_op = self.transform_op.?;
-        const transform_module = self.transform_module.?;
+        std.debug.print("  Applying {} transform operation(s) via PDL...\n", .{transformOps.len});
 
-        std.debug.print("  Applying transform operation...\n", .{});
-        std.debug.print("    Transform operation: {s}\n", .{mlir.Operation.getName(transform_op)});
-        std.debug.print("    Transform module: {s}\n", .{mlir.Operation.getName(transform_module)});
+        // Create a temporary module to hold the PDL patterns
+        const location = mlir.Location.unknown(self.ctx);
+        var pdl_module = try mlir.Module.create(location);
+        defer pdl_module.destroy();
 
-        // Create transform options
-        var transform_options = mlir.TransformOptions.create();
-        defer transform_options.destroy();
+        // Extract and clone PDL patterns from transform operations
+        const pdl_mod_body = pdl_module.getBody();
+        for (transformOps) |transform_op| {
+            try self.extractPDLPatterns(transform_op, pdl_mod_body);
+        }
 
-        // Enable expensive checks if verifier is enabled
-        transform_options.enableExpensiveChecks(self.config.enable_verifier);
+        // If no PDL patterns were found, skip
+        if (mlir.c.mlirOperationIsNull(mlir.c.mlirBlockGetFirstOperation(pdl_mod_body))) {
+            std.debug.print("  No PDL patterns found, skipping transform\n", .{});
+            return;
+        }
 
-        std.debug.print("  Module before transform:\n", .{});
+        std.debug.print("  PDL pattern module:\n", .{});
+        pdl_module.print();
+
+        std.debug.print("  Module before PDL patterns:\n", .{});
         module.print();
 
-        // Apply the transform
-        // Note: applyNamedSequence can actually handle different transform types,
-        // not just transform.named_sequence. It works with transform.with_pdl_patterns,
-        // transform.sequence, and other transform dialect operations.
-        const payload = module.getOperation();
+        // Create PDLPatternModule from the module containing PDL patterns
+        const pdl_pattern_module = mlir.c.mlirPDLPatternModuleFromModule(pdl_module.module);
+        defer mlir.c.mlirPDLPatternModuleDestroy(pdl_pattern_module);
 
-        std.debug.print("  Applying transform to payload...\n", .{});
-        const result = mlir.Transform.applyNamedSequence(
-            payload,
-            transform_op,
-            transform_module,  // The module containing the transform
-            &transform_options,
+        // Convert to RewritePatternSet
+        const pattern_set = mlir.c.mlirRewritePatternSetFromPDLPatternModule(pdl_pattern_module);
+
+        // Freeze the pattern set (compiles PDL to bytecode)
+        const frozen_patterns = mlir.c.mlirFreezeRewritePattern(pattern_set);
+        defer mlir.c.mlirFrozenRewritePatternSetDestroy(frozen_patterns);
+
+        // Create a greedy rewrite config (use defaults)
+        const config = mlir.c.MlirGreedyRewriteDriverConfig{ .ptr = null };
+
+        // Apply patterns greedily
+        const result = mlir.c.mlirApplyPatternsAndFoldGreedily(
+            module.module,
+            frozen_patterns,
+            config,
         );
 
-        if (result) {
-            std.debug.print("  Module after transform:\n", .{});
-            module.print();
-            std.debug.print("  ✓ Transforms applied successfully\n", .{});
-        } else |err| {
-            std.debug.print("  ✗ Transform application failed: {}\n", .{err});
-            return err;
+        if (mlir.c.mlirLogicalResultIsFailure(result)) {
+            std.debug.print("  ✗ PDL pattern application failed\n", .{});
+            return error.PatternApplicationFailed;
+        }
+
+        std.debug.print("  Module after PDL patterns:\n", .{});
+        module.print();
+        std.debug.print("  ✓ PDL patterns applied successfully\n", .{});
+    }
+
+    /// Extract PDL patterns from a transform operation and add them to the target block
+    /// Recursively searches through transform.with_pdl_patterns operations
+    fn extractPDLPatterns(
+        self: *Executor,
+        op: mlir.MlirOperation,
+        target_block: mlir.MlirBlock,
+    ) !void {
+        // Check if this is a pdl.pattern operation - if so, clone it directly
+        const op_name_id = mlir.c.mlirOperationGetName(op);
+        const op_name_ref = mlir.c.mlirIdentifierStr(op_name_id);
+        const op_name_str = op_name_ref.data[0..op_name_ref.length];
+
+        if (std.mem.eql(u8, op_name_str, "pdl.pattern")) {
+            const cloned = mlir.c.mlirOperationClone(op);
+            mlir.c.mlirBlockAppendOwnedOperation(target_block, cloned);
+            return;
+        }
+
+        // Recursively search regions for PDL patterns
+        const num_regions = mlir.c.mlirOperationGetNumRegions(op);
+        var i: usize = 0;
+        while (i < num_regions) : (i += 1) {
+            const region = mlir.c.mlirOperationGetRegion(op, @intCast(i));
+
+            // Iterate through blocks in the region
+            var block = mlir.c.mlirRegionGetFirstBlock(region);
+            while (!mlir.c.mlirBlockIsNull(block)) {
+                // Iterate through operations in the block
+                var block_op = mlir.c.mlirBlockGetFirstOperation(block);
+                while (!mlir.c.mlirOperationIsNull(block_op)) {
+                    try self.extractPDLPatterns(block_op, target_block);
+                    block_op = mlir.c.mlirOperationGetNextInBlock(block_op);
+                }
+
+                block = mlir.c.mlirBlockGetNextInRegion(block);
+            }
         }
     }
 
@@ -144,7 +197,9 @@ pub const Executor = struct {
     /// Compile the MLIR module and create an execution engine
     pub fn compile(self: *Executor, module: *mlir.Module) !void {
         // First, apply transforms if any were set
-        try self.applyTransforms(module);
+        if (self.transform_ops.len > 0) {
+            try self.applyTransforms(module, self.transform_ops);
+        }
 
         // Then, lower to LLVM IR
         try self.lowerToLLVM(module);
