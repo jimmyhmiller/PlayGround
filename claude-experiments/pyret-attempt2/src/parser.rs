@@ -481,7 +481,13 @@ impl Parser {
                 // Check for include-from: include from module: names
                 if self.matches(&TokenType::From) {
                     self.advance();
-                    let module = self.parse_import_source()?;
+
+                    // Parse dotted module path: PPX.PX or just PPX
+                    let mut module_path = vec![self.parse_name()?];
+                    while self.matches(&TokenType::Dot) {
+                        self.advance(); // consume dot
+                        module_path.push(self.parse_name()?);
+                    }
 
                     self.expect(TokenType::Colon)?;
 
@@ -509,7 +515,7 @@ impl Parser {
 
                     Ok(Import::SIncludeFrom {
                         l: self.make_loc(&start, &end),
-                        import: module,
+                        module_path,
                         names,
                     })
                 } else {
@@ -2503,14 +2509,12 @@ impl Parser {
             ));
         }
 
-        let num: i64 = parts[0]
-            .parse()
-            .map_err(|_| ParseError::invalid("rational", &token, "Invalid numerator"))?;
-        let den: i64 = parts[1]
-            .parse()
-            .map_err(|_| ParseError::invalid("rational", &token, "Invalid denominator"))?;
+        // Strip leading '+' from numerator (Pyret normalizes +3 to 3)
+        let num = parts[0].trim_start_matches('+').to_string();
+        let den = parts[1].to_string();
 
-        if den == 0 {
+        // Validate that denominator is not zero (check string representation)
+        if den == "0" {
             return Err(ParseError::invalid(
                 "rational",
                 &token,
@@ -2520,6 +2524,7 @@ impl Parser {
 
         // Note: We don't simplify fractions to match official Pyret parser behavior
         // The official parser keeps fractions in their original form (e.g., 8/10 not 4/5)
+        // We store numerator and denominator as strings to support arbitrary precision
         Ok(Expr::SFrac { l: loc, num, den })
     }
 
@@ -2550,14 +2555,12 @@ impl Parser {
             ));
         }
 
-        let num: i64 = parts[0]
-            .parse()
-            .map_err(|_| ParseError::invalid("rough rational", &token, "Invalid numerator"))?;
-        let den: i64 = parts[1]
-            .parse()
-            .map_err(|_| ParseError::invalid("rough rational", &token, "Invalid denominator"))?;
+        // Strip leading '+' from numerator (Pyret normalizes +3 to 3)
+        let num = parts[0].trim_start_matches('+').to_string();
+        let den = parts[1].to_string();
 
-        if den == 0 {
+        // Validate that denominator is not zero (check string representation)
+        if den == "0" {
             return Err(ParseError::invalid(
                 "rough rational",
                 &token,
@@ -2567,6 +2570,7 @@ impl Parser {
 
         // Note: We don't simplify fractions to match official Pyret parser behavior
         // The official parser keeps fractions in their original form (e.g., ~8/10 not ~4/5)
+        // We store numerator and denominator as strings to support arbitrary precision
         Ok(Expr::SRfrac { l: loc, num, den })
     }
 
@@ -3640,38 +3644,111 @@ impl Parser {
     fn parse_for_expr(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::For)?;
 
-        // Parse the iterator expression (e.g., "map" or "lists.map2")
-        // This needs to be a full expression to handle dot access
-        // We'll manually parse just enough to get the iterator before the paren
+        // Parse the iterator expression - can be any postfix expression:
+        // - Simple: map
+        // - Dot access: lists.map2
+        // - Function call: make-iterator(config)
+        // - Chained: make-iterator(config).with-logging
         let mut iterator = self.parse_prim_expr()?;
 
-        // Handle dot access for things like lists.map2
-        while self.matches(&TokenType::Dot) {
-            self.advance();
-            let field_token = self.parse_field_name()?;
+        // Handle postfix operators (dot access, function calls, etc.)
+        loop {
+            if self.matches(&TokenType::Dot) {
+                self.advance();
+                let field_token = self.parse_field_name()?;
 
-            let start_loc = match &iterator {
-                Expr::SId { l, .. } => l.clone(),
-                Expr::SDot { l, .. } => l.clone(),
-                _ => self.current_loc(),
-            };
+                let start_loc = match &iterator {
+                    Expr::SId { l, .. } => l.clone(),
+                    Expr::SDot { l, .. } => l.clone(),
+                    Expr::SApp { l, .. } => l.clone(),
+                    _ => self.current_loc(),
+                };
 
-            iterator = Expr::SDot {
-                l: Loc::new(
-                    self.file_name.clone(),
-                    start_loc.start_line,
-                    start_loc.start_column,
-                    start_loc.start_char,
-                    field_token.location.end_line,
-                    field_token.location.end_col,
-                    field_token.location.end_pos,
-                ),
-                obj: Box::new(iterator),
-                field: field_token.value.clone(),
-            };
+                iterator = Expr::SDot {
+                    l: Loc::new(
+                        self.file_name.clone(),
+                        start_loc.start_line,
+                        start_loc.start_column,
+                        start_loc.start_char,
+                        field_token.location.end_line,
+                        field_token.location.end_col,
+                        field_token.location.end_pos,
+                    ),
+                    obj: Box::new(iterator),
+                    field: field_token.value.clone(),
+                };
+            } else if self.matches(&TokenType::ParenNoSpace) {
+                // Check if this paren starts for-bindings (contains FROM) or is a function call
+                // Look ahead to see if we have "name FROM" pattern
+                let saved_pos = self.current;
+                self.advance(); // consume (
+
+                // Check if next tokens look like "binding FROM" (for-bindings)
+                // or just an expression (function call args)
+                let is_for_binding = if self.matches(&TokenType::Name) {
+                    // Peek ahead to see if there's a FROM after the name
+                    let next_tok = self.peek_ahead(1);
+                    next_tok.token_type == TokenType::From || next_tok.token_type == TokenType::Shadow
+                } else if self.matches(&TokenType::LBrace) {
+                    // Could be tuple binding {x; y} FROM ...
+                    // For now, assume it's a for-binding
+                    true
+                } else {
+                    false
+                };
+
+                // Restore position
+                self.current = saved_pos;
+
+                if is_for_binding {
+                    // This is the start of for-bindings, stop postfix parsing
+                    break;
+                }
+
+                // This is a function call
+                self.advance(); // consume (
+
+                let mut args = Vec::new();
+                if !self.matches(&TokenType::RParen) {
+                    args.push(Box::new(self.parse_binop_expr()?));
+
+                    while self.matches(&TokenType::Comma) {
+                        self.advance(); // consume comma
+                        if self.matches(&TokenType::RParen) {
+                            break; // trailing comma
+                        }
+                        args.push(Box::new(self.parse_binop_expr()?));
+                    }
+                }
+
+                let rparen = self.expect(TokenType::RParen)?;
+
+                let start_loc = match &iterator {
+                    Expr::SId { l, .. } => l.clone(),
+                    Expr::SDot { l, .. } => l.clone(),
+                    Expr::SApp { l, .. } => l.clone(),
+                    _ => self.current_loc(),
+                };
+
+                iterator = Expr::SApp {
+                    l: Loc::new(
+                        self.file_name.clone(),
+                        start_loc.start_line,
+                        start_loc.start_column,
+                        start_loc.start_char,
+                        rparen.location.end_line,
+                        rparen.location.end_col,
+                        rparen.location.end_pos,
+                    ),
+                    _fun: Box::new(iterator),
+                    args,
+                };
+            } else {
+                break;
+            }
         }
 
-        // Expect opening paren (no space)
+        // Now expect opening paren (no space) for the for bindings
         self.expect(TokenType::ParenNoSpace)?;
 
         // Parse for-bindings: binding FROM expr (COMMA binding FROM expr)*

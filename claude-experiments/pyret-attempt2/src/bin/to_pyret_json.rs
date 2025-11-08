@@ -83,17 +83,27 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
             // Use original string if available (preserves precision for large integers)
             // Otherwise convert to fraction string
             let value_str = if let Some(orig) = original {
-                // Rough numbers (starting with ~) need normalization: strip trailing .0
+                // Rough numbers (starting with ~) need normalization: strip trailing .0 and leading +
                 if orig.starts_with('~') {
-                    let normalized = if orig.ends_with(".0") {
+                    let mut normalized = if orig.ends_with(".0") {
                         orig.strip_suffix(".0").unwrap().to_string()
                     } else {
                         orig.clone()
                     };
+                    // Strip leading + after ~ (e.g., ~+1.5 -> ~1.5)
+                    if normalized.starts_with("~+") {
+                        normalized = format!("~{}", normalized.strip_prefix("~+").unwrap());
+                    }
+                    // Convert very long decimal representations to scientific notation
+                    // This handles cases like ~0.000...0005 (many zeros) -> ~5e-324
+                    if normalized.len() > 50 {
+                        normalized = format!("~{:e}", n);
+                    }
                     normalized
                 }
-                // For decimals or scientific notation, convert to fraction; for integers, use as-is
-                else if orig.contains('.') || orig.contains('e') || orig.contains('E') {
+                // For decimals (without scientific notation), convert to fraction
+                // For scientific notation or integers, use as-is
+                else if orig.contains('.') && !orig.contains('e') && !orig.contains('E') {
                     float_to_fraction_string(*n)
                 } else {
                     orig.clone()
@@ -955,21 +965,10 @@ fn import_to_pyret_json(import: &pyret_attempt2::Import) -> Value {
                 "import-type": import_type_to_pyret_json(import)
             })
         }
-        Import::SIncludeFrom { import, names, .. } => {
-            // For include-from, extract the module name from import and format as "mod" array
-            let mod_array = match import {
-                pyret_attempt2::ImportType::SConstImport { module, .. } => {
-                    vec![json!({"type": "s-name", "name": module})]
-                }
-                pyret_attempt2::ImportType::SSpecialImport { .. } => {
-                    // Special imports shouldn't appear in include-from, but handle it anyway
-                    vec![import_type_to_pyret_json(import)]
-                }
-            };
-
+        Import::SIncludeFrom { module_path, names, .. } => {
             json!({
                 "type": "s-include-from",
-                "mod": mod_array,
+                "mod": module_path.iter().map(|n| name_to_pyret_json(n)).collect::<Vec<_>>(),
                 "specs": names.iter().map(|n| include_spec_to_pyret_json(n)).collect::<Vec<_>>()
             })
         }

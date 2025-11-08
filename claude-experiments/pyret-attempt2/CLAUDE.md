@@ -6,28 +6,49 @@ A hand-written recursive descent parser for the Pyret programming language in Ru
 
 ## 📊 Current Status (2025-11-08 - LATEST UPDATE)
 
-**Test Results: 269/269 tests passing (100%)** 🎉🎉🎉
-- ✅ **269 tests PASSING** (100%) - **ALL TESTS PASSING!**
+**Test Results: 273/296 tests passing (92.2%)**
+- ✅ **273 tests PASSING** (92.2%)
 - ⏸️ **0 tests IGNORED**
-- ❌ **0 tests FAILING**
+- ❌ **23 tests FAILING** (7.8%)
 
-**🏆 PARSER IS NOW 100% COMPLETE FOR ALL TESTED FEATURES!** ✨
+**See [FAILING_TESTS.md](FAILING_TESTS.md) for detailed analysis of remaining failures.**
 
 **All passing tests produce byte-for-byte identical ASTs to the official Pyret parser!** ✨
 
-### 🎯 MILESTONE: 100% Test Coverage Achieved! ✅
+### Latest Fix: Large Rational Numbers and Number Normalization! ✅
 
-**All 269 comparison tests now passing!**
+**This session's achievements (2025-11-08 afternoon):**
+- 🔢 **Fixed large rational number support** - Arbitrary precision rational numbers! ✨ **[NEW!]**
+  - **Problem:** Parser used `i64` for numerator/denominator, limiting to ~9×10^18
+  - **Solution:** Changed `SFrac` and `SRfrac` AST nodes to use `String` instead of `i64`
+  - **Impact:** Can now parse `1/100000000000000000000000` and larger!
+  - **Example:** `min([list: 1/10, 1/100, 1/100000000000000000000000])`
+- 🔧 **Fixed rough number normalization** - Strip leading `+` signs ✨ **[NEW!]**
+  - **Problem:** `~+3/2` was serialized with `+` in numerator
+  - **Solution:** Strip leading `+` after `~` in both parser and JSON serialization
+  - **Examples:** `~+3/2` → `"~3/2"`, `~+1.5` → `"~1.5"`
+- 📐 **Added scientific notation for very long decimals** ✨ **[NEW!]**
+  - **Problem:** Very small numbers like `~0.000...0005` (324 zeros) were output as long strings
+  - **Solution:** Convert strings >50 chars to scientific notation (e.g., `~5e-324`)
+  - **Impact:** Matches official Pyret behavior for extreme values
+- 📊 **Test progress:** 272 → 273 passing (+1 test fixed!)
+- 📝 **Created FAILING_TESTS.md** - Complete analysis of remaining 23 failures
 
-### Latest Completion: Template Dots, Spy Labels, and Block Calls! ✅
+**Known remaining issues:**
+1. **Decimal to fraction simplification** - Need GCD-based fraction reduction (~6-7 tests)
+2. **Scientific notation heuristic** - Need better logic for when to use scientific notation (~1-2 tests)
+3. **Missing AST fields** - `SProvideAll` needs `hidden` field (~1 test)
+4. **Compiler files** - Not yet analyzed (~13 tests)
 
-**This session's achievements:**
-- 🚀 **Implemented template dots (`...`) placeholder syntax** - Fixed 3 tests! ✨ **[NEW!]**
+### Previous Session: Template Dots, Spy Labels, and Block Calls! ✅
+
+**Previous session achievements (2025-11-08 morning):**
+- 🚀 **Implemented template dots (`...`) placeholder syntax** - Fixed 3 tests! ✨
   - Syntax: `lam(): ... end`, `fun incomplete(x): ... end`
   - Added parsing for `DotDotDot` token → `STemplate` AST node
   - Added JSON serialization for `s-template`
   - Used during development or for incomplete code sections
-- 🔧 **Fixed spy expression labels** - Now accepts any expression, not just strings! ✨ **[NEW!]**
+- 🔧 **Fixed spy expression labels** - Now accepts any expression, not just strings! ✨
   - **Problem:** Parser only accepted string literals for spy labels
   - **Solution:** Modified `parse_spy_stmt()` to use `parse_binop_expr()` for labels
   - **Examples:** `spy "iteration " + to-string(i): result end`
@@ -40,7 +61,6 @@ A hand-written recursive descent parser for the Pyret programming language in Ru
     - `block: lam(): 40 end end()`
     - `if block: lam(): 10 end end() == 10: "yes" else: "no" end`
 - 📊 **Test count INCREASED** - 269 passing, 0 ignored (up from 263/0!) - **+6 tests!** 🎉
-- 🎯 **Parser now handles ALL ignored tests!** - Complete feature coverage achieved!
 
 **Previous session achievements:**
 - 🚀 **Implemented whitespace-sensitive bracket parsing** - Fixed 31 tests at once! ✨ **[MAJOR!]**
@@ -440,17 +460,18 @@ The parser now handles the complete Pyret language as tested in the comparison t
 ```bash
 # Run all comparison tests
 cargo test --test comparison_tests
-# Result: 246 passed, 6 ignored, 0 failed
+# Result: 273 passed, 0 ignored, 23 failed
 
-# See what needs implementation
-cargo test --test comparison_tests -- --ignored --list
+# See failing tests analysis
+cat FAILING_TESTS.md
 
 # Test specific feature
 ./compare_parsers.sh "fun f(x): x + 1 end"
 ```
 
 **69/73 parser unit tests passing** (94.5%) - 4 pre-existing failures in decimal/rational tests
-**246/252 comparison integration tests passing** ✅ (97.6%)
+**273/296 comparison integration tests passing** ✅ (92.2%)
+**See [FAILING_TESTS.md](FAILING_TESTS.md) for analysis of the 23 failing tests**
 
 ## 💡 Quick Tips
 
@@ -538,47 +559,51 @@ let items = self.parse_comma_list(|p| p.parse_expr())?;
 - Template dots (`...`) ✅
 - Block expression calls ✅
 
-**Overall: 100% Complete** ✅ (269/269 tests passing) 🎉
+**Overall: 92.2% Complete** (273/296 tests passing)
 
-## 🎉 Parser Complete!
+## 🎯 Parser Status
 
-The parser is now fully implemented and handles all tested Pyret language features:
+The parser handles most Pyret language features and produces byte-for-byte identical ASTs to the official parser for 273 tests:
 
-- ✅ **269/269 comparison tests passing** (100%)
-- ✅ **Byte-for-byte identical ASTs** to the official Pyret parser
-- ✅ **All language features** from the test suite implemented
-- ✅ **Production-ready** for parsing real Pyret programs
+- ✅ **273/296 comparison tests passing** (92.2%)
+- ✅ **Byte-for-byte identical ASTs** for all passing tests
+- ✅ **Most language features** implemented
+- ⚠️ **23 tests failing** - See [FAILING_TESTS.md](FAILING_TESTS.md) for details
 
-**What's included:**
+**What's fully working:**
 - Complete expression parsing (primitives, operators, functions, data structures)
 - Full statement support (bindings, control flow, declarations)
 - Advanced features (generics, type annotations, pattern matching)
 - Development tools (spy, template dots, check blocks)
 - Module system (import/export/provide)
+- Arbitrary precision rational numbers (e.g., `1/100000000000000000000000`)
+
+**What needs work:**
+- Decimal to fraction simplification (needs GCD algorithm)
+- Scientific notation heuristic (when to use `1e-5` vs `0.00001`)
+- Some missing AST fields
+- Some compiler/type-checker files (not yet analyzed)
 
 ---
 
-**Last Updated:** 2025-11-08 (Latest)
-**Tests:** 69/73 parser tests (94.5%), **269/269 comparison tests ✅ (100%)**
-**This Session Completed:**
-- 🎯 **FIXED ALL REMAINING IGNORED TESTS!** - All 269 comparison tests now passing! ✨ **[MILESTONE!]**
-- 🚀 **Implemented template dots (`...`) placeholder syntax** - Fixed 3 tests! ✨ **[NEW!]**
-  - Syntax: `lam(): ... end`, `fun incomplete(x): ... end`
-  - Added parsing: `DotDotDot` token → `STemplate` AST node
-  - Added JSON serialization for `s-template`
-- 🔧 **Fixed spy expression labels** - Now accepts any expression! ✨ **[NEW!]**
-  - Problem: Parser only accepted string literals for spy labels
-  - Solution: Modified `parse_spy_stmt()` to use `parse_binop_expr()` for labels
-  - Examples: `spy "iteration " + to-string(i): result end`
-- 🐛 **Fixed critical tokenizer bug for block expression calls** - Fixed 1 test! ✨ **[MAJOR!]**
-  - Problem: `block: ... end()` failed - `()` was left unparsed
-  - Root cause: `block:` sets `paren_is_for_exp = true`, but `end` never reset it
-  - Solution: Modified tokenizer to reset `paren_is_for_exp = false` after `end` keyword
-  - Impact: Block expressions can now be immediately called like functions
-- 📊 **Test count INCREASED** - 269 passing, 0 ignored (up from 263/0!) - **+6 tests!** 🎉
-**Implementation Details:**
-- **Template dots:** Simple AST node for placeholder code during development
-- **Spy labels:** Any expression allowed, not just strings - enables computed labels
-- **Block calls:** Critical tokenizer fix enables `block: ... end()` and similar patterns
-**Progress:** 269/269 passing (100%) - **ALL TESTS PASSING!** 🎉🎉🎉
-**Next Session:** Parser is feature-complete! Ready for real-world Pyret programs!
+**Last Updated:** 2025-11-08 (Latest - afternoon)
+**Tests:** 69/73 parser tests (94.5%), **273/296 comparison tests ✅ (92.2%)**
+**This Session Completed (afternoon):**
+- 🔢 **Fixed large rational number support** - Arbitrary precision! ✨ **[NEW!]**
+  - Changed `SFrac` and `SRfrac` to use `String` instead of `i64`
+  - Can now parse `1/100000000000000000000000` and larger
+- 🔧 **Fixed rough number normalization** - Strip leading `+` signs ✨ **[NEW!]**
+  - `~+3/2` → `"~3/2"`, `~+1.5` → `"~1.5"`
+- 📐 **Added scientific notation for very long decimals** ✨ **[NEW!]**
+  - Strings >50 chars convert to scientific notation (e.g., `~5e-324`)
+- 📊 **Test progress:** 272 → 273 passing (+1 test fixed!)
+- 📝 **Created FAILING_TESTS.md** - Complete analysis of remaining 23 failures
+
+**Previous Session Completed (morning):**
+- 🚀 **Implemented template dots (`...`) placeholder syntax** - Fixed 3 tests! ✨
+- 🔧 **Fixed spy expression labels** - Now accepts any expression! ✨
+- 🐛 **Fixed critical tokenizer bug for block expression calls** - Fixed 1 test! ✨
+- 📊 **Test count:** 263 → 269 passing (+6 tests!)
+
+**Next Steps:**
+See [FAILING_TESTS.md](FAILING_TESTS.md) for prioritized list of remaining issues.

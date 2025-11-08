@@ -2,10 +2,23 @@
 set -e
 
 # Configuration
-REMOTE_HOST="192.168.0.55"
+LOCAL_IP="192.168.0.55"
+EXTERNAL_DNS="computer.jimmyhmiller.com"
 REMOTE_USER="${REMOTE_USER:-jimmyhmiller}"
 REMOTE_DIR="~/mlir-lisp-remote"
 LISP_FILE="${1}"
+
+# Detect which address to use based on network location
+echo "Detecting network location..."
+
+# Check if local IP is reachable on port 22 (SSH)
+if timeout 0.1 bash -c "cat < /dev/null > /dev/tcp/$LOCAL_IP/22" 2>/dev/null; then
+    REMOTE_HOST="$LOCAL_IP"
+    echo "Local machine reachable, using local address: $REMOTE_HOST"
+else
+    REMOTE_HOST="$EXTERNAL_DNS"
+    echo "Local machine not reachable, using external DNS: $REMOTE_HOST"
+fi
 
 # Colors for output
 GREEN='\033[0;32m'
