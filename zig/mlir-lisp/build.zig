@@ -27,6 +27,9 @@ pub fn build(b: *std.Build) void {
         const possible_paths = [_][]const u8{
             "/opt/homebrew/opt/llvm", // Homebrew Apple Silicon
             "/usr/local/opt/llvm", // Homebrew Intel Mac
+            "/usr/lib/llvm-18", // Ubuntu/Debian LLVM 18
+            "/usr/lib/llvm-19", // Ubuntu/Debian LLVM 19
+            "/usr/lib/llvm-20", // Ubuntu/Debian LLVM 20
             "/usr/local", // Standard Linux install
             "/usr", // System install
         };
@@ -45,9 +48,12 @@ pub fn build(b: *std.Build) void {
     const mlir_include_path = b.fmt("{s}/include", .{mlir_path});
     const mlir_lib_path = b.fmt("{s}/lib", .{mlir_path});
 
+    // Detect if we're building for Linux (to use correct C++ stdlib)
+    const is_linux = target.result.os.tag == .linux;
+
     // Helper function to link MLIR to a compile step
     const linkMLIR = struct {
-        fn link(step: *std.Build.Step.Compile, include_path: []const u8, lib_path: []const u8) void {
+        fn link(step: *std.Build.Step.Compile, include_path: []const u8, lib_path: []const u8, linux: bool) void {
             step.addIncludePath(.{ .cwd_relative = include_path });
 
             // Add library path
@@ -68,11 +74,29 @@ pub fn build(b: *std.Build) void {
             step.linkSystemLibrary("MLIRExecutionEngineUtils");
             step.linkSystemLibrary("MLIR");
 
+            // GPU/ROCDL libraries for AMD GPU support
+            step.linkSystemLibrary("MLIRROCDLToLLVMIRTranslation");
+            step.linkSystemLibrary("MLIRROCDLTarget");
+            step.linkSystemLibrary("MLIRROCDLDialect");
+            step.linkSystemLibrary("MLIRGPUToROCDLTransforms");
+
             // Monolithic LLVM library (contains all LLVM components)
             step.linkSystemLibrary("LLVM");
 
-            step.linkLibCpp();
+            // Link C library
             step.linkLibC();
+
+            // On Linux, LLVM is built against libstdc++ (GNU C++ stdlib)
+            // On macOS, use libc++ (LLVM C++ stdlib)
+            if (linux) {
+                // Workaround for Zig issue #12147:
+                // Zig automatically adds -lc++ but we need -lstdc++ on Linux
+                // The only way to override this is to provide the .so file directly
+                step.addObjectFile(.{ .cwd_relative = "/usr/lib/gcc/x86_64-linux-gnu/13/libstdc++.so" });
+            } else {
+                // On macOS, use LLVM's libc++
+                step.linkLibCpp();
+            }
         }
     }.link;
 
@@ -172,7 +196,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // Link MLIR C library
-    linkMLIR(exe, mlir_include_path, mlir_lib_path);
+    linkMLIR(exe, mlir_include_path, mlir_lib_path, is_linux);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -240,7 +264,7 @@ pub fn build(b: *std.Build) void {
     const mod_tests = b.addTest(.{
         .root_module = mod,
     });
-    linkMLIR(mod_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(mod_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the test executable.
     const run_mod_tests = fixRpathForTest(b, mod_tests, target, mlir_lib_path);
@@ -251,7 +275,7 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
-    linkMLIR(exe_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(exe_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the second test executable.
     const run_exe_tests = fixRpathForTest(b, exe_tests, target, mlir_lib_path);
@@ -297,7 +321,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(mlir_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(mlir_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the MLIR test executable.
     const run_mlir_tests = fixRpathForTest(b, mlir_tests, target, mlir_lib_path);
@@ -313,7 +337,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(parser_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(parser_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the parser test executable.
     const run_parser_tests = fixRpathForTest(b, parser_tests, target, mlir_lib_path);
@@ -329,7 +353,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(builder_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(builder_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the builder test executable.
     const run_builder_tests = fixRpathForTest(b, builder_tests, target, mlir_lib_path);
@@ -345,7 +369,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(printer_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(printer_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the printer test executable.
     const run_printer_tests = fixRpathForTest(b, printer_tests, target, mlir_lib_path);
@@ -361,7 +385,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(printer_validation_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(printer_validation_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the printer validation test executable.
     const run_printer_validation_tests = fixRpathForTest(b, printer_validation_tests, target, mlir_lib_path);
@@ -377,7 +401,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(executor_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(executor_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the executor test executable.
     const run_executor_tests = fixRpathForTest(b, executor_tests, target, mlir_lib_path);
@@ -393,7 +417,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(type_builder_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(type_builder_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the type builder test executable.
     const run_type_builder_tests = fixRpathForTest(b, type_builder_tests, target, mlir_lib_path);
@@ -409,7 +433,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(repl_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(repl_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the REPL test executable.
     const run_repl_tests = fixRpathForTest(b, repl_tests, target, mlir_lib_path);
@@ -427,7 +451,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(reader_roundtrip_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(reader_roundtrip_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the reader roundtrip test executable.
     const run_reader_roundtrip_tests = fixRpathForTest(b, reader_roundtrip_tests, target, mlir_lib_path);
@@ -443,7 +467,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(tokenizer_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(tokenizer_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the tokenizer test executable.
     const run_tokenizer_tests = fixRpathForTest(b, tokenizer_tests, target, mlir_lib_path);
@@ -459,7 +483,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(macro_expansion_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(macro_expansion_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the macro expansion test executable.
     const run_macro_expansion_tests = fixRpathForTest(b, macro_expansion_tests, target, mlir_lib_path);
@@ -475,7 +499,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(macro_system_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(macro_system_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the macro system test executable.
     const run_macro_system_tests = fixRpathForTest(b, macro_system_tests, target, mlir_lib_path);
@@ -491,7 +515,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(operation_flattener_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(operation_flattener_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the operation flattener test executable.
     const run_operation_flattener_tests = fixRpathForTest(b, operation_flattener_tests, target, mlir_lib_path);
@@ -507,7 +531,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(op_macro_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(op_macro_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the op macro test executable.
     const run_op_macro_tests = fixRpathForTest(b, op_macro_tests, target, mlir_lib_path);
@@ -523,7 +547,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(struct_access_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(struct_access_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the struct access test executable.
     const run_struct_access_tests = fixRpathForTest(b, struct_access_tests, target, mlir_lib_path);
@@ -539,7 +563,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(jit_macro_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(jit_macro_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the JIT macro test executable.
     const run_jit_macro_tests = fixRpathForTest(b, jit_macro_tests, target, mlir_lib_path);
@@ -555,7 +579,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(value_layout_tests, mlir_include_path, mlir_lib_path);
+    linkMLIR(value_layout_tests, mlir_include_path, mlir_lib_path, is_linux);
 
     // A run step that will run the value layout test executable.
     const run_value_layout_tests = fixRpathForTest(b, value_layout_tests, target, mlir_lib_path);
@@ -572,7 +596,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(test_printer_exe, mlir_include_path, mlir_lib_path);
+    linkMLIR(test_printer_exe, mlir_include_path, mlir_lib_path, is_linux);
     b.installArtifact(test_printer_exe);
 
     const run_test_printer = b.addRunArtifact(test_printer_exe);
@@ -591,7 +615,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(test_complex_printer_exe, mlir_include_path, mlir_lib_path);
+    linkMLIR(test_complex_printer_exe, mlir_include_path, mlir_lib_path, is_linux);
     b.installArtifact(test_complex_printer_exe);
 
     const run_test_complex_printer = b.addRunArtifact(test_complex_printer_exe);
@@ -610,7 +634,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(jit_example_exe, mlir_include_path, mlir_lib_path);
+    linkMLIR(jit_example_exe, mlir_include_path, mlir_lib_path, is_linux);
     b.installArtifact(jit_example_exe);
 
     const run_jit_example = b.addRunArtifact(jit_example_exe);
@@ -629,7 +653,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(fib_jit_example_exe, mlir_include_path, mlir_lib_path);
+    linkMLIR(fib_jit_example_exe, mlir_include_path, mlir_lib_path, is_linux);
     b.installArtifact(fib_jit_example_exe);
 
     const run_fib_jit_example = b.addRunArtifact(fib_jit_example_exe);
@@ -648,7 +672,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    linkMLIR(temp_testing_mlir_jit_exe, mlir_include_path, mlir_lib_path);
+    linkMLIR(temp_testing_mlir_jit_exe, mlir_include_path, mlir_lib_path, is_linux);
     b.installArtifact(temp_testing_mlir_jit_exe);
 
     // Workaround for Zig issue #24349: Remove duplicate rpaths on macOS
@@ -698,7 +722,7 @@ pub fn build(b: *std.Build) void {
     //         },
     //     }),
     // });
-    // linkMLIR(roundtrip_test_exe, mlir_include_path, mlir_lib_path);
+    // linkMLIR(roundtrip_test_exe, mlir_include_path, mlir_lib_path, is_linux);
     // b.installArtifact(roundtrip_test_exe);
 
     // const run_roundtrip_test = b.addRunArtifact(roundtrip_test_exe);

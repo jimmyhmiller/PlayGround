@@ -1178,7 +1178,7 @@ impl Parser {
             }
 
             // Check for type application: List<T>, Map<K, V>, etc.
-            let mut result_ann = if self.matches(&TokenType::Lt) {
+            let mut result_ann = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
                 self.advance(); // consume '<'
                 let type_args = self.parse_comma_list(|p| p.parse_ann())?;
                 let end_token = self.expect(TokenType::Gt)?; // consume '>'
@@ -1490,6 +1490,9 @@ impl Parser {
             if self.matches(&TokenType::ParenNoSpace) {
                 // Function application (no whitespace before paren)
                 left = self.parse_app_expr(left)?;
+            } else if self.matches(&TokenType::LtNoSpace) {
+                // Generic type instantiation: expr<T, U, ...> (no whitespace before <)
+                left = self.parse_instantiate_expr(left)?;
             } else if self.matches(&TokenType::Dot) {
                 // Dot access, tuple access, or object extension
                 let _dot_token = self.expect(TokenType::Dot)?;
@@ -2125,6 +2128,9 @@ impl Parser {
         loop {
             if self.matches(&TokenType::ParenNoSpace) {
                 left = self.parse_app_expr(left)?;
+            } else if self.matches(&TokenType::LtNoSpace) {
+                // Generic type instantiation: expr<T, U, ...> (no whitespace before <)
+                left = self.parse_instantiate_expr(left)?;
             } else if self.matches(&TokenType::Dot) {
                 let _dot_token = self.expect(TokenType::Dot)?;
                 if self.matches(&TokenType::LBrace) {
@@ -2275,6 +2281,9 @@ impl Parser {
             loop {
                 if self.matches(&TokenType::ParenNoSpace) {
                     right = self.parse_app_expr(right)?;
+                } else if self.matches(&TokenType::LtNoSpace) {
+                    // Generic type instantiation: expr<T, U, ...> (no whitespace before <)
+                    right = self.parse_instantiate_expr(right)?;
                 } else if self.matches(&TokenType::Dot) {
                     let _dot_token = self.expect(TokenType::Dot)?;
                     let field_token = self.parse_field_name()?;
@@ -2412,6 +2421,7 @@ impl Parser {
             TokenType::TableExtract => self.parse_extract_expr(),
             TokenType::LoadTable => self.parse_load_table_expr(),
             TokenType::Reactor => self.parse_reactor_expr(),
+            TokenType::DotDotDot => self.parse_template_expr(),
             _ => Err(ParseError::unexpected(token)),
         }
     }
@@ -2604,6 +2614,24 @@ impl Parser {
                 token.location.end_pos,
             ),
             s: token.value.clone(),
+        })
+    }
+
+    /// template-expr: ...
+    /// Represents a placeholder/template in function bodies
+    fn parse_template_expr(&mut self) -> ParseResult<Expr> {
+        let token = self.expect(TokenType::DotDotDot)?;
+
+        Ok(Expr::STemplate {
+            l: Loc::new(
+                self.file_name.clone(),
+                token.location.start_line,
+                token.location.start_col,
+                token.location.start_pos,
+                token.location.end_line,
+                token.location.end_col,
+                token.location.end_pos,
+            ),
         })
     }
 
@@ -3036,8 +3064,8 @@ impl Parser {
 
         // Parse fun-header: ty-params args return-ann
         // Parse optional type parameters: <T, U, V>
-        let params = if self.matches(&TokenType::Lt) {
-            self.advance(); // consume '<'
+        let params = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
+            self.advance(); // consume '<' or '<' (no space)
             let type_params = self.parse_comma_list(|p| p.parse_name())?;
             self.expect(TokenType::Gt)?; // consume '>'
             type_params
@@ -3198,6 +3226,64 @@ impl Parser {
             ),
             _fun: Box::new(base),
             args,
+        })
+    }
+
+    /// Parse generic type instantiation: expr<T, U, ...>
+    fn parse_instantiate_expr(&mut self, base: Expr) -> ParseResult<Expr> {
+        // Get location from base expression
+        let base_loc = match &base {
+            Expr::SNum { l, .. } => l.clone(),
+            Expr::SBool { l, .. } => l.clone(),
+            Expr::SStr { l, .. } => l.clone(),
+            Expr::SId { l, .. } => l.clone(),
+            Expr::SOp { l, .. } => l.clone(),
+            Expr::SParen { l, .. } => l.clone(),
+            Expr::SApp { l, .. } => l.clone(),
+            Expr::SInstantiate { l, .. } => l.clone(),
+            Expr::SConstruct { l, .. } => l.clone(),
+            Expr::SDot { l, .. } => l.clone(),
+            Expr::SBracket { l, .. } => l.clone(),
+            Expr::SObj { l, .. } => l.clone(),
+            Expr::STuple { l, .. } => l.clone(),
+            Expr::STupleGet { l, .. } => l.clone(),
+            Expr::SLam { l, .. } => l.clone(),
+            Expr::SBlock { l, .. } => l.clone(),
+            Expr::SUserBlock { l, .. } => l.clone(),
+            Expr::SIf { l, .. } => l.clone(),
+            Expr::SIfElse { l, .. } => l.clone(),
+            Expr::SWhen { l, .. } => l.clone(),
+            Expr::SFor { l, .. } => l.clone(),
+            Expr::SLetExpr { l, .. } => l.clone(),
+            Expr::SLet { l, .. } => l.clone(),
+            Expr::SVar { l, .. } => l.clone(),
+            Expr::SAssign { l, .. } => l.clone(),
+            _ => self.current_loc(),
+        };
+
+        self.expect(TokenType::LtNoSpace)?;
+
+        // Parse type parameters as comma-separated list
+        let params = if self.matches(&TokenType::Gt) {
+            Vec::new()
+        } else {
+            self.parse_comma_list(|p| p.parse_ann())?
+        };
+
+        let end = self.expect(TokenType::Gt)?;
+
+        Ok(Expr::SInstantiate {
+            l: Loc::new(
+                self.file_name.clone(),
+                base_loc.start_line,
+                base_loc.start_column,
+                base_loc.start_char,
+                end.location.end_line,
+                end.location.end_col,
+                end.location.end_pos,
+            ),
+            expr: Box::new(base),
+            params,
         })
     }
 }
@@ -3866,26 +3952,43 @@ impl Parser {
     fn parse_tuple_for_destructure(&mut self) -> ParseResult<()> {
         self.expect(TokenType::LBrace)?;
 
-        // Parse at least one field (with optional shadow keyword)
-        if self.matches(&TokenType::Shadow) {
-            self.advance(); // consume 'shadow'
-        }
-        self.parse_name()?;
+        // Parse first field (could be name or nested tuple)
+        if !self.matches(&TokenType::RBrace) {
+            self.parse_tuple_field_for_destructure()?;
 
-        // Parse remaining fields
-        while self.matches(&TokenType::Semi) {
-            self.advance(); // consume semicolon
+            // Parse remaining fields
+            while self.matches(&TokenType::Semi) {
+                self.advance(); // consume semicolon
 
-            // Check for optional shadow keyword
-            if self.matches(&TokenType::Shadow) {
-                self.advance(); // consume 'shadow'
+                // Check for trailing semicolon before }
+                if self.matches(&TokenType::RBrace) {
+                    break;
+                }
+
+                self.parse_tuple_field_for_destructure()?;
             }
-
-            self.parse_name()?;
         }
 
         self.expect(TokenType::RBrace)?;
         Ok(())
+    }
+
+    /// Helper to parse a single field in tuple destructuring (can be name or nested tuple)
+    fn parse_tuple_field_for_destructure(&mut self) -> ParseResult<()> {
+        // Check for optional shadow keyword
+        if self.matches(&TokenType::Shadow) {
+            self.advance(); // consume 'shadow'
+        }
+
+        // Check if this is a nested tuple
+        if self.matches(&TokenType::LBrace) {
+            // Recursively parse nested tuple
+            self.parse_tuple_for_destructure()
+        } else {
+            // Parse name
+            self.parse_name()?;
+            Ok(())
+        }
     }
 
     /// Parses tuple destructuring: {a; b; c} = {1; 2; 3}
@@ -4070,8 +4173,8 @@ impl Parser {
         self.expect(TokenType::ColonColon)?;
 
         // Parse optional type parameters <T, U>
-        let params = if self.matches(&TokenType::Lt) {
-            self.expect(TokenType::Lt)?; // consume <
+        let params = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
+            self.advance(); // consume <
             let params = self.parse_comma_list(|p| p.parse_name())?;
             self.expect(TokenType::Gt)?; // consume >
             params
@@ -4102,8 +4205,14 @@ impl Parser {
     fn parse_contract_ann(&mut self) -> ParseResult<Ann> {
         let start_pos = self.current;
 
-        // Parse the first annotation
-        let first_ann = self.parse_ann()?;
+        // Parse comma-separated annotations (arguments)
+        let mut args = vec![self.parse_ann()?];
+
+        // Check for additional arguments separated by commas
+        while self.matches(&TokenType::Comma) {
+            self.advance(); // consume comma
+            args.push(self.parse_ann()?);
+        }
 
         // Check if there's an arrow (for noparen-arrow-ann)
         if self.matches(&TokenType::ThinArrow) {
@@ -4111,10 +4220,6 @@ impl Parser {
 
             // Parse return type
             let ret = Box::new(self.parse_ann()?);
-
-            // The first annotation is the argument
-            // If it was a tuple {A; B}, it becomes the args, otherwise it's a single arg
-            let args = vec![first_ann];
 
             let end_pos = self.current - 1;
             let end_token = &self.tokens[end_pos];
@@ -4128,8 +4233,13 @@ impl Parser {
             });
         }
 
-        // No arrow, just return the annotation as-is
-        Ok(first_ann)
+        // No arrow, just return the annotation as-is (should be single arg)
+        if args.len() == 1 {
+            Ok(args.into_iter().next().unwrap())
+        } else {
+            // Multiple args without arrow is invalid, but return the first one
+            Ok(args.into_iter().next().unwrap())
+        }
     }
 
     /// Standalone let binding: x = value (no "let" keyword)
@@ -4421,7 +4531,7 @@ impl Parser {
         let name = self.parse_name()?;
 
         // Parse optional type parameters <T, U, V>
-        let params: Vec<Name> = if self.matches(&TokenType::Lt) {
+        let params: Vec<Name> = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
             self.advance(); // consume '<'
             let type_params = self.parse_comma_list(|p| p.parse_name())?;
             self.expect(TokenType::Gt)?; // consume '>'
@@ -4486,7 +4596,7 @@ impl Parser {
         let name = name_token.value.clone();
 
         // Parse optional type parameters <T, U, V>
-        let params: Vec<Name> = if self.matches(&TokenType::Lt) {
+        let params: Vec<Name> = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
             self.advance(); // consume '<'
             let type_params = self.parse_comma_list(|p| p.parse_name())?;
             self.expect(TokenType::Gt)?; // consume '>'
@@ -4548,7 +4658,7 @@ impl Parser {
             && !self.matches(&TokenType::Where)
             && !self.is_at_end()
         {
-            let stmt = self.parse_expr()?;
+            let stmt = self.parse_block_statement()?;
             body_stmts.push(Box::new(stmt));
         }
 
@@ -4599,7 +4709,7 @@ impl Parser {
         let start = self.expect(TokenType::Lam)?;
 
         // Parse optional type parameters <T, U, V>
-        let params: Vec<Name> = if self.matches(&TokenType::Lt) {
+        let params: Vec<Name> = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
             self.advance(); // consume '<'
             let type_params = self.parse_comma_list(|p| p.parse_name())?;
             self.expect(TokenType::Gt)?; // consume '>'
@@ -4608,11 +4718,16 @@ impl Parser {
             Vec::new()
         };
 
-        // Expect opening paren (can be LParen or ParenSpace after lam keyword)
+        // Expect opening paren (can be LParen, ParenSpace, or ParenNoSpace)
+        // ParenNoSpace can appear after type parameters: lam<A>()
         if self.matches(&TokenType::LParen) {
             self.expect(TokenType::LParen)?;
-        } else {
+        } else if self.matches(&TokenType::ParenSpace) {
             self.expect(TokenType::ParenSpace)?;
+        } else if self.matches(&TokenType::ParenNoSpace) {
+            self.expect(TokenType::ParenNoSpace)?;
+        } else {
+            return Err(ParseError::unexpected(self.peek().clone()));
         }
 
         // Parse parameters (comma-separated bindings)
@@ -4876,7 +4991,7 @@ impl Parser {
         let name = name_token.value.clone();
 
         // Parse optional type parameters <T, U, V>
-        let params: Vec<Name> = if self.matches(&TokenType::Lt) {
+        let params: Vec<Name> = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
             self.advance(); // consume '<'
             let type_params = self.parse_comma_list(|p| p.parse_name())?;
             self.expect(TokenType::Gt)?; // consume '>'
@@ -4919,10 +5034,23 @@ impl Parser {
         let (shared_members, mixins) = if self.matches(&TokenType::Sharing) {
             self.advance(); // consume "sharing:"
 
-            // Parse shared members (method/field definitions)
+            // Parse shared members (comma-separated method/field definitions)
+            // Grammar: fields: field (COMMA field)* [COMMA]
             let mut members = Vec::new();
             while !self.matches(&TokenType::End) && !self.matches(&TokenType::Where) && !self.is_at_end() {
                 members.push(self.parse_member()?);
+
+                // Check for optional comma separator
+                if self.matches(&TokenType::Comma) {
+                    self.advance(); // consume comma
+                    // If we see END or WHERE after comma, it's a trailing comma - stop parsing
+                    if self.matches(&TokenType::End) || self.matches(&TokenType::Where) {
+                        break;
+                    }
+                } else {
+                    // No comma, so we're done with members
+                    break;
+                }
             }
             (members, Vec::new())
         } else if self.matches(&TokenType::With) {
@@ -5402,15 +5530,12 @@ impl Parser {
     fn parse_spy_stmt(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::Spy)?;
 
-        // Check for optional string message
-        let message = if self.matches(&TokenType::String) {
-            let str_tok = self.advance().clone();
-            let str_value = str_tok.value.clone();
-            let str_loc = self.make_loc(&str_tok, &str_tok);
-            Some(Box::new(Expr::SStr {
-                l: str_loc,
-                s: str_value,
-            }))
+        // Check for optional message expression (not just string literal)
+        // The message can be any expression like "label" or "iteration " + to-string(i)
+        let message = if !self.matches(&TokenType::Colon) {
+            // Parse expression until we hit the colon
+            let msg_expr = self.parse_binop_expr()?;
+            Some(Box::new(msg_expr))
         } else {
             None
         };

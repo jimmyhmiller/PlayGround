@@ -145,6 +145,7 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
     var ctx = try mlir.Context.create();
     defer ctx.destroy();
     ctx.registerAllDialects();
+    ctx.registerAllLLVMTranslations();
     mlir.Context.registerAllPasses();
 
     // Load the necessary dialects
@@ -362,7 +363,7 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
         return;
     }
 
-    // Create executor and compile
+    // Create executor - we'll add GPU runtime later if needed
     const executor_config = mlir_lisp.ExecutorConfig{
         .opt_level = .O2,
         .enable_verifier = true,
@@ -428,9 +429,10 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
         break :blk false;
     };
 
+    var gpu_type: gpu_lowering.GPUType = .cpu_fallback;
     if (has_gpu_ops) {
         std.debug.print("Detected GPU operations, applying lowering passes...\n", .{});
-        const gpu_type = gpu_lowering.detectGPU();
+        gpu_type = gpu_lowering.detectGPU();
         std.debug.print("Detected GPU type: {s}\n", .{@tagName(gpu_type)});
         try gpu_lowering.applyGPULoweringPasses(allocator, &ctx, &mlir_module, gpu_type);
 
@@ -455,10 +457,42 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
     };
 
     if (still_has_gpu) {
-        std.debug.print("Note: GPU operations remain in IR after lowering.\n", .{});
-        std.debug.print("      Skipping JIT execution (GPU ops cannot be JIT compiled directly).\n", .{});
-        std.debug.print("      The MLIR above shows the successfully lowered GPU code.\n\n", .{});
-        return;
+        const has_rocdl = std.mem.indexOf(u8, @tagName(gpu_type), "amd") != null;
+        const has_nvvm = std.mem.indexOf(u8, @tagName(gpu_type), "nvidia") != null;
+
+        if (has_rocdl or has_nvvm) {
+            std.debug.print("\n✓ GPU kernel successfully lowered to hardware-specific IR!\n", .{});
+            if (has_rocdl) {
+                std.debug.print("  - Kernel converted to ROCDL (AMD ROCm dialect)\n", .{});
+                std.debug.print("  - Host code lowered to LLVM with GPU runtime calls\n", .{});
+            } else {
+                std.debug.print("  - Kernel converted to NVVM (NVIDIA CUDA dialect)\n", .{});
+                std.debug.print("  - Host code lowered to LLVM with GPU runtime calls\n", .{});
+            }
+            std.debug.print("\nAttempting JIT execution with GPU runtime...\n", .{});
+            // Continue to JIT execution instead of returning
+        } else {
+            std.debug.print("Note: GPU operations remain in IR after lowering.\n", .{});
+            std.debug.print("      Skipping JIT execution (GPU ops cannot be JIT compiled directly).\n", .{});
+            std.debug.print("      The MLIR above shows the successfully lowered GPU code.\n\n", .{});
+            return;
+        }
+    }
+
+    // Add GPU runtime library if still has GPU ops after lowering
+    if (still_has_gpu) {
+        var shared_libs = std.ArrayList([]const u8){};
+        defer shared_libs.deinit(allocator);
+
+        // Path to the ROCm runtime wrappers library
+        // Try absolute path first, fall back to relative
+        const home = std.posix.getenv("HOME") orelse "/home/jimmyhmiller";
+        const rocm_runtime_lib = try std.fmt.allocPrint(allocator, "{s}/mlir-lisp-remote/lib/libmlir_rocm_runtime.so", .{home});
+        try shared_libs.append(allocator, rocm_runtime_lib);
+        std.debug.print("Loading GPU runtime library: {s}\n", .{rocm_runtime_lib});
+
+        // Update executor config with shared libs
+        executor.config.shared_lib_paths = try allocator.dupe([]const u8, shared_libs.items);
     }
 
     std.debug.print("Compiling with JIT (optimization level: O2)...\n", .{});

@@ -54,28 +54,65 @@
                   (arguments [])
                   (operation
                     (name arith.constant)
-                    (result-bindings [%0])
+                    (result-bindings [%c10])
                     (result-types index)
                     (attributes {:value (: 10 index)}))
                   (operation
                     (name arith.constant)
-                    (result-bindings [%1])
+                    (result-bindings [%c1])
                     (result-types index)
                     (attributes {:value (: 1 index)}))
                   (operation
+                    (name arith.constant)
+                    (result-bindings [%c0])
+                    (result-types index)
+                    (attributes {:value (: 0 index)}))
+                  (operation
+                    (name arith.constant)
+                    (result-bindings [%f5])
+                    (result-types f32)
+                    (attributes {:value (: 5.0 f32)}))
+                  (operation
                     (name memref.alloc)
-                    (result-bindings [%2])
+                    (result-bindings [%input])
                     (result-types memref<10x10xf32>)
                     (attributes {:operandSegmentSizes array<i32: 0, 0>}))
                   (operation
                     (name memref.alloc)
-                    (result-bindings [%3])
+                    (result-bindings [%output])
                     (result-types memref<10x10xf32>)
                     (attributes {:operandSegmentSizes array<i32: 0, 0>}))
+                  (operation
+                    (name scf.for)
+                    (operand-uses %c0 %c10 %c1)
+                    (regions
+                      (region
+                        (block [^loop1]
+                          (arguments [(: %i index)])
+                          (operation
+                            (name scf.for)
+                            (operand-uses %c0 %c10 %c1)
+                            (regions
+                              (region
+                                (block [^loop2]
+                                  (arguments [(: %j index)])
+                                  (operation
+                                    (name memref.store)
+                                    (operand-uses %f5 %input %i %j))
+                                  (operation
+                                    (name scf.yield))))))
+                          (operation
+                            (name scf.yield))))))
                   (operation
                     (name gpu.launch_func)
-                    (operand-uses %0 %1 %1 %0 %1 %1 %2 %3)
+                    (operand-uses %c10 %c1 %c1 %c10 %c1 %c1 %input %output)
                     (attributes {:kernel @kernel_module::@square_kernel :operandSegmentSizes array<i32: 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 2, 0>}))
+                  (operation
+                    (name memref.dealloc)
+                    (operand-uses %input))
+                  (operation
+                    (name memref.dealloc)
+                    (operand-uses %output))
                   (operation
                     (name arith.constant)
                     (result-bindings [%4])

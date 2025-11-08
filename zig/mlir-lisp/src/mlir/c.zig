@@ -71,6 +71,10 @@ pub const Context = struct {
         c.mlirContextAppendDialectRegistry(self.ctx, registry);
     }
 
+    pub fn registerAllLLVMTranslations(self: *Context) void {
+        c.mlirRegisterAllLLVMTranslations(self.ctx);
+    }
+
     pub fn registerAllPasses() void {
         c.mlirRegisterAllPasses();
     }

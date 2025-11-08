@@ -2369,7 +2369,33 @@ obj :: ({ a :: Number, b :: Number } -> Number) = lam(o): o.a + o.b end
 }
 
 // ----------------------------------------------------------------------------
-// 27. Data Hiding in Provide
+// 27. Module References in Provide
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_provide_module_ref_simple() {
+    // Feature: Module references with dotted paths (data M.Type)
+    assert_matches_pyret(r#"
+provide:
+  data PD.BT
+end
+"#);
+}
+
+#[test]
+fn test_provide_module_ref_multiple() {
+    // Feature: Multiple module references and deeper paths
+    assert_matches_pyret(r#"
+provide:
+  data A.B.C,
+  type X.Y,
+  M.foo as bar
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 28. Data Hiding in Provide
 // ----------------------------------------------------------------------------
 
 #[test]
@@ -2796,11 +2822,9 @@ fn test_full_file_re_provide_data() {
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // generic type application in function calls not yet implemented
 fn test_full_file_underscore() {
     // From tests/type-check/should/underscore.arr
-    // Features: underscore partial application, generic function calls
-    // Error: example<Number,Number>(...) syntax not supported yet
+    // Features: underscore partial application, generic function types
     let code = include_str!("pyret-files/full-files/underscore.arr");
     assert_matches_pyret(code);
 }
@@ -2810,12 +2834,11 @@ fn test_full_file_underscore() {
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // provide-types and generic function signatures not yet implemented
 fn test_full_file_arrays() {
     // From src/arr/trove/arrays.arr
     // Features: provide-types *, generic function signatures like:
     //   array-filter :: <A> (A -> Boolean), Array<A> -> Array<A>
-    // Error: Unexpected tokens after program end at line 113:34
+    // Fixed by implementing LtNoSpace for method type parameters
     let code = include_str!("pyret-files/full-files/arrays.arr");
     assert_matches_pyret(code);
 }
@@ -2825,13 +2848,9 @@ fn test_full_file_arrays() {
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // tuple destructuring with mismatched sizes needs better error handling
 fn test_full_file_test_tuple() {
     // From tests/pyret/tests/test-tuple.arr
-    // Features: comprehensive tuple operations, destructuring edge cases
-    // Error: Unexpected tokens after program end at line 103:5
-    // The error is on: {shadow a; shadow b} = {1;2;3;4;5}
-    // This is intentionally wrong code to test error handling
+    // Features: comprehensive tuple operations, nested tuple destructuring
     let code = include_str!("pyret-files/full-files/test-tuple.arr");
     assert_matches_pyret(code);
 }
@@ -2841,12 +2860,10 @@ fn test_full_file_test_tuple() {
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // complex method definitions need investigation
 fn test_full_file_heap() {
     // From examples/heap.arr
     // Features: data types with methods, self-referential methods
-    // Error: Unexpected tokens after program end at line 33:51
-    // The error is on a method definition: method merge(self, other): merge(self, other) end
+    // Fixed by adding comma separator support in sharing clause
     let code = include_str!("pyret-files/full-files/heap.arr");
     assert_matches_pyret(code);
 }
@@ -2856,12 +2873,90 @@ fn test_full_file_heap() {
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore] // tuple destructuring in complex contexts
 fn test_full_file_statistics() {
     // From src/arr/trove/statistics.arr
-    // Features: tuple destructuring in for-fold expressions
-    // Error: Unexpected tokens after program end at line 148:19
-    // The error is on: {max-repeat; ms} = modes-helper(l)
+    // Features: tuple destructuring in for-fold expressions, rough number normalization
     let code = include_str!("pyret-files/full-files/statistics.arr");
     assert_matches_pyret(code);
+}
+
+// ----------------------------------------------------------------------------
+// 54. Sequence of Lettable Expressions Test
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_full_file_seq_of_lettable() {
+    // From tests/pyret/regression/seq-of-lettable.arr
+    // Features: Block expressions that end with lambda as lettable expressions
+    // Tests the ability to use lambdas as the last expression in a block/if
+    // Example: if block: lam(): 10 end lam(): 40 end end() == 40
+    let code = include_str!("pyret-files/full-files/seq-of-lettable.arr");
+    assert_matches_pyret(code);
+}
+
+// ----------------------------------------------------------------------------
+// 55. Import Re-Provided Module Test
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_full_file_import_re_provided() {
+    // From tests/pyret/tests/modules/import-re-provided.arr
+    // Features: Include from with dotted module paths
+    // - include from PPX: PX.x end (dotted path in include)
+    // - include from PPX.PX: x end (dotted module path)
+    // - include from PPX: module PX end (module keyword)
+    // - include from PPX: type PX.N end (type with dotted path)
+    let code = include_str!("pyret-files/full-files/import-re-provided.arr");
+    assert_matches_pyret(code);
+}
+
+// ----------------------------------------------------------------------------
+// 56. Spy Expression Comprehensive Test
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_full_file_spy() {
+    // From tests/type-check/good/spy.arr
+    // Features: Comprehensive spy expression patterns
+    // - spy: a: 1 end (named fields in spy)
+    // - spy: x, y end (multiple items in spy)
+    // - spy "label": x, y: 20 end (mix of items and named fields)
+    // - spy "iteration " + to-string(i): result end (computed labels)
+    let code = include_str!("pyret-files/full-files/spy.arr");
+    assert_matches_pyret(code);
+}
+
+// ============================================================================
+// MISSING FEATURES - Discovered from Bulk Test Analysis
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// 57. Template Dots (...) - Placeholder Syntax
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_template_dots_simple() {
+    // From tests/pyret/tests/test-errors.arr (line 352)
+    // Feature: ... as a placeholder/template in function bodies
+    // Used during development or for incomplete code
+    assert_matches_pyret("lam(): ... end");
+}
+
+#[test]
+fn test_template_dots_in_function() {
+    assert_matches_pyret(r#"
+fun incomplete-function(x):
+  ...
+end
+"#);
+}
+
+#[test]
+fn test_template_dots_in_block() {
+    assert_matches_pyret(r#"
+block:
+  x = 5
+  ...
+end
+"#);
 }
