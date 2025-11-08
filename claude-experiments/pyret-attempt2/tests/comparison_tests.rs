@@ -2284,7 +2284,6 @@ fn test_full_file_let_arr() {
 }
 
 #[test]
-#[ignore] // Full file test - tuple destructuring and type annotations
 fn test_full_file_weave_tuple_arr() {
     // From tests/pyret/regression/weave-tuple.arr
     // Features: tuple type annotations, tuple destructuring in function parameters
@@ -2297,6 +2296,30 @@ fn test_full_file_option_arr() {
     // From src/arr/trove/option.arr
     // Features: generic types, methods with trailing commas, data with methods
     let code = include_str!("pyret-files/option.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_obj_glb() {
+    // From tests/type-check/should/obj-glb.arr
+    // Features: object type checking, greatest lower bound
+    let code = include_str!("pyret-files/full-files/obj-glb.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_lazy_lists() {
+    // From tests/type-check/good/lazy-lists.arr
+    // Features: lazy evaluation, recursive data types
+    let code = include_str!("pyret-files/full-files/lazy-lists.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_tail_recursion_arg_order() {
+    // From tests/pyret/regression/tail-recursion-arg-order.arr
+    // Features: where clauses, examples blocks, data definitions, cases
+    let code = include_str!("pyret-files/full-files/tail-recursion-arg-order.arr");
     assert_matches_pyret(code);
 }
 
@@ -2746,4 +2769,99 @@ s = ```This is a
 multi-line
 string```
 "#);
+}
+
+// ============================================================================
+// FULL FILE TESTS FROM BULK ANALYSIS
+// ============================================================================
+// These tests are complete files from the Pyret codebase that currently fail
+// to parse. They were identified from the bulk test analysis of 200+ files.
+// Each test represents real-world Pyret code that exercises multiple features.
+
+// ----------------------------------------------------------------------------
+// 48. Re-Provide Data Module Test
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_full_file_re_provide_data() {
+    // From tests/pyret/tests/modules/re-provide-data.arr
+    // Features: provide data re-export (provide: data PD.BT end)
+    // FIXED: Module-ref now supports dotted paths like PD.BT
+    let code = include_str!("pyret-files/full-files/re-provide-data.arr");
+    assert_matches_pyret(code);
+}
+
+// ----------------------------------------------------------------------------
+// 49. Underscore Partial Application Test
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // generic type application in function calls not yet implemented
+fn test_full_file_underscore() {
+    // From tests/type-check/should/underscore.arr
+    // Features: underscore partial application, generic function calls
+    // Error: example<Number,Number>(...) syntax not supported yet
+    let code = include_str!("pyret-files/full-files/underscore.arr");
+    assert_matches_pyret(code);
+}
+
+// ----------------------------------------------------------------------------
+// 50. Arrays Module Test
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // provide-types and generic function signatures not yet implemented
+fn test_full_file_arrays() {
+    // From src/arr/trove/arrays.arr
+    // Features: provide-types *, generic function signatures like:
+    //   array-filter :: <A> (A -> Boolean), Array<A> -> Array<A>
+    // Error: Unexpected tokens after program end at line 113:34
+    let code = include_str!("pyret-files/full-files/arrays.arr");
+    assert_matches_pyret(code);
+}
+
+// ----------------------------------------------------------------------------
+// 51. Tuple Test Suite
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // tuple destructuring with mismatched sizes needs better error handling
+fn test_full_file_test_tuple() {
+    // From tests/pyret/tests/test-tuple.arr
+    // Features: comprehensive tuple operations, destructuring edge cases
+    // Error: Unexpected tokens after program end at line 103:5
+    // The error is on: {shadow a; shadow b} = {1;2;3;4;5}
+    // This is intentionally wrong code to test error handling
+    let code = include_str!("pyret-files/full-files/test-tuple.arr");
+    assert_matches_pyret(code);
+}
+
+// ----------------------------------------------------------------------------
+// 52. Heap Data Structure Test
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // complex method definitions need investigation
+fn test_full_file_heap() {
+    // From examples/heap.arr
+    // Features: data types with methods, self-referential methods
+    // Error: Unexpected tokens after program end at line 33:51
+    // The error is on a method definition: method merge(self, other): merge(self, other) end
+    let code = include_str!("pyret-files/full-files/heap.arr");
+    assert_matches_pyret(code);
+}
+
+// ----------------------------------------------------------------------------
+// 53. Statistics Module Test
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore] // tuple destructuring in complex contexts
+fn test_full_file_statistics() {
+    // From src/arr/trove/statistics.arr
+    // Features: tuple destructuring in for-fold expressions
+    // Error: Unexpected tokens after program end at line 148:19
+    // The error is on: {max-repeat; ms} = modes-helper(l)
+    let code = include_str!("pyret-files/full-files/statistics.arr");
+    assert_matches_pyret(code);
 }

@@ -21,8 +21,8 @@ PYRET_EXPR="/tmp/pyret_expr.json"
 
 # Check if input is a file path or an expression
 if [ -f "$INPUT" ]; then
-    # It's a file - use it directly
-    TEMP_FILE="$INPUT"
+    # It's a file - convert to absolute path for use across directories
+    TEMP_FILE="$(cd "$(dirname "$INPUT")" && pwd)/$(basename "$INPUT")"
     echo "=== Input File ==="
     echo "$INPUT"
     echo "(File contains $(wc -l < "$INPUT") lines)"
@@ -119,11 +119,17 @@ EOF
 # Capture the exit code from Python
 EXIT_CODE=$?
 
-# If different, show the diff
+# If different, show the diff in git-style unified format
 if [ $EXIT_CODE -eq 1 ]; then
     echo
-    echo "=== Diff (Pyret vs Rust) ==="
-    diff /tmp/pyret_ast_normalized.json /tmp/rust_ast_normalized.json || true
+    echo "=== Diff (Pyret official vs Rust implementation) ==="
+    # Use git diff with --no-index for colored, unified diff output
+    # or fall back to regular diff -u if git is not available
+    if command -v git &> /dev/null; then
+        git diff --no-index --color=always /tmp/pyret_ast_normalized.json /tmp/rust_ast_normalized.json || true
+    else
+        diff -u /tmp/pyret_ast_normalized.json /tmp/rust_ast_normalized.json || true
+    fi
 fi
 
 exit $EXIT_CODE

@@ -893,8 +893,14 @@ impl Parser {
             });
         }
 
-        // Parse module-ref (simple name for now, could be dotted path)
-        let name = self.parse_name()?;
+        // Parse module-ref (can be dotted path like PD.BT)
+        let mut path = vec![self.parse_name()?];
+
+        // Check for additional dot-separated names (e.g., PD.BT)
+        while self.matches(&TokenType::Dot) {
+            self.advance(); // consume DOT
+            path.push(self.parse_name()?);
+        }
 
         // Check for AS NAME
         let as_name = if self.matches(&TokenType::As) {
@@ -907,7 +913,7 @@ impl Parser {
         // The JSON format shows: "name-spec": {"type": "s-module-ref", "path": [{"type": "s-name", "name": "add"}], "as-name": null}
         Ok(NameSpec::SModuleRef {
             l: self.current_loc(),
-            path: vec![name],
+            path,
             as_name,
         })
     }
@@ -993,10 +999,11 @@ impl Parser {
         if self.matches(&TokenType::LBrace) {
             let start = self.advance().clone(); // consume {
 
-            // Empty braces - just return empty tuple
+            // Empty braces - return empty record (not tuple!)
+            // In Pyret: { } is an empty record type, {;} or similar would be tuple
             if self.matches(&TokenType::RBrace) {
                 let end = self.advance().clone();
-                return Ok(Ann::ATuple {
+                return Ok(Ann::ARecord {
                     l: self.make_loc(&start, &end),
                     fields: vec![],
                 });
@@ -1239,11 +1246,27 @@ impl Parser {
     /// binding: name [:: ann]
     /// Parses a parameter binding like: x, x :: Number
     fn parse_bind(&mut self) -> ParseResult<Bind> {
-        // Check for optional shadow keyword
-        if self.matches(&TokenType::Shadow) {
+        // binding: name-binding | tuple-binding
+        // Check if this is a tuple binding
+        if self.matches(&TokenType::LBrace) {
+            // Tuple binding: {x; y; z}
+            self.parse_tuple_bind()
+        } else if self.matches(&TokenType::Shadow) {
+            // Name binding with shadow keyword
             self.advance(); // consume 'shadow'
+
+            // Check if this is a tuple binding after shadow
+            if self.matches(&TokenType::LBrace) {
+                // shadow {x; y}
+                return Err(ParseError::general(
+                    self.peek(),
+                    "Shadow keyword cannot be used before tuple bindings"
+                ));
+            }
+
             self.parse_bind_with_shadow(true)
         } else {
+            // Regular name binding
             self.parse_bind_with_shadow(false)
         }
     }
@@ -1304,57 +1327,90 @@ impl Parser {
         })
     }
 
-    /// tuple-binding: { id; ... }
+    /// tuple-binding: LBRACE (binding SEMI)* binding [SEMI] RBRACE [AS name-binding]
+    /// binding: name-binding | tuple-binding
+    ///
+    /// Parses tuple bindings which can contain nested tuples: {x; y} or {{x; y}; z}
     fn parse_tuple_bind(&mut self) -> ParseResult<Bind> {
         let start = self.expect(TokenType::LBrace)?;
 
-        // Parse fields: name1; name2; name3
-        // Each field can optionally have "shadow" keyword
+        // Parse fields: binding; binding; ...
+        // Each binding can be a name or another tuple
         let mut fields = Vec::new();
 
-        // Parse first field (with optional shadow keyword)
-        let first_shadows = if self.matches(&TokenType::Shadow) {
-            self.advance(); // consume 'shadow'
-            true
-        } else {
-            false
-        };
-        let first_name = self.parse_name()?;
-        fields.push(Bind::SBind {
-            l: self.current_loc(),
-            shadows: first_shadows,
-            id: first_name,
-            ann: Ann::ABlank,
-        });
+        // Parse first field
+        if !self.matches(&TokenType::RBrace) {
+            // First binding
+            let field = self.parse_bind_in_tuple()?;
+            fields.push(field);
 
-        // Parse remaining fields
-        while self.matches(&TokenType::Semi) {
-            self.advance(); // consume semicolon
+            // Parse remaining fields
+            while self.matches(&TokenType::Semi) {
+                self.advance(); // consume semicolon
 
-            // Check for optional shadow keyword
-            let shadows = if self.matches(&TokenType::Shadow) {
-                self.advance(); // consume 'shadow'
-                true
-            } else {
-                false
-            };
+                // Check for trailing semicolon before }
+                if self.matches(&TokenType::RBrace) {
+                    break;
+                }
 
-            let name = self.parse_name()?;
-            fields.push(Bind::SBind {
-                l: self.current_loc(),
-                shadows,
-                id: name,
-                ann: Ann::ABlank,
-            });
+                let field = self.parse_bind_in_tuple()?;
+                fields.push(field);
+            }
         }
 
         let end = self.expect(TokenType::RBrace)?;
 
+        // Check for optional "as name" after the tuple
+        let as_name = if self.matches(&TokenType::As) {
+            self.advance(); // consume 'as'
+            let name = self.parse_name()?;
+            let ann = if self.matches(&TokenType::ColonColon) {
+                self.expect(TokenType::ColonColon)?;
+                self.parse_ann()?
+            } else {
+                Ann::ABlank
+            };
+            Some(Box::new(Bind::SBind {
+                l: self.current_loc(),
+                shadows: false,
+                id: name,
+                ann,
+            }))
+        } else {
+            None
+        };
+
         Ok(Bind::STupleBind {
             l: self.make_loc(&start, &end),
             fields,
-            as_name: None,
+            as_name,
         })
+    }
+
+    /// Helper to parse a single binding within a tuple (can be name or nested tuple)
+    fn parse_bind_in_tuple(&mut self) -> ParseResult<Bind> {
+        // Check for optional shadow keyword
+        if self.matches(&TokenType::Shadow) {
+            self.advance(); // consume 'shadow'
+
+            // After shadow, can only be a name, not a nested tuple
+            if self.matches(&TokenType::LBrace) {
+                return Err(ParseError::general(
+                    self.peek(),
+                    "Shadow keyword cannot be used before tuple bindings"
+                ));
+            }
+
+            return self.parse_bind_with_shadow(true);
+        }
+
+        // Check if this is a nested tuple
+        if self.matches(&TokenType::LBrace) {
+            self.parse_tuple_bind()
+        } else {
+            // Regular name binding
+            self.parse_bind_with_shadow(false)
+        }
     }
 
     /// let-binding: LET | VAR binding = expr
@@ -3667,7 +3723,7 @@ impl Parser {
         // Parse block body
         let mut body_stmts = Vec::new();
         while !self.matches(&TokenType::End) && !self.is_at_end() {
-            let stmt = self.parse_expr()?;
+            let stmt = self.parse_block_statement()?;
             body_stmts.push(Box::new(stmt));
         }
 
@@ -4091,25 +4147,19 @@ impl Parser {
         // Parse value expression
         let value = self.parse_expr()?;
 
-        // Create LetBind
-        let let_bind = LetBind::SLetBind {
-            l: self.current_loc(),
-            b: bind.clone(),
-            value: Box::new(value.clone()),
-        };
-
         let end = if self.current > 0 {
             self.tokens[self.current - 1].clone()
         } else {
             start.clone()
         };
 
-        // Return SLetExpr with the value as the body
-        Ok(Expr::SLetExpr {
+        // Return SLet (simple let binding statement)
+        // This is for implicit let bindings like: x = 5
+        Ok(Expr::SLet {
             l: self.make_loc(&start, &end),
-            binds: vec![let_bind],
-            body: Box::new(value),
-            blocky: false,
+            name: bind,
+            value: Box::new(value),
+            keyword_val: false,
         })
     }
 

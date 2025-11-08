@@ -1,0 +1,134 @@
+# LLM Organizer Configuration Example
+# Copy this file to ~/.config/llm-organizer/config.toml and customize
+
+[llm]
+# Your LLM endpoint URL
+# Examples:
+#   - Ollama: "http://localhost:11434/api/generate"
+#   - llama.cpp: "http://localhost:8080/completion"
+#   - OpenAI-compatible: "https://api.openai.com/v1/completions"
+endpoint = "http://localhost:8080"
+
+# Optional: Model name if your endpoint supports multiple models
+# model = "mistral"
+# model = "llama2"
+# model = "gpt-4"
+
+# Maximum tokens for LLM completion requests
+max_tokens = 2048
+
+# Temperature for text generation (0.0 = deterministic, 1.0 = creative)
+temperature = 0.7
+
+# Request timeout in seconds
+timeout_secs = 30
+
+[filesystem]
+# Directories to watch for file changes
+# These directories will be monitored recursively
+watch_dirs = [
+    "/Users/you/Documents",
+    "/Users/you/Downloads",
+]
+
+# Where to mount the virtual filesystem
+# This directory will show your organized views
+mount_point = "/Users/you/.local/share/llm-organizer/mount"
+
+# File extensions to ignore (don't analyze these)
+ignore_extensions = [
+    ".tmp",      # Temporary files
+    ".swp",      # Vim swap files
+    ".DS_Store", # macOS metadata
+    ".git",      # Git files
+    ".lock",     # Lock files
+]
+
+[database]
+# Path to the SQLite database
+path = "/Users/you/.local/share/llm-organizer/metadata.db"
+
+# Enable WAL mode for better concurrent access
+# Recommended: true
+wal_mode = true
+
+[organization]
+# Master prompt that defines how files should be organized
+# This is sent to the LLM along with file content to determine categories
+prompt = """
+Organize files intelligently based on their content and purpose.
+
+Categories to use:
+- Work: Professional documents, emails, reports, presentations
+- Personal: Letters, journals, personal correspondence
+- Finance: Invoices, receipts, tax documents, bank statements
+- Research: Academic papers, studies, research notes
+- Projects: Project-specific documents (organize by project name when clear)
+- Reference: Manuals, guides, reference materials
+- Media: Photos, videos, creative content
+
+Additional guidelines:
+- Extract and preserve important dates (prefer YYYY-MM-DD format)
+- Identify key people, organizations, and locations
+- Tag technical content with relevant technology keywords
+- Note document type (invoice, report, email, etc.)
+- Identify language if not English
+- Mark sensitive/confidential documents appropriately
+"""
+
+# Automatically analyze new files as they're detected
+# Set to false if you want to manually trigger analysis
+auto_analyze = true
+
+# How long to cache LLM responses (in seconds)
+# Longer cache = fewer API calls but potentially stale results
+# 3600 = 1 hour, 86400 = 1 day
+cache_ttl_secs = 3600
+
+# ============================================================================
+# Advanced Configuration Examples
+# ============================================================================
+
+# Example 1: Academic Research Setup
+# [organization]
+# prompt = """
+# Organize academic papers and research materials.
+# Categories: By topic area, year, author, conference/journal
+# Extract: Authors, publication date, venue, citations, methodology
+# Tag with: Research area, techniques used, datasets mentioned
+# """
+
+# Example 2: Photo Organization
+# [organization]
+# prompt = """
+# Organize photos and media files.
+# Categories: By date (YYYY/MM), event type, location, people
+# Extract: EXIF data, GPS coordinates, dates, camera info
+# Tag with: Occasion, people present, location, season
+# """
+
+# Example 3: Code Repository Organization
+# [organization]
+# prompt = """
+# Organize code and technical documents.
+# Categories: By programming language, project, purpose
+# Extract: Language, frameworks, dependencies, author
+# Tag with: Technology stack, domain (frontend/backend/etc)
+# """
+
+# Example 4: Legal Documents
+# [organization]
+# prompt = """
+# Organize legal and contractual documents.
+# Categories: By document type, client, matter, date
+# Extract: Parties involved, dates, jurisdiction, case numbers
+# Tag with: Document type, status (draft/final), confidentiality level
+# """
+
+# Example 5: Minimal/Simple Organization
+# [organization]
+# prompt = """
+# Simple organization by file type and date.
+# Categories: Documents, Spreadsheets, Presentations, Other
+# Extract dates and basic metadata only.
+# """
