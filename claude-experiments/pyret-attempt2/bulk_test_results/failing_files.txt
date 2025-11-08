@@ -1,64 +1,25 @@
 tools/benchmark/auto-report-programs/adding-ones-2000.arr  # FAIL despite earlier success (stack overflow (expression too deep))
-tools/benchmark/auto-report-programs/anf-loop-compiler.arr  # UNKNOWN: line=1066 content='{new-cases; after-app-label} = get-new-cases(compiler, opt-d...'
-tools/benchmark/auto-report-programs/ast.arr  # UNKNOWN: line=160 content='method _lessthan(self, other): self.key() < other.key() end,...'
-tests/pyret/tests/test-errors.arr  # UNKNOWN: line=352 content='template-err = get-err(lam(): (lam(): ... end)() end)...'
+tools/benchmark/auto-report-programs/anf-loop-compiler.arr  # UNKNOWN: line=2309 content='cases-dispatches!dispatches +...'
 tests/pyret/tests/test-roughnum.arr  # SUCCESS (verified)
 tests/pyret/tests/test-parse-errors.arr  # UNKNOWN: line=133 content=']...'
 tests/pyret/tests/test-rounding.arr  # SUCCESS (verified)
 tests/pyret/tests/test-statistics.arr  # SUCCESS (verified)
 tests/pyret/tests/test-math.arr  # UNKNOWN: line=14 content='min([list: 1/10, 1/100, 1/100000000000000000000000]) is 1/10...'
-tests/pyret/tests/modules/re-re-provide-data.arr  # provide from (provide from M: x end)
 tests/pyret/tests/modules/test-import-data-from-data-star.arr  # SUCCESS (verified)
-tests/pyret/tests/modules/re-provide-data.arr  # provide from (provide from M: x end)
-tests/pyret/tests/modules/import-re-provided.arr  # provide from (provide from M: x end)
+tests/pyret/tests/modules/import-re-provided.arr  # UNKNOWN: Error: Expected { expected: Colon, found: Dot, location: "8:16:123" }
 tests/pyret/tests/test-adaptive-simpson.arr  # SUCCESS (verified)
 tests/pyret/tests/test-numbers.arr  # UNKNOWN: line=300 content='rough-p-over-q = ~812687218752923223460064283612774865041325...'
 tests/pyret/tests/test-within.arr  # UNKNOWN: line=164 content='within-abs(0.1)(0, 16236617687846825556281301518037323038237...'
 tests/pyret/tests/test-bar-chart.arr  # SUCCESS (verified)
-tests/pyret/tests/test-tuple.arr  # UNKNOWN: line=103 content='{shadow a; shadow b} = {1;2;3;4;5}...'
-tests/pyret/regression/seq-of-lettable.arr  # UNKNOWN: line=43 content='end() == 40:...'
-tests/type-check/bad/lambda-instantiate.arr  # UNKNOWN: line=9 content='a = tru(5)...'
-tests/type-check/should/lambda-test-inference.arr  # UNKNOWN: line=9 content='fals-number = fals<Number>...'
-tests/type-check/should/lambda-instantiate.arr  # UNKNOWN: line=9 content='a = tru(5)...'
-tests/type-check/should/underscore.arr  # UNKNOWN: line=9 content='example<Number,Number>(5, (_ + 2), (_ + 2))...'
-tests/type-check/good/data-constructorAsSingleton-instantiate.arr  # UNKNOWN: line=14 content='| my-link(a, r) =>...'
-tests/type-check/good/data-higherOrder-instantiate.arr  # UNKNOWN: line=8 content='| my-empty()    => my-empty<B>()...'
 tests/type-check/good/tests.arr  # SUCCESS (verified)
-tests/type-check/good/spy.arr  # UNKNOWN: line=52 content='spy "iteration " + to-string(i):...'
-tests/type-check/good/data-polymorphic-instantiate.arr  # UNKNOWN: line=13 content='a-synth                    = my-link<Number>(1, my-empty<Num...'
-tests/type-check/good/data-constructorAsSingleton-infer.arr  # UNKNOWN: line=19 content='my-link(v, my-empty<A>)...'
-tests/type-check/good/data-methods.arr  # SUCCESS (verified)
 tests/type-check/good/tests-because.arr  # SUCCESS (verified)
-tests/type-check/good/tuple-regression.arr  # UNKNOWN: line=93 content='{sum; prod} = for fold({sum :: Number;prod :: Number;} from ...'
-tests/type-check/good/data-polymorphic-recursive-instantiate.arr  # SUCCESS (verified)
-tests/type-check/good/data-constructorAsFun-infer.arr  # UNKNOWN: line=28 content='zero-list-list-synth                              = my-map(m...'
-tests/type-check/good/data-constructorAsFun-instantiate.arr  # UNKNOWN: line=13 content='| my-empty()    => my-empty<B>()...'
-examples/ralist.arr  # UNKNOWN: line=41 content='method first(self): rfirst(self) end,...'
-examples/heap.arr  # UNKNOWN: line=33 content='method merge(self, other): merge(self, other) end,...'
-src/arr/trove/sets.arr  # UNKNOWN: line=161 content='end,...'
-src/arr/trove/charts.arr  # UNKNOWN: line=295 content='{first-quartile; third-quartile} = if num-modulo(n, 2) == 0:...'
-src/arr/trove/checker.arr  # UNKNOWN: line=62 content='end,...'
-src/arr/trove/matrices.arr  # UNKNOWN: line=194 content='end,...'
-src/arr/trove/arrays.arr  # UNKNOWN: line=113 content='array-filter :: <A> (A -> Boolean), Array<A> -> Array<A>...'
-src/arr/trove/lists.arr  # UNKNOWN: line=181 content='method _output(self :: List<a>) -> VS.ValueSkeleton: VS.vs-c...'
-src/arr/trove/statistics.arr  # UNKNOWN: line=148 content='{max-repeat; ms} = modes-helper(l)...'
-src/arr/trove/matrix-util.arr  # SUCCESS (verified)
-src/arr/trove/error.arr  # UNKNOWN: line=113 content='......'
-src/arr/trove/ast.arr  # UNKNOWN: line=160 content='method _lessthan(self, other): self.key() < other.key() end,...'
-src/arr/trove/csv.arr  # SUCCESS (verified)
-src/arr/trove/pprint.arr  # UNKNOWN: line=74 content='end,...'
+src/arr/trove/charts.arr  # UNKNOWN: line=412 content='when labels.length() <> self.obj!values.length():...'
+src/arr/trove/checker.arr  # UNKNOWN: line=826 content='for left-right-check(loc)(lv from left, rv from right):...'
+src/arr/trove/matrices.arr  # UNKNOWN: line=852 content='for raw-array-fold2<Number, Number, Number>(acc from Equal, ...'
+src/arr/trove/error.arr  # UNKNOWN: line=1162 content='.and-then({(v) block:...'
 src/arr/compiler/pyret.arr  # UNKNOWN: line=94 content=']...'
-src/arr/compiler/concat-lists.arr  # UNKNOWN: line=115 content='end,...'
 src/arr/compiler/ast-util.arr  # UNKNOWN: line=394 content='with-params.{env: args-env}.option(_check)...'
-src/arr/compiler/compile-structs.arr  # UNKNOWN: line=195 content='end,...'
 src/arr/compiler/compile-lib.arr  # UNKNOWN: line=309 content='{loadable :: Loadable; trace :: List} = compile-module(w.loc...'
-src/arr/compiler/js-ast.arr  # UNKNOWN: line=80 content='end,...'
-src/arr/compiler/cli-module-loader.arr  # UNKNOWN: line=118 content='{static-path; module-path} = cases(CachedType) cache-type:...'
-src/arr/compiler/resolve-scope.arr  # UNKNOWN: line=508 content='{new-binds; new-body} = for fold(acc from {empty; v-body}, a...'
-src/arr/compiler/type-check.arr  # UNKNOWN: "value": "Expected a data type but got "
-src/arr/compiler/anf-loop-compiler.arr  # UNKNOWN: line=1066 content='{new-cases; after-app-label} = get-new-cases(compiler, opt-d...'
-src/arr/compiler/js-dag-utils.arr  # SUCCESS (verified)
-src/arr/compiler/type-check-structs.arr  # UNKNOWN: line=90 content='end,...'
+src/arr/compiler/resolve-scope.arr  # UNKNOWN: line=1072 content=']))...'
+src/arr/compiler/anf-loop-compiler.arr  # UNKNOWN: line=2309 content='cases-dispatches!dispatches +...'
 src/arr/compiler/type-defaults.arr  # UNKNOWN: line=255 content=']...'
-src/arr/compiler/type-structs.arr  # UNKNOWN: line=138 content='end,...'
-src/scripts/time-obj-vs-tup.arr  # UNKNOWN: line=19 content='{fsum; fprod} = for fold(totals from {0; 1}, item from l):...'

@@ -83,9 +83,14 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
             // Use original string if available (preserves precision for large integers)
             // Otherwise convert to fraction string
             let value_str = if let Some(orig) = original {
-                // Rough numbers (starting with ~) are kept as-is
+                // Rough numbers (starting with ~) need normalization: strip trailing .0
                 if orig.starts_with('~') {
-                    orig.clone()
+                    let normalized = if orig.ends_with(".0") {
+                        orig.strip_suffix(".0").unwrap().to_string()
+                    } else {
+                        orig.clone()
+                    };
+                    normalized
                 }
                 // For decimals or scientific notation, convert to fraction; for integers, use as-is
                 else if orig.contains('.') || orig.contains('e') || orig.contains('E') {
@@ -140,6 +145,13 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "type": "s-app",
                 "fun": expr_to_pyret_json(_fun),
                 "args": args.iter().map(|e| expr_to_pyret_json(e.as_ref())).collect::<Vec<_>>()
+            })
+        }
+        Expr::SInstantiate { expr, params, .. } => {
+            json!({
+                "type": "s-instantiate",
+                "expr": expr_to_pyret_json(expr),
+                "params": params.iter().map(|a| ann_to_pyret_json(a)).collect::<Vec<_>>()
             })
         }
         Expr::SConstruct { modifier, constructor, values, .. } => {
@@ -492,6 +504,11 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "name": name_to_pyret_json(name),
                 "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
                 "ann": ann_to_pyret_json(ann)
+            })
+        }
+        Expr::STemplate { .. } => {
+            json!({
+                "type": "s-template"
             })
         }
         _ => {

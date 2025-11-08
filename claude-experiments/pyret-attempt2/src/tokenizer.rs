@@ -165,6 +165,7 @@ pub enum TokenType {
     EqualTilde,
     Neq,
     Lt,
+    LtNoSpace,
     Gt,
     ThickArrow,
     ColonColon,
@@ -910,7 +911,7 @@ impl Tokenizer {
             "do" => TokenType::Do,
             "does-not-raise" => { self.paren_is_for_exp = true; TokenType::DoesNotRaise },
             "else" => TokenType::Else,
-            "end" => TokenType::End,
+            "end" => { self.paren_is_for_exp = false; TokenType::End },
             "examples" => { self.paren_is_for_exp = true; TokenType::Examples },
             "extend" => TokenType::TableExtend,
             "extract" => TokenType::TableExtract,
@@ -1283,14 +1284,21 @@ impl Tokenizer {
             '<' => {
                 self.advance();
                 let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let token_type = if self.prior_whitespace {
+                    TokenType::Lt
+                } else if self.paren_is_for_exp {
+                    TokenType::Lt
+                } else {
+                    TokenType::LtNoSpace
+                };
                 self.paren_is_for_exp = true;
                 self.prior_whitespace = false;
-                Some(Token::new(TokenType::Lt, "<".to_string(), loc))
+                Some(Token::new(token_type, "<".to_string(), loc))
             }
             '>' => {
                 self.advance();
                 let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
-                self.paren_is_for_exp = true;
+                self.paren_is_for_exp = false; // After >, allow ParenNoSpace for function application
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Gt, ">".to_string(), loc))
             }
