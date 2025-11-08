@@ -2960,3 +2960,210 @@ block:
 end
 "#);
 }
+
+// ============================================================================
+// NEW FAILING CASES - From Bulk Test Analysis
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// 58. Include From with Dotted Module Paths
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_full_file_import_re_provided_dotted_modules() {
+    // From tests/pyret/tests/modules/import-re-provided.arr (full version with dotted paths)
+    // Features: Include from with dotted module paths
+    // - include from PPX.PX: x end (dotted module path after 'from')
+    // - include from PPX: type PX.N end (type with dotted path in include)
+    // FAILS: Error: Expected { expected: Colon, found: Dot, location: "8:16:123" }
+    // The parser expects a colon after the module name but finds a dot
+    let code = include_str!("pyret-files/full-files/import-re-provided-dotted.arr");
+    assert_matches_pyret(code);
+}
+
+// ----------------------------------------------------------------------------
+// 59. For Expressions with Function Call Iterators
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_for_with_function_call_iterator() {
+    // From src/arr/trove/checker.arr line 826
+    // Feature: for left-right-check(loc)(lv from left, rv from right): ... end
+    // The iterator type can be a function call that returns an iterator function
+    // FAILS: Error: General { location: "1:24:24", message: "Unexpected tokens after program end" }
+    // The parser parses 'for left-right-check(loc)' and stops, leaving '(lv from...)' unparsed
+    assert_matches_pyret(r#"for make-checker(loc)(lv from [list: 1, 2], rv from [list: 3, 4]):
+  lv + rv
+end"#);
+}
+
+#[test]
+fn test_full_file_for_with_function_iterator() {
+    // Full file test for for expressions with function call iterators
+    let code = include_str!("pyret-files/full-files/for-with-function-iterator.arr");
+    assert_matches_pyret(code);
+}
+
+// ============================================================================
+// Full File Tests - Benchmark Programs
+// ============================================================================
+
+#[test]
+fn test_full_file_benchmark_adding_ones_2000() {
+    let code = include_str!("pyret-files/full-files/benchmark/adding-ones-2000.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_benchmark_anf_loop_compiler() {
+    let code = include_str!("pyret-files/full-files/benchmark/anf-loop-compiler.arr");
+    assert_matches_pyret(code);
+}
+
+// ============================================================================
+// Full File Tests - Pyret Test Suite
+// ============================================================================
+
+#[test]
+fn test_full_file_test_roughnum() {
+    let code = include_str!("pyret-files/full-files/tests/test-roughnum.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_parse_errors() {
+    let code = include_str!("pyret-files/full-files/tests/test-parse-errors.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_rounding() {
+    let code = include_str!("pyret-files/full-files/tests/test-rounding.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_statistics() {
+    let code = include_str!("pyret-files/full-files/tests/test-statistics.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_math() {
+    let code = include_str!("pyret-files/full-files/tests/test-math.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_import_data_from_data_star() {
+    let code = include_str!("pyret-files/full-files/tests/test-import-data-from-data-star.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_adaptive_simpson() {
+    let code = include_str!("pyret-files/full-files/tests/test-adaptive-simpson.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_numbers() {
+    let code = include_str!("pyret-files/full-files/tests/test-numbers.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_within() {
+    let code = include_str!("pyret-files/full-files/tests/test-within.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_bar_chart() {
+    let code = include_str!("pyret-files/full-files/tests/test-bar-chart.arr");
+    assert_matches_pyret(code);
+}
+
+// ============================================================================
+// Full File Tests - Type Check Test Suite
+// ============================================================================
+
+#[test]
+fn test_full_file_type_check_tests() {
+    let code = include_str!("pyret-files/full-files/type-check/tests.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_type_check_tests_because() {
+    let code = include_str!("pyret-files/full-files/type-check/tests-because.arr");
+    assert_matches_pyret(code);
+}
+
+// ============================================================================
+// Full File Tests - Trove Libraries
+// ============================================================================
+
+#[test]
+fn test_full_file_trove_charts() {
+    let code = include_str!("pyret-files/full-files/trove/charts.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_trove_matrices() {
+    let code = include_str!("pyret-files/full-files/trove/matrices.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_trove_error() {
+    let code = include_str!("pyret-files/full-files/trove/error.arr");
+    assert_matches_pyret(code);
+}
+
+// ============================================================================
+// Full File Tests - Compiler Source Files
+// ============================================================================
+
+#[test]
+fn test_full_file_compiler_pyret() {
+    let code = include_str!("pyret-files/full-files/compiler/pyret.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_compiler_ast_util() {
+    let code = include_str!("pyret-files/full-files/compiler/ast-util.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_compiler_compile_lib() {
+    let code = include_str!("pyret-files/full-files/compiler/compile-lib.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_compiler_resolve_scope() {
+    let code = include_str!("pyret-files/full-files/compiler/resolve-scope.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_compiler_anf_loop_compiler() {
+    let code = include_str!("pyret-files/full-files/compiler/anf-loop-compiler.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_compiler_js_dag_utils() {
+    let code = include_str!("pyret-files/full-files/compiler/js-dag-utils.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_compiler_type_defaults() {
+    let code = include_str!("pyret-files/full-files/compiler/type-defaults.arr");
+    assert_matches_pyret(code);
+}

@@ -103,6 +103,7 @@ tests/pyret/tests/modules/aliased-name-re-provided.arr
 tests/pyret/tests/modules/provide-x.arr
 tests/pyret/tests/modules/test-provide-type-as-simple.arr
 tests/pyret/tests/modules/provide-arrow-using-datatype.arr
+tests/pyret/tests/modules/import-re-provided.arr
 tests/pyret/tests/modules/import-datatype-as-type-alias.arr
 tests/pyret/tests/modules/test-provide-data-with-provide-star.arr
 tests/pyret/tests/test-array.arr
@@ -382,6 +383,7 @@ src/arr/trove/timing.arr
 src/arr/trove/sets.arr
 src/arr/trove/either.arr
 src/arr/trove/vector-util.arr
+src/arr/trove/checker.arr
 src/arr/trove/system.arr
 src/arr/trove/pick.arr
 src/arr/trove/file.arr
@@ -434,7 +436,6 @@ src/arr/compiler/cli-module-loader.arr
 src/arr/compiler/well-formed.arr
 src/arr/compiler/type-check.arr
 src/arr/compiler/list-aux.arr
-src/arr/compiler/js-dag-utils.arr
 src/arr/compiler/type-check-structs.arr
 src/arr/compiler/libs.arr
 src/arr/compiler/repl.arr

@@ -528,11 +528,11 @@ pub enum Expr {
 
     /// Fraction literal (rational)
     #[serde(rename = "s-frac")]
-    SFrac { l: Loc, num: i64, den: i64 },
+    SFrac { l: Loc, num: String, den: String },
 
     /// Rough fraction literal
     #[serde(rename = "s-rfrac")]
-    SRfrac { l: Loc, num: i64, den: i64 },
+    SRfrac { l: Loc, num: String, den: String },
 
     /// Boolean literal
     #[serde(rename = "s-bool")]
@@ -1019,7 +1019,9 @@ pub enum Import {
     #[serde(rename = "s-include-from")]
     SIncludeFrom {
         l: Loc,
-        import: ImportType,
+        #[serde(rename = "mod")]
+        module_path: Vec<Name>,
+        #[serde(rename = "specs")]
         names: Vec<IncludeSpec>,
     },
 
