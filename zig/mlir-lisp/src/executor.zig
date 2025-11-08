@@ -8,6 +8,7 @@ pub const ExecutorError = error{
     ExecutionEngineCreationFailed,
     LoweringFailed,
     InvokeFailed,
+    MetadataModuleInJITPipeline,
 } || std.mem.Allocator.Error;
 
 pub const OptLevel = enum(u32) {
@@ -117,6 +118,35 @@ pub const Executor = struct {
         }
     }
 
+    /// Validate that the module doesn't contain metadata modules
+    /// Metadata modules should not be JIT compiled
+    fn validateNoMetadata(module: *mlir.Module) !void {
+        const module_op = module.getOperation();
+        const body_region = mlir.c.mlirOperationGetRegion(module_op, 0);
+        const body_block = mlir.c.mlirRegionGetFirstBlock(body_region);
+
+        var current_op = mlir.c.mlirBlockGetFirstOperation(body_block);
+
+        while (!mlir.c.mlirOperationIsNull(current_op)) {
+            const op_name = mlir.Operation.getName(current_op);
+
+            // Check if it's a builtin.module with metadata attribute
+            if (std.mem.eql(u8, op_name, "builtin.module")) {
+                const attr_name_str = "metadata";
+                const attr_name_ref = mlir.c.mlirStringRefCreate(attr_name_str.ptr, attr_name_str.len);
+                const attr = mlir.c.mlirOperationGetAttributeByName(current_op, attr_name_ref);
+
+                if (!mlir.c.mlirAttributeIsNull(attr)) {
+                    std.debug.print("ERROR: Found metadata module in JIT compilation pipeline!\n", .{});
+                    std.debug.print("Metadata modules should not be JIT compiled.\n", .{});
+                    return error.MetadataModuleInJITPipeline;
+                }
+            }
+
+            current_op = mlir.c.mlirOperationGetNextInBlock(current_op);
+        }
+    }
+
     /// Apply lowering passes to convert high-level MLIR to LLVM IR
     /// This uses a standard lowering pipeline:
     /// 1. Convert func/arith/scf/cf to lower level dialects
@@ -143,6 +173,9 @@ pub const Executor = struct {
 
     /// Compile the MLIR module and create an execution engine
     pub fn compile(self: *Executor, module: *mlir.Module) !void {
+        // Validate that no metadata modules are present
+        try validateNoMetadata(module);
+
         // First, apply transforms if any were set
         try self.applyTransforms(module);
 

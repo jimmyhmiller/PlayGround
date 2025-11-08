@@ -11,6 +11,7 @@ const Repl = mlir_lisp.Repl;
 const MacroExpander = mlir_lisp.MacroExpander;
 const builtin_macros = mlir_lisp.builtin_macros;
 const DialectRegistry = mlir_lisp.DialectRegistry;
+const metadata_detector = mlir_lisp.metadata_detector;
 
 /// Helper function to wrap multiple top-level forms in an implicit list
 fn createImplicitList(allocator: std.mem.Allocator, forms: PersistentVector(*Value)) !*Value {
@@ -20,26 +21,6 @@ fn createImplicitList(allocator: std.mem.Allocator, forms: PersistentVector(*Val
         .data = .{ .list = forms },
     };
     return value;
-}
-
-/// Predicate: Check if operation is IRDL metadata
-fn isIRDL(op_name: []const u8) bool {
-    return std.mem.startsWith(u8, op_name, "irdl.");
-}
-
-/// Predicate: Check if operation is Transform metadata
-fn isTransform(op_name: []const u8) bool {
-    return std.mem.startsWith(u8, op_name, "transform.") or
-           std.mem.eql(u8, op_name, "builtin.module"); // Transform modules wrapped in builtin.module
-}
-
-/// Predicate: Check if operation is regular application code
-fn isRegularCode(op_name: []const u8) bool {
-    // Regular code is anything except IRDL, transform operations, and builtin.module
-    // (builtin.module wraps transforms and belongs in the metadata module)
-    return !std.mem.startsWith(u8, op_name, "irdl.") and
-           !std.mem.startsWith(u8, op_name, "transform.") and
-           !std.mem.eql(u8, op_name, "builtin.module");
 }
 
 pub fn main() !void {
@@ -196,47 +177,66 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
     var parsed_module = try parser.parseModule(flattened_value);
     defer parsed_module.deinit();
 
-    // ========== 2-PASS COMPILATION: IRDL + TRANSFORM SUPPORT ==========
+    // ========== METADATA-BASED COMPILATION: IRDL + TRANSFORM SUPPORT ==========
 
     std.debug.print("Building MLIR IR...\n", .{});
     var builder = Builder.init(allocator, &ctx);
     defer builder.deinit();
 
-    // PASS 1: Extract and load IRDL dialect definitions
-    std.debug.print("Pass 1: Processing IRDL dialect definitions...\n", .{});
-    var irdl_module = try builder.buildModuleFiltered(&parsed_module, isIRDL);
+    // Separate metadata modules from application modules
+    var metadata_ops = std.ArrayList(*const mlir_lisp.parser.Operation){};
+    defer metadata_ops.deinit(allocator);
+    var app_ops = std.ArrayList(*const mlir_lisp.parser.Operation){};
+    defer app_ops.deinit(allocator);
 
-    // Scan for IRDL operations
-    var dialect_registry = DialectRegistry.init(allocator);
-    defer dialect_registry.deinit();
-
-    try dialect_registry.scanModule(&irdl_module);
-
-    // Load IRDL dialects if found
-    const has_irdl = dialect_registry.hasIRDLDialects();
-    if (has_irdl) {
-        std.debug.print("  Found {} IRDL dialect definition(s), loading...\n", .{dialect_registry.getIRDLOperations().len});
-        try irdl_module.loadIRDLDialects();
-        std.debug.print("  ✓ IRDL dialects loaded into context\n", .{});
+    for (parsed_module.operations) |*op| {
+        if (metadata_detector.isMetadataModule(op)) {
+            try metadata_ops.append(allocator, op);
+        } else {
+            try app_ops.append(allocator, op);
+        }
     }
 
-    // NOTE: Don't destroy irdl_module if it contains IRDL dialects!
-    // After loadIRDLDialects(), the context holds references to the module's operations.
-    // Destroying it causes a segfault. The arena allocator will clean it up instead.
-    // If no IRDL, clean up the module
-    if (!has_irdl) {
-        defer irdl_module.destroy();
-    }
+    std.debug.print("Found {} metadata module(s), {} application module(s)\n", .{metadata_ops.items.len, app_ops.items.len});
 
-    // PASS 2: Load or build transform module
-    std.debug.print("Pass 2: Processing transform operations...\n", .{});
-
+    // Process metadata modules: IRDL and transforms
+    var has_irdl = false;
     var transform_module: mlir.Module = undefined;
     var has_transforms = false;
 
+    for (metadata_ops.items) |meta_op| {
+        const meta_type = metadata_detector.detectMetadataType(meta_op);
+
+        switch (meta_type) {
+            .irdl => {
+                std.debug.print("Processing IRDL metadata module...\n", .{});
+                var irdl_module = try builder.buildSingleOperation(meta_op);
+
+                // Load IRDL dialects
+                try irdl_module.loadIRDLDialects();
+                std.debug.print("  ✓ IRDL dialects loaded into context\n", .{});
+                has_irdl = true;
+
+                // NOTE: Don't destroy irdl_module! The context holds references.
+            },
+            .transform => {
+                std.debug.print("Processing transform metadata module...\n", .{});
+                transform_module = try builder.buildSingleOperation(meta_op);
+                has_transforms = true;
+
+                std.debug.print("  Transform module structure:\n", .{});
+                transform_module.print();
+                std.debug.print("\n", .{});
+            },
+            .unknown => {
+                std.debug.print("Warning: Metadata module without IRDL or transform operations\n", .{});
+            },
+        }
+    }
+
+    // Handle transforms from separate file (if --transform flag used)
     if (transform_file_path) |transform_path| {
-        // Load transforms from separate file
-        std.debug.print("  Loading transforms from: {s}\n", .{transform_path});
+        std.debug.print("Loading transforms from file: {s}\n", .{transform_path});
 
         const transform_source = try std.fs.cwd().readFileAlloc(allocator, transform_path, 1024 * 1024);
         std.debug.print("  Transform file loaded ({} bytes)\n", .{transform_source.len});
@@ -265,39 +265,24 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
 
         var transform_builder = Builder.init(allocator, &ctx);
         defer transform_builder.deinit();
+
+        // Override any transforms from same file with file transforms
+        if (has_transforms) {
+            transform_module.destroy();
+        }
         transform_module = try transform_builder.buildModule(&parsed_transform_module);
-
         has_transforms = true;
+
         std.debug.print("  ✓ Transform module loaded from file\n", .{});
-    } else {
-        // Build from filtered operations in main file
-        transform_module = try builder.buildModuleFiltered(&parsed_module, isTransform);
-
-        // Check if we have transforms
-        has_transforms = blk: {
-            var temp_registry = DialectRegistry.init(allocator);
-            defer temp_registry.deinit();
-            try temp_registry.scanModule(&transform_module);
-            break :blk temp_registry.hasTransforms();
-        };
     }
 
-    if (has_transforms) {
-        std.debug.print("  Transform module structure:\n", .{});
-        transform_module.print();
-        std.debug.print("\n", .{});
-    }
-
-    // PASS 3: Build application code (excluding IRDL/transform metadata)
-    std.debug.print("Pass 3: Building application code...\n", .{});
-    var mlir_module = try builder.buildModuleFiltered(&parsed_module, isRegularCode);
+    // Build application code (non-metadata modules)
+    std.debug.print("Building application code ({} module(s))...\n", .{app_ops.items.len});
+    var mlir_module = try builder.buildFromOperations(app_ops.items);
     defer mlir_module.destroy();
 
-    // If no transforms, clean up the transform module
-    if (!has_transforms) {
-        defer transform_module.destroy();
-    }
-    mlir_module.print();
+    // If we have transforms, they need to be destroyed later (after execution)
+    // The destroy is done conditionally in the executor section
 
     std.debug.print("✓ MLIR module created successfully!\n", .{});
 
@@ -359,14 +344,14 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
             const op_name = mlir.Operation.getName(first_op);
             std.debug.print("  Found transform operation: {s}\n", .{op_name});
 
-            // If it's a builtin.module with transform.with_named_sequence attribute, extract inner operation
+            // If it's a builtin.module with {:metadata unit} attribute, extract inner operation
             if (std.mem.eql(u8, op_name, "builtin.module")) {
-                const attr_name_str = "transform.with_named_sequence";
+                const attr_name_str = "metadata";
                 const attr_name_ref = mlir.c.mlirStringRefCreate(attr_name_str.ptr, attr_name_str.len);
                 const attr = mlir.c.mlirOperationGetAttributeByName(first_op, attr_name_ref);
 
                 if (!mlir.c.mlirAttributeIsNull(attr)) {
-                    // This is a transform module, extract the first operation inside it
+                    // This is a metadata module, extract the first operation inside it
                     const inner_region = mlir.c.mlirOperationGetRegion(first_op, 0);
                     const inner_block = mlir.c.mlirRegionGetFirstBlock(inner_region);
                     const inner_op = mlir.c.mlirBlockGetFirstOperation(inner_block);
@@ -376,11 +361,11 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
                         executor.setTransform(inner_op, first_op);
                     }
                 } else {
-                    // Regular builtin.module, use module and first op
+                    // Regular builtin.module (from --transform file), use module and first op
                     executor.setTransform(first_op, transform_module_op);
                 }
             } else {
-                // Direct transform operation
+                // Direct transform operation (from --transform file)
                 executor.setTransform(first_op, transform_module_op);
             }
         }

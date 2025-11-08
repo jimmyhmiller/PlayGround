@@ -1119,7 +1119,7 @@ pub enum Provide {
 #[serde(tag = "type")]
 pub enum ProvideTypes {
     #[serde(rename = "s-provide-types")]
-    SProvideTypes { l: Loc, anns: Vec<Ann> },
+    SProvideTypes { l: Loc, anns: Vec<AField> },
 
     #[serde(rename = "s-provide-types-all")]
     SProvideTypesAll { l: Loc },

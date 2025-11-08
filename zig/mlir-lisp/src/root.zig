@@ -78,6 +78,9 @@ pub const OptLevel = @import("executor.zig").OptLevel;
 // Export the dialect registry module
 pub const DialectRegistry = @import("dialect_registry.zig").DialectRegistry;
 
+// Export the metadata detector module
+pub const metadata_detector = @import("metadata_detector.zig");
+
 // Export the runtime symbols registration module
 pub const runtime_symbols = @import("runtime_symbols.zig");
 

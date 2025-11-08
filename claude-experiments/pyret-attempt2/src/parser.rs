@@ -663,7 +663,7 @@ impl Parser {
     /// provide-types-stmt: PROVIDE-TYPES record-ann | PROVIDE-TYPES (STAR|TIMES)
     /// Parses provide-types statements like:
     /// - provide-types *
-    /// - provide-types { Type1, Type2 } (TODO: record-ann not yet implemented)
+    /// - provide-types { Foo:: Foo, Bar:: Bar }
     fn parse_provide_types_stmt(&mut self) -> ParseResult<ProvideTypes> {
         let start = self.expect(TokenType::ProvideTypes)?;
 
@@ -674,12 +674,51 @@ impl Parser {
             Ok(ProvideTypes::SProvideTypesAll {
                 l: self.make_loc(&start, &start),
             })
+        } else if self.matches(&TokenType::LBrace) {
+            // Parse provide-types { Foo:: Foo, Bar:: Bar }
+            self.advance(); // consume {
+
+            let mut fields = Vec::new();
+
+            // Parse comma-separated list of Name:: Ann
+            if !self.matches(&TokenType::RBrace) {
+                loop {
+                    // Parse Name:: Ann
+                    let name_tok = self.expect(TokenType::Name)?;
+                    let name = name_tok.value.clone();
+                    self.expect(TokenType::ColonColon)?;
+                    let ann = self.parse_ann()?;
+
+                    fields.push(AField {
+                        node_type: "a-field".to_string(),
+                        l: self.make_loc(&name_tok, &name_tok),
+                        name,
+                        ann,
+                    });
+
+                    // Check for comma
+                    if self.matches(&TokenType::Comma) {
+                        self.advance();
+                        // Allow trailing comma
+                        if self.matches(&TokenType::RBrace) {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            let end = self.expect(TokenType::RBrace)?;
+
+            Ok(ProvideTypes::SProvideTypes {
+                l: self.make_loc(&start, &end),
+                anns: fields,
+            })
         } else {
-            // TODO: Implement record-ann for provide-types { Type1, Type2 }
-            // For now, just return an error
             Err(ParseError::general(
                 self.peek(),
-                "provide-types with specific types not yet implemented",
+                "Expected * or { after provide-types",
             ))
         }
     }
@@ -778,11 +817,29 @@ impl Parser {
         if self.matches(&TokenType::Data) {
             self.advance(); // consume DATA
             let name_spec = self.parse_name_spec()?;
-            // TODO: Parse hiding(...) spec if present
+
+            // Parse optional hiding(...) spec
+            let hidden = if self.matches(&TokenType::Hiding) {
+                self.advance(); // consume HIDING
+                // Accept either LParen or ParenSpace (whitespace-sensitive)
+                if !self.matches(&TokenType::LParen) && !self.matches(&TokenType::ParenSpace) {
+                    return Err(ParseError::expected(
+                        TokenType::LParen,
+                        self.peek().clone(),
+                    ));
+                }
+                self.advance(); // consume ( or (
+                let names = self.parse_comma_list(|p| p.parse_name())?;
+                self.expect(TokenType::RParen)?;
+                names
+            } else {
+                Vec::new()
+            };
+
             return Ok(ProvideSpec::SProvideData {
                 l: self.current_loc(),
                 name: name_spec,
-                hidden: Vec::new(),
+                hidden,
             });
         }
 
@@ -811,10 +868,28 @@ impl Parser {
         if self.matches(&TokenType::Times) || self.matches(&TokenType::Star) {
             let start = self.peek().clone();
             self.advance();
-            // TODO: Parse optional hiding-spec
+
+            // Parse optional hiding-spec: * hiding (name1, name2)
+            let hidden = if self.matches(&TokenType::Hiding) {
+                self.advance(); // consume HIDING
+                // Accept either LParen or ParenSpace
+                if !self.matches(&TokenType::LParen) && !self.matches(&TokenType::ParenSpace) {
+                    return Err(ParseError::expected(
+                        TokenType::LParen,
+                        self.peek().clone(),
+                    ));
+                }
+                self.advance(); // consume (
+                let names = self.parse_comma_list(|p| p.parse_name())?;
+                self.expect(TokenType::RParen)?;
+                names
+            } else {
+                Vec::new()
+            };
+
             return Ok(NameSpec::SStar {
                 l: self.make_loc(&start, &start),
-                hidden: Vec::new(),
+                hidden,
             });
         }
 
@@ -1002,13 +1077,14 @@ impl Parser {
             }
         }
 
-        // Handle parenthesized arrow types: (A -> B), (A, B -> C), etc.
+        // Handle parenthesized arrow types: (A -> B), (A, B -> C), ( -> C), etc.
         if self.matches(&TokenType::LParen) || self.matches(&TokenType::ParenSpace) {
             let start = self.advance().clone(); // consume (
 
             // Parse argument types (comma-separated)
+            // Special case: ( -> RetType) has no args, just check for immediate arrow
             let mut args = Vec::new();
-            if !self.matches(&TokenType::RParen) {
+            if !self.matches(&TokenType::RParen) && !self.matches(&TokenType::ThinArrow) {
                 args.push(self.parse_ann()?);
 
                 // Check for arrow or comma
@@ -1536,8 +1612,8 @@ impl Parser {
                         field: field_token.value.clone(),
                     };
                 }
-            } else if self.matches(&TokenType::LBrack) {
-                // Bracket access
+            } else if self.matches(&TokenType::BrackNoSpace) {
+                // Bracket access (no whitespace before bracket)
                 left = self.parse_bracket_expr(left)?;
             } else if self.matches(&TokenType::Bang) {
                 // Bang operator for ref field access or update
@@ -2244,7 +2320,7 @@ impl Parser {
             TokenType::String => self.parse_str(),
             TokenType::Name => self.parse_id_expr(),
             TokenType::ParenSpace | TokenType::LParen => self.parse_paren_expr(),
-            TokenType::LBrack => self.parse_construct_expr(),
+            TokenType::BrackSpace | TokenType::LBrack => self.parse_construct_expr(),
             TokenType::LBrace => {
                 // Distinguish between curly brace lambda {(x): ...} and object {x: ...}
                 // Peek ahead to see if next token is LParen or ParenSpace
@@ -2640,7 +2716,12 @@ impl Parser {
     /// construct-expr: LBRACK construct-modifier binop-expr COLON trailing-opt-comma-binops RBRACK
     /// Construct expressions like [list: 1, 2, 3] or [lazy set: x, y]
     fn parse_construct_expr(&mut self) -> ParseResult<Expr> {
-        let start = self.expect(TokenType::LBrack)?;
+        // Accept both BrackSpace and LBrack for construct expressions
+        let start = if self.matches(&TokenType::BrackSpace) {
+            self.expect(TokenType::BrackSpace)?
+        } else {
+            self.expect(TokenType::LBrack)?
+        };
 
         // Check for optional LAZY modifier
         let modifier = if self.matches(&TokenType::Lazy) {
@@ -2676,7 +2757,7 @@ impl Parser {
     /// bracket-expr: expr LBRACK binop-expr RBRACK
     /// Bracket access expression like arr[0] or dict["key"]
     fn parse_bracket_expr(&mut self, obj: Expr) -> ParseResult<Expr> {
-        let _start = self.expect(TokenType::LBrack)?;
+        let _start = self.expect(TokenType::BrackNoSpace)?;
 
         // Parse the field expression (can be any expression)
         let field = self.parse_expr()?;
@@ -2898,7 +2979,15 @@ impl Parser {
         let name = name_token.value.clone();
 
         // Parse fun-header: ty-params args return-ann
-        // For simplicity, we skip ty-params (type parameters) for now
+        // Parse optional type parameters: <T, U, V>
+        let params = if self.matches(&TokenType::Lt) {
+            self.advance(); // consume '<'
+            let type_params = self.parse_comma_list(|p| p.parse_name())?;
+            self.expect(TokenType::Gt)?; // consume '>'
+            type_params
+        } else {
+            Vec::new()
+        };
 
         // Expect opening paren (can be LParen or ParenSpace or ParenNoSpace)
         let paren_token = self.peek().clone();
@@ -2917,10 +3006,6 @@ impl Parser {
         } else {
             self.parse_comma_list(|p| p.parse_bind())?
         };
-
-        // params is for type parameters (e.g., <T, U>), not function parameters
-        // We don't parse type parameters yet, so this is always empty
-        let params: Vec<Name> = Vec::new();
 
         // Expect closing paren
         self.expect(TokenType::RParen)?;
@@ -3119,23 +3204,30 @@ impl Parser {
             if self.matches(&TokenType::ColonColon) {
                 // Has type annotation - could be contract or let binding
                 // Need to look further ahead to check for = after the type
-                let _checkpoint2 = self.checkpoint();
+                self.advance(); // consume '::'
 
-                // Try to parse the type annotation
-                if let Ok(_) = self.parse_ann() {
-                    if self.matches(&TokenType::Equals) {
-                        // Has = after type, so it's a let binding: x :: Type = value
-                        self.restore(checkpoint);
-                        self.parse_implicit_let_expr()
-                    } else {
-                        // No = after type, so it's a contract statement: x :: Type
-                        self.restore(checkpoint);
-                        self.parse_contract_stmt()
-                    }
-                } else {
-                    // Failed to parse type annotation, restore and try as expression
+                // Check for generic parameters first: name :: <T, U>
+                if self.matches(&TokenType::Lt) {
+                    // Has generic parameters, so it's definitely a contract statement
                     self.restore(checkpoint);
-                    self.parse_expr()
+                    self.parse_contract_stmt()
+                } else {
+                    // Try to parse the type annotation
+                    if let Ok(_) = self.parse_ann() {
+                        if self.matches(&TokenType::Equals) {
+                            // Has = after type, so it's a let binding: x :: Type = value
+                            self.restore(checkpoint);
+                            self.parse_implicit_let_expr()
+                        } else {
+                            // No = after type, so it's a contract statement: x :: Type
+                            self.restore(checkpoint);
+                            self.parse_contract_stmt()
+                        }
+                    } else {
+                        // Failed to parse type annotation, restore and try as expression
+                        self.restore(checkpoint);
+                        self.parse_expr()
+                    }
                 }
             } else if self.matches(&TokenType::Equals) {
                 // Implicit let binding: x = value
@@ -3512,62 +3604,85 @@ impl Parser {
         })
     }
 
-    /// let-expr: LET bind = expr
-    ///          | LET bind = expr BLOCK body END
-    /// Parses let bindings: x = 5
+    /// multi-let-expr: LET let-binding (COMMA let-binding)* (BLOCK|COLON) block END
+    /// let-binding: let-expr | var-expr
+    /// let-expr: toplevel-binding EQUALS binop-expr
+    /// var-expr: VAR toplevel-binding EQUALS binop-expr
+    ///
+    /// Parses multi-let expressions: let x = 5, y = 10 block: ... end
     fn parse_let_expr(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::Let)?;
 
-        // Parse binding: name [:: type]
+        // Parse first binding: binding = binop-expr
+        let mut binds = Vec::new();
+
+        // First binding (always a let-binding)
         let bind = self.parse_bind()?;
-
-        // Expect =
         self.expect(TokenType::Equals)?;
-
-        // Parse value expression
-        let value = self.parse_expr()?;
-
-        // Create LetBind
-        let let_bind = LetBind::SLetBind {
+        let value = self.parse_binop_expr()?;
+        binds.push(LetBind::SLetBind {
             l: self.current_loc(),
             b: bind.clone(),
             value: Box::new(value.clone()),
-        };
+        });
 
-        // Check if there's a block body
-        let body = if self.matches(&TokenType::Block) {
+        // Additional bindings (comma-separated)
+        // Each can be either: binding = expr  OR  var binding = expr
+        while self.matches(&TokenType::Comma) {
+            self.expect(TokenType::Comma)?;
+
+            // Check if this is a var binding
+            let is_var = self.matches(&TokenType::Var);
+            if is_var {
+                self.expect(TokenType::Var)?;
+                let bind = self.parse_bind()?;
+                self.expect(TokenType::Equals)?;
+                let value = self.parse_binop_expr()?;
+                binds.push(LetBind::SVarBind {
+                    l: self.current_loc(),
+                    b: bind,
+                    value: Box::new(value),
+                });
+            } else {
+                // Regular let binding
+                let bind = self.parse_bind()?;
+                self.expect(TokenType::Equals)?;
+                let value = self.parse_binop_expr()?;
+                binds.push(LetBind::SLetBind {
+                    l: self.current_loc(),
+                    b: bind,
+                    value: Box::new(value),
+                });
+            }
+        }
+
+        // Must have a body with (BLOCK|COLON) block END
+        let blocky = self.matches(&TokenType::Block);
+        if blocky {
             self.expect(TokenType::Block)?;
+        } else {
             self.expect(TokenType::Colon)?;
+        }
 
-            // Parse block body
-            let mut body_stmts = Vec::new();
-            while !self.matches(&TokenType::End) && !self.is_at_end() {
-                let stmt = self.parse_expr()?;
-                body_stmts.push(Box::new(stmt));
-            }
+        // Parse block body
+        let mut body_stmts = Vec::new();
+        while !self.matches(&TokenType::End) && !self.is_at_end() {
+            let stmt = self.parse_expr()?;
+            body_stmts.push(Box::new(stmt));
+        }
 
-            self.expect(TokenType::End)?;
+        let end = self.expect(TokenType::End)?;
 
-            Expr::SBlock {
-                l: self.current_loc(),
-                stmts: body_stmts,
-            }
-        } else {
-            // No explicit body, just use the value
-            value.clone()
-        };
-
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
+        let body = Expr::SBlock {
+            l: self.make_loc(&start, &end),
+            stmts: body_stmts,
         };
 
         Ok(Expr::SLetExpr {
             l: self.make_loc(&start, &end),
-            binds: vec![let_bind],
+            binds,
             body: Box::new(body),
-            blocky: false,
+            blocky,
         })
     }
 
@@ -3593,9 +3708,13 @@ impl Parser {
             value: Box::new(value.clone()),
         };
 
-        // Check if there's a block body
-        let body = if self.matches(&TokenType::Block) {
-            self.expect(TokenType::Block)?;
+        // Check if there's a block body (either "block:" or just ":")
+        let body = if self.matches(&TokenType::Block) || self.matches(&TokenType::Colon) {
+            // Consume "block" if present
+            if self.matches(&TokenType::Block) {
+                self.expect(TokenType::Block)?;
+            }
+
             self.expect(TokenType::Colon)?;
 
             // Parse block body
@@ -3895,8 +4014,11 @@ impl Parser {
         self.expect(TokenType::ColonColon)?;
 
         // Parse optional type parameters <T, U>
-        let params = if self.matches(&TokenType::LAngle) {
-            self.parse_comma_list(|p| p.parse_name())?
+        let params = if self.matches(&TokenType::Lt) {
+            self.expect(TokenType::Lt)?; // consume <
+            let params = self.parse_comma_list(|p| p.parse_name())?;
+            self.expect(TokenType::Gt)?; // consume >
+            params
         } else {
             Vec::new()
         };
@@ -4081,7 +4203,10 @@ impl Parser {
             let pattern_loc = self.make_loc(&pattern_start, &name_token);
 
             // Check for arguments: name(args)
-            let args = if self.matches(&TokenType::LParen) || self.matches(&TokenType::ParenNoSpace) {
+            // Track whether parentheses were present to distinguish:
+            // - | foo => ... (singleton, no parens)
+            // - | foo() => ... (regular branch with empty args, parens present)
+            let (has_parens, args) = if self.matches(&TokenType::LParen) || self.matches(&TokenType::ParenNoSpace) {
                 self.advance(); // consume (
 
                 let args = if self.matches(&TokenType::RParen) {
@@ -4118,9 +4243,9 @@ impl Parser {
                 };
 
                 self.expect(TokenType::RParen)?;
-                args
+                (true, args) // parens were present
             } else {
-                Vec::new()
+                (false, Vec::new()) // no parens
             };
 
             // Expect =>
@@ -4139,7 +4264,8 @@ impl Parser {
             });
 
             // Create the appropriate branch type
-            let branch = if args.is_empty() {
+            // Singleton only if NO parentheses were present
+            let branch = if !has_parens {
                 CasesBranch::SSingletonCasesBranch {
                     l: self.current_loc(),
                     pattern_loc,
@@ -4147,6 +4273,7 @@ impl Parser {
                     body,
                 }
             } else {
+                // Has parentheses (even if args list is empty)
                 CasesBranch::SCasesBranch {
                     l: self.current_loc(),
                     pattern_loc,

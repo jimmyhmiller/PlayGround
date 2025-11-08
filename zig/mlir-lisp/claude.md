@@ -76,7 +76,52 @@ See `/Users/jimmyhmiller/Documents/Code/PlayGround/zig/mlir-lisp/test/arraylist_
 
 # Tools
 
+## paredit-like - Structured Editing for S-expressions
 
+**CRITICAL: Always use `paredit-like balance` when working with .lisp files!**
+
+This project has access to `paredit-like`, a command-line tool for structural editing
+of s-expressions. The `balance` command automatically fixes parentheses based on indentation.
+
+### Most Important Command
+
+```bash
+# Balance parentheses in a file (USE THIS AFTER EDITING .lisp FILES!)
+paredit-like balance examples/mlsp_dialect.lisp --in-place
+
+# Preview changes before applying
+paredit-like balance examples/mlsp_dialect.lisp --dry-run
+```
+
+### When to Use
+
+- **After editing any .lisp file** - Always run `paredit-like balance <file> --in-place`
+- **Before testing** - Balance files to avoid parsing errors
+- **When you get UnterminatedList or UnexpectedClosingDelimiter errors** - Use balance to fix
+- **DO NOT manually count or fix parentheses** - Let paredit-like do it based on indentation
+
+### How It Works
+
+1. Make sure your **indentation is correct** in the .lisp file
+2. Run `paredit-like balance <file> --in-place`
+3. The tool uses indentation to determine where parentheses should be
+4. All missing or extra parentheses are automatically fixed
+
+### Other Available Operations
+
+- `slurp` - Move next/previous form into current list
+- `barf` - Move last/first form out of current list
+- `splice` - Remove parentheses, keep children
+- `raise` - Replace parent with current form
+- `wrap` - Surround form with parens/brackets/braces
+- `merge-let` - Flatten nested let forms
+
+### Getting Help
+
+```bash
+paredit-like --help
+paredit-like balance --help
+```
 
 ## Bug Tracker
 

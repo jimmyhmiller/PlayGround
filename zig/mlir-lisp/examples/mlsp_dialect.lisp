@@ -13,6 +13,12 @@
 ;; ========================================
 
 (operation
+  (name builtin.module)
+  (attributes {:metadata unit})
+  (regions
+    (region
+      (block))))
+(operation
   (name irdl.dialect)
   (attributes {:sym_name @mlsp})
   (regions
@@ -240,7 +246,7 @@
 
 (operation
   (name builtin.module)
-  (attributes {})
+  (attributes {:metadata unit})
   (regions
     (region
       (block
@@ -273,8 +279,8 @@
                           (result-types !pdl.value))
                         (operation
                           (name pdl.operation)
-                          (attributes {:opName "mlsp.identifier"
-                                     :operandSegmentSizes array<i32: 1, 0, 1>})
+                          (attributes {:opName "mlsp.identifier"}
+                                     :operandSegmentSizes array<i32: 1, 0, 1>)
                           (operand-uses %str_val %ptr_type)
                           (result-bindings [%mlsp_op])
                           (result-types !pdl.operation))
@@ -297,9 +303,9 @@
                                 ;; For now: placeholder - replace with call to helper function
                                 (operation
                                   (name pdl.operation)
-                                  (attributes {:opName "llvm.call"
+                                  (attributes {:opName "llvm.call"}
                                              :attributeValueNames ["callee"]
-                                             :operandSegmentSizes array<i32: 1, 0, 1>})
+                                             :operandSegmentSizes array<i32: 1, 0, 1>)
                                   (operand-uses %str_val %ptr_type)
                                   (result-bindings [%result_op])
                                   (result-types !pdl.operation))
@@ -335,8 +341,8 @@
                           (result-types !pdl.type))
                         (operation
                           (name pdl.operation)
-                          (attributes {:opName "mlsp.list"
-                                     :operandSegmentSizes array<i32: 1, 0, 1>})
+                          (attributes {:opName "mlsp.list"}
+                                     :operandSegmentSizes array<i32: 1, 0, 1>)
                           (operand-uses %elements %ptr_type)
                           (result-bindings [%mlsp_op])
                           (result-types !pdl.operation))
@@ -361,9 +367,9 @@
                                 ;; For now: placeholder
                                 (operation
                                   (name pdl.operation)
-                                  (attributes {:opName "llvm.call"
+                                  (attributes {:opName "llvm.call"}
                                              :attributeValueNames ["callee"]
-                                             :operandSegmentSizes array<i32: 1, 0, 1>})
+                                             :operandSegmentSizes array<i32: 1, 0, 1>)
                                   (operand-uses %elements %ptr_type)
                                   (result-bindings [%result_op])
                                   (result-types !pdl.operation))
@@ -404,8 +410,8 @@
                           (result-types !pdl.value))
                         (operation
                           (name pdl.operation)
-                          (attributes {:opName "mlsp.get_element"
-                                     :operandSegmentSizes array<i32: 2, 0, 1>})
+                          (attributes {:opName "mlsp.get_element"}
+                                     :operandSegmentSizes array<i32: 2, 0, 1>)
                           (operand-uses %list_val %index_val %ptr_type)
                           (result-bindings [%mlsp_op])
                           (result-types !pdl.operation))
@@ -427,9 +433,9 @@
                                 ;; For now: placeholder
                                 (operation
                                   (name pdl.operation)
-                                  (attributes {:opName "llvm.call"
+                                  (attributes {:opName "llvm.call"}
                                              :attributeValueNames ["callee"]
-                                             :operandSegmentSizes array<i32: 2, 0, 1>})
+                                             :operandSegmentSizes array<i32: 2, 0, 1>)
                                   (operand-uses %list_val %index_val %ptr_type)
                                   (result-bindings [%result_op])
                                   (result-types !pdl.operation))
@@ -442,8 +448,8 @@
                 ;; Transform sequence to apply all patterns
                 (operation
                   (name transform.sequence)
-                  (attributes {:failure_propagation_mode (: 1 i32)
-                             :operandSegmentSizes array<i32: 1, 0>})
+                  (attributes {:failure_propagation_mode (: 1 i32)}
+                             :operandSegmentSizes array<i32: 1, 0>)
                   (operand-uses %root)
                   (result-types !transform.any_op)
                   (regions
