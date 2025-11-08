@@ -75,35 +75,21 @@ impl Parinfer {
 
     pub fn balance(&self) -> Result<String> {
         let options = Self::default_options();
-        let answer = parinfer::paren_mode(&self.source, &options);
+        let answer = parinfer::indent_mode(&self.source, &options);
         let success = answer.success;
         let error = answer.error.clone();
         let output = answer.text.into_owned();
-        let mut parser = crate::parser::ClojureParser::new()?;
-        if !Self::is_structurally_balanced(&output) {
-            if let Some(err) = error.clone() {
-                return Err(anyhow!(
-                    "Parinfer produced unbalanced output ({}): {}",
-                    err.name, err.message
-                ));
-            }
-            return Err(anyhow!("Parinfer produced unbalanced output"));
-        }
-        if let Err(parse_err) = parser.parse_to_sexpr(&output) {
-            if let Some(err) = error {
-                return Err(anyhow!(
-                    "Parinfer failed to produce parseable output ({}): {}",
-                    err.name, err.message
-                ));
-            }
-            return Err(parse_err);
-        }
+
+        // Check for recoverable errors first - these are OK to return
         if !success {
-            if let Some(err) = error {
+            if let Some(err) = error.clone() {
                 match err.name {
                     ErrorName::UnmatchedCloseParen
                     | ErrorName::UnmatchedOpenParen
                     | ErrorName::LeadingCloseParen => {
+                        // These errors mean parinfer couldn't fully process the file,
+                        // but indent_mode should still have done its best.
+                        // Return the output as-is.
                         return Ok(output);
                     }
                     _ => {
@@ -117,6 +103,29 @@ impl Parinfer {
                 return Err(anyhow!("Parinfer reported failure without details"));
             }
         }
+
+        // Parinfer succeeded - validate the output
+        if !Self::is_structurally_balanced(&output) {
+            if let Some(ref err) = error {
+                return Err(anyhow!(
+                    "Parinfer produced unbalanced output ({}): {}",
+                    err.name, err.message
+                ));
+            }
+            return Err(anyhow!("Parinfer produced unbalanced output"));
+        }
+
+        let mut parser = crate::parser::ClojureParser::new()?;
+        if let Err(parse_err) = parser.parse_to_sexpr(&output) {
+            if let Some(err) = error {
+                return Err(anyhow!(
+                    "Parinfer failed to produce parseable output ({}): {}",
+                    err.name, err.message
+                ));
+            }
+            return Err(parse_err);
+        }
+
         Ok(output)
     }
 }
@@ -127,10 +136,11 @@ mod tests {
     use anyhow::Result;
 
     #[test]
-    fn test_parinfer_unbalanced_error() -> Result<()> {
+    fn test_parinfer_unbalanced_is_fixed() -> Result<()> {
         let p = Parinfer::new("(+ 1 2");
         let res = p.balance();
-        assert!(res.is_err(), "Expected error for unbalanced input");
+        assert!(res.is_ok(), "indent_mode should fix unbalanced input");
+        assert_eq!(res.unwrap(), "(+ 1 2)");
         Ok(())
     }
 

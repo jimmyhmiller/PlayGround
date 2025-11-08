@@ -479,6 +479,21 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "spec": spec.iter().map(|s| load_table_spec_to_pyret_json(s)).collect::<Vec<_>>()
             })
         }
+        Expr::STableExtract { column, table, .. } => {
+            json!({
+                "type": "s-table-extract",
+                "column": name_to_pyret_json(column),
+                "table": expr_to_pyret_json(table)
+            })
+        }
+        Expr::SContract { name, params, ann, .. } => {
+            json!({
+                "type": "s-contract",
+                "name": name_to_pyret_json(name),
+                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
+                "ann": ann_to_pyret_json(ann)
+            })
+        }
         _ => {
             json!({
                 "type": "UNSUPPORTED",
@@ -849,13 +864,21 @@ fn provide_to_pyret_json(provide: &pyret_attempt2::Provide) -> Value {
     }
 }
 
+fn a_field_to_pyret_json(field: &pyret_attempt2::AField) -> Value {
+    json!({
+        "type": "a-field",
+        "name": &field.name,
+        "ann": ann_to_pyret_json(&field.ann)
+    })
+}
+
 fn provide_types_to_pyret_json(provide_types: &pyret_attempt2::ProvideTypes) -> Value {
     use pyret_attempt2::ProvideTypes;
     match provide_types {
         ProvideTypes::SProvideTypes { anns, .. } => {
             json!({
                 "type": "s-provide-types",
-                "anns": anns.iter().map(|a| ann_to_pyret_json(a)).collect::<Vec<_>>()
+                "anns": anns.iter().map(|a| a_field_to_pyret_json(a)).collect::<Vec<_>>()
             })
         }
         ProvideTypes::SProvideTypesAll { .. } => {

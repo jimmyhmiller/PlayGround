@@ -2160,7 +2160,6 @@ data Bar: | bar end
 }
 
 #[test]
-#[ignore] // Missing feature: data hiding in provide statements
 fn test_data_hiding_in_provide() {
     assert_matches_pyret(r#"
 provide:
@@ -2277,7 +2276,6 @@ spy "debug message": x end
 // These are complete files from the Pyret codebase that currently fail to parse
 
 #[test]
-#[ignore] // Full file test - multiple missing features
 fn test_full_file_let_arr() {
     // From tests/type-check/good/let.arr
     // Features: let with multiple bindings and block
@@ -2295,10 +2293,457 @@ fn test_full_file_weave_tuple_arr() {
 }
 
 #[test]
-#[ignore] // Full file test - real-world library code
 fn test_full_file_option_arr() {
     // From src/arr/trove/option.arr
     // Features: generic types, methods with trailing commas, data with methods
     let code = include_str!("pyret-files/option.arr");
     assert_matches_pyret(code);
+}
+
+// ============================================================================
+// NEW TESTS - GAPS FROM BULK ANALYSIS
+// ============================================================================
+// The following tests are derived from real Pyret code that currently fails
+// to parse. They represent important missing features discovered by analyzing
+// 200+ files from the official Pyret codebase.
+
+// ----------------------------------------------------------------------------
+// 26. Object Type Annotations
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_object_type_annotation_simple() {
+    // From tests/type-check/good/obj-check.arr
+    // Feature: Object type with field annotations { field :: Type }
+    assert_matches_pyret(r#"
+a :: { b :: Number, c :: String } = { b : 5, c : "hello" }
+b :: Number = a.b
+c :: String = a.c
+"#);
+}
+
+#[test]
+fn test_object_type_annotation_with_method() {
+    // From tests/type-check/good/obj-methods.arr
+    // Feature: Object type with method field { m :: (T -> T) }
+    assert_matches_pyret(r#"
+obj :: { x :: Number, m :: (Number -> Number) } = {
+  x: 1,
+  method m(self, n):
+    self.x + n
+  end
+}
+"#);
+}
+
+#[test]
+fn test_object_type_annotation_method_signature() {
+    // From tests/type-check/good/obj-fun-check.arr
+    // Feature: Arrow type as object annotation
+    assert_matches_pyret(r#"
+obj :: ({ a :: Number, b :: Number } -> Number) = lam(o): o.a + o.b end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 27. Data Hiding in Provide
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_provide_data_hiding() {
+    // From src/arr/trove/matrices.arr (line 137)
+    // Feature: data Foo hiding(constructor)
+    assert_matches_pyret(r#"
+provide:
+  data Vector hiding(vector),
+  type Vector3D,
+  data Matrix hiding(matrix)
+end
+"#);
+}
+
+#[test]
+fn test_provide_hiding_multiple() {
+    // From src/arr/trove/tables.arr (line 2)
+    // Feature: * hiding (name1, name2)
+    assert_matches_pyret(r#"
+provide:
+  * hiding (is-kv-pairs, is-raw-array-of-rows),
+  type *
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 28. Lazy Constructors
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_lazy_constructor() {
+    // From tests/type-check/good/lazy-maker.arr
+    // Feature: [lazy obj: values] construct
+    assert_matches_pyret(r#"
+a = { lazy-make: lam(arr): empty end }
+c :: List<Number> = [lazy a: 1, 2]
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 29. Object Update Syntax (!{})
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_object_update_bang() {
+    // From tests/type-check/should-not/obj-update.arr
+    // Feature: obj!{field: value} for updating ref fields
+    assert_matches_pyret(r#"
+data Foo:
+  | foo(ref a :: Number, ref b :: Any)
+end
+
+a = foo(5, 6)
+b :: Foo = a!{a : 6}
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 30. Lowercase Generic Type Parameters
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_lowercase_generic_data() {
+    // From src/arr/trove/option.arr
+    // Feature: data Option<a> (lowercase type variable)
+    assert_matches_pyret(r#"
+data Option<a>:
+  | none
+  | some(value :: a)
+end
+"#);
+}
+
+#[test]
+fn test_lowercase_generic_method() {
+    // From src/arr/trove/option.arr (line 14)
+    // Feature: method<b> with lowercase type parameters
+    assert_matches_pyret(r#"
+data Option<a>:
+  | none with:
+    method and-then<b>(self :: Option<a>, f :: (a -> b)) -> Option<b>:
+      none
+    end
+  | some(value :: a)
+end
+"#);
+}
+
+#[test]
+fn test_lowercase_generic_multiple() {
+    // From src/arr/trove/lists.arr (line 30)
+    // Feature: Multiple lowercase type parameters
+    assert_matches_pyret(r#"
+data List<a>:
+  | empty with:
+    method foldr<b>(self :: List<a>, f :: (a, b -> b), base :: b) -> b:
+      base
+    end
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 31. Constructor Objects (make, make0, make1, etc.)
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_constructor_object() {
+    // From tests/pyret/tests/test-constructors.arr (line 23)
+    // Feature: Objects with make0, make1, make2 for construct expressions
+    assert_matches_pyret(r#"
+every-other = {
+  make: lam(arr): empty end,
+  make0: lam(): empty end,
+  make1: lam(a): [list: a] end,
+  make2: lam(a, b): [list: a] end
+}
+[every-other: 1, 2, 3, 4, 5]
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 32. Raw Array Construct Expressions
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_raw_array_construct() {
+    // From tests/type-check/good/raw-array.arr (line 14)
+    // Feature: [raw-array: items] or [a: items] with constructor
+    assert_matches_pyret(r#"
+a = { make: lam(arr :: RawArray<Number>): arr end }
+c :: RawArray<Number> = [a: 1, 2, 3, 4, 5, 6]
+"#);
+}
+
+#[test]
+fn test_raw_array_literal() {
+    // Feature: [raw-array: ...] construct
+    assert_matches_pyret(r#"
+arr :: RawArray<Number> = [raw-array: 1, 2, 3]
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 33. Include From Syntax
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_include_from_syntax() {
+    // From src/arr/trove/tables.arr
+    // Feature: include from Module: name1, name2 end
+    assert_matches_pyret(r#"
+import equality as E
+include from E: Equal, NotEqual end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 34. Type Aliases
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_type_alias_polymorphic() {
+    // From tests/type-check/good/polymorphic-newtype.arr (line 14)
+    // Feature: type Alias<T> = RealType<T>
+    assert_matches_pyret(r#"
+type MyList<T> = List<T>
+x :: MyList<Number> = [list: 1, 2, 3]
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 35. Reactor Expressions
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_reactor_with_typed_state() {
+    // From tests/pyret/tests/test-reactor.arr (line 41)
+    // Feature: reactor: init: value, handlers end
+    assert_matches_pyret(r#"
+r :: R.Reactor<Number> = reactor:
+  init: 0,
+  on-tick: lam(n): n + 1 end
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 36. For Raw-Array-Fold
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_for_raw_array_fold() {
+    // From src/arr/trove/statistics.arr (line 97)
+    // Feature: for raw-array-fold(acc from init, item from arr, idx from 0)
+    assert_matches_pyret(r#"
+result = for raw-array-fold(acc from 0, item from arr, idx from 0):
+  acc + item
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 37. Let with Colon Syntax
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_let_colon() {
+    // From src/arr/trove/error-display.arr (line 156)
+    // Feature: let binding = expr: body end
+    assert_matches_pyret(r#"
+let last-digit = num-modulo(n, 10):
+  to-string(last-digit)
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 38. Doc Strings
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_doc_string_method() {
+    // From src/arr/trove/option.arr
+    // Feature: doc: "string" in methods/functions
+    assert_matches_pyret(r#"
+data Option:
+  | none with:
+    method or-else(self, v):
+      doc: "Return the default provided value"
+      v
+    end
+end
+"#);
+}
+
+#[test]
+fn test_doc_string_triple_backtick() {
+    // From src/arr/trove/lists.arr
+    // Feature: doc: ```multiline string```
+    assert_matches_pyret(r#"
+fun example():
+  doc: ```Takes a predicate and returns an object with two fields:
+        the 'is-true' field contains the list of items```
+  42
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 39. Generic Function Type Signatures
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_generic_function_signature() {
+    // From src/arr/trove/timing.arr (line 10)
+    // Feature: name :: <T> ((args) -> ReturnType)
+    assert_matches_pyret(r#"
+time-only :: <T> (( -> T) -> Number)
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 40. Tuple in Object Return Type
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_tuple_in_object_return_type() {
+    // From src/arr/trove/lists.arr
+    // Feature: method() -> {field1 :: T, field2 :: T}
+    assert_matches_pyret(r#"
+data List<a>:
+  | empty with:
+    method partition(self, f) -> {is-true :: List<a>, is-false :: List<a>}:
+      { is-true: empty, is-false: empty }
+    end
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 41. Array Construct Expression
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_array_construct() {
+    // From tests/pyret/tests/test-array.arr (line 350)
+    // Feature: [array: items]
+    assert_matches_pyret(r#"
+check:
+  [array: 1, 2, 3] is=~ [array: 1, 2, 3]
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 42. Otherwise Keyword in Cases
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_otherwise_in_cases() {
+    // Feature: otherwise as alternative to else in cases
+    assert_matches_pyret(r#"
+cases(Option) x:
+  | some(v) => v
+  | otherwise => 0
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 43. Newtype Pattern
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_newtype_brand() {
+    // From tests/type-check/bad/newtype.arr (line 5)
+    // Feature: SomeType.brand(value)
+    assert_matches_pyret(r#"
+data FooT:
+  | foo-t(v :: Number)
+end
+a = foo-t(5)
+b :: Number = FooT.brand(a)
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 44. Complex Tuple Destructuring
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_tuple_destructure_in_if_expr() {
+    // From src/arr/trove/charts.arr (line 295)
+    // Feature: Tuple destructuring in if expression results
+    assert_matches_pyret(r#"
+{first-quartile; third-quartile} = if num-modulo(n, 2) == 0:
+  {1; 3}
+else:
+  {2; 4}
+end
+"#);
+}
+
+#[test]
+fn test_tuple_in_for_fold() {
+    // From src/arr/trove/statistics.arr
+    assert_matches_pyret(r#"
+{front; acc} = for raw-array-fold(result from {{1; 2}; [list:]}):
+  result
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 45. Letrec Pattern
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_letrec() {
+    // From tests/type-check/good/letrec.arr (line 2)
+    // Feature: mutually recursive bindings
+    assert_matches_pyret(r#"
+rec a = lam(): b() end
+rec b = lam(): a() end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 46. Cases with Singleton Variants
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_cases_singleton_parens() {
+    // From tests/type-check/bad/cases-singleton-2.arr
+    assert_matches_pyret(r#"
+data Foo:
+  | bar()
+end
+a = cases(Foo) bar():
+  | bar() => 5
+end
+"#);
+}
+
+// ----------------------------------------------------------------------------
+// 47. Multi-Line Strings (Triple Backtick)
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_triple_backtick_string() {
+    // Feature: ```multi-line string```
+    assert_matches_pyret(r#"
+s = ```This is a
+multi-line
+string```
+"#);
 }

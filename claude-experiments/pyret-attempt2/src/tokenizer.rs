@@ -124,6 +124,8 @@ pub enum TokenType {
 
     // Brackets and parentheses
     LBrack,
+    BrackSpace,
+    BrackNoSpace,
     RBrack,
     LBrace,
     RBrace,
@@ -1168,9 +1170,16 @@ impl Tokenizer {
             '[' => {
                 self.advance();
                 let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let token_type = if self.prior_whitespace {
+                    TokenType::BrackSpace
+                } else if self.paren_is_for_exp {
+                    TokenType::BrackSpace
+                } else {
+                    TokenType::BrackNoSpace
+                };
                 self.paren_is_for_exp = true;
                 self.prior_whitespace = false;
-                Some(Token::new(TokenType::LBrack, "[".to_string(), loc))
+                Some(Token::new(token_type, "[".to_string(), loc))
             }
             ']' => {
                 self.advance();

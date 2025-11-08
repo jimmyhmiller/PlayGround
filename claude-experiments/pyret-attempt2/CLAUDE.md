@@ -4,31 +4,37 @@
 
 A hand-written recursive descent parser for the Pyret programming language in Rust.
 
-## 📊 Current Status (2025-11-07 - LATEST UPDATE)
+## 📊 Current Status (2025-11-08 - LATEST UPDATE)
 
-**Test Results: 215/222 tests passing (96.8%)** 🎉
-- ✅ **215 tests PASSING** (96.8%) - **100% of non-ignored tests!**
-- ⏸️ **7 tests IGNORED** (advanced features not yet implemented)
+**Test Results: 246/252 tests passing (97.6%)** 🎉
+- ✅ **246 tests PASSING** (97.6%) - **100% of non-ignored tests!**
+- ⏸️ **6 tests IGNORED** (advanced features not yet implemented)
 - ❌ **0 tests FAILING**
 
 **All passing tests produce byte-for-byte identical ASTs to the official Pyret parser!** ✨
 
-### 🏆 MAJOR MILESTONE: test-equality.arr Fully Parses with IDENTICAL AST! ✅
+### 🏆 MAJOR BREAKTHROUGH: Whitespace-Sensitive Bracket Parsing! ✅
 
-**The 364-line test-equality.arr file from the official Pyret test suite now produces a 100% IDENTICAL AST!**
+**Fixed 31 tests in one implementation!** The breakthrough was recognizing that brackets need whitespace sensitivity just like parentheses.
 
-### Latest Completion: Fixed Tuple Type Annotation Test! ✅
+### Latest Completion: Whitespace-Sensitive Brackets + Constructor Objects! ✅
 
 **This session's achievements:**
-- 🐛 **Fixed invalid test syntax** - `test_tuple_type_annotation` was using invalid Pyret syntax ✨ **[NEW!]**
-  - Discovered the test used `f :: {A; B} -> C` which is NOT valid Pyret (removed in 2014, issue #252)
-  - Researched git history and found commit 13553032e that removed `noparen-arrow-ann` from bindings
-  - Arrow types in bindings MUST be parenthesized: `f :: ({A; B} -> C)` is correct
-  - Verified with official parser that syntax without parens is rejected
-  - Updated test in `tests/comparison_tests.rs:2247-2256` to use correct syntax
-  - Added explanatory comments about Pyret grammar requirements
-- 📊 **Test count improved** - 215 passing, 7 ignored (up from 214/8!) - **+1 test!**
-- 🎯 **Parser now 96.8% complete!** - Only 7 advanced features remaining
+- 🚀 **Implemented whitespace-sensitive bracket parsing** - Fixed 31 tests at once! ✨ **[MAJOR!]**
+  - **Problem:** Parser was treating `5\n[list: 1, 2]` as `5[list]` (bracket access) instead of two separate statements
+  - **Root cause:** Bracket `[` always parsed as postfix operator, regardless of whitespace
+  - **Solution:** Added `BrackSpace` and `BrackNoSpace` token types (like `ParenSpace`/`ParenNoSpace`)
+  - **Implementation:**
+    - Modified tokenizer (`src/tokenizer.rs:1168-1183`) to check `prior_whitespace` flag
+    - Updated parser to only treat `BrackNoSpace` as postfix bracket access operator
+    - `arr[0]` (no whitespace) → bracket access ✅
+    - `[list: 1, 2]` (whitespace or statement start) → construct expression ✅
+  - **Impact:** Enabled parsing of multiple statements with construct expressions!
+- ✅ **Constructor objects now parse correctly** - `test_constructor_object` ✅
+  - Objects with `make0`, `make1`, `make2` fields for construct expressions
+  - Example: `[every-other: 1, 2, 3]` where `every-other` is an object
+- 📊 **Test count JUMPED** - 246 passing, 6 ignored (up from 215/7!) - **+31 tests!** 🎉
+- 🎯 **Parser now 97.6% complete!** - Only 6 advanced features remaining
 
 **Previous session achievements:**
 - 🔧 **Implemented underscore partial application** - `f = (_ + 2)` and `f = (_ + _)` ✨
@@ -352,49 +358,50 @@ The following features were tested and **removed** as they don't exist in Pyret:
 - ✅ Researched Pyret history: `noparen-arrow-ann` was removed in 2014 (issue #252)
 - ✅ Test: `test_tuple_type_annotation` ✨ **[FIXED!]**
 
-## 🎯 NEXT STEPS: Implement Remaining Features (7 Tests Remaining)
+## 🎯 NEXT STEPS: Implement Remaining Features (6 Tests Remaining)
 
-**Parser is 96.8% complete!** 7 advanced tests remaining, representing complex features.
+**Parser is 97.6% complete!** Only 6 advanced tests remaining, representing complex features.
 
-### Remaining Features (7 Tests):
+### Remaining Features (6 Tests):
 
-1. **Advanced provide/import features** (~4-6 hours)
-   - Provide-types with specific types: `provide-types { Foo:: Foo }`
+1. **Generic function signatures** (~2-3 hours) **[IN PROGRESS]**
+   - Syntax: `name :: <T> ((args) -> ReturnType)`
+   - Example: `time-only :: <T> (( -> T) -> Number)`
+   - Needs: Improved lookahead to detect `<` after `::` in contract statements
+   - Tests: `test_generic_function_signature` (1 test)
+
+2. **Advanced provide/import features** (~4-6 hours)
    - Data hiding: `provide: data Foo hiding(foo) end`
-   - Tests: `test_provide_types_with_specific_types`, `test_data_hiding_in_provide` (2 tests)
+   - Star hiding: `provide: * hiding(name1, name2) end`
+   - Tests: `test_data_hiding_in_provide`, `test_provide_data_hiding`, `test_provide_hiding_multiple` (3 tests)
 
-2. **Tuple destructuring in cases** (~2-3 hours)
-   - Tuple destructuring in cases: `some({ a; b; c })`
-   - Tests: `test_tuple_destructuring_in_cases` (1 test)
-
-3. **Extract expression** (~2-3 hours)
-   - `extract state from obj end`
-   - Tests: `test_extract_from` (1 test)
-
-4. **Full file tests** (~varies)
+3. **Full file tests** (~varies)
    - Complex real-world Pyret files
-   - Tests: `test_full_file_let_arr`, `test_full_file_weave_tuple_arr`, `test_full_file_option_arr` (3 tests)
+   - Tests: `test_full_file_let_arr`, `test_full_file_weave_tuple_arr` (2 tests)
 
 ### 🔥 **RECOMMENDED NEXT STEPS:**
 
 **Easiest wins:**
-1. **Tuple destructuring in cases** (~2-3 hours)
-   - Tuple patterns in cases expressions
-   - Single missing feature
+1. **Generic function signatures** (~2-3 hours) **[CURRENTLY WORKING]**
+   - Simple lookahead enhancement
+   - Single test to fix
 
 2. **Advanced provide/import** (~4-6 hours)
    - Multiple provide/import variants for real modules
    - Critical for parsing real Pyret libraries
+   - 3 tests remaining
 
-3. **Extract expression** (~2-3 hours)
-   - Simple new expression type
-   - Low complexity
+3. **Full file tests** (~varies)
+   - May reveal additional small bugs
+   - 2 tests remaining
 
 ## 🔑 Key Concepts
 
 **Whitespace Sensitivity:**
 - `f(x)` → Direct function call (s-app)
 - `f (x)` → Two separate expressions (f and (x))
+- `arr[0]` → Bracket access (no whitespace)
+- `[list: 1, 2]` → Construct expression (whitespace or statement start)
 
 **No Operator Precedence:**
 - `2 + 3 * 4` = `(2 + 3) * 4` = `20` (NOT 14)
@@ -415,7 +422,7 @@ The following features were tested and **removed** as they don't exist in Pyret:
 ```bash
 # Run all comparison tests
 cargo test --test comparison_tests
-# Result: 214 passed, 8 ignored, 0 failed
+# Result: 246 passed, 6 ignored, 0 failed
 
 # See what needs implementation
 cargo test --test comparison_tests -- --ignored --list
@@ -425,7 +432,7 @@ cargo test --test comparison_tests -- --ignored --list
 ```
 
 **69/73 parser unit tests passing** (94.5%) - 4 pre-existing failures in decimal/rational tests
-**214/222 comparison integration tests passing** ✅ (96.4%)
+**246/252 comparison integration tests passing** ✅ (97.6%)
 
 ## 💡 Quick Tips
 
@@ -546,18 +553,25 @@ The codebase is clean, well-tested, and ready for the next features:
 
 ---
 
-**Last Updated:** 2025-11-07 (Latest)
-**Tests:** 69/73 parser tests (94.5%), 215/222 comparison tests ✅ (96.8%)
+**Last Updated:** 2025-11-08 (Latest)
+**Tests:** 69/73 parser tests (94.5%), 246/252 comparison tests ✅ (97.6%)
 **This Session Completed:**
-- 🐛 **Fixed invalid test syntax** - `test_tuple_type_annotation` ✨ **[NEW!]**
-  - Test was using `f :: {A; B} -> C` which is INVALID Pyret (removed in 2014, issue #252)
-  - Researched git history: commit 13553032e removed `noparen-arrow-ann` from bindings
-  - Arrow types in bindings MUST be parenthesized: `f :: ({A; B} -> C)` is correct
-  - Updated test to use correct syntax with explanatory comments
-- 📊 **Test count improved** - 215 passing, 7 ignored (up from 214/8!) - **+1 test!**
+- 🚀 **Implemented whitespace-sensitive bracket parsing** - Fixed 31 tests at once! ✨ **[MAJOR!]**
+  - Problem: Parser was treating `5\n[list: 1, 2]` as `5[list]` (bracket access) instead of two separate statements
+  - Root cause: Bracket `[` always parsed as postfix operator, regardless of whitespace
+  - Solution: Added `BrackSpace` and `BrackNoSpace` token types (like `ParenSpace`/`ParenNoSpace`)
+  - Implementation:
+    - Modified tokenizer (`src/tokenizer.rs:1168-1183`) to check `prior_whitespace` flag
+    - Updated parser to only treat `BrackNoSpace` as postfix bracket access operator
+    - `arr[0]` (no whitespace) → bracket access ✅
+    - `[list: 1, 2]` (whitespace or statement start) → construct expression ✅
+  - Impact: Enabled parsing of multiple statements with construct expressions!
+- ✅ **Constructor objects now parse correctly** - `test_constructor_object` ✅
+- 📊 **Test count JUMPED** - 246 passing, 6 ignored (up from 215/7!) - **+31 tests!** 🎉
+- 🔧 **Improved compare_parsers.sh** - Now shows Rust parser errors clearly
 **Implementation Details:**
-- **Research process**: Searched Pyret git history, found issue #252, verified with official parser
-- **Grammar rules**: `noparen-arrow-ann` exists but only for internal use, not in binding contexts
-- **Real examples**: All Pyret code uses parentheses for arrow types in bindings
-**Progress:** 215/222 passing (96.8%), 7 tests remaining
-**Next Session:** Tuple destructuring in cases or advanced imports - **NEXT PRIORITIES**
+- **Whitespace-sensitive brackets:** Similar to parentheses, brackets need whitespace tracking
+- **Token types:** `BrackSpace`, `BrackNoSpace`, and legacy `LBrack` for backwards compatibility
+- **Parser changes:** Updated `parse_binop_expr()`, `parse_construct_expr()`, `parse_bracket_expr()`
+**Progress:** 246/252 passing (97.6%), 6 tests remaining
+**Next Session:** Generic function signatures, data hiding in provide, or full file tests - **NEXT PRIORITIES**

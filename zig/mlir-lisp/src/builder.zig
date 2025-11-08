@@ -112,6 +112,47 @@ pub const Builder = struct {
         return mod;
     }
 
+    /// Build a single operation into a module
+    /// Useful for building metadata modules that are single operations
+    pub fn buildSingleOperation(
+        self: *Builder,
+        operation: *const parser.Operation,
+    ) BuildError!mlir.Module {
+        const mlir_op = try self.buildOperation(operation);
+        return try mlir.Module.fromOperation(mlir_op);
+    }
+
+    /// Build a module from a list of operations (not full parsed module)
+    /// Used for building application code after filtering out metadata
+    pub fn buildFromOperations(
+        self: *Builder,
+        operations: []const *const parser.Operation,
+    ) BuildError!mlir.Module {
+        // Special case: if we have exactly one operation and it's a builtin.module,
+        // use that directly instead of creating a wrapper module
+        if (operations.len == 1) {
+            const operation = operations[0];
+            if (std.mem.eql(u8, operation.name, "builtin.module")) {
+                const mlir_op = try self.buildOperation(operation);
+                return try mlir.Module.fromOperation(mlir_op);
+            }
+        }
+
+        // Otherwise, create a new module and add all operations to it
+        var mod = try mlir.Module.create(self.location);
+
+        // Get the module's body block
+        const body = mod.getBody();
+
+        // Build each operation
+        for (operations) |operation| {
+            const mlir_op = try self.buildOperation(operation);
+            mlir.Block.appendOperation(body, mlir_op);
+        }
+
+        return mod;
+    }
+
     /// Register type aliases in the builder context
     fn registerTypeAliases(self: *Builder, type_aliases: []const parser.TypeAlias) BuildError!void {
         for (type_aliases) |alias| {

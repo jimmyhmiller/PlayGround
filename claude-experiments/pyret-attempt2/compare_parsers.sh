@@ -45,7 +45,17 @@ cp "$PYRET_JSON" "$PYRET_EXPR"
 # Parse with our Rust parser
 echo "=== Parsing with Rust parser... ==="
 cd /Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/pyret-attempt2
-cargo run --bin to_pyret_json "$TEMP_FILE" 2>/dev/null > "$RUST_JSON"
+RUST_ERROR=$(mktemp)
+if cargo run --bin to_pyret_json "$TEMP_FILE" > "$RUST_JSON" 2>"$RUST_ERROR"; then
+    RUST_PARSE_SUCCESS=1
+else
+    RUST_PARSE_SUCCESS=0
+    echo "❌ RUST PARSER ERROR:"
+    cat "$RUST_ERROR"
+    rm "$RUST_ERROR"
+    exit 1
+fi
+rm "$RUST_ERROR"
 
 # Compare the two JSON outputs (normalize for field order)
 echo "=== Comparison ==="
@@ -72,11 +82,19 @@ def normalize_json(obj):
     else:
         return obj
 
-with open('/tmp/pyret_expr.json') as f:
-    pyret = json.load(f)
+try:
+    with open('/tmp/pyret_expr.json') as f:
+        pyret = json.load(f)
+except Exception as e:
+    print(f"Error loading Pyret JSON: {e}")
+    sys.exit(1)
 
-with open('/tmp/rust_output.json') as f:
-    rust = json.load(f)
+try:
+    with open('/tmp/rust_output.json') as f:
+        rust = json.load(f)
+except Exception as e:
+    print(f"Error loading Rust JSON: {e}")
+    sys.exit(1)
 
 pyret_norm = normalize_json(pyret)
 rust_norm = normalize_json(rust)
