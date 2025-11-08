@@ -1,0 +1,37 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Config (don't commit user config)
+config.toml
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+
+# Build artifacts
+/dist/
+/build/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Test data
+/test_data/
+/tmp/

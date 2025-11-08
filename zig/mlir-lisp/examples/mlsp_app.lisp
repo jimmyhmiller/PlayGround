@@ -855,18 +855,14 @@
 
 (defn addMacro [(: %args_ptr !llvm.ptr)] !llvm.ptr
 
-  ;; Constants
-  (constant %c0 (: 0 i64))
-  (constant %c1 (: 1 i64))
-  (constant %c2 (: 2 i64))
-
+ 
   ;; ========== EXTRACT ARGUMENTS ==========
-  (op %type_expr_ptr (: !llvm.ptr) (mlsp.get_element [%args_ptr %c0]))
-  (op %operand1_ptr (: !llvm.ptr) (mlsp.get_element [%args_ptr %c1]))
-  (op %operand2_ptr (: !llvm.ptr) (mlsp.get_element [%args_ptr %c2]))
+  (op %type_expr_ptr (: !llvm.ptr) (mlsp.get_element [%args_ptr (constant (: 0 i64))]))
+  (op %operand1_ptr (: !llvm.ptr) (mlsp.get_element [%args_ptr (constant (: 1 i64))]))
+  (op %operand2_ptr (: !llvm.ptr) (mlsp.get_element [%args_ptr (constant (: 2 i64))]))
 
   ;; Extract type from (: type)
-  (op %result_type_ptr (: !llvm.ptr) (mlsp.get_element [%type_expr_ptr %c1]))
+  (op %result_type_ptr (: !llvm.ptr) (mlsp.get_element [%type_expr_ptr (constant (: 1 i64))]))
 
   ;; ========== CREATE IDENTIFIERS FROM CONSTANTS ==========
   (op %operation_id (: !llvm.ptr) (mlsp.identifier_const {:global @str_operation}))
@@ -875,18 +871,11 @@
   (op %result_types_id (: !llvm.ptr) (mlsp.identifier_const {:global @str_result_types}))
   (op %operands_id (: !llvm.ptr) (mlsp.identifier_const {:global @str_operands}))
 
-  ;; ========== BUILD LISTS ==========
-  ;; (name arith.addi)
-  (op %name_list (: !llvm.ptr) (mlsp.list [%name_id %addi_id]))
-
-  ;; (result-types type)
-  (op %types_list (: !llvm.ptr) (mlsp.list [%result_types_id %result_type_ptr]))
-
-  ;; (operands op1 op2)
-  (op %operands_list (: !llvm.ptr) (mlsp.list [%operands_id %operand1_ptr %operand2_ptr]))
-
-  ;; (operation ...)
-  (op %result (: !llvm.ptr) (mlsp.list [%operation_id %name_list %types_list %operands_list]))
+  (op %result (: !llvm.ptr)
+      (mlsp.list [%operation_id
+                  (op (: !llvm.ptr) (mlsp.list [%name_id %addi_id]))
+                  (op (: !llvm.ptr) (mlsp.list [%result_types_id %result_type_ptr]))
+                  (op (: !llvm.ptr) (mlsp.list [%operands_id %operand1_ptr %operand2_ptr]))]))
 
   (return %result))
 

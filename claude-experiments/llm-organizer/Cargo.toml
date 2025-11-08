@@ -1,0 +1,54 @@
+[package]
+name = "llm-organizer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# FUSE filesystem
+fuser = "0.15"
+
+# Database
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+# Async runtime
+tokio = { version = "1.42", features = ["full"] }
+tokio-stream = "0.1"
+
+# HTTP client for LLM
+reqwest = { version = "0.12", features = ["json"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# File watching
+notify = "7.0"
+
+# Caching
+moka = { version = "0.12", features = ["future"] }
+
+# File type detection
+infer = "0.16"
+
+# Document processing
+pdf-extract = "0.7"
+docx-rs = "0.4"
+
+# Utilities
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "4.5", features = ["derive"] }
+sha2 = "0.10"
+chrono = "0.4"
+libc = "0.2"
+textwrap = "0.16"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

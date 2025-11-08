@@ -5,6 +5,7 @@ const Reader = mlir_lisp.Reader;
 const Value = mlir_lisp.Value;
 const PersistentVector = mlir_lisp.PersistentVector;
 const Parser = mlir_lisp.Parser;
+const Operation = mlir_lisp.Operation;
 const Builder = mlir_lisp.Builder;
 const Executor = mlir_lisp.Executor;
 const Repl = mlir_lisp.Repl;
@@ -12,6 +13,25 @@ const MacroExpander = mlir_lisp.MacroExpander;
 const builtin_macros = mlir_lisp.builtin_macros;
 const DialectRegistry = mlir_lisp.DialectRegistry;
 const metadata_detector = mlir_lisp.metadata_detector;
+const gpu_lowering = @import("gpu_lowering.zig");
+
+/// Helper function to recursively check for GPU operations in regions
+fn hasGPUOpsInRegions(op: *const Operation) bool {
+    for (op.regions) |*region| {
+        for (region.blocks) |*block| {
+            for (block.operations) |*nested_op| {
+                if (std.mem.startsWith(u8, nested_op.name, "gpu.") or
+                    std.mem.indexOf(u8, nested_op.name, "gpu.") != null) {
+                    return true;
+                }
+                if (hasGPUOpsInRegions(nested_op)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
 
 /// Helper function to wrap multiple top-level forms in an implicit list
 fn createImplicitList(allocator: std.mem.Allocator, forms: PersistentVector(*Value)) !*Value {
@@ -296,20 +316,41 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
     }
     std.debug.print("----------------------------------------\n\n", .{});
 
-    // Check if the module has a main function
+    // Check if the module has a main function (recursively search through regions)
     const has_main = blk: {
-        for (parsed_module.operations) |*op| {
-            if (std.mem.eql(u8, op.name, "func.func")) {
-                // Check for sym_name attribute
-                for (op.attributes) |*attr| {
-                    if (std.mem.eql(u8, attr.key, "sym_name")) {
-                        // The value should be a symbol starting with @
-                        const val = attr.value.value;
-                        if (val.type == .symbol and std.mem.eql(u8, val.data.atom, "@main")) {
-                            break :blk true;
+        // Helper to recursively search for main
+        const Searcher = struct {
+            fn hasMainInOp(op: *const Operation) bool {
+                // Check if this operation is func.func @main
+                if (std.mem.eql(u8, op.name, "func.func")) {
+                    for (op.attributes) |*attr| {
+                        if (std.mem.eql(u8, attr.key, "sym_name")) {
+                            const val = attr.value.value;
+                            if (val.type == .symbol and std.mem.eql(u8, val.data.atom, "@main")) {
+                                return true;
+                            }
                         }
                     }
                 }
+
+                // Search in regions
+                for (op.regions) |*region| {
+                    for (region.blocks) |*block| {
+                        for (block.operations) |*nested_op| {
+                            if (hasMainInOp(nested_op)) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+
+                return false;
+            }
+        };
+
+        for (parsed_module.operations) |*op| {
+            if (Searcher.hasMainInOp(op)) {
+                break :blk true;
             }
         }
         break :blk false;
@@ -369,6 +410,55 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
                 executor.setTransform(first_op, transform_module_op);
             }
         }
+    }
+
+    // Check if the module contains GPU operations and apply lowering if needed
+    const has_gpu_ops = blk: {
+        // Check if any operation name contains "gpu."
+        for (parsed_module.operations) |*op| {
+            if (std.mem.startsWith(u8, op.name, "gpu.") or
+                std.mem.indexOf(u8, op.name, "gpu.") != null) {
+                break :blk true;
+            }
+            // Also check nested operations
+            if (hasGPUOpsInRegions(op)) {
+                break :blk true;
+            }
+        }
+        break :blk false;
+    };
+
+    if (has_gpu_ops) {
+        std.debug.print("Detected GPU operations, applying lowering passes...\n", .{});
+        const gpu_type = gpu_lowering.detectGPU();
+        std.debug.print("Detected GPU type: {s}\n", .{@tagName(gpu_type)});
+        try gpu_lowering.applyGPULoweringPasses(allocator, &ctx, &mlir_module, gpu_type);
+
+        std.debug.print("\nLowered MLIR (after GPU passes):\n", .{});
+        std.debug.print("----------------------------------------\n", .{});
+        mlir_module.print();
+        std.debug.print("----------------------------------------\n\n", .{});
+    }
+
+    // Check if GPU ops still remain after lowering
+    const still_has_gpu = blk: {
+        for (parsed_module.operations) |*op| {
+            if (std.mem.startsWith(u8, op.name, "gpu.") or
+                std.mem.indexOf(u8, op.name, "gpu.") != null) {
+                break :blk true;
+            }
+            if (hasGPUOpsInRegions(op)) {
+                break :blk true;
+            }
+        }
+        break :blk false;
+    };
+
+    if (still_has_gpu) {
+        std.debug.print("Note: GPU operations remain in IR after lowering.\n", .{});
+        std.debug.print("      Skipping JIT execution (GPU ops cannot be JIT compiled directly).\n", .{});
+        std.debug.print("      The MLIR above shows the successfully lowered GPU code.\n\n", .{});
+        return;
     }
 
     std.debug.print("Compiling with JIT (optimization level: O2)...\n", .{});

@@ -248,6 +248,7 @@ pub const Tokenizer = struct {
     fn scanSymbol(self: *Tokenizer) !Token {
         // Already consumed '@', now scan the suffix-id
         // MLIR allows: digit+ | (letter|punct)(letter|digit|punct)*
+        // Special handling for :: in nested references like @module::@func
         const first_char = self.peek();
 
         if (self.isDigit(first_char)) {
@@ -256,9 +257,32 @@ pub const Tokenizer = struct {
                 _ = self.advance();
             }
         } else if (self.isAlpha(first_char) or first_char == '_') {
-            // Named identifier: @main, @test_func, etc.
-            while (self.isAlphaNumeric(self.peek()) or self.isIdentifierChar(self.peek())) {
-                _ = self.advance();
+            // Named identifier: @main, @test_func, @module::@func, etc.
+            while (true) {
+                const c = self.peek();
+                if (self.isAlphaNumeric(c) or self.isIdentifierChar(c)) {
+                    // Special case: if we hit ':', check if it's part of '::'
+                    if (c == ':') {
+                        // Look ahead to see if it's '::'
+                        const next_char = if (self.current + 1 < self.source.len) self.source[self.current + 1] else 0;
+                        if (next_char == ':') {
+                            // Consume both colons as part of the symbol
+                            _ = self.advance(); // first :
+                            _ = self.advance(); // second :
+                            // Check if :: is followed by @ (nested symbol reference)
+                            if (self.peek() == '@') {
+                                _ = self.advance(); // consume @
+                            }
+                            continue;
+                        } else {
+                            // Single ':' at end - stop here
+                            break;
+                        }
+                    }
+                    _ = self.advance();
+                } else {
+                    break;
+                }
             }
         } else {
             self.error_line = self.line;

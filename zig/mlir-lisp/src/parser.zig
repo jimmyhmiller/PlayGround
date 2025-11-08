@@ -676,15 +676,41 @@ pub const Parser = struct {
                     key_str,
                 });
                 std.debug.print("Attribute maps must use keywords (starting with ':') as keys\n", .{});
-                std.debug.print("Map has {} elements, currently at index {}\n", .{map.len(), i});
-                std.debug.print("Previous elements:\n", .{});
+                std.debug.print("Map has {} elements total, currently parsing at pair index {}\n", .{map.len(), i/2});
+                std.debug.print("\nAll map elements:\n", .{});
                 var j: usize = 0;
-                while (j < i and j < 10) : (j += 2) {
-                    const prev_key = map.at(j);
-                    const prev_val = map.at(j + 1);
-                    const pk_str = if (prev_key.type == .identifier or prev_key.type == .keyword) prev_key.data.atom else "(complex)";
-                    const pv_str = if (prev_val.type == .identifier or prev_val.type == .keyword) prev_val.data.atom else @tagName(prev_val.type);
-                    std.debug.print("  [{}: {s} => {s}]\n", .{j/2, pk_str, pv_str});
+                while (j < map.len()) : (j += 2) {
+                    const elem_key = map.at(j);
+                    const elem_val = if (j + 1 < map.len()) map.at(j + 1) else null;
+                    const ek_type = @tagName(elem_key.type);
+                    const ek_str = if (elem_key.type == .identifier or elem_key.type == .keyword)
+                        elem_key.data.atom
+                    else if (elem_key.type == .list)
+                        "(list)"
+                    else if (elem_key.type == .type)
+                        "(type)"
+                    else if (elem_key.type == .function_type)
+                        "(function_type)"
+                    else
+                        "(complex)";
+
+                    if (elem_val) |ev| {
+                        const ev_type = @tagName(ev.type);
+                        const ev_str = if (ev.type == .identifier or ev.type == .keyword)
+                            ev.data.atom
+                        else if (ev.type == .list)
+                            "(list)"
+                        else if (ev.type == .type)
+                            "(type)"
+                        else if (ev.type == .function_type)
+                            "(function_type)"
+                        else
+                            "(complex)";
+                        const marker = if (j == i) ">>> " else "    ";
+                        std.debug.print("{s}[{}]: key={s}:{s} => val={s}:{s}\n", .{marker, j/2, ek_type, ek_str, ev_type, ev_str});
+                    } else {
+                        std.debug.print("  [{}]: key={s}:{s} => (missing value)\n", .{j/2, ek_type, ek_str});
+                    }
                 }
                 return error.ExpectedKeyword;
             }
