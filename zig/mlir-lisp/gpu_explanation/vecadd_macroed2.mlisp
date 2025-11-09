@@ -1,0 +1,74 @@
+((operation
+  (name func.func)
+  (attributes {:function_type (!function (inputs memref<5xf32> memref<5xf32> memref<5xf32>) (results)) :sym_name @vecadd})
+  (regions
+    (region
+      (block
+        [^bb0]
+        (arguments [(: %arg1 memref<5xf32>) (: %arg2 memref<5xf32>) (: %arg3 memref<5xf32>)])
+        (constant %19 (: 0 index))
+        (constant %20 (: 1 index))
+        (constant %21 (: 5 index))
+        (op (gpu.launch
+          {:workgroup_attributions (: 0 i64)}
+          [%20 %20 %20 %21 %20 %20]
+          (region
+            (block
+              [^bb0]
+              (arguments [(: %arg4 index) (: %arg5 index) (: %arg6 index) (: %arg7 index) (: %arg8 index) (: %arg9 index) (: %arg10 index) (: %arg11 index) (: %arg12 index) (: %arg13 index) (: %arg14 index) (: %arg15 index)])
+              (op %22 (: f32) (memref.load [%arg1 %arg7]))
+              (op %23 (: f32) (memref.load [%arg2 %arg7]))
+              (op %24 (: f32) (arith.addf {:fastmath #arith.fastmath<none>} [%22 %23]))
+              (op (memref.store [%24 %arg3 %arg7]))
+              (op (gpu.terminator))))))
+        (operation
+          (name func.return)))))) (operation
+  (name func.func)
+  (attributes {:function_type (!function (inputs) (results)) :sym_name @main})
+  (regions
+    (region
+      (block
+        (arguments [])
+        (constant %0 (: 0 index))
+        (constant %1 (: 1 index))
+        (constant %2 (: 5 index))
+        (constant %3 (: 1.230000e+00 f32))
+        (op %4 (: memref<5xf32>) (memref.alloc {:operandSegmentSizes array<i32: 0, 0>}))
+        (op %5 (: memref<5xf32>) (memref.alloc {:operandSegmentSizes array<i32: 0, 0>}))
+        (op %6 (: memref<5xf32>) (memref.alloc {:operandSegmentSizes array<i32: 0, 0>}))
+        (op %7 (: memref<?xf32>) (memref.cast [%4]))
+        (op %8 (: memref<?xf32>) (memref.cast [%5]))
+        (op %9 (: memref<?xf32>) (memref.cast [%6]))
+        (op (scf.for
+          [%0 %2 %1]
+          (region
+            (block
+              [^bb0]
+              (arguments [(: %arg0 index)])
+              (op (memref.store [%3 %7 %arg0]))
+              (op (memref.store [%3 %8 %arg0]))
+              (op (scf.yield))))))
+        (op %10 (: memref<*xf32>) (memref.cast [%7]))
+        (op %11 (: memref<*xf32>) (memref.cast [%8]))
+        (op %12 (: memref<*xf32>) (memref.cast [%9]))
+        (op (gpu.host_register [%10]))
+        (op (gpu.host_register [%11]))
+        (op (gpu.host_register [%12]))
+        (call %13 @mgpuMemGetDeviceMemRef1dFloat %7 memref<?xf32>)
+        (call %14 @mgpuMemGetDeviceMemRef1dFloat %8 memref<?xf32>)
+        (call %15 @mgpuMemGetDeviceMemRef1dFloat %9 memref<?xf32>)
+        (op %16 (: memref<5xf32>) (memref.cast [%13]))
+        (op %17 (: memref<5xf32>) (memref.cast [%14]))
+        (op %18 (: memref<5xf32>) (memref.cast [%15]))
+        (call @vecadd %16 %17 %18 ())
+        (call @printMemrefF32 %12 ())
+        (operation
+          (name func.return)))))) (operation
+  (name func.func)
+  (attributes {:function_type (!function (inputs memref<?xf32>) (results memref<?xf32>)) :sym_name @mgpuMemGetDeviceMemRef1dFloat :sym_visibility "private"})
+  (regions
+    (region))) (operation
+  (name func.func)
+  (attributes {:function_type (!function (inputs memref<*xf32>) (results)) :sym_name @printMemrefF32 :sym_visibility "private"})
+  (regions
+    (region))))

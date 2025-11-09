@@ -52,6 +52,7 @@ tests/pyret/tests/test-timing.arr
 tests/pyret/tests/test-sets.arr
 tests/pyret/tests/test-string-dict.arr
 tests/pyret/tests/test-error-rendering.arr
+tests/pyret/tests/test-parse-errors.arr
 tests/pyret/tests/test-constants.arr
 tests/pyret/tests/test-binops.arr
 tests/pyret/tests/test-flatness.arr
@@ -397,6 +398,7 @@ src/arr/trove/checker.arr
 src/arr/trove/system.arr
 src/arr/trove/pick.arr
 src/arr/trove/file.arr
+src/arr/trove/matrices.arr
 src/arr/trove/cmdline.arr
 src/arr/trove/arrays.arr
 src/arr/trove/equality.arr
@@ -425,10 +427,12 @@ src/arr/trove/pprint.arr
 src/arr/trove/image-typed.arr
 src/arr/trove/s-exp-structs.arr
 src/arr/compiler/server.arr
+src/arr/compiler/pyret.arr
 src/arr/compiler/flatness.arr
 src/arr/compiler/ast-anf.arr
 src/arr/compiler/concat-lists.arr
 src/arr/compiler/js-of-pyret.arr
+src/arr/compiler/ast-util.arr
 src/arr/compiler/desugar.arr
 src/arr/compiler/compile-structs.arr
 src/arr/compiler/gensym.arr
@@ -451,6 +455,7 @@ src/arr/compiler/anf-loop-compiler.arr
 src/arr/compiler/type-check-structs.arr
 src/arr/compiler/libs.arr
 src/arr/compiler/repl.arr
+src/arr/compiler/type-defaults.arr
 src/arr/compiler/type-structs.arr
 src/scripts/time-obj-vs-tup.arr
 src/scripts/time-string-dict.arr

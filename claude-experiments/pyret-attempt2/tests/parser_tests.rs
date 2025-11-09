@@ -1635,6 +1635,62 @@ fn test_parse_for_with_dot_access() {
 }
 
 #[test]
+fn test_parse_for_with_type_params() {
+    // for fold<Number>(acc from 0, x from lst): acc + x end
+    let expr = parse_expr("for fold<Number>(acc from 0, x from lst): acc + x end").expect("Failed to parse");
+
+    match expr {
+        Expr::SFor { iterator, bindings, .. } => {
+            // Check iterator is SInstantiate(fold, [Number])
+            match *iterator {
+                Expr::SInstantiate { ref expr, ref params, .. } => {
+                    // Check the base expression is SId(fold)
+                    match **expr {
+                        Expr::SId { ref id, .. } => {
+                            match id {
+                                Name::SName { s, .. } => assert_eq!(s, "fold"),
+                                _ => panic!("Expected SName for iterator"),
+                            }
+                        }
+                        _ => panic!("Expected SId for iterator base"),
+                    }
+                    // Check type parameters
+                    assert_eq!(params.len(), 1);
+                }
+                _ => panic!("Expected SInstantiate for iterator, got {:?}", iterator),
+            }
+
+            // Check bindings
+            assert_eq!(bindings.len(), 2);
+        }
+        _ => panic!("Expected SFor"),
+    }
+}
+
+#[test]
+fn test_parse_for_with_multiple_type_params() {
+    // for raw-array-fold2<A, B, C>(acc from 0, x from l1, y from l2): acc end
+    let expr = parse_expr("for raw-array-fold2<A, B, C>(acc from 0, x from l1, y from l2): acc end").expect("Failed to parse");
+
+    match expr {
+        Expr::SFor { iterator, bindings, .. } => {
+            // Check iterator is SInstantiate
+            match *iterator {
+                Expr::SInstantiate { ref params, .. } => {
+                    // Check we have 3 type parameters
+                    assert_eq!(params.len(), 3);
+                }
+                _ => panic!("Expected SInstantiate for iterator"),
+            }
+
+            // Check bindings
+            assert_eq!(bindings.len(), 3);
+        }
+        _ => panic!("Expected SFor"),
+    }
+}
+
+#[test]
 fn test_parse_provide_all() {
     // Test: provide *
     let program = parse_program("provide *").expect("Failed to parse");

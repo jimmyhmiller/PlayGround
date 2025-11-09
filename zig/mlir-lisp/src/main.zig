@@ -156,14 +156,19 @@ fn prettyPrintValue(value: *const Value, writer: anytype, indent: usize) error{O
             const is_op = first.type == .identifier and std.mem.eql(u8, first.data.atom, "op");
             const is_call = first.type == .identifier and std.mem.eql(u8, first.data.atom, "call");
             const is_constant = first.type == .identifier and std.mem.eql(u8, first.data.atom, "constant");
+            const is_defn = first.type == .identifier and std.mem.eql(u8, first.data.atom, "defn");
+            const is_return = first.type == .identifier and std.mem.eql(u8, first.data.atom, "return");
 
             // Determine if we need multiline formatting
             const needs_multiline = blk: {
                 // Always multiline for these structural forms
                 if (is_operation or is_region or is_block or is_mlir) break :blk true;
 
+                // defn needs special multiline handling
+                if (is_defn) break :blk true;
+
                 // Always single line for these macros
-                if (is_call or is_constant) break :blk false;
+                if (is_call or is_constant or is_return) break :blk false;
 
                 // For 'op' macro calls, check if they have regions
                 if (is_op) {
@@ -182,13 +187,34 @@ fn prettyPrintValue(value: *const Value, writer: anytype, indent: usize) error{O
             };
 
             if (needs_multiline) {
-                for (list.slice(), 0..) |elem, i| {
-                    if (i == 0) {
-                        try prettyPrintValue(elem, writer, indent);
-                    } else {
-                        try writer.writeAll("\n");
-                        for (0..indent + 1) |_| try writer.writeAll(indent_str);
-                        try prettyPrintValue(elem, writer, indent + 1);
+                if (is_defn) {
+                    // Special formatting for defn: (defn name [args] return-type\n  body...)
+                    // Elements: [0]=defn [1]=name [2]=args [3]=return-type [4+]=body
+                    for (list.slice(), 0..) |elem, i| {
+                        if (i == 0) {
+                            // defn keyword
+                            try prettyPrintValue(elem, writer, indent);
+                        } else if (i <= 3) {
+                            // name, args, return-type on same line
+                            try writer.writeAll(" ");
+                            try prettyPrintValue(elem, writer, indent);
+                        } else {
+                            // body on new lines
+                            try writer.writeAll("\n");
+                            for (0..indent + 1) |_| try writer.writeAll(indent_str);
+                            try prettyPrintValue(elem, writer, indent + 1);
+                        }
+                    }
+                } else {
+                    // Standard multiline formatting
+                    for (list.slice(), 0..) |elem, i| {
+                        if (i == 0) {
+                            try prettyPrintValue(elem, writer, indent);
+                        } else {
+                            try writer.writeAll("\n");
+                            for (0..indent + 1) |_| try writer.writeAll(indent_str);
+                            try prettyPrintValue(elem, writer, indent + 1);
+                        }
                     }
                 }
             } else {
@@ -297,7 +323,10 @@ fn runTransformation(backing_allocator: std.mem.Allocator, file_path: []const u8
 
     const transformed_value = if (do_macroify) blk: {
         // Macroify: compress verbose operations to macro form
-        break :blk try macro_compressor.compressMacros(allocator, value);
+        const compressed = try macro_compressor.compressMacros(allocator, value);
+        // Unwrap non-metadata modules to remove boilerplate
+        const unwrapped = try macro_compressor.unwrapNonMetadataModule(allocator, compressed);
+        break :blk unwrapped;
     } else blk: {
         // Macro-expand: expand macros to verbose form
         var macro_expander = MacroExpander.init(allocator);
@@ -310,8 +339,41 @@ fn runTransformation(backing_allocator: std.mem.Allocator, file_path: []const u8
     var buffer = std.ArrayList(u8){};
     defer buffer.deinit(allocator);
     const writer = buffer.writer(allocator);
-    try prettyPrintValue(transformed_value, writer, 0);
-    try writer.writeAll("\n");
+
+    // Check if result is a plain list (multiple top-level forms from unwrapping)
+    // vs a special form (like (mlir ...), (defn ...), etc.)
+    const should_print_as_multiple = blk: {
+        if (transformed_value.type != .list) break :blk false;
+        const list = transformed_value.data.list;
+        if (list.len() == 0) break :blk false;
+
+        // If it starts with a known keyword/form, it's a single form
+        const first = list.at(0);
+        if (first.type != .identifier) break :blk true;
+
+        // Known form identifiers that indicate single forms
+        const known_forms = [_][]const u8{ "mlir", "operation", "defn", "op", "region", "block", "call", "constant", "return", "+", "*" };
+        for (known_forms) |form| {
+            if (std.mem.eql(u8, first.data.atom, form)) break :blk false;
+        }
+
+        // Otherwise, it's likely a list of top-level forms
+        break :blk true;
+    };
+
+    if (should_print_as_multiple) {
+        // Print each element as a separate top-level form
+        const list = transformed_value.data.list;
+        for (list.slice(), 0..) |elem, i| {
+            if (i > 0) try writer.writeAll("\n\n");
+            try prettyPrintValue(elem, writer, 0);
+        }
+        try writer.writeAll("\n");
+    } else {
+        // Print as a single form
+        try prettyPrintValue(transformed_value, writer, 0);
+        try writer.writeAll("\n");
+    }
 
     // Write to stdout file descriptor
     const stdout_fd = std.posix.STDOUT_FILENO;
