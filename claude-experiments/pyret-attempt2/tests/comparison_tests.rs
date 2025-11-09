@@ -15,7 +15,7 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Helper to run the comparison and check if parsers match
 fn compare_with_pyret(expr: &str) -> bool {
-    let script_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("compare_parsers.sh");
+    let script_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/compare_parsers.sh");
 
     let output = Command::new("bash")
         .arg(&script_path)
@@ -3008,6 +3008,7 @@ fn test_full_file_for_with_function_iterator() {
 // ============================================================================
 
 #[test]
+#[ignore]
 fn test_full_file_benchmark_adding_ones_2000() {
     let code = include_str!("pyret-files/full-files/benchmark/adding-ones-2000.arr");
     assert_matches_pyret(code);

@@ -114,7 +114,9 @@ mod tests {
         let expr = Expr::SNum { l: loc, value: "123".to_string() };
 
         let json = serde_json::to_string(&expr).unwrap();
+        // Our AST uses "value" field internally (as string for arbitrary precision)
+        // The to_pyret_json binary transforms it to "n" for Pyret-compatible output
         assert!(json.contains("\"type\":\"s-num\""));
-        assert!(json.contains("\"n\":123"));
+        assert!(json.contains("\"value\":\"123\""));
     }
 }
