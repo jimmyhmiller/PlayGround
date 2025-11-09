@@ -1,4 +1,4 @@
-use pyret_attempt2::{Parser, Expr};
+use pyret_attempt2::Parser;
 use pyret_attempt2::tokenizer::Tokenizer;
 use std::env;
 use std::fs;

@@ -6,7 +6,6 @@
 ///
 /// Note: Tests in this file use a global lock to run serially to avoid
 /// race conditions with shared temp files in the comparison script.
-
 use std::process::Command;
 use std::path::Path;
 use std::sync::Mutex;

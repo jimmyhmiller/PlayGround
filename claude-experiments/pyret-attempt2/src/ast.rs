@@ -189,7 +189,7 @@ pub enum Bind {
         l: Loc,
         shadows: bool,
         id: Name,
-        ann: Ann,
+        ann: Box<Ann>,
     },
 
     /// Tuple destructuring binding

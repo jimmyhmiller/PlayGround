@@ -9,6 +9,9 @@ use crate::ast::*;
 use crate::error::{ParseError, ParseResult};
 use crate::tokenizer::{Token, TokenType};
 
+// Type alias for complex return type
+type PreludeResult = (Option<Use>, Provide, ProvideTypes, Vec<ProvideBlock>, Vec<Import>);
+
 // ============================================================================
 // SECTION 1: Parser Struct and Core Methods
 // ============================================================================
@@ -242,15 +245,7 @@ impl Parser {
     }
 
     /// prelude: [use-stmt] (provide-stmt|import-stmt)*
-    fn parse_prelude(
-        &mut self,
-    ) -> ParseResult<(
-        Option<Use>,
-        Provide,
-        ProvideTypes,
-        Vec<ProvideBlock>,
-        Vec<Import>,
-    )> {
+    fn parse_prelude(&mut self) -> ParseResult<PreludeResult> {
         let mut _use = None;
 
         let mut provides = Vec::new();
@@ -601,33 +596,6 @@ impl Parser {
         } else if self.matches(&TokenType::From) {
             // provide from module: specs end
             // This is actually a provide-block, not a provide-stmt
-            // We need to parse it here anyway since we already consumed PROVIDE
-            self.advance(); // consume FROM
-
-            // Parse module-ref (just a name for now)
-            let module_name = self.parse_name()?;
-
-            self.expect(TokenType::Colon)?;
-
-            // Parse provide-specs
-            let mut specs = Vec::new();
-
-            if !self.matches(&TokenType::End) {
-                specs.push(self.parse_provide_spec()?);
-
-                while self.matches(&TokenType::Comma) {
-                    self.advance(); // consume comma
-
-                    if self.matches(&TokenType::End) {
-                        break;
-                    }
-
-                    specs.push(self.parse_provide_spec()?);
-                }
-            }
-
-            let end = self.expect(TokenType::End)?;
-
             // This case is now handled by parse_provide_from_block()
             // which is called from parse_prelude()
             unreachable!("provide from should be handled by parse_provide_from_block");
@@ -1141,7 +1109,7 @@ impl Parser {
                 });
             } else {
                 // Just a parenthesized annotation, not an arrow
-                let end = self.expect(TokenType::RParen)?;
+                self.expect(TokenType::RParen)?;
                 // Return the single annotation (unwrap the parens)
                 return Ok(args.into_iter().next().unwrap_or(Ann::ABlank));
             }
@@ -1243,21 +1211,6 @@ impl Parser {
             Ok(Ann::ABlank)
         }
     }
-
-    /// arrow-ann: (args -> ret)
-    fn parse_arrow_ann(&mut self) -> ParseResult<Ann> {
-        todo!("Implement parse_arrow_ann")
-    }
-
-    /// record-ann: { field, ... }
-    fn parse_record_ann(&mut self) -> ParseResult<Ann> {
-        todo!("Implement parse_record_ann")
-    }
-
-    /// tuple-ann: { ann; ... }
-    fn parse_tuple_ann(&mut self) -> ParseResult<Ann> {
-        todo!("Implement parse_tuple_ann")
-    }
 }
 
 // ============================================================================
@@ -1345,7 +1298,7 @@ impl Parser {
             ),
             shadows,
             id: name,
-            ann,
+            ann: Box::new(ann),
         })
     }
 
@@ -1396,7 +1349,7 @@ impl Parser {
                 l: self.current_loc(),
                 shadows: false,
                 id: name,
-                ann,
+                ann: Box::new(ann),
             }))
         } else {
             None
@@ -1433,11 +1386,6 @@ impl Parser {
             // Regular name binding
             self.parse_bind_with_shadow(false)
         }
-    }
-
-    /// let-binding: LET | VAR binding = expr
-    fn parse_let_bind(&mut self) -> ParseResult<LetBind> {
-        todo!("Implement parse_let_bind")
     }
 }
 
@@ -2591,8 +2539,9 @@ impl Parser {
     /// Pyret represents all numbers as rationals, so:
     /// - Integers like "42" -> SNum with n=42.0
     /// - Decimals like "3.14" -> SNum with n=3.14 (NOT SFrac - decimals are stored as floats)
-    /// Note: The official Pyret parser converts decimals to fractions internally but
-    /// represents them as s-num in JSON with fraction string values like "157/50"
+    ///
+    ///   Note: The official Pyret parser converts decimals to fractions internally but
+    ///   represents them as s-num in JSON with fraction string values like "157/50"
     fn parse_num(&mut self) -> ParseResult<Expr> {
         let token = self.expect(TokenType::Number)?;
         let loc = Loc::new(
@@ -3473,13 +3422,12 @@ impl Parser {
             let checkpoint = self.checkpoint();
 
             // Try to parse the tuple pattern and see if = follows
-            if let Ok(_) = self.parse_tuple_for_destructure() {
-                if self.matches(&TokenType::Equals) {
+            if self.parse_tuple_for_destructure().is_ok()
+                && self.matches(&TokenType::Equals) {
                     // Yes! This is tuple destructuring
                     self.restore(checkpoint);
                     return self.parse_tuple_destructure_expr();
                 }
-            }
 
             // Not tuple destructuring, restore and parse as expression
             self.restore(checkpoint);
@@ -3507,7 +3455,7 @@ impl Parser {
                     self.parse_contract_stmt()
                 } else {
                     // Try to parse the type annotation
-                    if let Ok(_) = self.parse_ann() {
+                    if self.parse_ann().is_ok() {
                         if self.matches(&TokenType::Equals) {
                             // Has = after type, so it's a let binding: x :: Type = value
                             self.restore(checkpoint);
@@ -5212,16 +5160,6 @@ impl Parser {
             blocky,
         })
     }
-
-    /// Shared helper for function headers
-    fn parse_fun_header(&mut self) -> ParseResult<(Vec<Name>, Vec<Bind>, Ann)> {
-        todo!("Implement parse_fun_header")
-    }
-
-    /// where-clause: WHERE: body END
-    fn parse_where_clause(&mut self) -> ParseResult<Option<Expr>> {
-        todo!("Implement parse_where_clause")
-    }
 }
 
 // ============================================================================
@@ -5566,11 +5504,6 @@ impl Parser {
         })
     }
 
-    /// table-select: select columns from table
-    fn parse_table_select(&mut self) -> ParseResult<Expr> {
-        todo!("Implement parse_table_select")
-    }
-
     /// load-table-expr: LOAD-TABLE COLON headers spec* END
     /// Parses a load-table expression like:
     ///   load-table: name, age
@@ -5766,11 +5699,6 @@ impl Parser {
     ///   foo() raises "error"
     ///
     /// Note: parse_expr() will create an SCheckTest when it sees a check operator in parse_binop_expr.
-    fn parse_check_test(&mut self) -> ParseResult<Expr> {
-        // Simply parse the full expression (which will create SCheckTest when it sees the check operator)
-        self.parse_expr()
-    }
-
     /// spy-stmt: SPY [string] COLON spy-contents END
     /// spy-contents: spy-expr [COMMA spy-expr]* [COMMA]
     /// spy-expr: NAME COLON expr | expr (where expr is NAME creates implicit label)
@@ -5821,12 +5749,9 @@ impl Parser {
     /// Parse a single spy expression: either "name: expr" or just "expr"
     /// If just "expr" and expr is an identifier, use implicit label
     fn parse_spy_expr(&mut self) -> ParseResult<SpyField> {
-        let start_pos = self.current;
-
         // Try to parse as "name: expr" pattern
         // We need to look ahead to see if there's a colon after the name
         if self.matches(&TokenType::Name) {
-            let name_tok = self.peek();
             let next = self.peek_ahead(1);
 
             if next.token_type == TokenType::Colon {
@@ -5964,57 +5889,6 @@ impl Parser {
 // ============================================================================
 
 impl Parser {
-    /// Convert a decimal string to a rational (numerator, denominator)
-    /// For example: "3.14" -> (157, 50), "2.5" -> (5, 2)
-    fn decimal_to_rational(decimal_str: &str) -> Result<(i64, i64), String> {
-        // Remove leading + or - sign
-        let (sign, num_str) = if let Some(stripped) = decimal_str.strip_prefix('-') {
-            (-1, stripped)
-        } else if let Some(stripped) = decimal_str.strip_prefix('+') {
-            (1, stripped)
-        } else {
-            (1, decimal_str)
-        };
-
-        // Check if there's a decimal point
-        if let Some(dot_pos) = num_str.find('.') {
-            let integer_part = &num_str[..dot_pos];
-            let decimal_part = &num_str[dot_pos + 1..];
-
-            // Parse integer and decimal parts
-            let int_val: i64 = if integer_part.is_empty() {
-                0
-            } else {
-                integer_part.parse().map_err(|_| "Invalid integer part")?
-            };
-
-            let dec_val: i64 = decimal_part.parse().map_err(|_| "Invalid decimal part")?;
-            let dec_places = decimal_part.len() as u32;
-            let denominator = 10_i64.pow(dec_places);
-
-            // Calculate numerator: (integer_part * denominator) + decimal_part
-            let numerator = sign * (int_val * denominator + dec_val);
-
-            // Simplify the fraction
-            let gcd = Self::gcd(numerator.abs(), denominator);
-            Ok((numerator / gcd, denominator / gcd))
-        } else {
-            // No decimal point - it's an integer
-            let int_val: i64 = num_str.parse().map_err(|_| "Invalid integer")?;
-            Ok((sign * int_val, 1))
-        }
-    }
-
-    /// Calculate greatest common divisor using Euclid's algorithm
-    fn gcd(mut a: i64, mut b: i64) -> i64 {
-        while b != 0 {
-            let temp = b;
-            b = a % b;
-            a = temp;
-        }
-        a
-    }
-
     /// Parse comma-separated list
     /// Handles trailing commas: [1, 2, 3,] is valid
     fn parse_comma_list<T, F>(&mut self, parser: F) -> ParseResult<Vec<T>>
@@ -6036,31 +5910,6 @@ impl Parser {
                 Ok(item) => items.push(item),
                 Err(_) => break, // Trailing comma - stop here
             }
-        }
-
-        Ok(items)
-    }
-
-    /// Parse optional element
-    fn parse_optional<T, F>(&mut self, parser: F) -> ParseResult<Option<T>>
-    where
-        F: Fn(&mut Self) -> ParseResult<T>,
-    {
-        match parser(self) {
-            Ok(value) => Ok(Some(value)),
-            Err(_) => Ok(None),
-        }
-    }
-
-    /// Parse list until END token
-    fn parse_until_end<T, F>(&mut self, parser: F) -> ParseResult<Vec<T>>
-    where
-        F: Fn(&mut Self) -> ParseResult<T>,
-    {
-        let mut items = Vec::new();
-
-        while !self.matches(&TokenType::End) && !self.is_at_end() {
-            items.push(parser(self)?);
         }
 
         Ok(items)
