@@ -35,7 +35,6 @@ tests/pyret/tests/test-matrices.arr
 tests/pyret/tests/test-file-locators.arr
 tests/pyret/tests/test-record-concat.arr
 tests/pyret/tests/test-strings.arr
-tests/pyret/tests/test-equality.arr
 tests/pyret/tests/test-examples.arr
 tests/pyret/tests/test-modules.arr
 tests/pyret/tests/test-import.arr
@@ -55,6 +54,7 @@ tests/pyret/tests/test-binops.arr
 tests/pyret/tests/test-flatness.arr
 tests/pyret/tests/test-path.arr
 tests/pyret/tests/test-letrec.arr
+tests/pyret/tests/test-rounding.arr
 tests/pyret/tests/test-parse.arr
 tests/pyret/tests/test-cases.arr
 tests/pyret/tests/test-dup-names.arr
@@ -88,6 +88,7 @@ tests/pyret/tests/modules/test-import-arrow-using-datatype.arr
 tests/pyret/tests/modules/provide-data-with-provide-star.arr
 tests/pyret/tests/modules/import-data.arr
 tests/pyret/tests/modules/re-re-provide-data.arr
+tests/pyret/tests/modules/test-import-data-from-data-star.arr
 tests/pyret/tests/modules/provide-data-star.arr
 tests/pyret/tests/modules/provide-data.arr
 tests/pyret/tests/modules/test-import-re-provided-data.arr
@@ -109,7 +110,6 @@ tests/pyret/tests/modules/test-provide-data-with-provide-star.arr
 tests/pyret/tests/test-array.arr
 tests/pyret/tests/test-s-exp.arr
 tests/pyret/tests/test-format.arr
-tests/pyret/tests/test-images.arr
 tests/pyret/tests/test-pprint.arr
 tests/pyret/tests/test-repl.arr
 tests/pyret/tests/test-tuple.arr
@@ -277,6 +277,7 @@ tests/type-check/good/obj-lub.arr
 tests/type-check/good/numbers.arr
 tests/type-check/good/data-basic-infer.arr
 tests/type-check/good/_plus.arr
+tests/type-check/good/tests.arr
 tests/type-check/good/data-recursive.arr
 tests/type-check/good/import-refined-data.arr
 tests/type-check/good/list.arr

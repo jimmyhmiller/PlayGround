@@ -1117,10 +1117,56 @@ pub const Parser = struct {
         };
     }
 
-    // Grammar: memref-type ::= `memref` `<` dimension-list type (`,` layout-specification)? (`,` memory-space)? `>`
+    // Grammar: memref-type ::= ranked-memref-type | unranked-memref-type
+    // Grammar: ranked-memref-type ::= `memref` `<` dimension-list type (`,` layout-specification)? (`,` memory-space)? `>`
+    // Grammar: unranked-memref-type ::= `memref` `<` `*` `x` type (`,` memory-space)? `>`
     fn parseMemRefType(self: *Parser) !ast.MemRefType {
         _ = try self.expect(.langle);
 
+        // Check for unranked memref: memref<*xf32>
+        if (self.check(.star)) {
+            _ = self.advance(); // consume '*'
+
+            // Expect 'x' prefix in bare_id token (e.g., "xf32")
+            if (self.check(.bare_id) and self.current.lexeme.len > 0 and self.current.lexeme[0] == 'x') {
+                const lexeme = self.current.lexeme;
+                _ = self.advance();
+
+                // Parse element type from "xf32" -> "f32"
+                const element_type = try self.allocator.create(ast.Type);
+                const element_type_str = lexeme[1..]; // skip 'x'
+                var type_lexer = Lexer.init(element_type_str);
+                var type_parser = try Parser.init(self.allocator, &type_lexer);
+                defer type_parser.deinit();
+                element_type.* = try type_parser.parseType();
+
+                // Parse optional memory space
+                const memory_space: ?ast.AttributeValue = null;
+                if (self.match(&.{.comma})) {
+                    // Skip memory space for now
+                    var depth: usize = 1;
+                    while (depth > 0 and !self.isAtEnd()) {
+                        if (self.check(.langle)) depth += 1;
+                        if (self.check(.rangle)) {
+                            depth -= 1;
+                            if (depth == 0) break;
+                        }
+                        _ = self.advance();
+                    }
+                }
+
+                _ = try self.expect(.rangle);
+
+                return ast.MemRefType{
+                    .unranked = .{
+                        .element_type = element_type,
+                        .memory_space = memory_space,
+                    },
+                };
+            }
+        }
+
+        // Parse ranked memref
         var dimensions: std.ArrayList(ast.TensorType.Dimension) = .empty;
         errdefer dimensions.deinit(self.allocator);
 
@@ -1204,10 +1250,12 @@ pub const Parser = struct {
         _ = try self.expect(.rangle);
 
         return ast.MemRefType{
-            .dimensions = try dimensions.toOwnedSlice(self.allocator),
-            .element_type = element_type,
-            .layout = layout,
-            .memory_space = memory_space,
+            .ranked = .{
+                .dimensions = try dimensions.toOwnedSlice(self.allocator),
+                .element_type = element_type,
+                .layout = layout,
+                .memory_space = memory_space,
+            },
         };
     }
 

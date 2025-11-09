@@ -58,8 +58,7 @@ fn demo_ast_json() {
     // Simple number expression: 42
     let num_expr = Expr::SNum {
         l: loc.clone(),
-        n: 42.0,
-        original: Some("42".to_string()),
+        value: "42".to_string(),
     };
 
     // String expression: "Hello Pyret"

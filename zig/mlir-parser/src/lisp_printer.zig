@@ -628,15 +628,23 @@ pub const LispPrinter = struct {
             },
             .memref => |memref| {
                 try self.writer.writeAll("memref<");
-                for (memref.dimensions, 0..) |dim, i| {
-                    if (i > 0) try self.writer.writeByte('x');
-                    switch (dim) {
-                        .static => |s| try self.writer.print("{d}", .{s}),
-                        .dynamic => try self.writer.writeByte('?'),
-                    }
+                switch (memref) {
+                    .ranked => |ranked| {
+                        for (ranked.dimensions, 0..) |dim, i| {
+                            if (i > 0) try self.writer.writeByte('x');
+                            switch (dim) {
+                                .static => |s| try self.writer.print("{d}", .{s}),
+                                .dynamic => try self.writer.writeByte('?'),
+                            }
+                        }
+                        try self.writer.writeByte('x');
+                        try self.printType(ranked.element_type.*, .result_type);
+                    },
+                    .unranked => |unranked| {
+                        try self.writer.writeAll("*x");
+                        try self.printType(unranked.element_type.*, .result_type);
+                    },
                 }
-                try self.writer.writeByte('x');
-                try self.printType(memref.element_type.*, .result_type);
                 try self.writer.writeByte('>');
             },
             .vector => |vector| {

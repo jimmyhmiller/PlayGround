@@ -11,6 +11,26 @@ A grammar-driven recursive descent parser for MLIR (Multi-Level Intermediate Rep
 
 ## Quick Start
 
+### Installation
+
+Build and install all binaries globally:
+
+```bash
+./install.sh
+```
+
+This will:
+- Build the project with `zig build`
+- Install `mlir-to-lisp`, `mlir_parser`, and `debug_printer` to `~/.local/bin`
+- Create symlinks so you can use them from anywhere
+
+Make sure `~/.local/bin` is in your PATH:
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### Usage
+
 ```bash
 # Build everything
 zig build
@@ -18,8 +38,14 @@ zig build
 # Run tests
 zig build test
 
-# Convert MLIR to Lisp S-expressions
+# Convert MLIR to Lisp S-expressions (after installation)
+mlir-to-lisp myfile.mlir
+
+# Or run without installation
 zig build mlir-to-lisp -- myfile.mlir
+
+# Get help
+mlir-to-lisp --help
 ```
 
 ## Project Structure

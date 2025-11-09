@@ -522,9 +522,9 @@ pub enum Expr {
     // ========== Primitives ==========
 
     /// Number literal
-    /// Stores both the parsed float value and original string to preserve precision
+    /// Stores the number as a string to support arbitrary precision (like SFrac/SRfrac)
     #[serde(rename = "s-num")]
-    SNum { l: Loc, n: f64, #[serde(skip)] original: Option<String> },
+    SNum { l: Loc, value: String },
 
     /// Fraction literal (rational)
     #[serde(rename = "s-frac")]
@@ -1073,7 +1073,7 @@ pub enum IncludeSpec {
     SIncludeType { l: Loc, name: NameSpec },
 
     #[serde(rename = "s-include-data")]
-    SIncludeData { l: Loc, name: NameSpec },
+    SIncludeData { l: Loc, name: NameSpec, hidden: Vec<Name> },
 
     #[serde(rename = "s-include-module")]
     SIncludeModule { l: Loc, name: NameSpec },
