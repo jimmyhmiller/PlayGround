@@ -12,7 +12,6 @@
 /// - ideal-thorny-kingfisher: Parser accepts trailing tokens
 /// - oily-awkward-hedgehog: Parser accepts multiple expressions
 /// - reflecting-enchanting-caribou: Parser accepts invalid characters
-
 use pyret_attempt2::{Parser, Expr};
 use pyret_attempt2::tokenizer::Tokenizer;
 use pyret_attempt2::error::ParseError;
@@ -120,7 +119,7 @@ fn test_error_double_comma() {
 fn test_error_call_on_non_callable() {
     // This might actually parse, depending on implementation
     // The error would be semantic, not syntactic
-    let result = parse_expr("123(x)");
+    let _result = parse_expr("123(x)");
     // Could be valid syntax (number followed by call), but unusual
     // Document the behavior
 }
@@ -153,20 +152,20 @@ fn test_error_array_double_comma() {
 
 #[test]
 fn test_error_dot_without_field() {
-    let result = parse_expr("obj.");
-    assert!(result.is_err(), "Should error on dot without field name");
+    let _result = parse_expr("obj.");
+    assert!(_result.is_err(), "Should error on dot without field name");
 }
 
 #[test]
 fn test_error_dot_with_number() {
-    let result = parse_expr("obj.123");
-    assert!(result.is_err(), "Should error on dot with number (not an identifier)");
+    let _result = parse_expr("obj.123");
+    assert!(_result.is_err(), "Should error on dot with number (not an identifier)");
 }
 
 #[test]
 fn test_error_leading_dot() {
-    let result = parse_expr(".field");
-    assert!(result.is_err(), "Should error on leading dot");
+    let _result = parse_expr(".field");
+    assert!(_result.is_err(), "Should error on leading dot");
 }
 
 // ============================================================================
@@ -175,14 +174,14 @@ fn test_error_leading_dot() {
 
 #[test]
 fn test_error_empty_input() {
-    let result = parse_expr("");
-    assert!(result.is_err(), "Should error on empty input");
+    let _result = parse_expr("");
+    assert!(_result.is_err(), "Should error on empty input");
 }
 
 #[test]
 fn test_error_whitespace_only() {
-    let result = parse_expr("   ");
-    assert!(result.is_err(), "Should error on whitespace-only input");
+    let _result = parse_expr("   ");
+    assert!(_result.is_err(), "Should error on whitespace-only input");
 }
 
 #[test]
@@ -265,7 +264,7 @@ fn test_error_invalid_characters() {
 #[test]
 fn test_error_unicode_in_wrong_place() {
     // Unicode might be valid in strings but not in identifiers
-    let result = parse_expr("café");
+    let _result = parse_expr("café");
     // This depends on tokenizer behavior
 }
 
@@ -294,7 +293,7 @@ fn test_comparison_chains() {
 fn test_tabs_vs_spaces() {
     // Test that tabs and spaces are treated similarly
     let result1 = parse_expr("f(x)");
-    let result2 = parse_expr("f\t(x)"); // Tab instead of space
+    let _result2 = parse_expr("f\t(x)"); // Tab instead of space
 
     // Both should parse successfully
     assert!(result1.is_ok());
@@ -303,7 +302,7 @@ fn test_tabs_vs_spaces() {
 
 #[test]
 fn test_newlines_in_expressions() {
-    let result = parse_expr("1 +\n2");
+    let _result = parse_expr("1 +\n2");
     // Pyret's whitespace rules might make this valid or invalid
     // Document the behavior
 }

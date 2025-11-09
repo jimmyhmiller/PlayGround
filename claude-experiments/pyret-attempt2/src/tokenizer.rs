@@ -447,7 +447,7 @@ impl Tokenizer {
                             octal.push(c);
                             for _ in 0..2 {
                                 if let Some(&o) = chars.peek() {
-                                    if o >= '0' && o <= '7' {
+                                    if ('0'..='7').contains(&o) {
                                         octal.push(o);
                                         chars.next();
                                     } else {
@@ -1171,9 +1171,7 @@ impl Tokenizer {
             '[' => {
                 self.advance();
                 let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
-                let token_type = if self.prior_whitespace {
-                    TokenType::BrackSpace
-                } else if self.paren_is_for_exp {
+                let token_type = if self.prior_whitespace || self.paren_is_for_exp {
                     TokenType::BrackSpace
                 } else {
                     TokenType::BrackNoSpace
@@ -1204,9 +1202,7 @@ impl Tokenizer {
             '(' => {
                 self.advance();
                 let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
-                let token_type = if self.prior_whitespace {
-                    TokenType::ParenSpace
-                } else if self.paren_is_for_exp {
+                let token_type = if self.prior_whitespace || self.paren_is_for_exp {
                     TokenType::ParenSpace
                 } else {
                     TokenType::ParenNoSpace
@@ -1284,9 +1280,7 @@ impl Tokenizer {
             '<' => {
                 self.advance();
                 let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
-                let token_type = if self.prior_whitespace {
-                    TokenType::Lt
-                } else if self.paren_is_for_exp {
+                let token_type = if self.prior_whitespace || self.paren_is_for_exp {
                     TokenType::Lt
                 } else {
                     TokenType::LtNoSpace
@@ -1400,21 +1394,16 @@ impl Tokenizer {
 
     pub fn tokenize(&mut self) -> Vec<Token> {
         let mut tokens = Vec::new();
-        loop {
-            match self.next_token() {
-                Some(token) => {
-                    let is_eof = token.token_type == TokenType::Eof;
-                    // Skip whitespace and comment tokens
-                    if token.token_type != TokenType::Ws
-                        && token.token_type != TokenType::Comment
-                        && token.token_type != TokenType::BlockComment {
-                        tokens.push(token);
-                    }
-                    if is_eof {
-                        break;
-                    }
-                }
-                None => break,
+        while let Some(token) = self.next_token() {
+            let is_eof = token.token_type == TokenType::Eof;
+            // Skip whitespace and comment tokens
+            if token.token_type != TokenType::Ws
+                && token.token_type != TokenType::Comment
+                && token.token_type != TokenType::BlockComment {
+                tokens.push(token);
+            }
+            if is_eof {
+                break;
             }
         }
         tokens
@@ -1484,7 +1473,7 @@ mod tests {
 
         assert!(matches!(tokens[0].token_type, TokenType::ParenSpace | TokenType::ParenNoSpace));
         assert_eq!(tokens[1].token_type, TokenType::RParen);
-        assert_eq!(tokens[2].token_type, TokenType::LBrack);
+        assert!(matches!(tokens[2].token_type, TokenType::BrackSpace | TokenType::BrackNoSpace));
         assert_eq!(tokens[3].token_type, TokenType::RBrack);
         assert_eq!(tokens[4].token_type, TokenType::LBrace);
         assert_eq!(tokens[5].token_type, TokenType::RBrace);

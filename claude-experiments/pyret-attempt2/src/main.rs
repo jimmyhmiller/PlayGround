@@ -1,5 +1,4 @@
 use pyret_attempt2::{ast::*, tokenizer::Tokenizer};
-use serde_json;
 
 fn main() {
     println!("Pyret Parser - Phase 1: AST & Tokenizer");
@@ -104,7 +103,7 @@ mod tests {
         let mut tokenizer = Tokenizer::new(code);
         let tokens = tokenizer.tokenize();
 
-        assert!(tokens.len() > 0);
+        assert!(!tokens.is_empty());
         assert!(tokens.iter().any(|t| t.token_type == TokenType::Fun));
         assert!(tokens.iter().any(|t| t.token_type == TokenType::Name && t.value == "factorial"));
     }

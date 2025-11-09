@@ -1,4 +1,4 @@
-use pyret_attempt2::{Parser, Expr, Member, Name, ConstructModifier, LetBind, Bind, ForBind, Program, Provide};
+use pyret_attempt2::{Parser, Expr, Member, Name, ConstructModifier, LetBind, Bind, Program, Provide};
 use pyret_attempt2::tokenizer::Tokenizer;
 
 /// Helper to parse a string into an expression
@@ -1450,7 +1450,7 @@ fn test_parse_simple_let() {
     match expr {
         Expr::SLetExpr { binds, body, blocky, .. } => {
             assert_eq!(binds.len(), 1);
-            assert_eq!(blocky, false);
+            assert!(!blocky);
 
             // Check bind
             match &binds[0] {
@@ -1562,7 +1562,7 @@ fn test_parse_simple_for() {
 
     match expr {
         Expr::SFor { iterator, bindings, body, blocky, .. } => {
-            assert_eq!(blocky, false);
+            assert!(!blocky);
 
             // Check iterator is SId(map)
             match *iterator {

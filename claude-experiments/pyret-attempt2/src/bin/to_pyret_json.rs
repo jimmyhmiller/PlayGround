@@ -5,7 +5,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Read};
 use num_bigint::BigInt;
-use num_traits::{Zero, ToPrimitive, One};
+use num_traits::Zero;
 
 /// Convert a Loc to Pyret's srcloc string representation
 fn loc_to_srcloc_string(loc: &Loc) -> String {
@@ -28,8 +28,8 @@ fn decimal_string_to_fraction(s: &str) -> Option<(i64, i64)> {
     // Parse a decimal string like "2.034" to a fraction (2034, 1000)
     // Returns None if it doesn't contain a decimal point or can't be parsed
 
-    let (negative, s) = if s.starts_with('-') {
-        (true, &s[1..])
+    let (negative, s) = if let Some(stripped) = s.strip_prefix('-') {
+        (true, stripped)
     } else {
         (false, s)
     };
@@ -70,8 +70,8 @@ fn decimal_string_to_fraction(s: &str) -> Option<(i64, i64)> {
 fn expand_scientific_notation(s: &str) -> Option<String> {
     // Parse scientific notation: e.g., "1e300", "1.5e10", "-2e5"
     let s = s.trim();
-    let (s, negative) = if s.starts_with('-') {
-        (&s[1..], true)
+    let (s, negative) = if let Some(stripped) = s.strip_prefix('-') {
+        (stripped, true)
     } else {
         (s, false)
     };
@@ -113,15 +113,15 @@ fn expand_scientific_notation(s: &str) -> Option<String> {
                 if result.is_empty() {
                     result = "0".to_string();
                 }
-                return Some(if negative { format!("-{}", result) } else { result });
+                Some(if negative { format!("-{}", result) } else { result })
             } else {
                 // Would have a fractional part
-                return None;
+                None
             }
         } else {
             // No decimal point - simple case
             let result = format!("{}{}", mantissa_str, "0".repeat(exponent as usize));
-            return Some(if negative { format!("-{}", result) } else { result });
+            Some(if negative { format!("-{}", result) } else { result })
         }
     } else {
         // Negative exponent - create a fraction
@@ -191,8 +191,8 @@ fn gcd_bigint(a: &BigInt, b: &BigInt) -> BigInt {
 fn decimal_string_to_fraction_bigint(s: &str) -> Option<(BigInt, BigInt)> {
     // Parse decimal string using BigInt for arbitrary precision
 
-    let (negative, s) = if s.starts_with('-') {
-        (true, &s[1..])
+    let (negative, s) = if let Some(stripped) = s.strip_prefix('-') {
+        (true, stripped)
     } else {
         (false, s)
     };
@@ -366,7 +366,7 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                             let sci = format!("{:e}", n);
                             if let Some(e_pos) = sci.find('e') {
                                 if let Ok(exponent) = sci[e_pos+1..].parse::<i32>() {
-                                    if exponent >= -6 && exponent < 0 {
+                                    if (-6..0).contains(&exponent) {
                                         // Expand to decimal form
                                         // e.g., 1e-5 -> 0.00001
                                         format!("~{}", n)
@@ -500,7 +500,7 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
             json!({
                 "type": "s-instantiate",
                 "expr": expr_to_pyret_json(expr),
-                "params": params.iter().map(|a| ann_to_pyret_json(a)).collect::<Vec<_>>()
+                "params": params.iter().map(ann_to_pyret_json).collect::<Vec<_>>()
             })
         }
         Expr::SConstruct { modifier, constructor, values, .. } => {
@@ -553,26 +553,26 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
         Expr::SReactor { fields, .. } => {
             json!({
                 "type": "s-reactor",
-                "fields": fields.iter().map(|f| member_to_pyret_json(f)).collect::<Vec<_>>()
+                "fields": fields.iter().map(member_to_pyret_json).collect::<Vec<_>>()
             })
         }
         Expr::SObj { fields, .. } => {
             json!({
                 "type": "s-obj",
-                "fields": fields.iter().map(|f| member_to_pyret_json(f)).collect::<Vec<_>>()
+                "fields": fields.iter().map(member_to_pyret_json).collect::<Vec<_>>()
             })
         }
         Expr::SFun { name, params, args, ann, doc, body, check, check_loc, blocky, .. } => {
             json!({
                 "type": "s-fun",
                 "name": name,
-                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
-                "args": args.iter().map(|a| bind_to_pyret_json(a)).collect::<Vec<_>>(),
+                "params": params.iter().map(name_to_pyret_json).collect::<Vec<_>>(),
+                "args": args.iter().map(bind_to_pyret_json).collect::<Vec<_>>(),
                 "ann": ann_to_pyret_json(ann),
                 "doc": doc,
                 "body": expr_to_pyret_json(body),
                 "check": check.as_ref().map(|c| expr_to_pyret_json(c)),
-                "check-loc": check_loc.as_ref().map(|loc| loc_to_srcloc_string(loc)),
+                "check-loc": check_loc.as_ref().map(loc_to_srcloc_string),
                 "blocky": blocky
             })
         }
@@ -580,13 +580,13 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
             json!({
                 "type": "s-method",
                 "name": name,
-                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
-                "args": args.iter().map(|a| bind_to_pyret_json(a)).collect::<Vec<_>>(),
+                "params": params.iter().map(name_to_pyret_json).collect::<Vec<_>>(),
+                "args": args.iter().map(bind_to_pyret_json).collect::<Vec<_>>(),
                 "ann": ann_to_pyret_json(ann),
                 "doc": doc,
                 "body": expr_to_pyret_json(body),
                 "check": check.as_ref().map(|c| expr_to_pyret_json(c)),
-                "check-loc": check_loc.as_ref().map(|loc| loc_to_srcloc_string(loc)),
+                "check-loc": check_loc.as_ref().map(loc_to_srcloc_string),
                 "blocky": blocky
             })
         }
@@ -594,13 +594,13 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
             json!({
                 "type": "s-lam",
                 "name": name,
-                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
-                "args": args.iter().map(|a| bind_to_pyret_json(a)).collect::<Vec<_>>(),
+                "params": params.iter().map(name_to_pyret_json).collect::<Vec<_>>(),
+                "args": args.iter().map(bind_to_pyret_json).collect::<Vec<_>>(),
                 "ann": ann_to_pyret_json(ann),
                 "doc": doc,
                 "body": expr_to_pyret_json(body),
                 "check": check.as_ref().map(|c| expr_to_pyret_json(c)),
-                "check-loc": check_loc.as_ref().map(|loc| loc_to_srcloc_string(loc)),
+                "check-loc": check_loc.as_ref().map(loc_to_srcloc_string),
                 "blocky": blocky
             })
         }
@@ -632,14 +632,14 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
         Expr::SIf { branches, blocky, .. } => {
             json!({
                 "type": "s-if",
-                "branches": branches.iter().map(|b| if_branch_to_pyret_json(b)).collect::<Vec<_>>(),
+                "branches": branches.iter().map(if_branch_to_pyret_json).collect::<Vec<_>>(),
                 "blocky": blocky
             })
         }
         Expr::SIfElse { branches, _else, blocky, .. } => {
             json!({
                 "type": "s-if-else",
-                "branches": branches.iter().map(|b| if_branch_to_pyret_json(b)).collect::<Vec<_>>(),
+                "branches": branches.iter().map(if_branch_to_pyret_json).collect::<Vec<_>>(),
                 "else": expr_to_pyret_json(_else),
                 "blocky": blocky
             })
@@ -647,14 +647,14 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
         Expr::SIfPipe { branches, blocky, .. } => {
             json!({
                 "type": "s-if-pipe",
-                "branches": branches.iter().map(|b| if_pipe_branch_to_pyret_json(b)).collect::<Vec<_>>(),
+                "branches": branches.iter().map(if_pipe_branch_to_pyret_json).collect::<Vec<_>>(),
                 "blocky": blocky
             })
         }
         Expr::SIfPipeElse { branches, _else, blocky, .. } => {
             json!({
                 "type": "s-if-pipe-else",
-                "branches": branches.iter().map(|b| if_pipe_branch_to_pyret_json(b)).collect::<Vec<_>>(),
+                "branches": branches.iter().map(if_pipe_branch_to_pyret_json).collect::<Vec<_>>(),
                 "else": expr_to_pyret_json(_else),
                 "blocky": blocky
             })
@@ -663,7 +663,7 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
             json!({
                 "type": "s-for",
                 "iterator": expr_to_pyret_json(iterator),
-                "bindings": bindings.iter().map(|b| for_bind_to_pyret_json(b)).collect::<Vec<_>>(),
+                "bindings": bindings.iter().map(for_bind_to_pyret_json).collect::<Vec<_>>(),
                 "ann": ann_to_pyret_json(ann),
                 "body": expr_to_pyret_json(body),
                 "blocky": blocky
@@ -674,7 +674,7 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "type": "s-cases",
                 "typ": ann_to_pyret_json(typ),
                 "val": expr_to_pyret_json(val),
-                "branches": branches.iter().map(|b| cases_branch_to_pyret_json(b)).collect::<Vec<_>>(),
+                "branches": branches.iter().map(cases_branch_to_pyret_json).collect::<Vec<_>>(),
                 "blocky": blocky
             })
         }
@@ -683,7 +683,7 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 "type": "s-cases-else",
                 "typ": ann_to_pyret_json(typ),
                 "val": expr_to_pyret_json(val),
-                "branches": branches.iter().map(|b| cases_branch_to_pyret_json(b)).collect::<Vec<_>>(),
+                "branches": branches.iter().map(cases_branch_to_pyret_json).collect::<Vec<_>>(),
                 "else": expr_to_pyret_json(_else),
                 "blocky": blocky
             })
@@ -691,7 +691,7 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
         Expr::SLetExpr { binds, body, blocky, .. } => {
             json!({
                 "type": "s-let-expr",
-                "binds": binds.iter().map(|b| let_bind_to_pyret_json(b)).collect::<Vec<_>>(),
+                "binds": binds.iter().map(let_bind_to_pyret_json).collect::<Vec<_>>(),
                 "body": expr_to_pyret_json(body),
                 "blocky": blocky
             })
@@ -707,7 +707,7 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
         Expr::SLetrec { binds, body, blocky, .. } => {
             json!({
                 "type": "s-letrec",
-                "binds": binds.iter().map(|b| letrec_bind_to_pyret_json(b)).collect::<Vec<_>>(),
+                "binds": binds.iter().map(letrec_bind_to_pyret_json).collect::<Vec<_>>(),
                 "body": expr_to_pyret_json(body),
                 "blocky": blocky
             })
@@ -745,7 +745,7 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
             json!({
                 "type": "s-type",
                 "name": name_to_pyret_json(name),
-                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
+                "params": params.iter().map(name_to_pyret_json).collect::<Vec<_>>(),
                 "ann": ann_to_pyret_json(ann)
             })
         }
@@ -760,11 +760,11 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
             json!({
                 "type": "s-data",
                 "name": name,
-                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
+                "params": params.iter().map(name_to_pyret_json).collect::<Vec<_>>(),
                 "mixins": mixins.iter().map(|m| expr_to_pyret_json(m)).collect::<Vec<_>>(),
-                "variants": variants.iter().map(|v| variant_to_pyret_json(v)).collect::<Vec<_>>(),
-                "shared-members": shared_members.iter().map(|m| member_to_pyret_json(m)).collect::<Vec<_>>(),
-                "check-loc": check_loc.as_ref().map(|loc| loc_to_srcloc_string(loc)),
+                "variants": variants.iter().map(variant_to_pyret_json).collect::<Vec<_>>(),
+                "shared-members": shared_members.iter().map(member_to_pyret_json).collect::<Vec<_>>(),
+                "check-loc": check_loc.as_ref().map(loc_to_srcloc_string),
                 "check": check.as_ref().map(|c| expr_to_pyret_json(c))
             })
         }
@@ -772,11 +772,11 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
             json!({
                 "type": "s-data-expr",
                 "name": name,
-                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
+                "params": params.iter().map(name_to_pyret_json).collect::<Vec<_>>(),
                 "mixins": mixins.iter().map(|m| expr_to_pyret_json(m)).collect::<Vec<_>>(),
-                "variants": variants.iter().map(|v| variant_to_pyret_json(v)).collect::<Vec<_>>(),
-                "shared-members": shared_members.iter().map(|m| member_to_pyret_json(m)).collect::<Vec<_>>(),
-                "check-loc": check_loc.as_ref().map(|loc| loc_to_srcloc_string(loc)),
+                "variants": variants.iter().map(variant_to_pyret_json).collect::<Vec<_>>(),
+                "shared-members": shared_members.iter().map(member_to_pyret_json).collect::<Vec<_>>(),
+                "check-loc": check_loc.as_ref().map(loc_to_srcloc_string),
                 "check": check.as_ref().map(|c| expr_to_pyret_json(c))
             })
         }
@@ -798,21 +798,21 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
             json!({
                 "type": "s-extend",
                 "super": expr_to_pyret_json(supe),
-                "fields": fields.iter().map(|f| member_to_pyret_json(f)).collect::<Vec<_>>()
+                "fields": fields.iter().map(member_to_pyret_json).collect::<Vec<_>>()
             })
         }
         Expr::SUpdate { supe, fields, .. } => {
             json!({
                 "type": "s-update",
                 "super": expr_to_pyret_json(supe),
-                "fields": fields.iter().map(|f| member_to_pyret_json(f)).collect::<Vec<_>>()
+                "fields": fields.iter().map(member_to_pyret_json).collect::<Vec<_>>()
             })
         }
         Expr::SSpyBlock { message, contents, .. } => {
             json!({
                 "type": "s-spy-block",
                 "message": message.as_ref().map(|m| expr_to_pyret_json(m)),
-                "contents": contents.iter().map(|f| spy_field_to_pyret_json(f)).collect::<Vec<_>>()
+                "contents": contents.iter().map(spy_field_to_pyret_json).collect::<Vec<_>>()
             })
         }
         Expr::STable { headers, rows, .. } => {
@@ -837,7 +837,7 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                     "name": h.name,
                     "value": ann_to_pyret_json(&h.ann)
                 })).collect::<Vec<_>>(),
-                "spec": spec.iter().map(|s| load_table_spec_to_pyret_json(s)).collect::<Vec<_>>()
+                "spec": spec.iter().map(load_table_spec_to_pyret_json).collect::<Vec<_>>()
             })
         }
         Expr::STableExtract { column, table, .. } => {
@@ -851,7 +851,7 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
             json!({
                 "type": "s-contract",
                 "name": name_to_pyret_json(name),
-                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>(),
+                "params": params.iter().map(name_to_pyret_json).collect::<Vec<_>>(),
                 "ann": ann_to_pyret_json(ann)
             })
         }
@@ -902,14 +902,14 @@ fn member_to_pyret_json(member: &pyret_attempt2::Member) -> Value {
             json!({
                 "type": "s-method-field",
                 "ann": ann_to_pyret_json(ann),
-                "args": args.iter().map(|a| bind_to_pyret_json(a)).collect::<Vec<_>>(),
+                "args": args.iter().map(bind_to_pyret_json).collect::<Vec<_>>(),
                 "blocky": blocky,
                 "body": expr_to_pyret_json(body),
                 "check": check.as_ref().map(|c| expr_to_pyret_json(c)),
-                "check-loc": check_loc.as_ref().map(|loc| loc_to_srcloc_string(loc)),
+                "check-loc": check_loc.as_ref().map(loc_to_srcloc_string),
                 "doc": doc,
                 "name": name,
-                "params": params.iter().map(|p| name_to_pyret_json(p)).collect::<Vec<_>>()
+                "params": params.iter().map(name_to_pyret_json).collect::<Vec<_>>()
             })
         }
     }
@@ -931,15 +931,15 @@ fn variant_to_pyret_json(variant: &pyret_attempt2::Variant) -> Value {
             json!({
                 "type": "s-variant",
                 "name": name,
-                "members": members.iter().map(|m| variant_member_to_pyret_json(m)).collect::<Vec<_>>(),
-                "with-members": with_members.iter().map(|m| member_to_pyret_json(m)).collect::<Vec<_>>()
+                "members": members.iter().map(variant_member_to_pyret_json).collect::<Vec<_>>(),
+                "with-members": with_members.iter().map(member_to_pyret_json).collect::<Vec<_>>()
             })
         }
         Variant::SSingletonVariant { name, with_members, .. } => {
             json!({
                 "type": "s-singleton-variant",
                 "name": name,
-                "with-members": with_members.iter().map(|m| member_to_pyret_json(m)).collect::<Vec<_>>()
+                "with-members": with_members.iter().map(member_to_pyret_json).collect::<Vec<_>>()
             })
         }
     }
@@ -1093,7 +1093,7 @@ fn bind_to_pyret_json(bind: &pyret_attempt2::Bind) -> Value {
         Bind::STupleBind { fields, as_name, .. } => {
             json!({
                 "type": "s-tuple-bind",
-                "fields": fields.iter().map(|f| bind_to_pyret_json(f)).collect::<Vec<_>>(),
+                "fields": fields.iter().map(bind_to_pyret_json).collect::<Vec<_>>(),
                 "as-name": as_name.as_ref().map(|n| bind_to_pyret_json(n))
             })
         }
@@ -1131,7 +1131,7 @@ fn cases_branch_to_pyret_json(branch: &pyret_attempt2::CasesBranch) -> Value {
             json!({
                 "type": "s-cases-branch",
                 "name": name,
-                "args": args.iter().map(|a| cases_bind_to_pyret_json(a)).collect::<Vec<_>>(),
+                "args": args.iter().map(cases_bind_to_pyret_json).collect::<Vec<_>>(),
                 "body": expr_to_pyret_json(body)
             })
         }
@@ -1190,8 +1190,8 @@ fn program_to_pyret_json(program: &Program) -> Value {
         "type": "s-program",
         "provide": provide_to_pyret_json(&program._provide),
         "provided-types": provide_types_to_pyret_json(&program.provided_types),
-        "provides": program.provides.iter().map(|p| provide_block_to_pyret_json(p)).collect::<Vec<_>>(),
-        "imports": program.imports.iter().map(|i| import_to_pyret_json(i)).collect::<Vec<_>>(),
+        "provides": program.provides.iter().map(provide_block_to_pyret_json).collect::<Vec<_>>(),
+        "imports": program.imports.iter().map(import_to_pyret_json).collect::<Vec<_>>(),
         "body": expr_to_pyret_json(&program.body)
     });
 
@@ -1244,7 +1244,7 @@ fn provide_types_to_pyret_json(provide_types: &pyret_attempt2::ProvideTypes) -> 
         ProvideTypes::SProvideTypes { anns, .. } => {
             json!({
                 "type": "s-provide-types",
-                "anns": anns.iter().map(|a| a_field_to_pyret_json(a)).collect::<Vec<_>>()
+                "anns": anns.iter().map(a_field_to_pyret_json).collect::<Vec<_>>()
             })
         }
         ProvideTypes::SProvideTypesAll { .. } => {
@@ -1259,8 +1259,8 @@ fn provide_types_to_pyret_json(provide_types: &pyret_attempt2::ProvideTypes) -> 
 fn provide_block_to_pyret_json(provide_block: &pyret_attempt2::ProvideBlock) -> Value {
     json!({
         "type": "s-provide-block",
-        "path": provide_block.path.iter().map(|n| name_to_pyret_json(n)).collect::<Vec<_>>(),
-        "specs": provide_block.specs.iter().map(|s| provide_spec_to_pyret_json(s)).collect::<Vec<_>>()
+        "path": provide_block.path.iter().map(name_to_pyret_json).collect::<Vec<_>>(),
+        "specs": provide_block.specs.iter().map(provide_spec_to_pyret_json).collect::<Vec<_>>()
     })
 }
 
@@ -1283,7 +1283,7 @@ fn provide_spec_to_pyret_json(spec: &pyret_attempt2::ProvideSpec) -> Value {
             json!({
                 "type": "s-provide-data",
                 "name-spec": name_spec_to_pyret_json(name),
-                "hidden": hidden.iter().map(|h| name_to_pyret_json(h)).collect::<Vec<_>>()
+                "hidden": hidden.iter().map(name_to_pyret_json).collect::<Vec<_>>()
             })
         }
         ProvideSpec::SProvideModule { name, .. } => {
@@ -1307,8 +1307,8 @@ fn import_to_pyret_json(import: &pyret_attempt2::Import) -> Value {
         Import::SIncludeFrom { module_path, names, .. } => {
             json!({
                 "type": "s-include-from",
-                "mod": module_path.iter().map(|n| name_to_pyret_json(n)).collect::<Vec<_>>(),
-                "specs": names.iter().map(|n| include_spec_to_pyret_json(n)).collect::<Vec<_>>()
+                "mod": module_path.iter().map(name_to_pyret_json).collect::<Vec<_>>(),
+                "specs": names.iter().map(include_spec_to_pyret_json).collect::<Vec<_>>()
             })
         }
         Import::SImport { import, name, .. } => {
@@ -1321,7 +1321,7 @@ fn import_to_pyret_json(import: &pyret_attempt2::Import) -> Value {
         Import::SImportFields { fields, import, .. } => {
             json!({
                 "type": "s-import-fields",
-                "fields": fields.iter().map(|f| name_to_pyret_json(f)).collect::<Vec<_>>(),
+                "fields": fields.iter().map(name_to_pyret_json).collect::<Vec<_>>(),
                 "import-type": import_type_to_pyret_json(import)
             })
         }
@@ -1329,7 +1329,7 @@ fn import_to_pyret_json(import: &pyret_attempt2::Import) -> Value {
             json!({
                 "type": "s-import-types",
                 "import-type": import_type_to_pyret_json(import),
-                "types": types.iter().map(|t| name_to_pyret_json(t)).collect::<Vec<_>>(),
+                "types": types.iter().map(name_to_pyret_json).collect::<Vec<_>>(),
                 "name": name_to_pyret_json(name)
             })
         }
@@ -1374,7 +1374,7 @@ fn include_spec_to_pyret_json(spec: &pyret_attempt2::IncludeSpec) -> Value {
             json!({
                 "type": "s-include-data",
                 "name-spec": name_spec_to_pyret_json(name),
-                "hidden": hidden.iter().map(|h| name_to_pyret_json(h)).collect::<Vec<_>>()
+                "hidden": hidden.iter().map(name_to_pyret_json).collect::<Vec<_>>()
             })
         }
         IncludeSpec::SIncludeModule { name, .. } => {
@@ -1392,14 +1392,14 @@ fn name_spec_to_pyret_json(name_spec: &pyret_attempt2::NameSpec) -> Value {
         NameSpec::SStar { hidden, .. } => {
             json!({
                 "type": "s-star",
-                "hidden": hidden.iter().map(|n| name_to_pyret_json(n)).collect::<Vec<_>>()
+                "hidden": hidden.iter().map(name_to_pyret_json).collect::<Vec<_>>()
             })
         }
         NameSpec::SModuleRef { path, as_name, .. } => {
             json!({
                 "type": "s-module-ref",
-                "path": path.iter().map(|n| name_to_pyret_json(n)).collect::<Vec<_>>(),
-                "as-name": as_name.as_ref().map(|n| name_to_pyret_json(n)).unwrap_or(Value::Null)
+                "path": path.iter().map(name_to_pyret_json).collect::<Vec<_>>(),
+                "as-name": as_name.as_ref().map(name_to_pyret_json).unwrap_or(Value::Null)
             })
         }
         NameSpec::SRemoteRef { uri, name, .. } => {
