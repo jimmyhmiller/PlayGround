@@ -328,10 +328,19 @@ fn float_to_fraction_string(f: f64) -> String {
     }
 }
 
-fn format_scientific_notation(sci_str: &str, _value: f64) -> String {
-    // For now, just preserve the original scientific notation with lowercase 'e'
-    // Future: could normalize format (e.g., ensure mantissa is between 1 and 10)
-    sci_str.replace('E', "e")
+fn normalize_scientific_notation(sci: &str) -> String {
+    // Normalize scientific notation: lowercase 'e' and explicit '+' for positive exponents
+    // e.g., "1.5e308" -> "1.5e+308", "1.5e-10" -> "1.5e-10"
+    if sci.contains("e-") || sci.contains("E-") {
+        // Already has a sign (negative)
+        sci.replace('E', "e")
+    } else if sci.contains('e') || sci.contains('E') {
+        // Positive exponent - add explicit '+'
+        sci.replace('E', "e").replace("e", "e+")
+    } else {
+        // No exponent
+        sci.to_string()
+    }
 }
 
 fn expr_to_pyret_json(expr: &Expr) -> Value {
@@ -343,29 +352,69 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                 if value.starts_with('~') {
                     let without_tilde = value.strip_prefix('~').unwrap();
 
-                    // Parse to f64 to truncate to IEEE 754 double precision (17 significant digits)
-                    // This ensures we match Pyret's behavior
-                    if let Ok(n) = without_tilde.parse::<f64>() {
-                        // Format back to string - Rust's default f64 formatting gives us the right precision
-                        let normalized = format!("~{}", n);
+                    // If it contains scientific notation, may need to expand or keep it
+                    // Pyret expands ~1e-5 to ~0.00001 but keeps ~1e-7 as ~1e-7
+                    // The threshold appears to be exponent >= -6
+                    if without_tilde.contains('e') || without_tilde.contains('E') {
+                        // Parse to f64 to get the actual value
+                        if let Ok(n) = without_tilde.parse::<f64>() {
+                            // Determine if we should expand or use scientific notation
+                            // Pyret expands for exponents >= -6 (e.g., 1e-5, 1e-6)
+                            // but uses scientific notation for exponents < -6 (e.g., 1e-7, 1e-10)
 
-                        // Check if the normalized form is too long (e.g., ~0.000...005 with 324 zeros)
-                        // Convert very long decimals to scientific notation
-                        if normalized.len() > 50 {
+                            // First check the exponent
                             let sci = format!("{:e}", n);
-                            // Normalize: add + for positive exponents
-                            let sci_normalized = if sci.contains("e") && !sci.contains("e-") {
-                                sci.replace("e", "e+")
+                            if let Some(e_pos) = sci.find('e') {
+                                if let Ok(exponent) = sci[e_pos+1..].parse::<i32>() {
+                                    if exponent >= -6 && exponent < 0 {
+                                        // Expand to decimal form
+                                        // e.g., 1e-5 -> 0.00001
+                                        format!("~{}", n)
+                                    } else {
+                                        // Use scientific notation with normalized format
+                                        format!("~{}", normalize_scientific_notation(&sci))
+                                    }
+                                } else {
+                                    // Can't parse exponent - use scientific notation with normalization
+                                    format!("~{}", normalize_scientific_notation(&sci))
+                                }
                             } else {
-                                sci
-                            };
-                            format!("~{}", sci_normalized)
+                                // No exponent found - just use the number
+                                format!("~{}", n)
+                            }
                         } else {
-                            normalized
+                            // Parse failed - just normalize the 'e' to lowercase
+                            let normalized = without_tilde.replace('E', "e");
+                            format!("~{}", normalized)
                         }
                     } else {
-                        // Parse failed - keep original
-                        value.clone()
+                        // Not scientific notation - parse to f64 to truncate to IEEE 754 double precision (17 significant digits)
+                        // This ensures we match Pyret's behavior
+                        if let Ok(n) = without_tilde.parse::<f64>() {
+                            // Check the exponent to determine if we should use scientific notation
+                            // Pyret uses scientific notation for exponents < -6 (e.g., 1e-7)
+                            let sci = format!("{:e}", n);
+                            if let Some(e_pos) = sci.find('e') {
+                                if let Ok(exponent) = sci[e_pos+1..].parse::<i32>() {
+                                    if exponent < -6 {
+                                        // Use scientific notation with normalized format
+                                        format!("~{}", normalize_scientific_notation(&sci))
+                                    } else {
+                                        // Use decimal form
+                                        format!("~{}", n)
+                                    }
+                                } else {
+                                    // Can't parse exponent - use decimal form
+                                    format!("~{}", n)
+                                }
+                            } else {
+                                // No exponent found - use decimal form
+                                format!("~{}", n)
+                            }
+                        } else {
+                            // Parse failed - keep original
+                            value.clone()
+                        }
                     }
                 }
                 // For decimals (without scientific notation), convert to fraction

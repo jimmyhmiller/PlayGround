@@ -121,6 +121,7 @@ tests/pyret/tests/test-within.arr
 tests/pyret/tests/test-format.arr
 tests/pyret/tests/test-images.arr
 tests/pyret/tests/test-pprint.arr
+tests/pyret/tests/test-bar-chart.arr
 tests/pyret/tests/test-repl.arr
 tests/pyret/tests/test-tuple.arr
 tests/pyret/tests/test-constructors.arr
@@ -320,6 +321,7 @@ tests/type-check/good/occurrence-typing.arr
 tests/type-check/good/str-dict.arr
 tests/type-check/good/provide-data.arr
 tests/type-check/good/data-polymorphic-ref.arr
+tests/type-check/good/tests-because.arr
 tests/type-check/good/a-pred.arr
 tests/type-check/good/subtyping-and-bottom.arr
 tests/type-check/good/good-reactor.arr
@@ -392,6 +394,7 @@ src/arr/trove/valueskeleton.arr
 src/arr/trove/reactor-events.arr
 src/arr/trove/timing.arr
 src/arr/trove/sets.arr
+src/arr/trove/charts.arr
 src/arr/trove/either.arr
 src/arr/trove/vector-util.arr
 src/arr/trove/checker.arr
@@ -449,10 +452,12 @@ src/arr/compiler/compile-lib.arr
 src/arr/compiler/base.arr
 src/arr/compiler/js-ast.arr
 src/arr/compiler/cli-module-loader.arr
+src/arr/compiler/resolve-scope.arr
 src/arr/compiler/well-formed.arr
 src/arr/compiler/type-check.arr
 src/arr/compiler/list-aux.arr
 src/arr/compiler/anf-loop-compiler.arr
+src/arr/compiler/js-dag-utils.arr
 src/arr/compiler/type-check-structs.arr
 src/arr/compiler/libs.arr
 src/arr/compiler/repl.arr
