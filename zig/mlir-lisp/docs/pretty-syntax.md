@@ -122,22 +122,22 @@ Non‑Goals
             (op (gpu.terminator)))))))
 
 (defn main [] (-> () ())
-  (let [A? (cast (alloc memref<5xf32>) memref<?xf32>)
-        B? (cast (alloc memref<5xf32>) memref<?xf32>)
-        C? (cast (alloc memref<5xf32>) memref<?xf32>)
-        A* (cast A? memref<*xf32>)
-        B* (cast B? memref<*xf32>)
-        C* (cast C? memref<*xf32>)]
+  (let [A? (memref.cast (memref.alloc memref<5xf32>) memref<?xf32>)
+        B? (memref.cast (memref.alloc memref<5xf32>) memref<?xf32>)
+        C? (memref.cast (memref.alloc memref<5xf32>) memref<?xf32>)
+        A* (memref.cast A? memref<*xf32>)
+        B* (memref.cast B? memref<*xf32>)
+        C* (memref.cast C? memref<*xf32>)]
     (for [i 0 5 1]
-      (store 1.23 A? [i])
-      (store 1.23 B? [i]))
+      (memref.store 1.23 A? [i])
+      (memref.store 1.23 B? [i]))
     (gpu.host-register A*)
     (gpu.host-register B*)
     (gpu.host-register C*)
     (vecadd
-      (cast (mgpuMemGetDeviceMemRef1dFloat A? (memref<?xf32>)) memref<5xf32>)
-      (cast (mgpuMemGetDeviceMemRef1dFloat B? (memref<?xf32>)) memref<5xf32>)
-      (cast (mgpuMemGetDeviceMemRef1dFloat C? (memref<?xf32>)) memref<5xf32>))
+      (memref.cast (mgpuMemGetDeviceMemRef1dFloat A? (memref<?xf32>)) memref<5xf32>)
+      (memref.cast (mgpuMemGetDeviceMemRef1dFloat B? (memref<?xf32>)) memref<5xf32>)
+      (memref.cast (mgpuMemGetDeviceMemRef1dFloat C? (memref<?xf32>)) memref<5xf32>))
     (printMemrefF32 C* ())))
 
 
@@ -290,7 +290,7 @@ B) for
 Surface:
 
 (for [i 0 5 1]
-  (store 1.23 A? [i]))
+  (memref.store 1.23 A? [i]))
 
 Verbose:
 
@@ -362,20 +362,20 @@ Transform:
           (op (gpu.terminator)))))))
 
 (defn main [] (-> () ())
-  (let [A? (cast (alloc memref<5xf32>) memref<?xf32>)
-        B? (cast (alloc memref<5xf32>) memref<?xf32>)
-        C? (cast (alloc memref<5xf32>) memref<?xf32>)
-        A* (cast A? memref<*xf32>)
-        B* (cast B? memref<*xf32>)
-        C* (cast C? memref<*xf32>)]
+  (let [A? (memref.cast (memref.alloc memref<5xf32>) memref<?xf32>)
+        B? (memref.cast (memref.alloc memref<5xf32>) memref<?xf32>)
+        C? (memref.cast (memref.alloc memref<5xf32>) memref<?xf32>)
+        A* (memref.cast A? memref<*xf32>)
+        B* (memref.cast B? memref<*xf32>)
+        C* (memref.cast C? memref<*xf32>)]
     (for [i 0 5 1]
-      (store 1.23 A? [i])
-      (store 1.23 B? [i]))
+      (memref.store 1.23 A? [i])
+      (memref.store 1.23 B? [i]))
     (gpu.host-register A*)
     (gpu.host-register B*)
     (gpu.host-register C*)
     (vecadd
-      (cast (mgpuMemGetDeviceMemRef1dFloat A? (memref<?xf32>)) memref<5xf32>)
-      (cast (mgpuMemGetDeviceMemRef1dFloat B? (memref<?xf32>)) memref<5xf32>)
-      (cast (mgpuMemGetDeviceMemRef1dFloat C? (memref<?xf32>)) memref<5xf32>))
+      (memref.cast (mgpuMemGetDeviceMemRef1dFloat A? (memref<?xf32>)) memref<5xf32>)
+      (memref.cast (mgpuMemGetDeviceMemRef1dFloat B? (memref<?xf32>)) memref<5xf32>)
+      (memref.cast (mgpuMemGetDeviceMemRef1dFloat C? (memref<?xf32>)) memref<5xf32>))
     (printMemrefF32 C* ())))

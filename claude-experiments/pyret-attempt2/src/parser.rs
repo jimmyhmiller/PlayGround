@@ -2535,14 +2535,24 @@ impl Parser {
             TokenType::True | TokenType::False => self.parse_bool(),
             TokenType::String => self.parse_str(),
             TokenType::Name => self.parse_id_expr(),
-            TokenType::ParenSpace | TokenType::LParen => self.parse_paren_expr(),
+            TokenType::ParenSpace | TokenType::LParen | TokenType::ParenNoSpace => self.parse_paren_expr(),
             TokenType::BrackSpace | TokenType::LBrack => self.parse_construct_expr(),
             TokenType::LBrace => {
-                // Distinguish between curly brace lambda {(x): ...} and object {x: ...}
+                // Distinguish between curly brace lambda {(x): ...}, tuple {(x + 1); 2}, and object {x: 1}
                 // Peek ahead to see if next token is LParen or ParenSpace
                 let next_type = &self.peek_ahead(1).token_type;
                 if next_type == &TokenType::LParen || next_type == &TokenType::ParenSpace {
-                    self.parse_curly_lambda_expr()
+                    // Could be either curly-brace lambda or tuple with parenthesized expression
+                    // Try parsing as curly-brace lambda first
+                    let checkpoint = self.checkpoint();
+                    match self.parse_curly_lambda_expr() {
+                        Ok(expr) => Ok(expr),
+                        Err(_) => {
+                            // Failed to parse as lambda, restore and try as object/tuple
+                            self.restore(checkpoint);
+                            self.parse_obj_expr()
+                        }
+                    }
                 } else {
                     self.parse_obj_expr()
                 }
@@ -2921,9 +2931,11 @@ impl Parser {
     /// paren-expr: LPAREN expr RPAREN | PARENSPACE expr RPAREN
     /// Parenthesized expression (with whitespace before paren)
     fn parse_paren_expr(&mut self) -> ParseResult<Expr> {
-        // Expect ParenSpace or LParen token
+        // Expect ParenSpace, LParen, or ParenNoSpace token
         let start = if self.matches(&TokenType::ParenSpace) {
             self.expect(TokenType::ParenSpace)?
+        } else if self.matches(&TokenType::ParenNoSpace) {
+            self.expect(TokenType::ParenNoSpace)?
         } else {
             self.expect(TokenType::LParen)?
         };
@@ -3054,7 +3066,7 @@ impl Parser {
         } else {
             // Otherwise, parse an expression and check what follows
             // Save position to potentially backtrack
-            let checkpoint = self.current;
+            let checkpoint = self.checkpoint();
 
             // Try parsing as expression
             match self.parse_expr() {
@@ -3062,14 +3074,12 @@ impl Parser {
                     // Check what comes after the expression
                     let is_tuple = self.matches(&TokenType::Semi);
                     // Restore position to re-parse
-                    self.current = checkpoint;
-                    self.position = checkpoint;
+                    self.restore(checkpoint);
                     is_tuple
                 }
                 Err(_) => {
                     // Failed to parse as expression, assume object
-                    self.current = checkpoint;
-                    self.position = checkpoint;
+                    self.restore(checkpoint);
                     false
                 }
             }
@@ -3823,12 +3833,15 @@ impl Parser {
 
                 // Check if next tokens look like "binding FROM" (for-bindings)
                 // or just an expression (function call args)
-                let is_for_binding = if self.matches(&TokenType::Name) {
-                    // Peek ahead to see if there's a FROM, Shadow, or :: after the name
-                    // Pattern can be: "name FROM", "shadow name FROM", or "name :: Type FROM"
+                let is_for_binding = if self.matches(&TokenType::Shadow) {
+                    // Starts with "shadow" - definitely a for-binding
+                    // Pattern: "shadow name FROM" or "shadow name :: Type FROM"
+                    true
+                } else if self.matches(&TokenType::Name) {
+                    // Peek ahead to see if there's a FROM or :: after the name
+                    // Pattern can be: "name FROM" or "name :: Type FROM"
                     let next_tok = self.peek_ahead(1);
                     next_tok.token_type == TokenType::From
-                        || next_tok.token_type == TokenType::Shadow
                         || next_tok.token_type == TokenType::ColonColon  // Type annotation
                 } else if self.matches(&TokenType::LBrace) {
                     // Could be tuple binding {x; y} FROM ...
