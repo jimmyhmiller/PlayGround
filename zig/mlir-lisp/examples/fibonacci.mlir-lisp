@@ -25,7 +25,7 @@
     (regions
       (region
         (block [^entry]
-          (arguments [ [%n i32] ])
+          (arguments [ (: %n i32) ])
 
           ;; Check if n <= 1 (base case)
           (operation

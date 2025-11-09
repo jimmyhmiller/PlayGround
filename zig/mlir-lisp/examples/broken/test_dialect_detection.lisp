@@ -12,7 +12,7 @@
 ;; A placeholder transform operation
 (operation
   (name transform.sequence)
-  (attributes {})
+  (attributes {:failure_propagation_mode (: 1 i32)})
   (regions (region)))
 
 ;; Regular program code

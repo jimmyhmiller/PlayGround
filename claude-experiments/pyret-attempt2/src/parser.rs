@@ -25,7 +25,7 @@ impl Parser {
         // Filter out comments and block comments as they're not part of the AST
         let tokens: Vec<Token> = tokens
             .into_iter()
-            .filter(|t| !matches!(t.token_type, TokenType::Comment | TokenType::BlockComment))
+            .filter(|t| !matches!(t.token_type, TokenType::Comment | TokenType::BlockComment | TokenType::UnterminatedBlockComment))
             .collect();
 
         Parser {
@@ -5053,8 +5053,14 @@ impl Parser {
         // Expect closing paren
         self.expect(TokenType::RParen)?;
 
-        // Expect colon before body
-        self.expect(TokenType::Colon)?;
+        // Check if this is a blocky lambda {(x) block: ...} or regular {(x): ...}
+        let blocky = if self.matches(&TokenType::Block) {
+            self.expect(TokenType::Block)?;
+            true
+        } else {
+            self.expect(TokenType::Colon)?;
+            false
+        };
 
         // Parse body as a block of statements
         // Body continues until we hit the closing brace
@@ -5083,7 +5089,7 @@ impl Parser {
             body: Box::new(body),
             check_loc: None,
             check: None,
-            blocky: false,       // Curly brace lambdas are not blocky
+            blocky,              // Set based on whether block: or : was used
         })
     }
 

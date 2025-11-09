@@ -17,7 +17,7 @@
     (regions
       (region
         (block [^entry]
-          (arguments [ [%arg0 !my_vec] [%arg1 !my_vec] ])
+          (arguments [ (: %arg0 !my_vec) (: %arg1 !my_vec) ])
 
           ;; Add the two vectors (placeholder operation)
           (operation

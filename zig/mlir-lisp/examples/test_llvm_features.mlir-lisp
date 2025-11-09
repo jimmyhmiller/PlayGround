@@ -12,7 +12,7 @@
     (regions
       (region
         (block [^entry]
-          (arguments [ [%arg0 !llvm.ptr] [%arg1 !llvm.ptr] ])
+          (arguments [ (: %arg0 !llvm.ptr) (: %arg1 !llvm.ptr) ])
 
           (operation
             (name llvm.icmp)
@@ -35,7 +35,7 @@
     (regions
       (region
         (block [^entry]
-          (arguments [ [%cond i1] [%val i32] ])
+          (arguments [ (: %cond i1) (: %val i32) ])
 
           ;; Conditional branch to ^bb1 or ^bb2
           (operation
@@ -47,7 +47,7 @@
 
         ;; Block with argument
         (block [^bb1]
-          (arguments [ [%arg i32] ])
+          (arguments [ (: %arg i32) ])
 
           (operation
             (name llvm.mlir.constant)
@@ -83,7 +83,7 @@
 
         ;; Common successor with block argument
         (block [^bb3]
-          (arguments [ [%result i32] ])
+          (arguments [ (: %result i32) ])
 
           (operation
             (name llvm.return)
@@ -103,7 +103,7 @@
     (regions
       (region
         (block [^entry]
-          (arguments [ [%ptr !llvm.ptr] ])
+          (arguments [ (: %ptr !llvm.ptr) ])
 
           (operation
             (name llvm.load)
@@ -137,7 +137,7 @@
     (regions
       (region
         (block [^entry]
-          (arguments [ [%x i32] ])
+          (arguments [ (: %x i32) ])
 
           (operation
             (name llvm.mlir.zero)
