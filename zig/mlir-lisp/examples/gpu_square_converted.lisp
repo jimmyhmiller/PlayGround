@@ -33,16 +33,16 @@
                             (name memref.load)
                             (result-bindings [%7])
                             (result-types f32)
-                            (operand-uses %arg0 %5 %6))
+                            (operands %arg0 %5 %6))
                           (operation
                             (name arith.mulf)
                             (result-bindings [%8])
                             (result-types f32)
-                            (operand-uses %7 %7)
+                            (operands %7 %7)
                             (attributes {:fastmath #arith.fastmath<none>}))
                           (operation
                             (name memref.store)
-                            (operand-uses %8 %arg1 %5 %6))
+                            (operands %8 %arg1 %5 %6))
                           (operation
                             (name gpu.return))))))))))
           (operation
@@ -84,35 +84,35 @@
                     (attributes {:operandSegmentSizes array<i32: 0, 0>}))
                   (operation
                     (name scf.for)
-                    (operand-uses %c0 %c10 %c1)
+                    (operands %c0 %c10 %c1)
                     (regions
                       (region
                         (block [^loop1]
                           (arguments [(: %i index)])
                           (operation
                             (name scf.for)
-                            (operand-uses %c0 %c10 %c1)
+                            (operands %c0 %c10 %c1)
                             (regions
                               (region
                                 (block [^loop2]
                                   (arguments [(: %j index)])
                                   (operation
                                     (name memref.store)
-                                    (operand-uses %f5 %input %i %j))
+                                    (operands %f5 %input %i %j))
                                   (operation
                                     (name scf.yield))))))
                           (operation
                             (name scf.yield))))))
                   (operation
                     (name gpu.launch_func)
-                    (operand-uses %c10 %c1 %c1 %c10 %c1 %c1 %input %output)
+                    (operands %c10 %c1 %c1 %c10 %c1 %c1 %input %output)
                     (attributes {:kernel @kernel_module::@square_kernel :operandSegmentSizes array<i32: 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 2, 0>}))
                   (operation
                     (name memref.dealloc)
-                    (operand-uses %input))
+                    (operands %input))
                   (operation
                     (name memref.dealloc)
-                    (operand-uses %output))
+                    (operands %output))
                   (operation
                     (name arith.constant)
                     (result-bindings [%4])
@@ -120,4 +120,4 @@
                     (attributes {:value (: 0 i64)}))
                   (operation
                     (name func.return)
-                    (operand-uses %4))))))))))
+                    (operands %4))))))))))

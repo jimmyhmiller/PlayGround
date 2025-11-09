@@ -24,13 +24,13 @@
   (op (scf.for [%c0 %M %c1]
            (region
             (block
-                (arguments [ (: %i index) ])
+                (arguments [ (: %i index)])
 
               ;; Middle loop: for j = 0 to N
               (op (scf.for [(constant (: 0 index)) %N %c1]
                        (region
                         (block
-                            (arguments [ (: %j index) ])
+                            (arguments [ (: %j index)])
 
                           ;; Load initial value from C[i,j] for accumulation
                           (op %acc_init (: f32) (memref.load [%C %i %j]))
@@ -40,7 +40,7 @@
                               (scf.for [%c0 %K %c1 %acc_init]
                                    (region
                                     (block
-                                        (arguments [ (: %k index) (: %acc f32) ])
+                                        (arguments [ (: %k index) (: %acc f32)])
 
                                       ;; Load A[i, k]
                                       (op %a (: f32) (memref.load [%A %i %k]))
@@ -80,7 +80,7 @@
   ;; Allocate matrices using op macro
   (op %A (: memref<2x3xf32>) (memref.alloc []))
   (op %B (: memref<3x2xf32>) (memref.alloc []))
-  (op %C (: memref<2x2xf32>) (memref.alloc []))
+  (op %C (: memref<2x2xf32>) (memref.alloc [])
 
   ;; Initialize A using op macro
       (op (memref.store [(constant (: 1.0 f32)) %A (constant (: 0 index)) (constant (: 0 index))]))
@@ -117,4 +117,4 @@
       (op %result_i64 (: i64) (arith.fptosi [%result_f32]))
 
       ;; Return the result
-      (return %result_i64))
+      (return %result_i64)))

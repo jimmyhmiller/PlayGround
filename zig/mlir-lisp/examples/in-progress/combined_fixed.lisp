@@ -34,13 +34,13 @@
                 (operation
                   (name irdl.operands)
                   (attributes {:names ["value"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))
+                  (operands %ptr_type))
 
                 ;; Result: !llvm.ptr (CValueLayout*)
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))))))
+                  (operands %ptr_type))))))
 
         ;; =====================================
         ;; mlsp.number - Create number atom
@@ -58,13 +58,13 @@
                 (operation
                   (name irdl.operands)
                   (attributes {:names ["value"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))
+                  (operands %ptr_type))
 
                 ;; Result: !llvm.ptr (CValueLayout*)
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))))))
+                  (operands %ptr_type))))))
 
         ;; =====================================
         ;; mlsp.string - Create string atom
@@ -82,13 +82,13 @@
                 (operation
                   (name irdl.operands)
                   (attributes {:names ["value"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))
+                  (operands %ptr_type))
 
                 ;; Result: !llvm.ptr (CValueLayout*)
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))))))
+                  (operands %ptr_type))))))
 
         ;; =====================================
         ;; mlsp.list - Create list from elements
@@ -106,13 +106,13 @@
                 (operation
                   (name irdl.operands)
                   (attributes {:names ["elements"] :variadicity #irdl<variadicity_array[ variadic]>})
-                  (operand-uses %ptr_type))
+                  (operands %ptr_type))
 
                 ;; Result: !llvm.ptr (CValueLayout*)
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))))))
+                  (operands %ptr_type))))))
 
         ;; =====================================
         ;; mlsp.vector - Create vector from elements
@@ -130,13 +130,13 @@
                 (operation
                   (name irdl.operands)
                   (attributes {:names ["elements"] :variadicity #irdl<variadicity_array[ variadic]>})
-                  (operand-uses %ptr_type))
+                  (operands %ptr_type))
 
                 ;; Result: !llvm.ptr (CValueLayout*)
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))))))
+                  (operands %ptr_type))))))
 
         ;; =====================================
         ;; mlsp.get_element - Extract list element by index
@@ -154,20 +154,20 @@
                 (operation
                   (name irdl.operands)
                   (attributes {:names ["list"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))
+                  (operands %ptr_type))
 
                 ;; Operand 2: index value
                 (op %i64_type (: !irdl.attribute) (irdl.is {:expected i64} []))
                 (operation
                   (name irdl.operands)
                   (attributes {:names ["index"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %i64_type))
+                  (operands %i64_type))
 
                 ;; Result: !llvm.ptr (CValueLayout*)
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))))))
+                  (operands %ptr_type))))))
 
         ;; =====================================
         ;; mlsp.string_const - Reference global string
@@ -185,14 +185,14 @@
                 (operation
                   (name irdl.attributes)
                   (attributes {:attributeValueNames ["global"]})
-                  (operand-uses %sym_attr))
+                  (operands %sym_attr))
 
                 ;; Result: !llvm.ptr
                 (op %ptr_type (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))))))
+                  (operands %ptr_type))))))
 
         ;; =====================================
         ;; mlsp.build_operation - High-level operation builder
@@ -210,28 +210,28 @@
                 (operation
                   (name irdl.operands)
                   (attributes {:names ["name"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type1))
+                  (operands %ptr_type1))
 
                 ;; Operand 2: result_types
                 (op %ptr_type2 (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
                 (operation
                   (name irdl.operands)
                   (attributes {:names ["result_types"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type2))
+                  (operands %ptr_type2))
 
                 ;; Operand 3: operands
                 (op %ptr_type3 (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
                 (operation
                   (name irdl.operands)
                   (attributes {:names ["operands"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type3))
+                  (operands %ptr_type3))
 
                 ;; Result: !llvm.ptr (CValueLayout*)
                 (op %ptr_result (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_result))))))))))
+                  (operands %ptr_result))))))))))
 
 ;; ========================================
 ;; PART 2: PDL Transform Patterns
@@ -256,7 +256,7 @@
                 ;; Apply the PDL patterns defined below
                 (operation
                   (name transform.with_pdl_patterns)
-                  (operand-uses %arg0)
+                  (operands %arg0)))))
           (regions
             (region
               (block [^bb0]
@@ -279,14 +279,14 @@
                           (result-types !pdl.type))
                         (operation
                           (name pdl.operand)
-                          (operand-uses %ptr_type)
+                          (operands %ptr_type)
                           (result-bindings [%str_val])
                           (result-types !pdl.value))
                         (operation
                           (name pdl.operation)
-                          (attributes {:opName "mlsp.identifier"
-                                     :operandSegmentSizes array<i32: 1, 0, 1>})
-                          (operand-uses %str_val %ptr_type)
+                          (attributes {:opName "mlsp.identifier"}
+                                     :operandSegmentSizes array<i32: 1, 0, 1>)
+                          (operands %str_val %ptr_type)
                           (result-bindings [%mlsp_op])
                           (result-types !pdl.operation))
 
@@ -294,7 +294,7 @@
                         (operation
                           (name pdl.rewrite)
                           (attributes {:operandSegmentSizes array<i32: 1, 0>})
-                          (operand-uses %mlsp_op)
+                          (operands %mlsp_op)
                           (regions
                             (region
                               (block
@@ -308,17 +308,17 @@
                                 ;; For now: placeholder - replace with call to helper function
                                 (operation
                                   (name pdl.operation)
-                                  (attributes {:opName "llvm.call"
+                                  (attributes {:opName "llvm.call"}
                                              :attributeValueNames ["callee"]
-                                             :operandSegmentSizes array<i32: 1, 0, 1>})
-                                  (operand-uses %str_val %ptr_type)
+                                             :operandSegmentSizes array<i32: 1, 0, 1>)
+                                  (operands %str_val %ptr_type)
                                   (result-bindings [%result_op])
                                   (result-types !pdl.operation))
 
                                 (operation
                                   (name pdl.replace)
                                   (attributes {:operandSegmentSizes array<i32: 1, 1, 0>})
-                                  (operand-uses %mlsp_op %result_op))))))))))
+                                  (operands %mlsp_op %result_op))))))))))
 
                 ;; =====================================
                 ;; Pattern: mlsp.list → LLVM
@@ -337,7 +337,7 @@
                           (result-types !pdl.range<type>))
                         (operation
                           (name pdl.operands)
-                          (operand-uses %elem_types)
+                          (operands %elem_types)
                           (result-bindings [%elements])
                           (result-types !pdl.range<value>))
                         (operation
@@ -346,9 +346,9 @@
                           (result-types !pdl.type))
                         (operation
                           (name pdl.operation)
-                          (attributes {:opName "mlsp.list"
-                                     :operandSegmentSizes array<i32: 1, 0, 1>})
-                          (operand-uses %elements %ptr_type)
+                          (attributes {:opName "mlsp.list"}
+                                     :operandSegmentSizes array<i32: 1, 0, 1>)
+                          (operands %elements %ptr_type)
                           (result-bindings [%mlsp_op])
                           (result-types !pdl.operation))
 
@@ -356,7 +356,7 @@
                         (operation
                           (name pdl.rewrite)
                           (attributes {:operandSegmentSizes array<i32: 1, 0>})
-                          (operand-uses %mlsp_op)
+                          (operands %mlsp_op)
                           (regions
                             (region
                               (block
@@ -372,17 +372,17 @@
                                 ;; For now: placeholder
                                 (operation
                                   (name pdl.operation)
-                                  (attributes {:opName "llvm.call"
+                                  (attributes {:opName "llvm.call"}
                                              :attributeValueNames ["callee"]
-                                             :operandSegmentSizes array<i32: 1, 0, 1>})
-                                  (operand-uses %elements %ptr_type)
+                                             :operandSegmentSizes array<i32: 1, 0, 1>)
+                                  (operands %elements %ptr_type)
                                   (result-bindings [%result_op])
                                   (result-types !pdl.operation))
 
                                 (operation
                                   (name pdl.replace)
                                   (attributes {:operandSegmentSizes array<i32: 1, 1, 0>})
-                                  (operand-uses %mlsp_op %result_op))))))))))
+                                  (operands %mlsp_op %result_op))))))))))
 
                 ;; =====================================
                 ;; Pattern: mlsp.get_element → LLVM
@@ -405,19 +405,19 @@
                           (result-types !pdl.type))
                         (operation
                           (name pdl.operand)
-                          (operand-uses %ptr_type)
+                          (operands %ptr_type)
                           (result-bindings [%list_val])
                           (result-types !pdl.value))
                         (operation
                           (name pdl.operand)
-                          (operand-uses %i64_type)
+                          (operands %i64_type)
                           (result-bindings [%index_val])
                           (result-types !pdl.value))
                         (operation
                           (name pdl.operation)
-                          (attributes {:opName "mlsp.get_element"
-                                     :operandSegmentSizes array<i32: 2, 0, 1>})
-                          (operand-uses %list_val %index_val %ptr_type)
+                          (attributes {:opName "mlsp.get_element"}
+                                     :operandSegmentSizes array<i32: 2, 0, 1>)
+                          (operands %list_val %index_val %ptr_type)
                           (result-bindings [%mlsp_op])
                           (result-types !pdl.operation))
 
@@ -425,7 +425,7 @@
                         (operation
                           (name pdl.rewrite)
                           (attributes {:operandSegmentSizes array<i32: 1, 0>})
-                          (operand-uses %mlsp_op)
+                          (operands %mlsp_op)
                           (regions
                             (region
                               (block
@@ -438,17 +438,17 @@
                                 ;; For now: placeholder
                                 (operation
                                   (name pdl.operation)
-                                  (attributes {:opName "llvm.call"
+                                  (attributes {:opName "llvm.call"}
                                              :attributeValueNames ["callee"]
-                                             :operandSegmentSizes array<i32: 2, 0, 1>})
-                                  (operand-uses %list_val %index_val %ptr_type)
+                                             :operandSegmentSizes array<i32: 2, 0, 1>)
+                                  (operands %list_val %index_val %ptr_type)
                                   (result-bindings [%result_op])
                                   (result-types !pdl.operation))
 
                                 (operation
                                   (name pdl.replace)
                                   (attributes {:operandSegmentSizes array<i32: 1, 1, 0>})
-                                  (operand-uses %mlsp_op %result_op))))))))))
+                                  (operands %mlsp_op %result_op))))))))))
 
                 ;; =====================================
                 ;; Pattern: mlsp.string_const → LLVM
@@ -470,14 +470,14 @@
                           (name pdl.operation)
                           (result-bindings [%mlsp_op])
                           (result-types !pdl.operation)
-                          (operand-uses %ptr_type)
-                          (attributes {:opName "mlsp.string_const"
-                                     :operandSegmentSizes array<i32: 0, 0, 1>}))
+                          (operands %ptr_type)
+                          (attributes {:opName "mlsp.string_const"}
+                                     :operandSegmentSizes array<i32: 0, 0, 1>))
 
                         ;; Rewrite to llvm.mlir.zero
                         (operation
                           (name pdl.rewrite)
-                          (operand-uses %mlsp_op)
+                          (operands %mlsp_op)
                           (attributes {:operandSegmentSizes array<i32: 1, 0>})
                           (regions
                             (region
@@ -486,22 +486,22 @@
                                   (name pdl.operation)
                                   (result-bindings [%zero_op])
                                   (result-types !pdl.operation)
-                                  (operand-uses %ptr_type)
-                                  (attributes {:attributeValueNames []
+                                  (operands %ptr_type)
+                                  (attributes {:attributeValueNames []}
                                              :opName "llvm.mlir.zero"
-                                             :operandSegmentSizes array<i32: 0, 0, 1>}))
+                                             :operandSegmentSizes array<i32: 0, 0, 1>))
 
                                 (operation
                                   (name pdl.replace)
-                                  (operand-uses %mlsp_op %zero_op)
+                                  (operands %mlsp_op %zero_op)
                                   (attributes {:operandSegmentSizes array<i32: 1, 1, 0>}))))))))))
 
                 ;; Transform sequence to apply all patterns
                 (operation
                   (name transform.sequence)
-                  (attributes {:failure_propagation_mode (: 1 i32)
-                             :operandSegmentSizes array<i32: 1, 0>})
-                  (operand-uses %payload)
+                  (attributes {:failure_propagation_mode (: 1 i32)}
+                             :operandSegmentSizes array<i32: 1, 0>)
+                  (operands %payload)
                   (result-types !transform.any_op)
                   (regions
                     (region
@@ -513,7 +513,7 @@
                         ;; (operation
                         ;;   (name transform.pdl_match)
                         ;;   (attributes {:pattern_name @mlsp_identifier_to_llvm})
-                        ;;   (operand-uses %arg1)
+                        ;;   (operands %arg1)
                         ;;   (result-bindings [%matched1])
                         ;;   (result-types !transform.any_op))
 
@@ -521,7 +521,7 @@
                         ;; (operation
                         ;;   (name transform.pdl_match)
                         ;;   (attributes {:pattern_name @mlsp_list_to_llvm})
-                        ;;   (operand-uses %arg1)
+                        ;;   (operands %arg1)
                         ;;   (result-bindings [%matched2])
                         ;;   (result-types !transform.any_op))
 
@@ -529,7 +529,7 @@
                         ;; (operation
                         ;;   (name transform.pdl_match)
                         ;;   (attributes {:pattern_name @mlsp_get_element_to_llvm})
-                        ;;   (operand-uses %arg1)
+                        ;;   (operands %arg1)
                         ;;   (result-bindings [%matched3])
                         ;;   (result-types !transform.any_op))
 
@@ -537,16 +537,16 @@
                         (operation
                           (name transform.pdl_match)
                           (attributes {:pattern_name @mlsp_string_const_to_llvm})
-                          (operand-uses %arg1)
+                          (operands %arg1)
                           (result-bindings [%matched4])
                           (result-types !transform.any_op))
 
                         (operation
-                          (name transform.yield)))))))))
+                          (name transform.yield))))))
 
                 ;; Yield from the named sequence
                 (operation
-                  (name transform.yield)))))))))))
+                  (name transform.yield))))))))))
 ;; + macro using MLSP dialect operations
 ;;
 ;; This version demonstrates the mlsp dialect by reimplementing the addMacro

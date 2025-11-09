@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn test_ast_serialization() {
         let loc = Loc::new("test.arr".to_string(), 1, 0, 0, 1, 1, 1);
-        let expr = Expr::SNum { l: loc, n: 123.0, original: Some("123".to_string()) };
+        let expr = Expr::SNum { l: loc, value: "123".to_string() };
 
         let json = serde_json::to_string(&expr).unwrap();
         assert!(json.contains("\"type\":\"s-num\""));

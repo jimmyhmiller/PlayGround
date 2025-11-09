@@ -144,7 +144,7 @@ Identifier/string operations accept any attribute type for flexibility:
 (op %any_attr (: !irdl.attribute) (irdl.any []))
 (operation (name irdl.attributes)
            (attributes {:attributeValueNames ["value"]})
-           (operand-uses %any_attr))
+           (operands %any_attr))
 ```
 
 Allows both symbol references (`@str_test`) and inline strings (`"test"`).
@@ -162,7 +162,7 @@ Future: Could add `!mlsp.value` opaque type for better safety.
 (operation (name irdl.operands)
            (attributes {:names ["elements"]
                        :variadicity #irdl<variadicity_array[ variadic]>})
-           (operand-uses %ptr_type))
+           (operands %ptr_type))
 ```
 
 Handles arbitrary number of children naturally.

@@ -536,7 +536,7 @@ pub const Parser = struct {
                 operation.result_bindings = try self.parseResultBindings(section);
             } else if (std.mem.eql(u8, name, "result-types")) {
                 operation.result_types = try self.parseResultTypes(section);
-            } else if (std.mem.eql(u8, name, "operand-uses") or std.mem.eql(u8, name, "operands")) {
+            } else if (std.mem.eql(u8, name, "operands")) {
                 operation.operands = try self.parseOperands(section);
             } else if (std.mem.eql(u8, name, "attributes")) {
                 operation.attributes = try self.parseAttributes(section);
@@ -606,6 +606,17 @@ pub const Parser = struct {
             const type_value = list.at(i);
             // Type should be a type, function_type, or identifier (for plain builtin types like i32)
             if (type_value.type != .type and type_value.type != .function_type and type_value.type != .identifier) {
+                std.debug.print("Error: Expected type, function_type, or identifier in result-types at position {d}, but got {s}\n", .{ i, @tagName(type_value.type) });
+                // Print value for atom-based types
+                switch (type_value.type) {
+                    .identifier, .number, .string, .value_id, .block_id, .symbol, .keyword => {
+                        std.debug.print("  Value: {s}\n", .{type_value.data.atom});
+                    },
+                    .type => {
+                        std.debug.print("  Type: {s}\n", .{type_value.data.type});
+                    },
+                    else => {},
+                }
                 return error.UnexpectedStructure;
             }
 
@@ -617,7 +628,7 @@ pub const Parser = struct {
     }
 
     fn parseOperands(self: *Parser, section: *Value) ParseError![][]const u8 {
-        // (operand-uses VALUE_ID*)
+        // (operands VALUE_ID*)
         const list = section.data.list;
         var operands = std.ArrayList([]const u8){};
         errdefer operands.deinit(self.allocator);

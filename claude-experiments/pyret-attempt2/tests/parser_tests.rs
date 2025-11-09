@@ -35,8 +35,8 @@ fn test_parse_number() {
     let expr = parse_expr("42").expect("Failed to parse");
 
     match expr {
-        Expr::SNum { n, .. } => {
-            assert_eq!(n, 42.0);
+        Expr::SNum { value, .. } => {
+            assert_eq!(value, "42");
         }
         _ => panic!("Expected SNum, got {:?}", expr),
     }
@@ -49,8 +49,8 @@ fn test_parse_decimal_as_rational() {
     let expr = parse_expr("3.14").expect("Failed to parse");
 
     match expr {
-        Expr::SNum { n, .. } => {
-            assert!((n - 3.14).abs() < 1e-10);
+        Expr::SNum { value, .. } => {
+            assert_eq!(value, "3.14");
         }
         _ => panic!("Expected SNum for decimal, got {:?}", expr),
     }
@@ -63,8 +63,8 @@ fn test_parse_simple_decimal() {
     let expr = parse_expr("2.5").expect("Failed to parse");
 
     match expr {
-        Expr::SNum { n, .. } => {
-            assert!((n - 2.5).abs() < 1e-10);
+        Expr::SNum { value, .. } => {
+            assert_eq!(value, "2.5");
         }
         _ => panic!("Expected SNum, got {:?}", expr),
     }
@@ -185,12 +185,12 @@ fn test_parse_simple_addition() {
             assert_eq!(op, "op+");
 
             match *left {
-                Expr::SNum { n, .. } => assert_eq!(n, 1.0),
+                Expr::SNum { value, .. } => assert_eq!(value, "1"),
                 _ => panic!("Expected left to be SNum(1)"),
             }
 
             match *right {
-                Expr::SNum { n, .. } => assert_eq!(n, 2.0),
+                Expr::SNum { value, .. } => assert_eq!(value, "2"),
                 _ => panic!("Expected right to be SNum(2)"),
             }
         }
@@ -209,7 +209,7 @@ fn test_parse_left_associative() {
 
             // Right should be just 3
             match *right {
-                Expr::SNum { n, .. } => assert_eq!(n, 3.0),
+                Expr::SNum { value, .. } => assert_eq!(value, "3"),
                 _ => panic!("Expected right to be SNum(3)"),
             }
 
@@ -218,11 +218,11 @@ fn test_parse_left_associative() {
                 Expr::SOp { op, left, right, .. } => {
                     assert_eq!(op, "op+");
                     match *left {
-                        Expr::SNum { n, .. } => assert_eq!(n, 1.0),
+                        Expr::SNum { value, .. } => assert_eq!(value, "1"),
                         _ => panic!("Expected inner left to be SNum(1)"),
                     }
                     match *right {
-                        Expr::SNum { n, .. } => assert_eq!(n, 2.0),
+                        Expr::SNum { value, .. } => assert_eq!(value, "2"),
                         _ => panic!("Expected inner right to be SNum(2)"),
                     }
                 }
@@ -255,12 +255,12 @@ fn test_parse_subtraction() {
             assert_eq!(op, "op-");
 
             match *left {
-                Expr::SNum { n, .. } => assert_eq!(n, 10.0),
+                Expr::SNum { value, .. } => assert_eq!(value, "10"),
                 _ => panic!("Expected left to be SNum(10)"),
             }
 
             match *right {
-                Expr::SNum { n, .. } => assert_eq!(n, 5.0),
+                Expr::SNum { value, .. } => assert_eq!(value, "5"),
                 _ => panic!("Expected right to be SNum(5)"),
             }
         }
@@ -312,7 +312,7 @@ fn test_parse_simple_paren_expr() {
     match expr {
         Expr::SParen { expr, .. } => {
             match *expr {
-                Expr::SNum { n, .. } => assert_eq!(n, 42.0),
+                Expr::SNum { ref value, .. } => assert_eq!(value, "42"),
                 _ => panic!("Expected SNum inside paren, got {:?}", expr),
             }
         }
@@ -355,7 +355,7 @@ fn test_parse_nested_parens() {
             match *outer {
                 Expr::SParen { expr: inner, .. } => {
                     match *inner {
-                        Expr::SNum { n, .. } => assert_eq!(n, 5.0),
+                        Expr::SNum { ref value, .. } => assert_eq!(value, "5"),
                         _ => panic!("Expected SNum in innermost paren"),
                     }
                 }
@@ -622,15 +622,15 @@ fn test_parse_construct_with_numbers() {
 
             // Check values
             match &*values[0] {
-                Expr::SNum { n, .. } => assert_eq!(*n, 1.0),
+                Expr::SNum { value, .. } => assert_eq!(value, "1"),
                 _ => panic!("Expected SNum"),
             }
             match &*values[1] {
-                Expr::SNum { n, .. } => assert_eq!(*n, 2.0),
+                Expr::SNum { value, .. } => assert_eq!(value, "2"),
                 _ => panic!("Expected SNum"),
             }
             match &*values[2] {
-                Expr::SNum { n, .. } => assert_eq!(*n, 3.0),
+                Expr::SNum { value, .. } => assert_eq!(value, "3"),
                 _ => panic!("Expected SNum"),
             }
         }
@@ -873,7 +873,7 @@ fn test_parse_simple_bracket_access() {
 
             // Check field is a number
             match &*field {
-                Expr::SNum { n, .. } => assert_eq!(*n, 0.0),
+                Expr::SNum { value, .. } => assert_eq!(value, "0"),
                 _ => panic!("Expected SNum"),
             }
         }
@@ -957,7 +957,7 @@ fn test_parse_mixed_dot_and_bracket() {
             match &*obj {
                 Expr::SBracket { obj: bracket_obj, field: bracket_field, .. } => {
                     match &**bracket_field {
-                        Expr::SNum { n, .. } => assert_eq!(*n, 0.0),
+                        Expr::SNum { value, .. } => assert_eq!(value, "0"),
                         _ => panic!("Expected SNum for [0]"),
                     }
 
@@ -1028,7 +1028,7 @@ fn test_parse_simple_object() {
                 Member::SDataField { name, value, .. } => {
                     assert_eq!(name, "x");
                     match value.as_ref() {
-                        Expr::SNum { n, .. } => assert_eq!(*n, 1.0f64),
+                        Expr::SNum { value, .. } => assert_eq!(value, "1"),
                         _ => panic!("Expected SNum for x value"),
                     }
                 }
@@ -1040,7 +1040,7 @@ fn test_parse_simple_object() {
                 Member::SDataField { name, value, .. } => {
                     assert_eq!(name, "y");
                     match value.as_ref() {
-                        Expr::SNum { n, .. } => assert_eq!(*n, 2.0f64),
+                        Expr::SNum { value: v, .. } => assert_eq!(v, "2"),
                         _ => panic!("Expected SNum for y value"),
                     }
                 }
@@ -1342,7 +1342,7 @@ fn test_parse_simple_block() {
 
                     // First statement should be a number
                     match *stmts[0] {
-                        Expr::SNum { n, .. } => assert_eq!(n, 5.0),
+                        Expr::SNum { ref value, .. } => assert_eq!(value, "5"),
                         _ => panic!("Expected SNum in block"),
                     }
                 }
@@ -1420,7 +1420,7 @@ fn test_parse_nested_blocks() {
                                     assert_eq!(inner_stmts.len(), 1);
 
                                     match *inner_stmts[0] {
-                                        Expr::SNum { n, .. } => assert_eq!(n, 1.0),
+                                        Expr::SNum { ref value, .. } => assert_eq!(value, "1"),
                                         _ => panic!("Expected SNum in inner block"),
                                     }
                                 }
@@ -1467,7 +1467,7 @@ fn test_parse_simple_let() {
 
                     // Check value
                     match **value {
-                        Expr::SNum { n, .. } => assert_eq!(n, 5.0),
+                        Expr::SNum { ref value, .. } => assert_eq!(value, "5"),
                         _ => panic!("Expected SNum"),
                     }
                 }
@@ -1476,7 +1476,7 @@ fn test_parse_simple_let() {
 
             // Check body (should be the value)
             match *body {
-                Expr::SNum { n, .. } => assert_eq!(n, 5.0),
+                Expr::SNum { ref value, .. } => assert_eq!(value, "5"),
                 _ => panic!("Expected SNum as body"),
             }
         }
@@ -1506,7 +1506,7 @@ fn test_parse_var_binding() {
                     }
 
                     match **value {
-                        Expr::SNum { n, .. } => assert_eq!(n, 5.0),
+                        Expr::SNum { ref value, .. } => assert_eq!(value, "5"),
                         _ => panic!("Expected SNum"),
                     }
                 }

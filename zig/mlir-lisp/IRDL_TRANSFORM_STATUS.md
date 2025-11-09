@@ -208,8 +208,8 @@ See the Rust example provided - it works because melior parses standard MLIR syn
 
 ### Our Parser Limitations
 
-- Expects `(operand-uses %val1 %val2)` - SSA values only
-- Doesn't handle `(operand-uses i32 i64)` - type identifiers
+- Expects `(operands %val1 %val2)` - SSA values only
+- Doesn't handle `(operands i32 i64)` - type identifiers
 - Requires explicit `(block ...)` wrappers in all regions
 
 ---
@@ -233,6 +233,6 @@ See the Rust example provided - it works because melior parses standard MLIR syn
 
 ## Contact/Handoff
 
-All code is committed and working. The blocker is purely syntactic - our Lisp parser needs to handle type lists in `(operand-uses)`, or we write IRDL in standard MLIR syntax and import it.
+All code is committed and working. The blocker is purely syntactic - our Lisp parser needs to handle type lists in `(operands)`, or we write IRDL in standard MLIR syntax and import it.
 
 The shortest path: **Extend parser at `src/parser.zig:641` to handle identifier lists for IRDL operations.**

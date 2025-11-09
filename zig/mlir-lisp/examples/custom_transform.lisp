@@ -15,7 +15,7 @@
                   (arguments [(: %arg0 !transform.any_op)])
                   (operation
                     (name transform.with_pdl_patterns)
-                    (operand-uses %arg0)
+                    (operands %arg0)
                     (regions
                       (region
                         (block [^bb0]
@@ -36,11 +36,11 @@
                                     (name pdl.operation)
                                     (result-bindings [%2])
                                     (result-types !pdl.operation)
-                                    (operand-uses %1)
+                                    (operands %1)
                                     (attributes {:attributeValueNames [] :opName "custom.magic" :operandSegmentSizes array<i32: 0, 0, 1>}))
                                   (operation
                                     (name pdl.rewrite)
-                                    (operand-uses %2)
+                                    (operands %2)
                                     (attributes {:operandSegmentSizes array<i32: 1, 0>})
                                     (regions
                                       (region
@@ -55,15 +55,15 @@
                                             (name pdl.operation)
                                             (result-bindings [%4])
                                             (result-types !pdl.operation)
-                                            (operand-uses %3 %1)
+                                            (operands %3 %1)
                                             (attributes {:attributeValueNames ["value"] :opName "arith.constant" :operandSegmentSizes array<i32: 0, 1, 1>}))
                                           (operation
                                             (name pdl.replace)
-                                            (operand-uses %2 %4)
+                                            (operands %2 %4)
                                             (attributes {:operandSegmentSizes array<i32: 1, 1, 0>}))))))))))
                           (operation
                             (name transform.sequence)
-                            (operand-uses %arg1)
+                            (operands %arg1)
                             (attributes {:failure_propagation_mode (: 1 i32) :operandSegmentSizes array<i32: 1, 0>})
                             (regions
                               (region
@@ -73,7 +73,7 @@
                                     (name transform.pdl_match)
                                     (result-bindings [%0])
                                     (result-types !transform.any_op)
-                                    (operand-uses %arg2)
+                                    (operands %arg2)
                                     (attributes {:pattern_name @replace_magic}))
                                   (operation
                                     (name transform.yield))))))))))

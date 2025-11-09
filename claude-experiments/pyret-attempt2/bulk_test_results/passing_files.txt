@@ -14,6 +14,7 @@ tools/benchmark/auto-report-programs/tree-set-grow-10000.arr
 tools/benchmark/auto-report-programs/method-calls-10000.arr
 tools/benchmark/auto-report-programs/recursive-calls-10000.arr
 tools/benchmark/auto-report-programs/mutable-string-dict-const-10000.arr
+tools/benchmark/auto-report-programs/anf-loop-compiler.arr
 tools/benchmark/auto-report-programs/ast.arr
 tools/benchmark/auto-report-programs/bignum-factorial-2000.arr
 tools/benchmark/auto-report-programs/list-set-grow-1000.arr
@@ -35,6 +36,7 @@ tests/pyret/tests/test-matrices.arr
 tests/pyret/tests/test-file-locators.arr
 tests/pyret/tests/test-record-concat.arr
 tests/pyret/tests/test-strings.arr
+tests/pyret/tests/test-equality.arr
 tests/pyret/tests/test-examples.arr
 tests/pyret/tests/test-modules.arr
 tests/pyret/tests/test-import.arr
@@ -45,6 +47,7 @@ tests/pyret/tests/test-compile-lib.arr
 tests/pyret/tests/test-match.arr
 tests/pyret/tests/test-tail-call.arr
 tests/pyret/tests/test-matrices2.arr
+tests/pyret/tests/test-roughnum.arr
 tests/pyret/tests/test-timing.arr
 tests/pyret/tests/test-sets.arr
 tests/pyret/tests/test-string-dict.arr
@@ -58,6 +61,7 @@ tests/pyret/tests/test-rounding.arr
 tests/pyret/tests/test-parse.arr
 tests/pyret/tests/test-cases.arr
 tests/pyret/tests/test-dup-names.arr
+tests/pyret/tests/test-statistics.arr
 tests/pyret/tests/test-file.arr
 tests/pyret/tests/test-reactor.arr
 tests/pyret/tests/use/test-essentials.arr
@@ -66,6 +70,7 @@ tests/pyret/tests/test-builtin-locator.arr
 tests/pyret/tests/defines-vars.arr
 tests/pyret/tests/test-refined-refs.arr
 tests/pyret/tests/test-include.arr
+tests/pyret/tests/test-math.arr
 tests/pyret/tests/test-output.arr
 tests/pyret/tests/test-include-block.arr
 tests/pyret/tests/test-rec.arr
@@ -107,9 +112,13 @@ tests/pyret/tests/modules/provide-arrow-using-datatype.arr
 tests/pyret/tests/modules/import-re-provided.arr
 tests/pyret/tests/modules/import-datatype-as-type-alias.arr
 tests/pyret/tests/modules/test-provide-data-with-provide-star.arr
+tests/pyret/tests/test-adaptive-simpson.arr
 tests/pyret/tests/test-array.arr
 tests/pyret/tests/test-s-exp.arr
+tests/pyret/tests/test-numbers.arr
+tests/pyret/tests/test-within.arr
 tests/pyret/tests/test-format.arr
+tests/pyret/tests/test-images.arr
 tests/pyret/tests/test-pprint.arr
 tests/pyret/tests/test-repl.arr
 tests/pyret/tests/test-tuple.arr
@@ -431,12 +440,14 @@ src/arr/compiler/locators/jsfile.arr
 src/arr/compiler/locators/url.arr
 src/arr/compiler/anf.arr
 src/arr/compiler/desugar-check.arr
+src/arr/compiler/compile-lib.arr
 src/arr/compiler/base.arr
 src/arr/compiler/js-ast.arr
 src/arr/compiler/cli-module-loader.arr
 src/arr/compiler/well-formed.arr
 src/arr/compiler/type-check.arr
 src/arr/compiler/list-aux.arr
+src/arr/compiler/anf-loop-compiler.arr
 src/arr/compiler/type-check-structs.arr
 src/arr/compiler/libs.arr
 src/arr/compiler/repl.arr

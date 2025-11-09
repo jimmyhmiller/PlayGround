@@ -45,16 +45,16 @@
                   (attributes {:expected f64}))
                 (operation
                   (name irdl.any_of)
-                  (operand-uses %0 %1 %2 %3 %4 %5)
+                  (operands %0 %1 %2 %3 %4 %5)
                   (result-bindings [%arith_type])
                   (result-types !irdl.attribute))
                 (operation
                   (name irdl.operands)
-                  (operand-uses %arith_type %arith_type)
+                  (operands %arith_type %arith_type)
                   (attributes {:names ["lhs" "rhs"] :variadicity #irdl<variadicity_array[ single,  single]>}))
                 (operation
                   (name irdl.results)
-                  (operand-uses %arith_type)
+                  (operands %arith_type)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))))))
 
 ;; Transform: mymath.add → arith.addi
@@ -74,7 +74,7 @@
                 (arguments [(: %arg0 !transform.any_op)])
                 (operation
                   (name transform.with_pdl_patterns)
-                  (operand-uses %arg0)
+                  (operands %arg0)
                   (regions
                     (region
                       (block
@@ -100,13 +100,13 @@
                                   (result-types !pdl.type))
                                 (operation
                                   (name pdl.operation)
-                                  (operand-uses %lhs %rhs %result_type)
+                                  (operands %lhs %rhs %result_type)
                                   (result-bindings [%mymath_op])
                                   (result-types !pdl.operation)
                                   (attributes {:attributeValueNames [] :opName "mymath.add" :operandSegmentSizes array<i32: 2, 0, 1>}))
                                 (operation
                                   (name pdl.rewrite)
-                                  (operand-uses %mymath_op)
+                                  (operands %mymath_op)
                                   (attributes {:operandSegmentSizes array<i32: 1, 0>})
                                   (regions
                                     (region
@@ -114,17 +114,17 @@
                                         (arguments [])
                                         (operation
                                           (name pdl.operation)
-                                          (operand-uses %lhs %rhs %result_type)
+                                          (operands %lhs %rhs %result_type)
                                           (result-bindings [%arith_op])
                                           (result-types !pdl.operation)
                                           (attributes {:attributeValueNames [] :opName "arith.addi" :operandSegmentSizes array<i32: 2, 0, 1>}))
                                         (operation
                                           (name pdl.replace)
-                                          (operand-uses %mymath_op %arith_op)
-                                          (attributes {:operandSegmentSizes array<i32: 1, 1, 0>})))))))))))
+                                          (operands %mymath_op %arith_op)
+                                          (attributes {:operandSegmentSizes array<i32: 1, 1, 0>}))))))))))
                         (operation
                           (name transform.sequence)
-                          (operand-uses %payload)
+                          (operands %payload)
                           (attributes {:failure_propagation_mode (: 1 i32) :operandSegmentSizes array<i32: 1, 0>})
                           (regions
                             (region
@@ -132,12 +132,12 @@
                                 (arguments [(: %arg1 !transform.any_op)])
                                 (operation
                                   (name transform.pdl_match)
-                                  (operand-uses %arg1)
+                                  (operands %arg1)
                                   (result-bindings [%matched])
                                   (result-types !transform.any_op)
                                   (attributes {:pattern_name @mymath_to_arith}))
                                 (operation
-                                  (name transform.yield)))))))))
+                                  (name transform.yield))))))))))
                 (operation
                   (name transform.yield))))))))))
 
@@ -161,7 +161,7 @@
           (attributes {:value (: 32 i32)}))
         (operation
           (name mymath.add)
-          (operand-uses %c10 %c32)
+          (operands %c10 %c32)
           (result-bindings [%result])
           (result-types i32))
         (operation

@@ -149,14 +149,14 @@ Pattern-based argument extraction from s-expressions.
                 (operation
                   (name irdl.attributes)
                   (attributes {:attributeValueNames ["value"]})
-                  (operand-uses %str_type))
+                  (operands %str_type))
 
                 ;; Returns !llvm.ptr (CValueLayout*)
                 (op %ptr_type (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))))))
+                  (operands %ptr_type))))))
 
         ;; Define mlsp.list operation
         (operation
@@ -170,13 +170,13 @@ Pattern-based argument extraction from s-expressions.
                 (operation
                   (name irdl.operands)
                   (attributes {:names ["elements"] :variadicity #irdl<variadicity_array[ variadic]>})
-                  (operand-uses %ptr_type))
+                  (operands %ptr_type))
 
                 ;; Returns !llvm.ptr
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))))))
+                  (operands %ptr_type))))))
 
         ;; Define mlsp.get_element operation
         ;; TODO: Additional operations...
@@ -232,7 +232,7 @@ Pattern-based argument extraction from s-expressions.
                           (attributes {:opName "mlsp.identifier"
                                      :attributeValueNames ["value"]
                                      :operandSegmentSizes array<i32: 0, 1, 1>})
-                          (operand-uses %str_val %ptr_type)
+                          (operands %str_val %ptr_type)
                           (result-bindings [%mlsp_op])
                           (result-types !pdl.operation))
 
@@ -240,7 +240,7 @@ Pattern-based argument extraction from s-expressions.
                         (operation
                           (name pdl.rewrite)
                           (attributes {:operandSegmentSizes array<i32: 1, 0>})
-                          (operand-uses %mlsp_op)
+                          (operands %mlsp_op)
                           (regions
                             (region
                               (block
@@ -257,21 +257,21 @@ Pattern-based argument extraction from s-expressions.
                                   (attributes {:opName "llvm.call"
                                              :attributeValueNames ["callee"]
                                              :operandSegmentSizes array<i32: 0, 1, 1>})
-                                  (operand-uses %str_val %ptr_type)
+                                  (operands %str_val %ptr_type)
                                   (result-bindings [%llvm_op])
                                   (result-types !pdl.operation))
 
                                 (operation
                                   (name pdl.replace)
                                   (attributes {:operandSegmentSizes array<i32: 1, 1, 0>})
-                                  (operand-uses %mlsp_op %llvm_op))))))))))
+                                  (operands %mlsp_op %llvm_op))))))))))
 
                 ;; Transform sequence
                 (operation
                   (name transform.sequence)
                   (attributes {:failure_propagation_mode (: 1 i32)
                              :operandSegmentSizes array<i32: 1, 0>})
-                  (operand-uses %root)
+                  (operands %root)
                   (result-types !transform.any_op)
                   (regions
                     (region
@@ -280,7 +280,7 @@ Pattern-based argument extraction from s-expressions.
                         (operation
                           (name transform.pdl_match)
                           (attributes {:pattern_name @mlsp_identifier_to_llvm})
-                          (operand-uses %arg1)
+                          (operands %arg1)
                           (result-bindings [%matched])
                           (result-types !transform.any_op))
                         (operation
@@ -299,7 +299,7 @@ Pattern-based argument extraction from s-expressions.
 
 **Example structure** (simplified):
 ```lisp
-(operation (name pdl.rewrite) (operand-uses %mlsp_op)
+(operation (name pdl.rewrite) (operands %mlsp_op)
   (regions (region (block
     ;; Create constant for malloc size
     (op %c56 ... (pdl.operation "arith.constant" {value = 56}))
@@ -312,7 +312,7 @@ Pattern-based argument extraction from s-expressions.
     (op ... (pdl.operation "llvm.store" [%tag %type_ptr]))
     ;; ... repeat for all fields ...
     ;; Replace original mlsp.identifier with final pointer
-    (operation (name pdl.replace) (operand-uses %mlsp_op %ptr))))))
+    (operation (name pdl.replace) (operands %mlsp_op %ptr))))))
 ```
 
 **Tasks**:

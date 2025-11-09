@@ -203,9 +203,9 @@ pub const LispPrinter = struct {
         try self.writer.writeByte(')');
     }
 
-    // Lisp Grammar: OPERANDS ::= (operand-uses VALUE_ID*)
+    // Lisp Grammar: OPERANDS ::= (operands VALUE_ID*)
     fn printOperandUses(self: *LispPrinter, operands: []ast.ValueUse) !void {
-        try self.writer.writeAll("(operand-uses");
+        try self.writer.writeAll("(operands");
         for (operands) |operand| {
             try self.writer.writeByte(' ');
             try self.writer.writeAll(operand.value_id);

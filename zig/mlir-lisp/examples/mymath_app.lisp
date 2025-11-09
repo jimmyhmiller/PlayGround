@@ -45,16 +45,16 @@
                   (attributes {:expected f64}))
                 (operation
                   (name irdl.any_of)
-                  (operand-uses %0 %1 %2 %3 %4 %5)
+                  (operands %0 %1 %2 %3 %4 %5)
                   (result-bindings [%arith_type])
                   (result-types !irdl.attribute))
                 (operation
                   (name irdl.operands)
-                  (operand-uses %arith_type %arith_type)
+                  (operands %arith_type %arith_type)
                   (attributes {:names ["lhs" "rhs"] :variadicity #irdl<variadicity_array[ single,  single]>}))
                 (operation
                   (name irdl.results)
-                  (operand-uses %arith_type)
+                  (operands %arith_type)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))))))
 
 ;; Application code
@@ -77,12 +77,12 @@
           (attributes {:value (: 32 i32)}))
         (operation
           (name mymath.add)
-          (operand-uses %c10 %c32)
+          (operands %c10 %c32)
           (result-bindings [%result])
           (result-types i32))
         (operation
           (name arith.extsi)
-          (operand-uses %result)
+          (operands %result)
           (result-bindings [%result64])
           (result-types i64))
         (operation

@@ -53,7 +53,7 @@
                             (name scf.for)
                             (result-bindings [%12])
                             (result-types f32)
-                            (operand-uses %9 %10 %11 %8)
+                            (operands %9 %10 %11 %8)
                             (regions
                               (region
                                 (block [^bb0]
@@ -62,30 +62,30 @@
                                     (name memref.load)
                                     (result-bindings [%13])
                                     (result-types f32)
-                                    (operand-uses %arg0 %6 %arg3))
+                                    (operands %arg0 %6 %arg3))
                                   (operation
                                     (name memref.load)
                                     (result-bindings [%14])
                                     (result-types f32)
-                                    (operand-uses %arg1 %arg3 %7))
+                                    (operands %arg1 %arg3 %7))
                                   (operation
                                     (name arith.mulf)
                                     (result-bindings [%15])
                                     (result-types f32)
-                                    (operand-uses %13 %14)
+                                    (operands %13 %14)
                                     (attributes {:fastmath #arith.fastmath<none>}))
                                   (operation
                                     (name arith.addf)
                                     (result-bindings [%16])
                                     (result-types f32)
-                                    (operand-uses %arg4 %15)
+                                    (operands %arg4 %15)
                                     (attributes {:fastmath #arith.fastmath<none>}))
                                   (operation
                                     (name scf.yield)
-                                    (operand-uses %16))))))
+                                    (operands %16))))))
                           (operation
                             (name memref.store)
-                            (operand-uses %12 %arg2 %6 %7))
+                            (operands %12 %arg2 %6 %7))
                           (operation
                             (name gpu.return))))))))))
           (operation
@@ -122,7 +122,7 @@
                     (attributes {:operandSegmentSizes array<i32: 0, 0>}))
                   (operation
                     (name gpu.launch_func)
-                    (operand-uses %0 %0 %1 %1 %1 %1 %2 %3 %4)
+                    (operands %0 %0 %1 %1 %1 %1 %2 %3 %4)
                     (attributes {:kernel @matmul_kernel::@matmul :operandSegmentSizes array<i32: 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 3, 0>}))
                   (operation
                     (name arith.constant)
@@ -131,4 +131,4 @@
                     (attributes {:value (: 0 i32)}))
                   (operation
                     (name func.return)
-                    (operand-uses %5))))))))))
+                    (operands %5))))))))))

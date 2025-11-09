@@ -18,7 +18,7 @@
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %i32))))))))))
+                  (operands %i32))))))))))
 
 ;; Transform: Use transform.with_pdl_patterns (like melior)
 (operation
@@ -37,7 +37,7 @@
                 ;; Apply the PDL patterns
                 (operation
                   (name transform.apply_patterns.transform.with_pdl_patterns)
-                  (operand-uses %arg0)
+                  (operands %arg0)
                   (result-bindings [%result])
                   (result-types !transform.any_op)
                   (regions
@@ -57,13 +57,13 @@
                                 (operation
                                   (name pdl.operation)
                                   (attributes {:opName "custom.magic" :operandSegmentSizes array<i32: 0, 0, 1>})
-                                  (operand-uses %type)
+                                  (operands %type)
                                   (result-bindings [%op])
                                   (result-types !pdl.operation))
                                 (operation
                                   (name pdl.rewrite)
                                   (attributes {:operandSegmentSizes array<i32: 1, 0>})
-                                  (operand-uses %op)
+                                  (operands %op)
                                   (regions
                                     (region
                                       (block
@@ -75,13 +75,13 @@
                                         (operation
                                           (name pdl.operation)
                                           (attributes {:attributeValueNames ["value"] :opName "arith.constant" :operandSegmentSizes array<i32: 0, 1, 1>})
-                                          (operand-uses %attr %type)
+                                          (operands %attr %type)
                                           (result-bindings [%new])
                                           (result-types !pdl.operation))
                                         (operation
                                           (name pdl.replace)
                                           (attributes {:operandSegmentSizes array<i32: 1, 1, 0>})
-                                          (operand-uses %op %new))))))))))))
+                                          (operands %op %new))))))))))))))
                 (operation
                   (name transform.yield))))))))))
 

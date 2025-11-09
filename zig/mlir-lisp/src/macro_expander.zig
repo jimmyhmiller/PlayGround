@@ -109,7 +109,10 @@ pub const MacroExpander = struct {
             const args_list = try self.vectorTailToLinkedList(list);
 
             // Call macro function
-            const expanded = try macro_fn(self.allocator, args_list);
+            const expanded = macro_fn(self.allocator, args_list) catch |err| {
+                std.debug.print("ERROR: Macro '{s}' failed with error: {}\n", .{ name, err });
+                return err;
+            };
 
             // Recursively expand the result (macros can expand to macros)
             return try self.expandOnce(expanded);

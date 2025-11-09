@@ -14,7 +14,7 @@
                   (arguments [[%arg0 i1]])
                   (operation
                     (name cf.cond_br)
-                    (operand-uses %arg0)
+                    (operands %arg0)
                     (successors
                       (successor ^bb1)
                       (successor ^bb2))))
@@ -44,4 +44,4 @@
                   (arguments [[%2 i64]])
                   (operation
                     (name func.return)
-                    (operand-uses %2))))))))))))
+                    (operands %2))))))))))))

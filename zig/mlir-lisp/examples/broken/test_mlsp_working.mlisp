@@ -25,7 +25,7 @@
          (result-types !irdl.attribute))
         (operation
          (name irdl.attributes)
-         (operand-uses %0)
+         (operands %0)
          (attributes {:attributeValueNames ["value"]}))
         (operation
          (name irdl.is)
@@ -34,7 +34,7 @@
          (attributes {:expected !llvm.ptr}))
         (operation
          (name irdl.results)
-         (operand-uses %1)
+         (operands %1)
          (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))))))
 
 
@@ -60,7 +60,7 @@
                 ;; Apply PDL patterns to lower mlsp operations
                 (operation
                   (name transform.apply_patterns)
-                  (operand-uses %arg0)
+                  (operands %arg0)
                   (regions
                     (region
                       (block
@@ -89,7 +89,7 @@
                                   (name pdl.operation)
                                   (result-bindings [%mlsp_id])
                                   (result-types !pdl.operation)
-                                  (operand-uses %str_attr %ptr_type)
+                                  (operands %str_attr %ptr_type)
                                   (attributes {:opName "mlsp.identifier"
                                              :attributeValueNames ["value"]
                                              :operandSegmentSizes array<i32: 0, 1, 1>}))
@@ -97,14 +97,14 @@
                                 ;; Rewrite: erase the operation
                                 (operation
                                   (name pdl.rewrite)
-                                  (operand-uses %mlsp_id)
+                                  (operands %mlsp_id)
                                   (regions
                                     (region
                                       (block
                                         (arguments [])
                                         (operation
                                           (name pdl.erase)
-                                          (operand-uses %mlsp_id))))))))))))))
+                                          (operands %mlsp_id))))))))))))))
 
                 (operation
                   (name transform.yield)))))))
@@ -132,4 +132,4 @@
      (attributes {:value (: 42 i64)}))
     (operation
      (name func.return)
-     (operand-uses %1)))))))))
+     (operands %1)))))))))

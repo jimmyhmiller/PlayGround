@@ -59,14 +59,14 @@
                                     (name irdl.any_of)
                                     (result-bindings [%15])
                                     (result-types !irdl.attribute)
-                                    (operand-uses %9 %10 %11 %12 %13 %14))
+                                    (operands %9 %10 %11 %12 %13 %14))
                                   (operation
                                     (name irdl.operands)
-                                    (operand-uses %15 %15)
+                                    (operands %15 %15)
                                     (attributes {:names ["lhs" "rhs"] :variadicity #irdl<variadicity_array[ single,  single]>}))
                                   (operation
                                     (name irdl.results)
-                                    (operand-uses %15)
+                                    (operands %15)
                                     (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))))))))))
           (operation
             (name builtin.module)
@@ -103,11 +103,11 @@
                                     (name pdl.operation)
                                     (result-bindings [%7])
                                     (result-types !pdl.operation)
-                                    (operand-uses %4 %5 %6)
+                                    (operands %4 %5 %6)
                                     (attributes {:attributeValueNames [] :opName "mymath.add" :operandSegmentSizes array<i32: 2, 0, 1>}))
                                   (operation
                                     (name pdl.rewrite)
-                                    (operand-uses %7)
+                                    (operands %7)
                                     (attributes {:operandSegmentSizes array<i32: 1, 0>})
                                     (regions
                                       (region
@@ -117,15 +117,15 @@
                                             (name pdl.operation)
                                             (result-bindings [%8])
                                             (result-types !pdl.operation)
-                                            (operand-uses %4 %5 %6)
+                                            (operands %4 %5 %6)
                                             (attributes {:attributeValueNames [] :opName "arith.addi" :operandSegmentSizes array<i32: 2, 0, 1>}))
                                           (operation
                                             (name pdl.replace)
-                                            (operand-uses %7 %8)
+                                            (operands %7 %8)
                                             (attributes {:operandSegmentSizes array<i32: 1, 1, 0>}))))))))))
                           (operation
                             (name transform.sequence)
-                            (operand-uses %arg0)
+                            (operands %arg0)
                             (attributes {:failure_propagation_mode (: 1 i32) :operandSegmentSizes array<i32: 1, 0>})
                             (regions
                               (region
@@ -135,7 +135,7 @@
                                     (name transform.pdl_match)
                                     (result-bindings [%3])
                                     (result-types !transform.any_op)
-                                    (operand-uses %arg1)
+                                    (operands %arg1)
                                     (attributes {:pattern_name @mymath_to_arith}))
                                   (operation
                                     (name transform.yield))))))))))))))
@@ -160,7 +160,7 @@
                     (name mymath.add)
                     (result-bindings [%2])
                     (result-types i32)
-                    (operand-uses %0 %1))
+                    (operands %0 %1))
                   (operation
                     (name func.return)
-                    (operand-uses %2)))))))))))
+                    (operands %2)))))))))))

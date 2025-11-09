@@ -28,7 +28,7 @@
   ;; Outer loop: block_id.x (0 to 10)
   (operation
     (name scf.for)
-    (operand-uses %c0 %c10 %c1)
+    (operands %c0 %c10 %c1)
     (regions
       (region
         (block
@@ -37,7 +37,7 @@
           ;; Inner loop: thread_id.x (0 to 10)
           (operation
             (name scf.for)
-            (operand-uses %c0 %c10 %c1)
+            (operands %c0 %c10 %c1)
             (regions
               (region
                 (block
@@ -49,19 +49,19 @@
                     (name memref.load)
                     (result-bindings [%val])
                     (result-types f32)
-                    (operand-uses %input %block_x %thread_x))
+                    (operands %input %block_x %thread_x))
 
                   ;; Square it
                   (operation
                     (name arith.mulf)
                     (result-bindings [%squared])
                     (result-types f32)
-                    (operand-uses %val %val))
+                    (operands %val %val))
 
                   ;; Store to output[block_x][thread_x]
                   (operation
                     (name memref.store)
-                    (operand-uses %squared %output %block_x %thread_x))
+                    (operands %squared %output %block_x %thread_x))
 
                   (operation
                     (name scf.yield))))))

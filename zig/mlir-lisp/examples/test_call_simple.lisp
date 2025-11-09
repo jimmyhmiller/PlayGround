@@ -1,9 +1,9 @@
 (operation
   (name func.func)
-  (attributes {
+  (attributes {}
     :sym_name @get_number
-    :function_type (!function (inputs) (results i64))
-  })
+    :function_type (!function (inputs) (results i64)))
+  
   (regions
     (region
       (block
@@ -12,17 +12,17 @@
           (name arith.constant)
           (result-bindings [%num])
           (result-types i64)
-          (attributes { :value (: 99 i64) }))
+          (attributes { :value (: 99 i64)}))
         (operation
           (name func.return)
           (operands %num))))))
 
 (operation
   (name func.func)
-  (attributes {
+  (attributes {}
     :sym_name @main
-    :function_type (!function (inputs) (results i64))
-  })
+    :function_type (!function (inputs) (results i64)))
+  
   (regions
     (region
       (block

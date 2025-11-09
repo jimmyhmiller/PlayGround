@@ -114,7 +114,7 @@
     (name llvm.call)
     (result-bindings [%value])
     (result-types !llvm.ptr)
-    (operand-uses %value_size)
+    (operands %value_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
 
   ;; Store fields: type, data_ptr, data_len
@@ -156,7 +156,7 @@
     (name llvm.call)
     (result-bindings [%value])
     (result-types !llvm.ptr)
-    (operand-uses %value_size)
+    (operands %value_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
 
   ;; Store fields: type, data_ptr (array), data_len
@@ -192,7 +192,7 @@
     (name llvm.call)
     (result-bindings [%array])
     (result-types !llvm.ptr)
-    (operand-uses %alloc_size)
+    (operands %alloc_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (return %array))
 
