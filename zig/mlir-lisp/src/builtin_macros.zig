@@ -447,26 +447,27 @@ fn mulMacro(
     return try createList(allocator, op_vec);
 }
 
-/// return macro: (return operand)
-/// Expands to: (operation (name func.return) (operands operand))
+/// return macro: (return [operand])
+/// Expands to: (operation (name func.return) [(operands operand)])
+/// Supports both (return value) and (return) for void functions
 fn returnMacro(
     allocator: std.mem.Allocator,
     args: *const PersistentLinkedList(*Value),
 ) !*Value {
-    // Validate: need exactly 1 arg (the return value)
-    if (args.len() != 1) {
-        std.debug.print("return macro requires 1 argument (operand), got {}\n", .{args.len()});
+    // Validate: need 0 or 1 arg
+    if (args.len() > 1) {
+        std.debug.print("return macro requires 0 or 1 argument (operand), got {}\n", .{args.len()});
         return error.InvalidMacroArgs;
     }
 
-    // Extract the operand
+    // Extract the operand if present
     var iter = args.iterator();
-    const operand = iter.next() orelse return error.InvalidMacroArgs;
+    const operand = iter.next();
 
     // Build operation structure:
     // (operation
     //   (name func.return)
-    //   (operands operand))
+    //   [(operands operand)])
 
     var op_vec = PersistentVector(*Value).init(allocator, null);
 
@@ -479,11 +480,13 @@ fn returnMacro(
     name_vec = try name_vec.push(try createIdentifier(allocator, "func.return"));
     op_vec = try op_vec.push(try createList(allocator, name_vec));
 
-    // Add (operands operand)
-    var operands_vec = PersistentVector(*Value).init(allocator, null);
-    operands_vec = try operands_vec.push(try createIdentifier(allocator, "operands"));
-    operands_vec = try operands_vec.push(operand);
-    op_vec = try op_vec.push(try createList(allocator, operands_vec));
+    // Add (operands operand) only if operand is present
+    if (operand) |op| {
+        var operands_vec = PersistentVector(*Value).init(allocator, null);
+        operands_vec = try operands_vec.push(try createIdentifier(allocator, "operands"));
+        operands_vec = try operands_vec.push(op);
+        op_vec = try op_vec.push(try createList(allocator, operands_vec));
+    }
 
     return try createList(allocator, op_vec);
 }

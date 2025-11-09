@@ -1834,8 +1834,65 @@ impl Parser {
                                 index_loc,
                             };
                         } else {
-                            // Not a tuple access, shouldn't happen in binop RHS but handle gracefully
-                            return Err(ParseError::general(&self.peek(), "Expected number for tuple access"));
+                            // Object extension: obj.{ x: 1, y: 2 }
+                            // Parse object fields (same as parse_obj_expr_fields but return fields)
+                            let mut fields = Vec::new();
+
+                            // Handle empty extension
+                            if !self.matches(&TokenType::RBrace) {
+                                loop {
+                                    fields.push(self.parse_obj_field()?);
+
+                                    if !self.matches(&TokenType::Comma) {
+                                        break;
+                                    }
+                                    self.advance(); // consume comma
+
+                                    // Check for trailing comma
+                                    if self.matches(&TokenType::RBrace) {
+                                        break;
+                                    }
+                                }
+                            }
+
+                            let end = self.expect(TokenType::RBrace)?;
+
+                            let start_loc = match &right {
+                                Expr::SNum { l, .. } => l.clone(),
+                                Expr::SBool { l, .. } => l.clone(),
+                                Expr::SStr { l, .. } => l.clone(),
+                                Expr::SId { l, .. } => l.clone(),
+                                Expr::SOp { l, .. } => l.clone(),
+                                Expr::SParen { l, .. } => l.clone(),
+                                Expr::SApp { l, .. } => l.clone(),
+                                Expr::SConstruct { l, .. } => l.clone(),
+                                Expr::SDot { l, .. } => l.clone(),
+                                Expr::SBracket { l, .. } => l.clone(),
+                                Expr::SObj { l, .. } => l.clone(),
+                                Expr::STuple { l, .. } => l.clone(),
+                                Expr::STupleGet { l, .. } => l.clone(),
+                                Expr::SLam { l, .. } => l.clone(),
+                                Expr::SExtend { l, .. } => l.clone(),
+                                Expr::SUpdate { l, .. } => l.clone(),
+                                _ => self.current_loc(),
+                            };
+
+                            // In Pyret, both extension and update use the same syntax: obj.{fields}
+                            // The semantic difference is: extension adds NEW fields, update MODIFIES existing fields
+                            // We use SExtend as the default; the type checker determines the actual semantics
+                            right = Expr::SExtend {
+                                l: Loc::new(
+                                    self.file_name.clone(),
+                                    start_loc.start_line,
+                                    start_loc.start_column,
+                                    start_loc.start_char,
+                                    end.location.end_line,
+                                    end.location.end_col,
+                                    end.location.end_pos,
+                                ),
+                                supe: Box::new(right),
+                                fields,
+                            };
                         }
                     } else {
                         // Regular dot access: obj.field
@@ -3827,6 +3884,9 @@ impl Parser {
                     _fun: Box::new(iterator),
                     args,
                 };
+            } else if self.matches(&TokenType::LtNoSpace) {
+                // Type instantiation: for fold<T, U>(...)
+                iterator = self.parse_instantiate_expr(iterator)?;
             } else {
                 break;
             }
@@ -5937,19 +5997,26 @@ impl Parser {
     }
 
     /// Parse comma-separated list
+    /// Handles trailing commas: [1, 2, 3,] is valid
     fn parse_comma_list<T, F>(&mut self, parser: F) -> ParseResult<Vec<T>>
     where
         F: Fn(&mut Self) -> ParseResult<T>,
     {
         let mut items = Vec::new();
 
-        loop {
-            items.push(parser(self)?);
+        // Parse first item
+        items.push(parser(self)?);
 
-            if !self.matches(&TokenType::Comma) {
-                break;
-            }
+        // Parse remaining items
+        while self.matches(&TokenType::Comma) {
             self.advance(); // consume comma
+
+            // Check if this is a trailing comma (followed by closing delimiter)
+            // Try to parse the next item, but if it fails, that's okay - it's just a trailing comma
+            match parser(self) {
+                Ok(item) => items.push(item),
+                Err(_) => break, // Trailing comma - stop here
+            }
         }
 
         Ok(items)

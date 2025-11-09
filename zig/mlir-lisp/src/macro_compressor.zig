@@ -262,17 +262,24 @@ fn compressArithConstant(allocator: std.mem.Allocator, op_list: PersistentVector
 
 /// Compress func.return to return macro
 /// (operation (name func.return) (operands x)) → (return x)
+/// (operation (name func.return)) → (return)
 fn compressFuncReturn(allocator: std.mem.Allocator, op_list: PersistentVector(*Value)) !*Value {
-    // Get operands
-    var operands_list = try getNamedElements(op_list, "operands", allocator) orelse return error.MissingOperands;
+    // Get operands - may be empty for void returns
+    var operands_list = try getNamedElements(op_list, "operands", allocator) orelse blk: {
+        const empty = std.ArrayList(*Value){};
+        break :blk empty;
+    };
     defer operands_list.deinit(allocator);
 
-    if (operands_list.items.len != 1) return error.InvalidOperandCount;
+    if (operands_list.items.len > 1) return error.InvalidOperandCount;
 
-    // Build (return x)
+    // Build (return) or (return x)
     var result_vec = PersistentVector(*Value).init(allocator, null);
     result_vec = try result_vec.push(try createIdentifier(allocator, "return"));
-    result_vec = try result_vec.push(operands_list.items[0]);
+
+    if (operands_list.items.len == 1) {
+        result_vec = try result_vec.push(operands_list.items[0]);
+    }
 
     return try createList(allocator, result_vec);
 }
@@ -339,6 +346,129 @@ fn compressFuncCall(allocator: std.mem.Allocator, op_list: PersistentVector(*Val
         // Create empty list () for void return
         const void_type = try createList(allocator, PersistentVector(*Value).init(allocator, null));
         result_vec = try result_vec.push(void_type);
+    }
+
+    return try createList(allocator, result_vec);
+}
+
+/// Compress func.func to defn macro
+/// (operation (name func.func) (attributes {:sym_name @name :function_type (!function ...)}) (regions ...))
+/// → (defn name [(: %arg type) ...] return_type body...)
+fn compressFuncFunc(allocator: std.mem.Allocator, op_list: PersistentVector(*Value)) !*Value {
+    // Get attributes map
+    const attrs_val = getNamedValue(op_list, "attributes") orelse return error.MissingAttributes;
+    if (attrs_val.type != .map) return error.InvalidAttributes;
+
+    // Extract :sym_name and :function_type from attributes
+    const attrs_map = attrs_val.data.map;
+    var sym_name: ?*Value = null;
+    var func_type: ?*Value = null;
+    var i: usize = 0;
+    while (i < attrs_map.len()) : (i += 2) {
+        const key = attrs_map.at(i);
+        if (key.type == .keyword) {
+            if (std.mem.eql(u8, key.data.atom, ":sym_name")) {
+                if (i + 1 < attrs_map.len()) {
+                    sym_name = attrs_map.at(i + 1);
+                }
+            } else if (std.mem.eql(u8, key.data.atom, ":function_type")) {
+                if (i + 1 < attrs_map.len()) {
+                    func_type = attrs_map.at(i + 1);
+                }
+            }
+        }
+    }
+
+    const func_name_val = sym_name orelse return error.MissingSymName;
+    const func_type_val = func_type orelse return error.MissingFunctionType;
+
+    // Extract function name from @name (strip @)
+    if (func_name_val.type != .symbol) return error.InvalidSymName;
+    const full_name = func_name_val.data.atom;
+    const func_name = if (std.mem.startsWith(u8, full_name, "@"))
+        full_name[1..]
+    else
+        full_name;
+
+    // Extract result types from function type
+    if (func_type_val.type != .function_type) return error.InvalidFunctionType;
+    const results = func_type_val.data.function_type.results;
+
+    // Get the result type - could be void (empty), single result, or multiple results
+    var result_type: *Value = undefined;
+    if (results.len() == 0) {
+        // Void function - create empty list () for return type
+        result_type = try createList(allocator, PersistentVector(*Value).init(allocator, null));
+    } else if (results.len() == 1) {
+        result_type = results.at(0);
+    } else {
+        // Multiple results - create a vector of types
+        result_type = try createVector(allocator, results);
+    }
+
+    // Get regions
+    var regions_list = try getNamedElements(op_list, "regions", allocator) orelse return error.MissingRegions;
+    defer regions_list.deinit(allocator);
+    if (regions_list.items.len != 1) return error.InvalidRegionCount;
+
+    const region = regions_list.items[0];
+    if (!isListStartingWith(region, "region")) return error.InvalidRegion;
+
+    // Extract block from region
+    const region_list = region.data.list;
+    if (region_list.len() < 2) {
+        // Empty region - this is a function declaration without body
+        // Don't compress to defn, return null to use generic op compression
+        return error.MissingBlock;
+    }
+    const block = region_list.at(1);
+    if (!isListStartingWith(block, "block")) return error.InvalidBlock;
+
+    // Extract block contents: [label] (arguments ...) body...
+    const block_list = block.data.list;
+    var block_idx: usize = 1;
+
+    // Skip optional label [^entry]
+    if (block_idx < block_list.len()) {
+        const maybe_label = block_list.at(block_idx);
+        if (maybe_label.type == .vector) {
+            block_idx += 1; // Skip label
+        }
+    }
+
+    // Extract arguments
+    var arg_names_and_types = PersistentVector(*Value).init(allocator, null);
+    if (block_idx < block_list.len()) {
+        const maybe_args = block_list.at(block_idx);
+        if (isListStartingWith(maybe_args, "arguments")) {
+            block_idx += 1; // Move past arguments
+            const args_list = maybe_args.data.list;
+            if (args_list.len() >= 2) {
+                const args_vec_val = args_list.at(1);
+                if (args_vec_val.type == .vector) {
+                    // Arguments are provided, use them
+                    arg_names_and_types = args_vec_val.data.vector;
+                }
+            }
+        }
+    }
+
+    // Extract body operations (rest of block)
+    var body_ops = PersistentVector(*Value).init(allocator, null);
+    while (block_idx < block_list.len()) : (block_idx += 1) {
+        body_ops = try body_ops.push(block_list.at(block_idx));
+    }
+
+    // Build defn: (defn name [args...] return-type body...)
+    var result_vec = PersistentVector(*Value).init(allocator, null);
+    result_vec = try result_vec.push(try createIdentifier(allocator, "defn"));
+    result_vec = try result_vec.push(try createIdentifier(allocator, func_name));
+    result_vec = try result_vec.push(try createVector(allocator, arg_names_and_types));
+    result_vec = try result_vec.push(result_type);
+
+    // Add body operations
+    for (body_ops.slice()) |body_op| {
+        result_vec = try result_vec.push(body_op);
     }
 
     return try createList(allocator, result_vec);
@@ -455,9 +585,9 @@ fn tryCompressOperation(allocator: std.mem.Allocator, value: *Value) !?*Value {
         return compressFuncCall(allocator, op_list) catch null;
     }
 
-    // Skip func.func - it's too complex and rarely benefits from compression
+    // Compress func.func to defn macro
     if (isFuncFunc(op_list)) {
-        return null;
+        return compressFuncFunc(allocator, op_list) catch null;
     }
 
     // Fall back to generic op macro
@@ -540,5 +670,171 @@ pub fn compressMacros(allocator: std.mem.Allocator, value: *Value) error{OutOfMe
         },
         // Atoms don't need processing
         else => return value,
+    }
+}
+
+/// Check if a module has metadata attribute
+fn hasMetadataAttribute(module_op_call: PersistentVector(*Value)) bool {
+    // In op macro syntax: (builtin.module {:metadata unit} (region ...))
+    // The attributes map is the second element if present
+    if (module_op_call.len() >= 2) {
+        const second_elem = module_op_call.at(1);
+        if (second_elem.type == .map) {
+            const attrs_map = second_elem.data.map;
+            var i: usize = 0;
+            while (i < attrs_map.len()) : (i += 2) {
+                const key = attrs_map.at(i);
+                if (key.type == .keyword and std.mem.eql(u8, key.data.atom, ":metadata")) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Also check for (attributes {...}) form in verbose operation syntax
+    for (module_op_call.slice()) |elem| {
+        if (elem.type != .list) continue;
+        if (!isListStartingWith(elem, "attributes")) continue;
+
+        // Found attributes, check if it has metadata
+        const attrs_list = elem.data.list;
+        if (attrs_list.len() >= 2) {
+            const attrs_val = attrs_list.at(1);
+            if (attrs_val.type == .map) {
+                const attrs_map = attrs_val.data.map;
+                var i: usize = 0;
+                while (i < attrs_map.len()) : (i += 2) {
+                    const key = attrs_map.at(i);
+                    if (key.type == .keyword and std.mem.eql(u8, key.data.atom, ":metadata")) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Unwrap module boilerplate for non-metadata modules
+/// Handles both verbose and compressed forms:
+/// - (mlir (op (builtin.module (region (block (arguments []) ops...))))) → ops...
+/// - (mlir (operation (name builtin.module) (regions (region (block (arguments []) ops...))))) → ops...
+/// Returns the original value if it's not a non-metadata module pattern
+pub fn unwrapNonMetadataModule(allocator: std.mem.Allocator, value: *Value) !*Value {
+    // Check for (mlir ...)
+    if (!isListStartingWith(value, "mlir")) return value;
+
+    const mlir_list = value.data.list;
+    if (mlir_list.len() < 2) return value;
+
+    const second_elem = mlir_list.at(1);
+
+    // Handle two possible forms:
+    // 1. (mlir (op (builtin.module ...))) - compressed op macro form
+    // 2. (mlir (operation (name builtin.module) ...)) - verbose operation form
+
+    var region_val: ?*Value = null;
+    var is_metadata = false;
+
+    if (isListStartingWith(second_elem, "op")) {
+        // Compressed form: (op (builtin.module ...))
+        const op_list = second_elem.data.list;
+        if (op_list.len() < 2) return value;
+
+        const module_call = op_list.at(1);
+        if (!isListStartingWith(module_call, "builtin.module")) return value;
+
+        const module_call_list = module_call.data.list;
+        is_metadata = hasMetadataAttribute(module_call_list);
+
+        // Find the region
+        for (module_call_list.slice()) |elem| {
+            if (isListStartingWith(elem, "region")) {
+                region_val = elem;
+                break;
+            }
+        }
+    } else if (isListStartingWith(second_elem, "operation")) {
+        // Verbose form: (operation (name builtin.module) ...)
+        const op_list = second_elem.data.list;
+
+        // Check if name is builtin.module
+        const name_val = getNamedValue(op_list, "name");
+        if (name_val == null or name_val.?.type != .identifier) return value;
+        if (!std.mem.eql(u8, name_val.?.data.atom, "builtin.module")) return value;
+
+        // Check for metadata attribute
+        const attrs_val = getNamedValue(op_list, "attributes");
+        if (attrs_val) |attrs| {
+            if (attrs.type == .map) {
+                const attrs_map = attrs.data.map;
+                var i: usize = 0;
+                while (i < attrs_map.len()) : (i += 2) {
+                    const key = attrs_map.at(i);
+                    if (key.type == .keyword and std.mem.eql(u8, key.data.atom, ":metadata")) {
+                        is_metadata = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Find the regions element
+        var regions_list = try getNamedElements(op_list, "regions", allocator) orelse return value;
+        defer regions_list.deinit(allocator);
+        if (regions_list.items.len > 0) {
+            region_val = regions_list.items[0];
+        }
+    } else {
+        return value;
+    }
+
+    // If it has metadata attribute, don't unwrap
+    if (is_metadata) return value;
+
+    const region = region_val orelse return value;
+    const region_list = region.data.list;
+    if (region_list.len() < 2) return value;
+
+    // Get the block
+    const block = region_list.at(1);
+    if (!isListStartingWith(block, "block")) return value;
+
+    const block_list = block.data.list;
+
+    // Extract operations from block (skip "block", label if present, and "arguments")
+    var ops = PersistentVector(*Value).init(allocator, null);
+    var idx: usize = 1; // Skip "block"
+
+    // Skip label if present
+    if (idx < block_list.len()) {
+        const maybe_label = block_list.at(idx);
+        if (maybe_label.type == .vector) {
+            idx += 1;
+        }
+    }
+
+    // Skip arguments if present
+    if (idx < block_list.len()) {
+        const maybe_args = block_list.at(idx);
+        if (isListStartingWith(maybe_args, "arguments")) {
+            idx += 1;
+        }
+    }
+
+    // Collect remaining operations
+    while (idx < block_list.len()) : (idx += 1) {
+        ops = try ops.push(block_list.at(idx));
+    }
+
+    // If there's only one operation, return it directly
+    // Otherwise, wrap in an implicit list
+    if (ops.len() == 1) {
+        return ops.at(0);
+    } else if (ops.len() > 1) {
+        return try createList(allocator, ops);
+    } else {
+        // No operations, return empty list
+        return try createList(allocator, PersistentVector(*Value).init(allocator, null));
     }
 }
