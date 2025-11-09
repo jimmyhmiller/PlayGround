@@ -84,6 +84,15 @@ impl Parser {
         self.peek().token_type == TokenType::Eof
     }
 
+    /// Get the last consumed token, or fallback if no tokens have been consumed
+    fn last_token(&self, fallback: &Token) -> Token {
+        if self.current > 0 {
+            self.tokens[self.current - 1].clone()
+        } else {
+            fallback.clone()
+        }
+    }
+
     // ========== Checkpointing for Backtracking ==========
 
     fn checkpoint(&self) -> usize {
@@ -120,6 +129,27 @@ impl Parser {
             end.location.end_col,
             end.location.end_pos,
         )
+    }
+
+    /// Convert a token to a Loc
+    fn token_to_loc(&self, token: &Token) -> Loc {
+        Loc::new(
+            self.file_name.clone(),
+            token.location.start_line,
+            token.location.start_col,
+            token.location.start_pos,
+            token.location.end_line,
+            token.location.end_col,
+            token.location.end_pos,
+        )
+    }
+
+    /// Convert a token to a Name::SName
+    fn token_to_name(&self, token: &Token) -> Name {
+        Name::SName {
+            l: self.token_to_loc(token),
+            s: token.value.clone(),
+        }
     }
 
     /// Parse a field name (can be a Name token or a keyword used as identifier)
@@ -202,6 +232,32 @@ impl Parser {
                 | TokenType::Descending
         )
     }
+
+    // ========== Helper: Parse hiding(...) clause ==========
+
+    /// Parse optional `hiding(name1, name2, ...)` clause
+    /// Returns empty vector if no hiding clause is present
+    fn parse_hiding_clause(&mut self) -> ParseResult<Vec<Name>> {
+        if !self.matches(&TokenType::Hiding) {
+            return Ok(Vec::new());
+        }
+
+        self.advance(); // consume HIDING
+
+        // Accept either LParen or ParenSpace (whitespace-sensitive)
+        if !self.matches(&TokenType::LParen) && !self.matches(&TokenType::ParenSpace) {
+            return Err(ParseError::expected(
+                TokenType::LParen,
+                self.peek().clone(),
+            ));
+        }
+
+        self.advance(); // consume (
+        let names = self.parse_comma_list(|p| p.parse_name())?;
+        self.expect(TokenType::RParen)?;
+
+        Ok(names)
+    }
 }
 
 // ============================================================================
@@ -227,11 +283,7 @@ impl Parser {
             ));
         }
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         Ok(Program::new(
             self.make_loc(&start, &end),
@@ -303,11 +355,7 @@ impl Parser {
             }
         }
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         Ok(Expr::SBlock {
             l: self.make_loc(&start, &end),
@@ -327,11 +375,7 @@ impl Parser {
         let name = self.parse_name()?;
         let module = self.parse_import_source()?;
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         Ok(Use {
             node_type: "s-use".to_string(),
@@ -373,11 +417,7 @@ impl Parser {
                     self.expect(TokenType::From)?;
                     let module = self.parse_import_source()?;
 
-                    let end = if self.current > 0 {
-                        self.tokens[self.current - 1].clone()
-                    } else {
-                        start.clone()
-                    };
+                    let end = self.last_token(&start);
 
                     Ok(Import::SImportFields {
                         l: self.make_loc(&start, &end),
@@ -389,11 +429,7 @@ impl Parser {
                     self.advance(); // consume FROM
                     let module = self.parse_import_source()?;
 
-                    let end = if self.current > 0 {
-                        self.tokens[self.current - 1].clone()
-                    } else {
-                        start.clone()
-                    };
+                    let end = self.last_token(&start);
 
                     Ok(Import::SImportFields {
                         l: self.make_loc(&start, &end),
@@ -457,11 +493,7 @@ impl Parser {
                     // Parse the alias name
                     let name = self.parse_name()?;
 
-                    let end = if self.current > 0 {
-                        self.tokens[self.current - 1].clone()
-                    } else {
-                        start.clone()
-                    };
+                    let end = self.last_token(&start);
 
                     Ok(Import::SImport {
                         l: self.make_loc(&start, &end),
@@ -517,11 +549,7 @@ impl Parser {
                     // Simple include: include module
                     let module = self.parse_import_source()?;
 
-                    let end = if self.current > 0 {
-                        self.tokens[self.current - 1].clone()
-                    } else {
-                        start.clone()
-                    };
+                    let end = self.last_token(&start);
 
                     Ok(Import::SInclude {
                         l: self.make_loc(&start, &end),
@@ -793,22 +821,7 @@ impl Parser {
             let name_spec = self.parse_name_spec()?;
 
             // Parse optional hiding(...) spec
-            let hidden = if self.matches(&TokenType::Hiding) {
-                self.advance(); // consume HIDING
-                // Accept either LParen or ParenSpace (whitespace-sensitive)
-                if !self.matches(&TokenType::LParen) && !self.matches(&TokenType::ParenSpace) {
-                    return Err(ParseError::expected(
-                        TokenType::LParen,
-                        self.peek().clone(),
-                    ));
-                }
-                self.advance(); // consume ( or (
-                let names = self.parse_comma_list(|p| p.parse_name())?;
-                self.expect(TokenType::RParen)?;
-                names
-            } else {
-                Vec::new()
-            };
+            let hidden = self.parse_hiding_clause()?;
 
             return Ok(ProvideSpec::SProvideData {
                 l: self.current_loc(),
@@ -844,22 +857,7 @@ impl Parser {
             self.advance();
 
             // Parse optional hiding-spec: * hiding (name1, name2)
-            let hidden = if self.matches(&TokenType::Hiding) {
-                self.advance(); // consume HIDING
-                // Accept either LParen or ParenSpace
-                if !self.matches(&TokenType::LParen) && !self.matches(&TokenType::ParenSpace) {
-                    return Err(ParseError::expected(
-                        TokenType::LParen,
-                        self.peek().clone(),
-                    ));
-                }
-                self.advance(); // consume (
-                let names = self.parse_comma_list(|p| p.parse_name())?;
-                self.expect(TokenType::RParen)?;
-                names
-            } else {
-                Vec::new()
-            };
+            let hidden = self.parse_hiding_clause()?;
 
             return Ok(NameSpec::SStar {
                 l: self.make_loc(&start, &start),
@@ -903,11 +901,7 @@ impl Parser {
             // include-type-spec: TYPE name-spec
             self.advance(); // consume TYPE
             let name = self.parse_name_spec()?;
-            let end = if self.current > 0 {
-                self.tokens[self.current - 1].clone()
-            } else {
-                start.clone()
-            };
+            let end = self.last_token(&start);
 
             Ok(IncludeSpec::SIncludeType {
                 l: self.make_loc(&start, &end),
@@ -919,28 +913,9 @@ impl Parser {
             let name = self.parse_name_spec()?;
 
             // Parse optional hiding-spec: hiding (name1, name2, ...)
-            let hidden = if self.matches(&TokenType::Hiding) {
-                self.advance(); // consume HIDING
-                // Accept either LParen or ParenSpace
-                if !self.matches(&TokenType::LParen) && !self.matches(&TokenType::ParenSpace) {
-                    return Err(ParseError::expected(
-                        TokenType::LParen,
-                        self.peek().clone(),
-                    ));
-                }
-                self.advance(); // consume (
-                let names = self.parse_comma_list(|p| p.parse_name())?;
-                self.expect(TokenType::RParen)?;
-                names
-            } else {
-                Vec::new()
-            };
+            let hidden = self.parse_hiding_clause()?;
 
-            let end = if self.current > 0 {
-                self.tokens[self.current - 1].clone()
-            } else {
-                start.clone()
-            };
+            let end = self.last_token(&start);
 
             Ok(IncludeSpec::SIncludeData {
                 l: self.make_loc(&start, &end),
@@ -951,11 +926,7 @@ impl Parser {
             // include-module-spec: MODULE name-spec
             self.advance(); // consume MODULE
             let name = self.parse_name_spec()?;
-            let end = if self.current > 0 {
-                self.tokens[self.current - 1].clone()
-            } else {
-                start.clone()
-            };
+            let end = self.last_token(&start);
 
             Ok(IncludeSpec::SIncludeModule {
                 l: self.make_loc(&start, &end),
@@ -1124,10 +1095,7 @@ impl Parser {
                 return Ok(Ann::AAny { l: loc });
             }
 
-            let name = Name::SName {
-                l: loc.clone(),
-                s: name_token.value.clone(),
-            };
+            let name = self.token_to_name(&name_token);
 
             // Handle dotted names: E.Either, Module.Type, etc.
             // Build up nested ADot nodes for chains like A.B.C
@@ -1264,18 +1232,7 @@ impl Parser {
                 ),
             }
         } else {
-            Name::SName {
-                l: Loc::new(
-                    self.file_name.clone(),
-                    name_token.location.start_line,
-                    name_token.location.start_col,
-                    name_token.location.start_pos,
-                    name_token.location.end_line,
-                    name_token.location.end_col,
-                    name_token.location.end_pos,
-                ),
-                s: name_str,
-            }
+            self.token_to_name(&name_token)
         };
 
         // Optional type annotation: :: ann
@@ -1482,33 +1439,7 @@ impl Parser {
                         let index_loc = self.make_loc(&index_token, &index_token);
                         let end = self.expect(TokenType::RBrace)?;
 
-                    let start_loc = match &left {
-                        Expr::SNum { l, .. } => l.clone(),
-                        Expr::SBool { l, .. } => l.clone(),
-                        Expr::SStr { l, .. } => l.clone(),
-                        Expr::SId { l, .. } => l.clone(),
-                        Expr::SOp { l, .. } => l.clone(),
-                        Expr::SParen { l, .. } => l.clone(),
-                        Expr::SApp { l, .. } => l.clone(),
-                        Expr::SConstruct { l, .. } => l.clone(),
-                        Expr::SDot { l, .. } => l.clone(),
-                        Expr::SBracket { l, .. } => l.clone(),
-                        Expr::SObj { l, .. } => l.clone(),
-                        Expr::STuple { l, .. } => l.clone(),
-                        Expr::STupleGet { l, .. } => l.clone(),
-                        Expr::SLam { l, .. } => l.clone(),
-                        Expr::SBlock { l, .. } => l.clone(),
-                        Expr::SUserBlock { l, .. } => l.clone(),
-                        Expr::SIf { l, .. } => l.clone(),
-                        Expr::SIfElse { l, .. } => l.clone(),
-                        Expr::SWhen { l, .. } => l.clone(),
-                        Expr::SFor { l, .. } => l.clone(),
-                        Expr::SLetExpr { l, .. } => l.clone(),
-                Expr::SLet { l, .. } => l.clone(),
-                Expr::SVar { l, .. } => l.clone(),
-                Expr::SAssign { l, .. } => l.clone(),
-                        _ => self.current_loc(),
-                    };
+                        let start_loc = left.get_loc().clone();
 
                         left = Expr::STupleGet {
                             l: Loc::new(
@@ -1548,35 +1479,7 @@ impl Parser {
 
                         let end = self.expect(TokenType::RBrace)?;
 
-                        let start_loc = match &left {
-                            Expr::SNum { l, .. } => l.clone(),
-                            Expr::SBool { l, .. } => l.clone(),
-                            Expr::SStr { l, .. } => l.clone(),
-                            Expr::SId { l, .. } => l.clone(),
-                            Expr::SOp { l, .. } => l.clone(),
-                            Expr::SParen { l, .. } => l.clone(),
-                            Expr::SApp { l, .. } => l.clone(),
-                            Expr::SConstruct { l, .. } => l.clone(),
-                            Expr::SDot { l, .. } => l.clone(),
-                            Expr::SBracket { l, .. } => l.clone(),
-                            Expr::SObj { l, .. } => l.clone(),
-                            Expr::STuple { l, .. } => l.clone(),
-                            Expr::STupleGet { l, .. } => l.clone(),
-                            Expr::SLam { l, .. } => l.clone(),
-                            Expr::SBlock { l, .. } => l.clone(),
-                            Expr::SUserBlock { l, .. } => l.clone(),
-                            Expr::SIf { l, .. } => l.clone(),
-                            Expr::SIfElse { l, .. } => l.clone(),
-                            Expr::SWhen { l, .. } => l.clone(),
-                            Expr::SFor { l, .. } => l.clone(),
-                            Expr::SLetExpr { l, .. } => l.clone(),
-                            Expr::SLet { l, .. } => l.clone(),
-                            Expr::SVar { l, .. } => l.clone(),
-                            Expr::SAssign { l, .. } => l.clone(),
-                            Expr::SExtend { l, .. } => l.clone(),
-                            Expr::SUpdate { l, .. } => l.clone(),
-                            _ => self.current_loc(),
-                        };
+                        let start_loc = left.get_loc().clone();
 
                         // In Pyret, both extension and update use the same syntax: obj.{fields}
                         // The semantic difference is: extension adds NEW fields, update MODIFIES existing fields
@@ -1599,33 +1502,7 @@ impl Parser {
                     // Regular dot access: obj.field
                     let field_token = self.parse_field_name()?;
 
-                    let start_loc = match &left {
-                        Expr::SNum { l, .. } => l.clone(),
-                        Expr::SBool { l, .. } => l.clone(),
-                        Expr::SStr { l, .. } => l.clone(),
-                        Expr::SId { l, .. } => l.clone(),
-                        Expr::SOp { l, .. } => l.clone(),
-                        Expr::SParen { l, .. } => l.clone(),
-                        Expr::SApp { l, .. } => l.clone(),
-                        Expr::SConstruct { l, .. } => l.clone(),
-                        Expr::SDot { l, .. } => l.clone(),
-                        Expr::SBracket { l, .. } => l.clone(),
-                        Expr::SObj { l, .. } => l.clone(),
-                        Expr::STuple { l, .. } => l.clone(),
-                        Expr::STupleGet { l, .. } => l.clone(),
-                        Expr::SLam { l, .. } => l.clone(),
-                        Expr::SBlock { l, .. } => l.clone(),
-                        Expr::SUserBlock { l, .. } => l.clone(),
-                        Expr::SIf { l, .. } => l.clone(),
-                        Expr::SIfElse { l, .. } => l.clone(),
-                        Expr::SWhen { l, .. } => l.clone(),
-                        Expr::SFor { l, .. } => l.clone(),
-                        Expr::SLetExpr { l, .. } => l.clone(),
-                Expr::SLet { l, .. } => l.clone(),
-                Expr::SVar { l, .. } => l.clone(),
-                Expr::SAssign { l, .. } => l.clone(),
-                        _ => self.current_loc(),
-                    };
+                    let start_loc = left.get_loc().clone();
 
                     left = Expr::SDot {
                         l: Loc::new(
@@ -1657,20 +1534,7 @@ impl Parser {
                     };
                     let end = self.expect(TokenType::RBrace)?;
 
-                    let start_loc = match &left {
-                        Expr::SNum { l, .. } => l.clone(),
-                        Expr::SBool { l, .. } => l.clone(),
-                        Expr::SId { l, .. } => l.clone(),
-                        Expr::SOp { l, .. } => l.clone(),
-                        Expr::SParen { l, .. } => l.clone(),
-                        Expr::SApp { l, .. } => l.clone(),
-                        Expr::SDot { l, .. } => l.clone(),
-                        Expr::SBracket { l, .. } => l.clone(),
-                        Expr::STupleGet { l, .. } => l.clone(),
-                        Expr::SExtend { l, .. } => l.clone(),
-                        Expr::SUpdate { l, .. } => l.clone(),
-                        _ => self.current_loc(),
-                    };
+                    let start_loc = left.get_loc().clone();
 
                     left = Expr::SUpdate {
                         l: Loc::new(
@@ -1688,20 +1552,7 @@ impl Parser {
                 } else {
                     // Bang field access: obj!field
                     let field_token = self.parse_field_name()?;
-                    let start_loc = match &left {
-                        Expr::SNum { l, .. } => l.clone(),
-                        Expr::SBool { l, .. } => l.clone(),
-                        Expr::SId { l, .. } => l.clone(),
-                        Expr::SOp { l, .. } => l.clone(),
-                        Expr::SParen { l, .. } => l.clone(),
-                        Expr::SApp { l, .. } => l.clone(),
-                        Expr::SDot { l, .. } => l.clone(),
-                        Expr::SBracket { l, .. } => l.clone(),
-                        Expr::STupleGet { l, .. } => l.clone(),
-                        Expr::SExtend { l, .. } => l.clone(),
-                        Expr::SUpdate { l, .. } => l.clone(),
-                        _ => self.current_loc(),
-                    };
+                    let start_loc = left.get_loc().clone();
                     left = Expr::SGetBang {
                         l: Loc::new(
                             self.file_name.clone(),
@@ -1749,23 +1600,7 @@ impl Parser {
                             let index_loc = self.make_loc(&index_token, &index_token);
                             let end = self.expect(TokenType::RBrace)?;
 
-                            let start_loc = match &right {
-                                Expr::SNum { l, .. } => l.clone(),
-                                Expr::SBool { l, .. } => l.clone(),
-                                Expr::SStr { l, .. } => l.clone(),
-                                Expr::SId { l, .. } => l.clone(),
-                                Expr::SOp { l, .. } => l.clone(),
-                                Expr::SParen { l, .. } => l.clone(),
-                                Expr::SApp { l, .. } => l.clone(),
-                                Expr::SConstruct { l, .. } => l.clone(),
-                                Expr::SDot { l, .. } => l.clone(),
-                                Expr::SBracket { l, .. } => l.clone(),
-                                Expr::SObj { l, .. } => l.clone(),
-                                Expr::STuple { l, .. } => l.clone(),
-                                Expr::STupleGet { l, .. } => l.clone(),
-                                Expr::SLam { l, .. } => l.clone(),
-                                _ => self.current_loc(),
-                            };
+                            let start_loc = right.get_loc().clone();
 
                             right = Expr::STupleGet {
                                 l: Loc::new(
@@ -1805,25 +1640,7 @@ impl Parser {
 
                             let end = self.expect(TokenType::RBrace)?;
 
-                            let start_loc = match &right {
-                                Expr::SNum { l, .. } => l.clone(),
-                                Expr::SBool { l, .. } => l.clone(),
-                                Expr::SStr { l, .. } => l.clone(),
-                                Expr::SId { l, .. } => l.clone(),
-                                Expr::SOp { l, .. } => l.clone(),
-                                Expr::SParen { l, .. } => l.clone(),
-                                Expr::SApp { l, .. } => l.clone(),
-                                Expr::SConstruct { l, .. } => l.clone(),
-                                Expr::SDot { l, .. } => l.clone(),
-                                Expr::SBracket { l, .. } => l.clone(),
-                                Expr::SObj { l, .. } => l.clone(),
-                                Expr::STuple { l, .. } => l.clone(),
-                                Expr::STupleGet { l, .. } => l.clone(),
-                                Expr::SLam { l, .. } => l.clone(),
-                                Expr::SExtend { l, .. } => l.clone(),
-                                Expr::SUpdate { l, .. } => l.clone(),
-                                _ => self.current_loc(),
-                            };
+                            let start_loc = right.get_loc().clone();
 
                             // In Pyret, both extension and update use the same syntax: obj.{fields}
                             // The semantic difference is: extension adds NEW fields, update MODIFIES existing fields
@@ -1846,23 +1663,7 @@ impl Parser {
                         // Regular dot access: obj.field
                         let field_token = self.parse_field_name()?;
 
-                        let start_loc = match &right {
-                            Expr::SNum { l, .. } => l.clone(),
-                            Expr::SBool { l, .. } => l.clone(),
-                            Expr::SStr { l, .. } => l.clone(),
-                            Expr::SId { l, .. } => l.clone(),
-                            Expr::SOp { l, .. } => l.clone(),
-                            Expr::SParen { l, .. } => l.clone(),
-                            Expr::SApp { l, .. } => l.clone(),
-                            Expr::SConstruct { l, .. } => l.clone(),
-                            Expr::SDot { l, .. } => l.clone(),
-                            Expr::SBracket { l, .. } => l.clone(),
-                            Expr::SObj { l, .. } => l.clone(),
-                            Expr::STuple { l, .. } => l.clone(),
-                            Expr::STupleGet { l, .. } => l.clone(),
-                            Expr::SLam { l, .. } => l.clone(),
-                            _ => self.current_loc(),
-                        };
+                        let start_loc = right.get_loc().clone();
 
                         right = Expr::SDot {
                             l: Loc::new(
@@ -1894,20 +1695,7 @@ impl Parser {
                         };
                         let end = self.expect(TokenType::RBrace)?;
 
-                        let start_loc = match &right {
-                            Expr::SNum { l, .. } => l.clone(),
-                            Expr::SBool { l, .. } => l.clone(),
-                            Expr::SId { l, .. } => l.clone(),
-                            Expr::SOp { l, .. } => l.clone(),
-                            Expr::SParen { l, .. } => l.clone(),
-                            Expr::SApp { l, .. } => l.clone(),
-                            Expr::SDot { l, .. } => l.clone(),
-                            Expr::SBracket { l, .. } => l.clone(),
-                            Expr::STupleGet { l, .. } => l.clone(),
-                            Expr::SExtend { l, .. } => l.clone(),
-                            Expr::SUpdate { l, .. } => l.clone(),
-                            _ => self.current_loc(),
-                        };
+                        let start_loc = right.get_loc().clone();
 
                         right = Expr::SUpdate {
                             l: Loc::new(
@@ -1925,20 +1713,7 @@ impl Parser {
                     } else {
                         // Bang field access: obj!field
                         let field_token = self.parse_field_name()?;
-                        let start_loc = match &right {
-                            Expr::SNum { l, .. } => l.clone(),
-                            Expr::SBool { l, .. } => l.clone(),
-                            Expr::SId { l, .. } => l.clone(),
-                            Expr::SOp { l, .. } => l.clone(),
-                            Expr::SParen { l, .. } => l.clone(),
-                            Expr::SApp { l, .. } => l.clone(),
-                            Expr::SDot { l, .. } => l.clone(),
-                            Expr::SBracket { l, .. } => l.clone(),
-                            Expr::STupleGet { l, .. } => l.clone(),
-                            Expr::SExtend { l, .. } => l.clone(),
-                            Expr::SUpdate { l, .. } => l.clone(),
-                            _ => self.current_loc(),
-                        };
+                        let start_loc = right.get_loc().clone();
                         right = Expr::SGetBang {
                             l: Loc::new(
                                 self.file_name.clone(),
@@ -1970,18 +1745,7 @@ impl Parser {
             );
 
             // Get location from left expression
-            let start_loc = match &left {
-                Expr::SNum { l, .. } => l.clone(),
-                Expr::SBool { l, .. } => l.clone(),
-                Expr::SStr { l, .. } => l.clone(),
-                Expr::SId { l, .. } => l.clone(),
-                Expr::SOp { l, .. } => l.clone(),
-                Expr::SParen { l, .. } => l.clone(),
-                Expr::SApp { l, .. } => l.clone(),
-                Expr::SConstruct { l, .. } => l.clone(),
-                Expr::SDot { l, .. } => l.clone(),
-                _ => self.current_loc(),
-            };
+            let start_loc = left.get_loc().clone();
 
             // Get location from right expression
             let end_loc = match &right {
@@ -2059,33 +1823,7 @@ impl Parser {
             };
 
             // Get location from left expression
-            let start_loc = match &left {
-                Expr::SNum { l, .. } => l.clone(),
-                Expr::SBool { l, .. } => l.clone(),
-                Expr::SStr { l, .. } => l.clone(),
-                Expr::SId { l, .. } => l.clone(),
-                Expr::SOp { l, .. } => l.clone(),
-                Expr::SParen { l, .. } => l.clone(),
-                Expr::SApp { l, .. } => l.clone(),
-                Expr::SConstruct { l, .. } => l.clone(),
-                Expr::SDot { l, .. } => l.clone(),
-                Expr::SBracket { l, .. } => l.clone(),
-                Expr::SObj { l, .. } => l.clone(),
-                Expr::STuple { l, .. } => l.clone(),
-                Expr::STupleGet { l, .. } => l.clone(),
-                Expr::SLam { l, .. } => l.clone(),
-                Expr::SBlock { l, .. } => l.clone(),
-                Expr::SUserBlock { l, .. } => l.clone(),
-                Expr::SIf { l, .. } => l.clone(),
-                Expr::SIfElse { l, .. } => l.clone(),
-                Expr::SWhen { l, .. } => l.clone(),
-                Expr::SFor { l, .. } => l.clone(),
-                Expr::SLetExpr { l, .. } => l.clone(),
-                Expr::SLet { l, .. } => l.clone(),
-                Expr::SVar { l, .. } => l.clone(),
-                Expr::SAssign { l, .. } => l.clone(),
-                _ => self.current_loc(),
-            };
+            let start_loc = left.get_loc().clone();
 
             // Get end location, considering refinement and right expression
             // Priority: right > refinement > operator
@@ -2240,18 +1978,7 @@ impl Parser {
                         .map_err(|_| ParseError::invalid("tuple index", &index_token, "Invalid number"))?;
                     let index_loc = self.make_loc(&index_token, &index_token);
                     let end = self.expect(TokenType::RBrace)?;
-                    let start_loc = match &left {
-                        Expr::SNum { l, .. } => l.clone(),
-                        Expr::SBool { l, .. } => l.clone(),
-                        Expr::SId { l, .. } => l.clone(),
-                        Expr::SOp { l, .. } => l.clone(),
-                        Expr::SParen { l, .. } => l.clone(),
-                        Expr::SApp { l, .. } => l.clone(),
-                        Expr::SDot { l, .. } => l.clone(),
-                        Expr::SBracket { l, .. } => l.clone(),
-                        Expr::STupleGet { l, .. } => l.clone(),
-                        _ => self.current_loc(),
-                    };
+                    let start_loc = left.get_loc().clone();
                     left = Expr::STupleGet {
                         l: Loc::new(
                             self.file_name.clone(),
@@ -2269,18 +1996,7 @@ impl Parser {
                 } else {
                     // Regular dot access
                     let field_token = self.parse_field_name()?;
-                    let start_loc = match &left {
-                        Expr::SNum { l, .. } => l.clone(),
-                        Expr::SBool { l, .. } => l.clone(),
-                        Expr::SId { l, .. } => l.clone(),
-                        Expr::SOp { l, .. } => l.clone(),
-                        Expr::SParen { l, .. } => l.clone(),
-                        Expr::SApp { l, .. } => l.clone(),
-                        Expr::SDot { l, .. } => l.clone(),
-                        Expr::SBracket { l, .. } => l.clone(),
-                        Expr::STupleGet { l, .. } => l.clone(),
-                        _ => self.current_loc(),
-                    };
+                    let start_loc = left.get_loc().clone();
                     left = Expr::SDot {
                         l: Loc::new(
                             self.file_name.clone(),
@@ -2310,18 +2026,7 @@ impl Parser {
                     };
                     let end = self.expect(TokenType::RBrace)?;
 
-                    let start_loc = match &left {
-                        Expr::SNum { l, .. } => l.clone(),
-                        Expr::SBool { l, .. } => l.clone(),
-                        Expr::SId { l, .. } => l.clone(),
-                        Expr::SOp { l, .. } => l.clone(),
-                        Expr::SParen { l, .. } => l.clone(),
-                        Expr::SApp { l, .. } => l.clone(),
-                        Expr::SDot { l, .. } => l.clone(),
-                        Expr::SBracket { l, .. } => l.clone(),
-                        Expr::STupleGet { l, .. } => l.clone(),
-                        _ => self.current_loc(),
-                    };
+                    let start_loc = left.get_loc().clone();
 
                     left = Expr::SUpdate {
                         l: Loc::new(
@@ -2339,18 +2044,7 @@ impl Parser {
                 } else {
                     // Bang field access: obj!field
                     let field_token = self.parse_field_name()?;
-                    let start_loc = match &left {
-                        Expr::SNum { l, .. } => l.clone(),
-                        Expr::SBool { l, .. } => l.clone(),
-                        Expr::SId { l, .. } => l.clone(),
-                        Expr::SOp { l, .. } => l.clone(),
-                        Expr::SParen { l, .. } => l.clone(),
-                        Expr::SApp { l, .. } => l.clone(),
-                        Expr::SDot { l, .. } => l.clone(),
-                        Expr::SBracket { l, .. } => l.clone(),
-                        Expr::STupleGet { l, .. } => l.clone(),
-                        _ => self.current_loc(),
-                    };
+                    let start_loc = left.get_loc().clone();
                     left = Expr::SGetBang {
                         l: Loc::new(
                             self.file_name.clone(),
@@ -2386,18 +2080,7 @@ impl Parser {
                 } else if self.matches(&TokenType::Dot) {
                     let _dot_token = self.expect(TokenType::Dot)?;
                     let field_token = self.parse_field_name()?;
-                    let start_loc = match &right {
-                        Expr::SNum { l, .. } => l.clone(),
-                        Expr::SBool { l, .. } => l.clone(),
-                        Expr::SId { l, .. } => l.clone(),
-                        Expr::SOp { l, .. } => l.clone(),
-                        Expr::SParen { l, .. } => l.clone(),
-                        Expr::SApp { l, .. } => l.clone(),
-                        Expr::SDot { l, .. } => l.clone(),
-                        Expr::SBracket { l, .. } => l.clone(),
-                        Expr::STupleGet { l, .. } => l.clone(),
-                        _ => self.current_loc(),
-                    };
+                    let start_loc = right.get_loc().clone();
                     right = Expr::SDot {
                         l: Loc::new(
                             self.file_name.clone(),
@@ -2427,17 +2110,7 @@ impl Parser {
                 op_token.location.end_col,
                 op_token.location.end_pos,
             );
-            let start_loc = match &left {
-                Expr::SNum { l, .. } => l.clone(),
-                Expr::SBool { l, .. } => l.clone(),
-                Expr::SId { l, .. } => l.clone(),
-                Expr::SOp { l, .. } => l.clone(),
-                Expr::SParen { l, .. } => l.clone(),
-                Expr::SApp { l, .. } => l.clone(),
-                Expr::SDot { l, .. } => l.clone(),
-                Expr::SBracket { l, .. } => l.clone(),
-                _ => self.current_loc(),
-            };
+            let start_loc = left.get_loc().clone();
             let end_loc = match &right {
                 Expr::SNum { l, .. } => l.clone(),
                 Expr::SBool { l, .. } => l.clone(),
@@ -2739,24 +2412,13 @@ impl Parser {
     /// id-expr: NAME
     fn parse_id_expr(&mut self) -> ParseResult<Expr> {
         let token = self.expect(TokenType::Name)?;
-        let loc = Loc::new(
-            self.file_name.clone(),
-            token.location.start_line,
-            token.location.start_col,
-            token.location.start_pos,
-            token.location.end_line,
-            token.location.end_col,
-            token.location.end_pos,
-        );
+        let loc = self.token_to_loc(&token);
 
         // Check if this is an underscore wildcard (for partial application)
         let id = if token.value == "_" {
             Name::SUnderscore { l: loc.clone() }
         } else {
-            Name::SName {
-                l: loc.clone(),
-                s: token.value.clone(),
-            }
+            self.token_to_name(&token)
         };
 
         Ok(Expr::SId {
@@ -3753,12 +3415,7 @@ impl Parser {
                 self.advance();
                 let field_token = self.parse_field_name()?;
 
-                let start_loc = match &iterator {
-                    Expr::SId { l, .. } => l.clone(),
-                    Expr::SDot { l, .. } => l.clone(),
-                    Expr::SApp { l, .. } => l.clone(),
-                    _ => self.current_loc(),
-                };
+                let start_loc = iterator.get_loc().clone();
 
                 iterator = Expr::SDot {
                     l: Loc::new(
@@ -3825,12 +3482,7 @@ impl Parser {
 
                 let rparen = self.expect(TokenType::RParen)?;
 
-                let start_loc = match &iterator {
-                    Expr::SId { l, .. } => l.clone(),
-                    Expr::SDot { l, .. } => l.clone(),
-                    Expr::SApp { l, .. } => l.clone(),
-                    _ => self.current_loc(),
-                };
+                let start_loc = iterator.get_loc().clone();
 
                 iterator = Expr::SApp {
                     l: Loc::new(
@@ -4059,11 +3711,7 @@ impl Parser {
             value.clone()
         };
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         Ok(Expr::SLetExpr {
             l: self.make_loc(&start, &end),
@@ -4087,11 +3735,7 @@ impl Parser {
         // Parse value expression
         let value = self.parse_expr()?;
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         // Var bindings are s-var statements
         Ok(Expr::SVar {
@@ -4115,11 +3759,7 @@ impl Parser {
         // Parse value expression
         let value = self.parse_expr()?;
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         // Rec bindings are s-rec statements
         Ok(Expr::SRec {
@@ -4193,11 +3833,7 @@ impl Parser {
         // Parse the value expression
         let value = self.parse_expr()?;
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         // Create an s-let with tuple bind
         Ok(Expr::SLet {
@@ -4292,11 +3928,7 @@ impl Parser {
         // Parse value expression
         let value = self.parse_expr()?;
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         Ok(Expr::SLet {
             l: self.make_loc(&start, &end),
@@ -4335,11 +3967,7 @@ impl Parser {
         // Parse value expression
         let value = self.parse_expr()?;
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         Ok(Expr::SLet {
             l: self.make_loc(&start, &end),
@@ -4375,11 +4003,7 @@ impl Parser {
         // Contract statements allow noparen-arrow-ann: args -> ret without parentheses
         let ann = self.parse_contract_ann()?;
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         Ok(Expr::SContract {
             l: self.make_loc(&start, &end),
@@ -4446,11 +4070,7 @@ impl Parser {
         // Parse value expression
         let value = self.parse_expr()?;
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         // Return SLet (simple let binding statement)
         // This is for implicit let bindings like: x = 5
@@ -4476,11 +4096,7 @@ impl Parser {
         // Parse value expression
         let value = self.parse_expr()?;
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         // This is an assignment, not a var declaration
         Ok(Expr::SAssign {
@@ -4735,11 +4351,7 @@ impl Parser {
         // Parse the type annotation
         let ann = self.parse_ann()?;
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         Ok(Expr::SType {
             l: self.make_loc(&start, &end),
@@ -4764,11 +4376,7 @@ impl Parser {
         // Parse the new type name
         let namet = self.parse_name()?;
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         Ok(Expr::SNewtype {
             l: self.make_loc(&start, &end),
@@ -5308,11 +4916,7 @@ impl Parser {
                 Vec::new()
             };
 
-            let end = if self.current > 0 {
-                self.tokens[self.current - 1].clone()
-            } else {
-                start.clone()
-            };
+            let end = self.last_token(&start);
 
             Ok(Variant::SVariant {
                 l: self.make_loc(&start, &end),
@@ -5330,11 +4934,7 @@ impl Parser {
                 Vec::new()
             };
 
-            let end = if self.current > 0 {
-                self.tokens[self.current - 1].clone()
-            } else {
-                start.clone()
-            };
+            let end = self.last_token(&start);
 
             Ok(Variant::SSingletonVariant {
                 l: self.make_loc(&start, &end),
@@ -5366,11 +4966,7 @@ impl Parser {
             self.parse_bind()?
         };
 
-        let end = if self.current > 0 {
-            self.tokens[self.current - 1].clone()
-        } else {
-            start.clone()
-        };
+        let end = self.last_token(&start);
 
         Ok(VariantMember {
             node_type: "s-variant-member".to_string(),
@@ -5563,10 +5159,7 @@ impl Parser {
 
                 spec.push(LoadTableSpec::SSanitize {
                     l: self.make_loc(&sanitize_tok, &name_token),
-                    name: Name::SName {
-                        l: self.make_loc(&name_token, &name_token),
-                        s: name_token.value.clone(),
-                    },
+                    name: self.token_to_name(&name_token),
                     sanitizer: Box::new(sanitizer_expr),
                 });
             } else {
@@ -5918,24 +5511,13 @@ impl Parser {
     /// Parse NAME token into Name AST node
     fn parse_name(&mut self) -> ParseResult<Name> {
         let token = self.expect(TokenType::Name)?;
-        let loc = Loc::new(
-            self.file_name.clone(),
-            token.location.start_line,
-            token.location.start_col,
-            token.location.start_pos,
-            token.location.end_line,
-            token.location.end_col,
-            token.location.end_pos,
-        );
+        let loc = self.token_to_loc(&token);
 
         // Check if this is an underscore wildcard
         if token.value == "_" {
             Ok(Name::SUnderscore { l: loc })
         } else {
-            Ok(Name::SName {
-                l: loc,
-                s: token.value,
-            })
+            Ok(self.token_to_name(&token))
         }
     }
 }
