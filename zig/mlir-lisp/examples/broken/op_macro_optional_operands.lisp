@@ -1,10 +1,10 @@
 ;; Demonstration of op macro with optional operands vector
 
 ;; Case 1: Attributes and operands (both present)
-(op %result (: i32) (arith.constant {value: 42} [%input]))
+(op %result (: i32) (arith.constant {:value 42} [%input]))
 
 ;; Case 2: Attributes only (no operands vector)
-(op %const (: i32) (arith.constant {value: 42}))
+(op %const (: i32) (arith.constant {:value 42}))
 
 ;; Case 3: Operands only (no attributes)
 (op %sum (: i32) (arith.addi [%a %b]))

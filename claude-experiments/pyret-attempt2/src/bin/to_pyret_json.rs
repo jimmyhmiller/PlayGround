@@ -339,74 +339,19 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
         Expr::SNum { value, .. } => {
             // Value is stored as a string to support arbitrary precision
             let value_str = {
-                // Rough numbers (starting with ~) need normalization: strip trailing .0 and leading +
+                // Rough numbers (starting with ~) need normalization
                 if value.starts_with('~') {
-                    let mut normalized = if value.ends_with(".0") {
-                        value.strip_suffix(".0").unwrap().to_string()
-                    } else {
-                        value.clone()
-                    };
-                    // Strip leading + after ~ (e.g., ~+1.5 -> ~1.5)
-                    if normalized.starts_with("~+") {
-                        normalized = format!("~{}", normalized.strip_prefix("~+").unwrap());
-                    }
+                    let without_tilde = value.strip_prefix('~').unwrap();
 
-                    // Strip trailing zeros from decimal parts (e.g., ~-6.928203230 -> ~-6.92820323)
-                    // Only apply to non-scientific notation numbers
-                    if normalized.contains('.') && !normalized.contains('e') && !normalized.contains('E') {
-                        let (prefix, decimal_part) = if let Some(dot_idx) = normalized.rfind('.') {
-                            let (before_dot, with_dot) = normalized.split_at(dot_idx);
-                            (before_dot.to_string(), with_dot.to_string())
-                        } else {
-                            (normalized.clone(), String::new())
-                        };
+                    // Parse to f64 to truncate to IEEE 754 double precision (17 significant digits)
+                    // This ensures we match Pyret's behavior
+                    if let Ok(n) = without_tilde.parse::<f64>() {
+                        // Format back to string - Rust's default f64 formatting gives us the right precision
+                        let normalized = format!("~{}", n);
 
-                        if !decimal_part.is_empty() {
-                            // decimal_part is ".123000" - strip trailing zeros
-                            let stripped = decimal_part.trim_end_matches('0');
-                            // Don't strip the decimal point itself - if we get just ".", add one zero
-                            let final_decimal = if stripped == "." {
-                                ".0".to_string()
-                            } else {
-                                stripped.to_string()
-                            };
-                            normalized = format!("{}{}", prefix, final_decimal);
-                        }
-                    }
-
-                    let without_tilde = normalized.strip_prefix('~').unwrap();
-
-                    // Handle scientific notation in input
-                    if without_tilde.contains('e') || without_tilde.contains('E') {
-                        // Parse to f64 to convert to decimal
-                        if let Ok(n) = without_tilde.parse::<f64>() {
-                            // Convert to decimal and see if it's reasonable length
-                            let decimal_str = format!("{}", n);
-                            let decimal_form = format!("~{}", decimal_str);
-
-                            // If decimal form is short enough (<= 9 chars including ~), use it
-                            // Otherwise keep scientific notation
-                            // Examples: ~0.00001 (9 chars) expands, ~0.0000001 (11 chars) stays as ~1e-7
-                            if decimal_form.len() <= 9 {
-                                normalized = decimal_form;
-                            } else {
-                                // Keep scientific notation - format it properly from the float value
-                                let sci = format!("{:e}", n);
-                                // Normalize: add + for positive exponents
-                                let sci_normalized = if sci.contains("e") && !sci.contains("e-") {
-                                    sci.replace("e", "e+")
-                                } else {
-                                    sci
-                                };
-                                normalized = format!("~{}", sci_normalized);
-                            }
-                        }
-                    }
-                    // Check if the normalized form is too long (e.g., ~0.000...005 with 324 zeros)
-                    // Convert very long decimals to scientific notation
-                    else if normalized.len() > 50 {
-                        // Parse to f64 for scientific notation formatting
-                        if let Ok(n) = without_tilde.parse::<f64>() {
+                        // Check if the normalized form is too long (e.g., ~0.000...005 with 324 zeros)
+                        // Convert very long decimals to scientific notation
+                        if normalized.len() > 50 {
                             let sci = format!("{:e}", n);
                             // Normalize: add + for positive exponents
                             let sci_normalized = if sci.contains("e") && !sci.contains("e-") {
@@ -414,11 +359,14 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                             } else {
                                 sci
                             };
-                            normalized = format!("~{}", sci_normalized);
+                            format!("~{}", sci_normalized)
+                        } else {
+                            normalized
                         }
+                    } else {
+                        // Parse failed - keep original
+                        value.clone()
                     }
-
-                    normalized
                 }
                 // For decimals (without scientific notation), convert to fraction
                 // Use the original string to preserve precision for large decimals

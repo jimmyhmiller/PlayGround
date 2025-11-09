@@ -154,14 +154,14 @@ pub const Builder = struct {
     }
 
     /// Register type aliases in the builder context
-    fn registerTypeAliases(self: *Builder, type_aliases: []const parser.TypeAlias) BuildError!void {
+    pub fn registerTypeAliases(self: *Builder, type_aliases: []const parser.TypeAlias) BuildError!void {
         for (type_aliases) |alias| {
             try self.type_alias_map.put(alias.name, alias.definition);
         }
     }
 
     /// Register attribute aliases in the builder context
-    fn registerAttributeAliases(self: *Builder, attribute_aliases: []const parser.AttributeAlias) BuildError!void {
+    pub fn registerAttributeAliases(self: *Builder, attribute_aliases: []const parser.AttributeAlias) BuildError!void {
         for (attribute_aliases) |alias| {
             try self.attribute_alias_map.put(alias.name, alias.definition);
         }
@@ -361,6 +361,12 @@ pub const Builder = struct {
             .identifier => {
                 // Plain identifier (builtin type like i32, f64, etc.)
                 const type_str = value.data.atom;
+
+                // Check if this is a type alias
+                if (self.type_alias_map.get(type_str)) |definition| {
+                    return mlir.Type.parse(self.ctx, definition) catch error.InvalidType;
+                }
+
                 return mlir.Type.parse(self.ctx, type_str) catch error.InvalidType;
             },
             .function_type => {
@@ -431,6 +437,12 @@ pub const Builder = struct {
             .identifier => {
                 // Plain identifier (builtin type like i32, f64, etc.)
                 const type_str = value.data.atom;
+
+                // Check if this is a type alias
+                if (self.type_alias_map.get(type_str)) |definition| {
+                    return mlir.Type.parse(self.ctx, definition) catch error.InvalidType;
+                }
+
                 return mlir.Type.parse(self.ctx, type_str) catch error.InvalidType;
             },
             .function_type => {

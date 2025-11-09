@@ -583,6 +583,10 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
         std.debug.print("  ✓ Transform module loaded from file\n", .{});
     }
 
+    // Register type and attribute aliases before building
+    try builder.registerTypeAliases(parsed_module.type_aliases);
+    try builder.registerAttributeAliases(parsed_module.attribute_aliases);
+
     // Build application code (non-metadata modules)
     std.debug.print("Building application code ({} module(s))...\n", .{app_ops.items.len});
     var mlir_module = try builder.buildFromOperations(app_ops.items);
