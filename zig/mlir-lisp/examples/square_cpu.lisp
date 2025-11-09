@@ -18,14 +18,14 @@
   ;; Nested loops: for row in 0..10, for col in 0..10
   (operation
     (name scf.for)
-    (operand-uses %c0 %c10 %c1)
+    (operands %c0 %c10 %c1)
     (regions
       (region
         (block
           (arguments [(: %row index)])
           (operation
             (name scf.for)
-            (operand-uses %c0 %c10 %c1)
+            (operands %c0 %c10 %c1)
             (regions
               (region
                 (block
@@ -36,19 +36,19 @@
                     (name memref.load)
                     (result-bindings [%val])
                     (result-types f32)
-                    (operand-uses %input %row %col))
+                    (operands %input %row %col))
 
                   ;; Square it
                   (operation
                     (name arith.mulf)
                     (result-bindings [%squared])
                     (result-types f32)
-                    (operand-uses %val %val))
+                    (operands %val %val))
 
                   ;; Store to output[row][col]
                   (operation
                     (name memref.store)
-                    (operand-uses %squared %output %row %col))
+                    (operands %squared %output %row %col))
 
                   (operation
                     (name scf.yield))))))

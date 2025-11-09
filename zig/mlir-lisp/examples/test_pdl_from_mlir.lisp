@@ -24,7 +24,7 @@
                             (result-types i32))
                           (operation
                             (name func.return)
-                            (operand-uses %4))))))))))
+                            (operands %4))))))))))
           (operation
             (name builtin.module)
             (attributes {:sym_name @patterns})
@@ -48,11 +48,11 @@
                             (name pdl.operation)
                             (result-bindings [%1])
                             (result-types !pdl.operation)
-                            (operand-uses %0)
+                            (operands %0)
                             (attributes {:attributeValueNames [] :opName "custom.foo" :operandSegmentSizes array<i32: 0, 0, 1>}))
                           (operation
                             (name pdl.rewrite)
-                            (operand-uses %1)
+                            (operands %1)
                             (attributes {:operandSegmentSizes array<i32: 1, 0>})
                             (regions
                               (region
@@ -67,9 +67,9 @@
                                     (name pdl.operation)
                                     (result-bindings [%3])
                                     (result-types !pdl.operation)
-                                    (operand-uses %2 %0)
+                                    (operands %2 %0)
                                     (attributes {:attributeValueNames ["value"] :opName "arith.constant" :operandSegmentSizes array<i32: 0, 1, 1>}))
                                   (operation
                                     (name pdl.replace)
-                                    (operand-uses %1 %3)
+                                    (operands %1 %3)
                                     (attributes {:operandSegmentSizes array<i32: 1, 1, 0>})))))))))))))))))))

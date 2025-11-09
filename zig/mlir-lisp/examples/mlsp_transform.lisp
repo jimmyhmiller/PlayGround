@@ -34,7 +34,7 @@
     (name llvm.call)
     (result-bindings [%value])
     (result-types !llvm.ptr)
-    (operand-uses %value_size)
+    (operands %value_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
 
   ;; Store fields: type, data_ptr, data_len
@@ -75,7 +75,7 @@
     (name llvm.call)
     (result-bindings [%value])
     (result-types !llvm.ptr)
-    (operand-uses %value_size)
+    (operands %value_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
 
   ;; Store fields: type, data_ptr (array), data_len
@@ -110,7 +110,7 @@
     (name llvm.call)
     (result-bindings [%array])
     (result-types !llvm.ptr)
-    (operand-uses %alloc_size)
+    (operands %alloc_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (return %array))
 
@@ -167,7 +167,7 @@
                 (arguments [(: %arg0 !transform.any_op)])
                 (operation
                   (name transform.with_pdl_patterns)
-                  (operand-uses %arg0)
+                  (operands %arg0)
                   (regions
                     (region
                       (block
@@ -189,11 +189,11 @@
                                   (name pdl.operation)
                                   (result-bindings [%op])
                                   (result-types !pdl.operation)
-                                  (operand-uses %ptr_type)
+                                  (operands %ptr_type)
                                   (attributes {:opName "mlsp.string_const" :operandSegmentSizes array<i32: 0, 0, 1>}))
                                 (operation
                                   (name pdl.rewrite)
-                                  (operand-uses %op)
+                                  (operands %op)
                                   (attributes {:operandSegmentSizes array<i32: 1, 0>})
                                   (regions
                                     (region
@@ -202,16 +202,16 @@
                                           (name pdl.operation)
                                           (result-bindings [%new_op])
                                           (result-types !pdl.operation)
-                                          (operand-uses %ptr_type)
+                                          (operands %ptr_type)
                                           (attributes {:opName "llvm.mlir.addressof" :operandSegmentSizes array<i32: 0, 0, 1>}))
                                         (operation
                                           (name pdl.replace)
-                                          (operand-uses %op %new_op)
+                                          (operands %op %new_op)
                                           (attributes {:operandSegmentSizes array<i32: 1, 1, 0>}))))))))))
 
                         (operation
                           (name transform.sequence)
-                          (operand-uses %payload)
+                          (operands %payload)
                           (attributes {:failure_propagation_mode (: 1 i32) :operandSegmentSizes array<i32: 1, 0>})
                           (regions
                             (region
@@ -219,7 +219,7 @@
                                 (arguments [(: %arg1 !transform.any_op)])
                                 (operation
                                   (name transform.pdl_match)
-                                  (operand-uses %arg1)
+                                  (operands %arg1)
                                   (result-bindings [%matched])
                                   (result-types !transform.any_op)
                                   (attributes {:pattern_name @mlsp_string_const}))

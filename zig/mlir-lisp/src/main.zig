@@ -14,6 +14,8 @@ const builtin_macros = mlir_lisp.builtin_macros;
 const DialectRegistry = mlir_lisp.DialectRegistry;
 const metadata_detector = mlir_lisp.metadata_detector;
 const gpu_lowering = @import("gpu_lowering.zig");
+const macro_compressor = mlir_lisp.macro_compressor;
+const vector = mlir_lisp.vector;
 
 /// Helper function to recursively check for GPU operations in regions
 fn hasGPUOpsInRegions(op: *const Operation) bool {
@@ -56,6 +58,8 @@ pub fn main() !void {
     var use_generic_format = false;
     var file_path: ?[]const u8 = null;
     var transform_file_path: ?[]const u8 = null;
+    var macroify = false;
+    var macro_expand = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -71,6 +75,10 @@ pub fn main() !void {
             if (i < args.len) {
                 transform_file_path = args[i];
             }
+        } else if (std.mem.eql(u8, args[i], "--macroify")) {
+            macroify = true;
+        } else if (std.mem.eql(u8, args[i], "--macro-expand")) {
+            macro_expand = true;
         } else {
             file_path = args[i];
         }
@@ -82,16 +90,232 @@ pub fn main() !void {
         std.debug.print("\nUsage:\n", .{});
         std.debug.print("  {s} [--generic|-g] [-t transform.lisp] <file.lisp>  - JIT compile and run a .lisp file\n", .{args[0]});
         std.debug.print("  {s} --repl                       - Start interactive REPL\n", .{args[0]});
+        std.debug.print("  {s} --macroify <file.lisp>       - Compress verbose operations to macro form (print only)\n", .{args[0]});
+        std.debug.print("  {s} --macro-expand <file.lisp>   - Expand macros to verbose form (print only)\n", .{args[0]});
         std.debug.print("  {s}                              - Run basic MLIR tests\n", .{args[0]});
         std.debug.print("\nOptions:\n", .{});
         std.debug.print("  --generic, -g      Print MLIR in generic form (shows all attributes)\n", .{});
         std.debug.print("  --transform, -t    Load transform operations from separate file\n", .{});
+        std.debug.print("  --macroify         Compress verbose MLIR operations to compact macros\n", .{});
+        std.debug.print("  --macro-expand     Expand macros to verbose MLIR operation form\n", .{});
         std.debug.print("\nRunning basic MLIR tests...\n\n", .{});
         try runBasicTests();
         return;
     }
 
+    // Check for mutually exclusive flags
+    if (macroify and macro_expand) {
+        std.debug.print("Error: --macroify and --macro-expand cannot be used together\n", .{});
+        return error.ConflictingFlags;
+    }
+
+    // Handle transformation-only modes
+    if (macroify or macro_expand) {
+        try runTransformation(allocator, file_path.?, macroify);
+        return;
+    }
+
     try runFile(allocator, file_path.?, transform_file_path, use_generic_format);
+}
+
+/// Check if a list contains a region (recursively search first level children)
+fn containsRegion(list: vector.PersistentVector(*Value)) bool {
+    for (list.slice()) |elem| {
+        if (elem.type == .list) {
+            const inner_list = elem.data.list;
+            if (inner_list.len() > 0) {
+                const first = inner_list.at(0);
+                if (first.type == .identifier and std.mem.eql(u8, first.data.atom, "region")) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// Pretty print a Value with indentation
+fn prettyPrintValue(value: *const Value, writer: anytype, indent: usize) error{OutOfMemory}!void {
+    const indent_str = "  ";
+
+    switch (value.type) {
+        .list => {
+            try writer.writeAll("(");
+            const list = value.data.list;
+            if (list.len() == 0) {
+                try writer.writeAll(")");
+                return;
+            }
+
+            // Check what kind of list this is
+            const first = list.at(0);
+            const is_operation = first.type == .identifier and std.mem.eql(u8, first.data.atom, "operation");
+            const is_region = first.type == .identifier and std.mem.eql(u8, first.data.atom, "region");
+            const is_block = first.type == .identifier and std.mem.eql(u8, first.data.atom, "block");
+            const is_mlir = first.type == .identifier and std.mem.eql(u8, first.data.atom, "mlir");
+            const is_op = first.type == .identifier and std.mem.eql(u8, first.data.atom, "op");
+            const is_call = first.type == .identifier and std.mem.eql(u8, first.data.atom, "call");
+            const is_constant = first.type == .identifier and std.mem.eql(u8, first.data.atom, "constant");
+
+            // Determine if we need multiline formatting
+            const needs_multiline = blk: {
+                // Always multiline for these structural forms
+                if (is_operation or is_region or is_block or is_mlir) break :blk true;
+
+                // Always single line for these macros
+                if (is_call or is_constant) break :blk false;
+
+                // For 'op' macro calls, check if they have regions
+                if (is_op) {
+                    // If op has regions as children, format multiline
+                    if (containsRegion(list)) break :blk true;
+                    // Simple op calls with ≤ 4 elements can be single line
+                    if (list.len() <= 4) break :blk false;
+                    break :blk true;
+                }
+
+                // For other lists, use a heuristic
+                // Single line if short and no regions
+                if (list.len() <= 4 and !containsRegion(list)) break :blk false;
+
+                break :blk true;
+            };
+
+            if (needs_multiline) {
+                for (list.slice(), 0..) |elem, i| {
+                    if (i == 0) {
+                        try prettyPrintValue(elem, writer, indent);
+                    } else {
+                        try writer.writeAll("\n");
+                        for (0..indent + 1) |_| try writer.writeAll(indent_str);
+                        try prettyPrintValue(elem, writer, indent + 1);
+                    }
+                }
+            } else {
+                for (list.slice(), 0..) |elem, i| {
+                    if (i > 0) try writer.writeAll(" ");
+                    try prettyPrintValue(elem, writer, indent);
+                }
+            }
+            try writer.writeAll(")");
+        },
+        .vector => {
+            try writer.writeAll("[");
+            const vec = value.data.vector;
+            for (vec.slice(), 0..) |elem, i| {
+                if (i > 0) try writer.writeAll(" ");
+                try prettyPrintValue(elem, writer, indent);
+            }
+            try writer.writeAll("]");
+        },
+        .map => {
+            try writer.writeAll("{");
+            const map = value.data.map;
+            for (map.slice(), 0..) |elem, i| {
+                if (i > 0) try writer.writeAll(" ");
+                try prettyPrintValue(elem, writer, indent);
+            }
+            try writer.writeAll("}");
+        },
+        .has_type => {
+            try writer.writeAll("(: ");
+            try prettyPrintValue(value.data.has_type.value, writer, indent);
+            try writer.writeAll(" ");
+            try prettyPrintValue(value.data.has_type.type_expr, writer, indent);
+            try writer.writeAll(")");
+        },
+        .attr_expr => {
+            try writer.writeAll("#");
+            try prettyPrintValue(value.data.attr_expr, writer, indent);
+        },
+        .function_type => {
+            try writer.writeAll("(!function (inputs");
+            const inputs = value.data.function_type.inputs;
+            for (inputs.slice()) |input| {
+                try writer.writeAll(" ");
+                try prettyPrintValue(input, writer, indent);
+            }
+            try writer.writeAll(") (results");
+            const results = value.data.function_type.results;
+            for (results.slice()) |result| {
+                try writer.writeAll(" ");
+                try prettyPrintValue(result, writer, indent);
+            }
+            try writer.writeAll("))");
+        },
+        // Atoms
+        .identifier, .number, .value_id, .block_id, .symbol => {
+            try writer.writeAll(value.data.atom);
+        },
+        .keyword => {
+            try writer.print(":{s}", .{value.keywordToName()});
+        },
+        .string => {
+            // String atoms already include quotes
+            try writer.writeAll(value.data.atom);
+        },
+        .type => {
+            try writer.writeAll(value.data.type);
+        },
+        .true_lit => try writer.writeAll("true"),
+        .false_lit => try writer.writeAll("false"),
+    }
+}
+
+/// Run macro transformation (--macroify or --macro-expand) and print result
+fn runTransformation(backing_allocator: std.mem.Allocator, file_path: []const u8, do_macroify: bool) !void {
+    // Create an arena for the transformation process
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Read the file
+    const source = try std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024);
+
+    // Parse the program
+    var tok = mlir_lisp.Tokenizer.init(allocator, source);
+    var reader = Reader.init(allocator, &tok) catch |err| {
+        const pos = tok.getPosition();
+        std.debug.print("error: {} at line {}, column {}\n", .{ err, pos.line, pos.column });
+        printErrorLocation(source, pos.line, pos.column);
+        return err;
+    };
+
+    // Read all top-level forms
+    const forms = reader.readAll() catch |err| {
+        const pos = tok.getPosition();
+        std.debug.print("error: {} at line {}, column {}\n", .{ err, pos.line, pos.column });
+        printErrorLocation(source, pos.line, pos.column);
+        return err;
+    };
+
+    // If there's only one form, use it directly; otherwise wrap in a list
+    const value = if (forms.len() == 1)
+        forms.at(0)
+    else
+        try createImplicitList(allocator, forms);
+
+    const transformed_value = if (do_macroify) blk: {
+        // Macroify: compress verbose operations to macro form
+        break :blk try macro_compressor.compressMacros(allocator, value);
+    } else blk: {
+        // Macro-expand: expand macros to verbose form
+        var macro_expander = MacroExpander.init(allocator);
+        defer macro_expander.deinit();
+        try builtin_macros.registerBuiltinMacros(&macro_expander);
+        break :blk try macro_expander.expandAll(value);
+    };
+
+    // Print the result to stdout (not stderr!)
+    var buffer = std.ArrayList(u8){};
+    defer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+    try prettyPrintValue(transformed_value, writer, 0);
+    try writer.writeAll("\n");
+
+    // Write to stdout file descriptor
+    const stdout_fd = std.posix.STDOUT_FILENO;
+    _ = try std.posix.write(stdout_fd, buffer.items);
 }
 
 fn printErrorLocation(source: []const u8, line: usize, column: usize) void {

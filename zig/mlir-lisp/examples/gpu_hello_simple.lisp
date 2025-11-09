@@ -29,7 +29,7 @@
                   (attributes {:operandSegmentSizes array<i32: 0, 0>}))
                 (operation
                   (name gpu.launch)
-                  (operand-uses %c10 %c1 %c1 %c1 %c1 %c1)
+                  (operands %c10 %c1 %c1 %c1 %c1 %c1)
                   (attributes {:operandSegmentSizes array<i32: 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0>})
                   (regions
                     (region
@@ -37,12 +37,12 @@
                         (arguments [(: %bx index) (: %by index) (: %bz index) (: %tx index) (: %ty index) (: %tz index) (: %num_bx index) (: %num_by index) (: %num_bz index) (: %num_tx index) (: %num_ty index) (: %num_tz index)])
                         (operation
                           (name memref.store)
-                          (operand-uses %bx %output %bx))
+                          (operands %bx %output %bx))
                         (operation
                           (name gpu.terminator))))))
                 (operation
                   (name memref.dealloc)
-                  (operand-uses %output))
+                  (operands %output))
                 (operation
                   (name arith.constant)
                   (result-bindings [%zero])
@@ -50,4 +50,4 @@
                   (attributes {:value (: 0 i64)}))
                 (operation
                   (name func.return)
-                  (operand-uses %zero))))))))))
+                  (operands %zero))))))))))

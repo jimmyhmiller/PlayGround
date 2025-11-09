@@ -102,7 +102,7 @@ Parallel matrix multiplication for 16x16 matrices.
 ```lisp
 (operation
   (name gpu.launch_func)
-  (operand-uses %grid_x %grid_y %grid_z %block_x %block_y %block_z %arg1 %arg2 ...)
+  (operands %grid_x %grid_y %grid_z %block_x %block_y %block_z %arg1 %arg2 ...)
   (attributes
     {:kernel @module::@kernel_name
      :operandSegmentSizes array<i32: 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, N, 0>}))

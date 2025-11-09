@@ -25,7 +25,7 @@
                             (result-types !irdl.attribute))
                           (operation
                             (name irdl.attributes)
-                            (operand-uses %6)
+                            (operands %6)
                             (attributes {:attributeValueNames ["value"]}))
                           (operation
                             (name irdl.is)
@@ -34,7 +34,7 @@
                             (attributes {:expected !llvm.ptr}))
                           (operation
                             (name irdl.results)
-                            (operand-uses %7)
+                            (operands %7)
                             (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))
                   (operation
                     (name irdl.operation)
@@ -50,11 +50,11 @@
                             (attributes {:expected !llvm.ptr}))
                           (operation
                             (name irdl.operands)
-                            (operand-uses %5)
+                            (operands %5)
                             (attributes {:names ["elements"] :variadicity #irdl<variadicity_array[ variadic]>}))
                           (operation
                             (name irdl.results)
-                            (operand-uses %5)
+                            (operands %5)
                             (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))
                   (operation
                     (name irdl.operation)
@@ -70,7 +70,7 @@
                             (attributes {:expected !llvm.ptr}))
                           (operation
                             (name irdl.operands)
-                            (operand-uses %3)
+                            (operands %3)
                             (attributes {:names ["list"] :variadicity #irdl<variadicity_array[ single]>}))
                           (operation
                             (name irdl.any)
@@ -78,11 +78,11 @@
                             (result-types !irdl.attribute))
                           (operation
                             (name irdl.attributes)
-                            (operand-uses %4)
+                            (operands %4)
                             (attributes {:attributeValueNames ["index"]}))
                           (operation
                             (name irdl.results)
-                            (operand-uses %3)
+                            (operands %3)
                             (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))
                   (operation
                     (name irdl.operation)
@@ -103,11 +103,11 @@
                             (attributes {:expected i64}))
                           (operation
                             (name irdl.operands)
-                            (operand-uses %1 %2)
+                            (operands %1 %2)
                             (attributes {:names ["list" "index"] :variadicity #irdl<variadicity_array[ single,  single]>}))
                           (operation
                             (name irdl.results)
-                            (operand-uses %1)
+                            (operands %1)
                             (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))
                   (operation
                     (name irdl.operation)
@@ -123,9 +123,9 @@
                             (attributes {:expected !llvm.ptr}))
                           (operation
                             (name irdl.operands)
-                            (operand-uses %0 %0 %0)
+                            (operands %0 %0 %0)
                             (attributes {:names ["name" "result_types" "operands"] :variadicity #irdl<variadicity_array[ single,  single,  single]>}))
                           (operation
                             (name irdl.results)
-                            (operand-uses %0)
+                            (operands %0)
                             (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})))))))))))))))

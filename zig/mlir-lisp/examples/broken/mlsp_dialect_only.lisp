@@ -21,12 +21,12 @@
                 (operation
                   (name irdl.attributes)
                   (attributes {:attributeValueNames ["value"]})
-                  (operand-uses %any_attr))
+                  (operands %any_attr))
                 (op %ptr_type (: !irdl.attribute) (irdl.is {:expected !llvm.ptr} []))
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))))))
+                  (operands %ptr_type))))))
 
         ;; mlsp.list
         (operation
@@ -39,11 +39,11 @@
                 (operation
                   (name irdl.operands)
                   (attributes {:names ["elements"] :variadicity #irdl<variadicity_array[ variadic]>})
-                  (operand-uses %ptr_type))
+                  (operands %ptr_type))
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))))))
+                  (operands %ptr_type))))))
 
         ;; mlsp.get_element
         (operation
@@ -59,11 +59,11 @@
                 (operation
                   (name irdl.operands)
                   (attributes {:names ["inputs"] :variadicity #irdl<variadicity_array[ variadic]>})
-                  (operand-uses %any_type))
+                  (operands %any_type))
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %ptr_type))))))))))
+                  (operands %ptr_type))))))))))
 
 ;; Test application
 (defn main [] i64

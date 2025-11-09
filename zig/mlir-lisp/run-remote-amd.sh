@@ -11,13 +11,14 @@ LISP_FILE="${1}"
 # Detect which address to use based on network location
 echo "Detecting network location..."
 
-# Check if local IP is reachable on port 22 (SSH)
-if timeout 0.1 bash -c "cat < /dev/null > /dev/tcp/$LOCAL_IP/22" 2>/dev/null; then
+# Check for home router's unique MAC address (instant, no network delay)
+HOME_GATEWAY_MAC="bc:7:1d:75:e2:1c"
+if arp -n 192.168.0.1 2>/dev/null | grep -qi "$HOME_GATEWAY_MAC"; then
     REMOTE_HOST="$LOCAL_IP"
-    echo "Local machine reachable, using local address: $REMOTE_HOST"
+    echo "On home network, using local address: $REMOTE_HOST"
 else
     REMOTE_HOST="$EXTERNAL_DNS"
-    echo "Local machine not reachable, using external DNS: $REMOTE_HOST"
+    echo "Not on home network, using external DNS: $REMOTE_HOST"
 fi
 
 # Colors for output

@@ -3,10 +3,10 @@
 
 (operation
   (name func.func)
-  (attributes {
+  (attributes {}
     :sym_name @main
-    :function_type (!function (inputs) (results i64))
-  })
+    :function_type (!function (inputs) (results i64)))
+  
   (regions
     (region
       (block [^entry]
@@ -20,12 +20,12 @@
               (operation
                 (name arith.constant)
                 (result-types i64)
-                (attributes { :value (: 10 i64) }))
+                (attributes { :value (: 10 i64)}))
               (operation
                 (name arith.constant)
                 (result-types i64)
-                (attributes { :value (: 32 i64) })))
+                (attributes { :value (: 32 i64)})))
             (operation
               (name arith.constant)
               (result-types i64)
-              (attributes { :value (: 2 i64) }))))))))
+              (attributes { :value (: 2 i64)}))))))))

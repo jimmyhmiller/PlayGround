@@ -15,7 +15,7 @@
                   (arguments [(: %arg0 !transform.any_op)])
                   (operation
                     (name transform.with_pdl_patterns)
-                    (operand-uses %arg0)
+                    (operands %arg0)
                     (regions
                       (region
                         (block [^bb0]
@@ -40,11 +40,11 @@
                                     (name pdl.operation)
                                     (result-bindings [%44])
                                     (result-types !pdl.operation)
-                                    (operand-uses %43 %42)
+                                    (operands %43 %42)
                                     (attributes {:attributeValueNames ["global"] :opName "mlsp.string_const" :operandSegmentSizes array<i32: 0, 1, 1>}))
                                   (operation
                                     (name pdl.rewrite)
-                                    (operand-uses %44)
+                                    (operands %44)
                                     (attributes {:operandSegmentSizes array<i32: 1, 0>})
                                     (regions
                                       (region
@@ -54,11 +54,11 @@
                                             (name pdl.operation)
                                             (result-bindings [%45])
                                             (result-types !pdl.operation)
-                                            (operand-uses %43 %42)
+                                            (operands %43 %42)
                                             (attributes {:attributeValueNames ["global_name"] :opName "llvm.mlir.addressof" :operandSegmentSizes array<i32: 0, 1, 1>}))
                                           (operation
                                             (name pdl.replace)
-                                            (operand-uses %44 %45)
+                                            (operands %44 %45)
                                             (attributes {:operandSegmentSizes array<i32: 1, 1, 0>}))))))))))
                           (operation
                             (name pdl.pattern)
@@ -84,11 +84,11 @@
                                     (name pdl.operation)
                                     (result-bindings [%39])
                                     (result-types !pdl.operation)
-                                    (operand-uses %37 %38 %36)
+                                    (operands %37 %38 %36)
                                     (attributes {:attributeValueNames [] :opName "mlsp.get_element" :operandSegmentSizes array<i32: 2, 0, 1>}))
                                   (operation
                                     (name pdl.rewrite)
-                                    (operand-uses %39)
+                                    (operands %39)
                                     (attributes {:operandSegmentSizes array<i32: 1, 0>})
                                     (regions
                                       (region
@@ -103,11 +103,11 @@
                                             (name pdl.operation)
                                             (result-bindings [%41])
                                             (result-types !pdl.operation)
-                                            (operand-uses %37 %38 %40 %36)
+                                            (operands %37 %38 %40 %36)
                                             (attributes {:attributeValueNames ["callee"] :opName "func.call" :operandSegmentSizes array<i32: 2, 1, 1>}))
                                           (operation
                                             (name pdl.replace)
-                                            (operand-uses %39 %41)
+                                            (operands %39 %41)
                                             (attributes {:operandSegmentSizes array<i32: 1, 1, 0>}))))))))))
                           (operation
                             (name pdl.pattern)
@@ -134,11 +134,11 @@
                                     (name pdl.operation)
                                     (result-bindings [%30])
                                     (result-types !pdl.operation)
-                                    (operand-uses %29 %27)
+                                    (operands %29 %27)
                                     (attributes {:attributeValueNames [] :opName "mlsp.identifier" :operandSegmentSizes array<i32: 1, 0, 1>}))
                                   (operation
                                     (name pdl.rewrite)
-                                    (operand-uses %30)
+                                    (operands %30)
                                     (attributes {:operandSegmentSizes array<i32: 1, 0>})
                                     (regions
                                       (region
@@ -153,13 +153,13 @@
                                             (name pdl.operation)
                                             (result-bindings [%32])
                                             (result-types !pdl.operation)
-                                            (operand-uses %31 %28)
+                                            (operands %31 %28)
                                             (attributes {:attributeValueNames ["value"] :opName "arith.constant" :operandSegmentSizes array<i32: 0, 1, 1>}))
                                           (operation
                                             (name pdl.result)
                                             (result-bindings [%33])
                                             (result-types !pdl.value)
-                                            (operand-uses %32)
+                                            (operands %32)
                                             (attributes {:index (: 0 i32)}))
                                           (operation
                                             (name pdl.attribute)
@@ -170,11 +170,11 @@
                                             (name pdl.operation)
                                             (result-bindings [%35])
                                             (result-types !pdl.operation)
-                                            (operand-uses %29 %33 %34 %27)
+                                            (operands %29 %33 %34 %27)
                                             (attributes {:attributeValueNames ["callee"] :opName "func.call" :operandSegmentSizes array<i32: 2, 1, 1>}))
                                           (operation
                                             (name pdl.replace)
-                                            (operand-uses %30 %35)
+                                            (operands %30 %35)
                                             (attributes {:operandSegmentSizes array<i32: 1, 1, 0>}))))))))))
                           (operation
                             (name pdl.pattern)
@@ -200,11 +200,11 @@
                                     (name pdl.operation)
                                     (result-bindings [%24])
                                     (result-types !pdl.operation)
-                                    (operand-uses %22 %23 %21)
+                                    (operands %22 %23 %21)
                                     (attributes {:attributeValueNames [] :opName "mlsp.list" :operandSegmentSizes array<i32: 2, 0, 1>}))
                                   (operation
                                     (name pdl.rewrite)
-                                    (operand-uses %24)
+                                    (operands %24)
                                     (attributes {:operandSegmentSizes array<i32: 1, 0>})
                                     (regions
                                       (region
@@ -219,11 +219,11 @@
                                             (name pdl.operation)
                                             (result-bindings [%26])
                                             (result-types !pdl.operation)
-                                            (operand-uses %22 %23 %25 %21)
+                                            (operands %22 %23 %25 %21)
                                             (attributes {:attributeValueNames ["callee"] :opName "func.call" :operandSegmentSizes array<i32: 2, 1, 1>}))
                                           (operation
                                             (name pdl.replace)
-                                            (operand-uses %24 %26)
+                                            (operands %24 %26)
                                             (attributes {:operandSegmentSizes array<i32: 1, 1, 0>}))))))))))
                           (operation
                             (name pdl.pattern)
@@ -253,11 +253,11 @@
                                     (name pdl.operation)
                                     (result-bindings [%18])
                                     (result-types !pdl.operation)
-                                    (operand-uses %15 %16 %17 %14)
+                                    (operands %15 %16 %17 %14)
                                     (attributes {:attributeValueNames [] :opName "mlsp.list" :operandSegmentSizes array<i32: 3, 0, 1>}))
                                   (operation
                                     (name pdl.rewrite)
-                                    (operand-uses %18)
+                                    (operands %18)
                                     (attributes {:operandSegmentSizes array<i32: 1, 0>})
                                     (regions
                                       (region
@@ -272,11 +272,11 @@
                                             (name pdl.operation)
                                             (result-bindings [%20])
                                             (result-types !pdl.operation)
-                                            (operand-uses %15 %16 %17 %19 %14)
+                                            (operands %15 %16 %17 %19 %14)
                                             (attributes {:attributeValueNames ["callee"] :opName "func.call" :operandSegmentSizes array<i32: 3, 1, 1>}))
                                           (operation
                                             (name pdl.replace)
-                                            (operand-uses %18 %20)
+                                            (operands %18 %20)
                                             (attributes {:operandSegmentSizes array<i32: 1, 1, 0>}))))))))))
                           (operation
                             (name pdl.pattern)
@@ -310,11 +310,11 @@
                                     (name pdl.operation)
                                     (result-bindings [%11])
                                     (result-types !pdl.operation)
-                                    (operand-uses %7 %8 %9 %10 %6)
+                                    (operands %7 %8 %9 %10 %6)
                                     (attributes {:attributeValueNames [] :opName "mlsp.list" :operandSegmentSizes array<i32: 4, 0, 1>}))
                                   (operation
                                     (name pdl.rewrite)
-                                    (operand-uses %11)
+                                    (operands %11)
                                     (attributes {:operandSegmentSizes array<i32: 1, 0>})
                                     (regions
                                       (region
@@ -329,15 +329,15 @@
                                             (name pdl.operation)
                                             (result-bindings [%13])
                                             (result-types !pdl.operation)
-                                            (operand-uses %7 %8 %9 %10 %12 %6)
+                                            (operands %7 %8 %9 %10 %12 %6)
                                             (attributes {:attributeValueNames ["callee"] :opName "func.call" :operandSegmentSizes array<i32: 4, 1, 1>}))
                                           (operation
                                             (name pdl.replace)
-                                            (operand-uses %11 %13)
+                                            (operands %11 %13)
                                             (attributes {:operandSegmentSizes array<i32: 1, 1, 0>}))))))))))
                           (operation
                             (name transform.sequence)
-                            (operand-uses %arg1)
+                            (operands %arg1)
                             (attributes {:failure_propagation_mode (: 1 i32) :operandSegmentSizes array<i32: 1, 0>})
                             (regions
                               (region
@@ -347,37 +347,37 @@
                                     (name transform.pdl_match)
                                     (result-bindings [%0])
                                     (result-types !transform.any_op)
-                                    (operand-uses %arg2)
+                                    (operands %arg2)
                                     (attributes {:pattern_name @mlsp_string_const}))
                                   (operation
                                     (name transform.pdl_match)
                                     (result-bindings [%1])
                                     (result-types !transform.any_op)
-                                    (operand-uses %arg2)
+                                    (operands %arg2)
                                     (attributes {:pattern_name @mlsp_get_element}))
                                   (operation
                                     (name transform.pdl_match)
                                     (result-bindings [%2])
                                     (result-types !transform.any_op)
-                                    (operand-uses %arg2)
+                                    (operands %arg2)
                                     (attributes {:pattern_name @mlsp_identifier}))
                                   (operation
                                     (name transform.pdl_match)
                                     (result-bindings [%3])
                                     (result-types !transform.any_op)
-                                    (operand-uses %arg2)
+                                    (operands %arg2)
                                     (attributes {:pattern_name @mlsp_list_2}))
                                   (operation
                                     (name transform.pdl_match)
                                     (result-bindings [%4])
                                     (result-types !transform.any_op)
-                                    (operand-uses %arg2)
+                                    (operands %arg2)
                                     (attributes {:pattern_name @mlsp_list_3}))
                                   (operation
                                     (name transform.pdl_match)
                                     (result-bindings [%5])
                                     (result-types !transform.any_op)
-                                    (operand-uses %arg2)
+                                    (operands %arg2)
                                     (attributes {:pattern_name @mlsp_list_4}))
                                   (operation
                                     (name transform.yield))))))))))

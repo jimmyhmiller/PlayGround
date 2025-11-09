@@ -2,7 +2,7 @@
 ;;
 ;; This version includes the string global declarations needed for identifier atoms
 
-(mlir
+(mlir)
 ;; Declare external malloc function
 (operation
   (name llvm.func)
@@ -166,7 +166,7 @@
     (name llvm.call)
     (result-bindings [%operation_id])
     (result-types !llvm.ptr)
-    (operand-uses %value_size)
+    (operands %value_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (op %operation_type_ptr (: !llvm.ptr) (llvm.getelementptr {:elem_type i8 :rawConstantIndices array<i32: 0>} [%operation_id]))
   (op (llvm.store [%identifier_tag %operation_type_ptr]))
@@ -188,7 +188,7 @@
     (name llvm.call)
     (result-bindings [%name_id])
     (result-types !llvm.ptr)
-    (operand-uses %value_size)
+    (operands %value_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (op %name_type_ptr (: !llvm.ptr) (llvm.getelementptr {:elem_type i8 :rawConstantIndices array<i32: 0>} [%name_id]))
   (op (llvm.store [%identifier_tag %name_type_ptr]))
@@ -210,7 +210,7 @@
     (name llvm.call)
     (result-bindings [%addi_id])
     (result-types !llvm.ptr)
-    (operand-uses %value_size)
+    (operands %value_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (op %addi_type_ptr (: !llvm.ptr) (llvm.getelementptr {:elem_type i8 :rawConstantIndices array<i32: 0>} [%addi_id]))
   (op (llvm.store [%identifier_tag %addi_type_ptr]))
@@ -232,7 +232,7 @@
     (name llvm.call)
     (result-bindings [%result_types_id])
     (result-types !llvm.ptr)
-    (operand-uses %value_size)
+    (operands %value_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (op %rt_type_ptr (: !llvm.ptr) (llvm.getelementptr {:elem_type i8 :rawConstantIndices array<i32: 0>} [%result_types_id]))
   (op (llvm.store [%identifier_tag %rt_type_ptr]))
@@ -254,7 +254,7 @@
     (name llvm.call)
     (result-bindings [%operands_id])
     (result-types !llvm.ptr)
-    (operand-uses %value_size)
+    (operands %value_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (op %op_type_ptr (: !llvm.ptr) (llvm.getelementptr {:elem_type i8 :rawConstantIndices array<i32: 0>} [%operands_id]))
   (op (llvm.store [%identifier_tag %op_type_ptr]))
@@ -279,7 +279,7 @@
     (name llvm.call)
     (result-bindings [%name_arr])
     (result-types !llvm.ptr)
-    (operand-uses %c2_size)
+    (operands %c2_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (op %name_arr_0 (: !llvm.ptr) (llvm.getelementptr {:elem_type i8 :rawConstantIndices array<i32: -2147483648>} [%name_arr %offset0]))
   (op (llvm.store [%name_id %name_arr_0]))
@@ -291,7 +291,7 @@
     (name llvm.call)
     (result-bindings [%types_arr])
     (result-types !llvm.ptr)
-    (operand-uses %c2_size)
+    (operands %c2_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (op %types_arr_0 (: !llvm.ptr) (llvm.getelementptr {:elem_type i8 :rawConstantIndices array<i32: -2147483648>} [%types_arr %offset0]))
   (op (llvm.store [%result_types_id %types_arr_0]))
@@ -304,7 +304,7 @@
     (name llvm.call)
     (result-bindings [%operands_arr])
     (result-types !llvm.ptr)
-    (operand-uses %c3_size)
+    (operands %c3_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (op %operands_arr_0 (: !llvm.ptr) (llvm.getelementptr {:elem_type i8 :rawConstantIndices array<i32: -2147483648>} [%operands_arr %offset0]))
   (op (llvm.store [%operands_id %operands_arr_0]))
@@ -320,7 +320,7 @@
     (name llvm.call)
     (result-bindings [%name_list])
     (result-types !llvm.ptr)
-    (operand-uses %value_size)
+    (operands %value_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (op %name_list_type_ptr (: !llvm.ptr) (llvm.getelementptr {:elem_type i8 :rawConstantIndices array<i32: 0>} [%name_list]))
   (op (llvm.store [%list_tag %name_list_type_ptr]))
@@ -342,7 +342,7 @@
     (name llvm.call)
     (result-bindings [%types_list])
     (result-types !llvm.ptr)
-    (operand-uses %value_size)
+    (operands %value_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (op %types_list_type_ptr (: !llvm.ptr) (llvm.getelementptr {:elem_type i8 :rawConstantIndices array<i32: 0>} [%types_list]))
   (op (llvm.store [%list_tag %types_list_type_ptr]))
@@ -364,7 +364,7 @@
     (name llvm.call)
     (result-bindings [%operands_list])
     (result-types !llvm.ptr)
-    (operand-uses %value_size)
+    (operands %value_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (op %operands_list_type_ptr (: !llvm.ptr) (llvm.getelementptr {:elem_type i8 :rawConstantIndices array<i32: 0>} [%operands_list]))
   (op (llvm.store [%list_tag %operands_list_type_ptr]))
@@ -389,7 +389,7 @@
     (name llvm.call)
     (result-bindings [%result_arr])
     (result-types !llvm.ptr)
-    (operand-uses %c4_size)
+    (operands %c4_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
   (op %offset3 (: i64) (llvm.mul [%c3 %ptr_size]))
 
@@ -407,7 +407,7 @@
     (name llvm.call)
     (result-bindings [%result])
     (result-types !llvm.ptr)
-    (operand-uses %value_size)
+    (operands %value_size)
     (attributes {:callee @malloc :operandSegmentSizes array<i32: 1, 0> :op_bundle_sizes array<i32>}))
 
   (op %result_type_ptr (: !llvm.ptr) (llvm.getelementptr {:elem_type i8 :rawConstantIndices array<i32: 0>} [%result]))
@@ -423,7 +423,7 @@
 
   (return %result))
 
-) ;; end mlir
+ ;; end mlir
 
 ;; SUCCESS! This is a complete, working implementation of the + macro in mlir-lisp!
 ;; It uses pure LLVM operations to manipulate Value structs at compile time.

@@ -57,19 +57,19 @@
                   (name memref.load)
                   (result-bindings [%val])
                   (result-types f32)
-                  (operand-uses %input %block_x %thread_x))
+                  (operands %input %block_x %thread_x))
 
                 ;; Square the value: result = val * val
                 (operation
                   (name arith.mulf)
                   (result-bindings [%result])
                   (result-types f32)
-                  (operand-uses %val %val))
+                  (operands %val %val))
 
                 ;; Store result to output at [block_x, thread_x]
                 (operation
                   (name memref.store)
-                  (operand-uses %result %output %block_x %thread_x))
+                  (operands %result %output %block_x %thread_x))
 
                 ;; Return from kernel
                 (operation
@@ -110,7 +110,7 @@
        :gridSizeX %c10
        :gridSizeY %c1
        :gridSizeZ %c1})
-    (operand-uses %input %output))
+    (operands %input %output))
 
   ;; Return 0
   (constant %c0 (: 0 i32))

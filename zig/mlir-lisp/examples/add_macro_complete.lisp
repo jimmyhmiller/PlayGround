@@ -2,7 +2,7 @@
 ;;
 ;; This version includes the string global declarations needed for identifier atoms
 
-(mlir
+(mlir)
 ;; Declare string constants as module-level globals
 (operation
   (name llvm.mlir.global)
@@ -259,7 +259,7 @@
 
   (return %result))
 
-) ;; end mlir
+ ;; end mlir
 
 ;; SUCCESS! This is a complete, working implementation of the + macro in mlir-lisp!
 ;; It uses pure LLVM operations to manipulate Value structs at compile time.

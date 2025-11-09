@@ -15,7 +15,7 @@
                 (arguments [(: %arg0 !transform.any_op)])
                 (operation
                   (name transform.with_pdl_patterns)
-                  (operand-uses %arg0)
+                  (operands %arg0)
                   (regions
                     (region
                       (block [^bb0]
@@ -36,12 +36,12 @@
                                   (name pdl.operation)
                                   (result-bindings [%op])
                                   (result-types !pdl.operation)
-                                  (operand-uses %t)
-                                  (attributes {:opName "mlsp.string_const"
-                                             :operandSegmentSizes array<i32: 0, 0, 1>}))
+                                  (operands %t)
+                                  (attributes {:opName "mlsp.string_const"}
+                                             :operandSegmentSizes array<i32: 0, 0, 1>))
                                 (operation
                                   (name pdl.rewrite)
-                                  (operand-uses %op)
+                                  (operands %op)
                                   (attributes {:operandSegmentSizes array<i32: 1, 0>})
                                   (regions
                                     (region
@@ -50,27 +50,27 @@
                                           (name pdl.operation)
                                           (result-bindings [%new])
                                           (result-types !pdl.operation)
-                                          (operand-uses %t)
-                                          (attributes {:opName "llvm.mlir.zero"
-                                                     :operandSegmentSizes array<i32: 0, 0, 1>}))
+                                          (operands %t)
+                                          (attributes {:opName "llvm.mlir.zero"}
+                                                     :operandSegmentSizes array<i32: 0, 0, 1>))
                                         (operation
                                           (name pdl.replace)
-                                          (operand-uses %op %new)
+                                          (operands %op %new)
                                           (attributes {:operandSegmentSizes array<i32: 1, 1, 0>}))))))))))
 
                         ;; Apply the pattern
                         (operation
                           (name transform.sequence)
-                          (operand-uses %arg1)
-                          (attributes {:failure_propagation_mode (: 1 i32)
-                                     :operandSegmentSizes array<i32: 1, 0>})
+                          (operands %arg1)
+                          (attributes {:failure_propagation_mode (: 1 i32)}
+                                     :operandSegmentSizes array<i32: 1, 0>)
                           (regions
                             (region
                               (block [^bb0]
                                 (arguments [(: %arg2 !transform.any_op)])
                                 (operation
                                   (name transform.pdl_match)
-                                  (operand-uses %arg2)
+                                  (operands %arg2)
                                   (result-bindings [%m])
                                   (result-types !transform.any_op)
                                   (attributes {:pattern_name @test_pattern}))

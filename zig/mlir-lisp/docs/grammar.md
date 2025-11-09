@@ -75,7 +75,7 @@ SECTION    ::= RESULTS
 ;----------------------------------------
 RESULTS        ::= (result-bindings [ VALUE_ID* ])
 RESULT_TYPES   ::= (result-types TYPE*)
-OPERANDS       ::= (operand-uses VALUE_ID*)
+OPERANDS       ::= (operands VALUE_ID*)
 ATTRIBUTES     ::= (attributes { KEYWORD ATTR* })
 SUCCESSORS     ::= (successors SUCCESSOR*)
 LOCATION       ::= (location ATTR)

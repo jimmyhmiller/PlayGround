@@ -66,14 +66,14 @@
                   (name arith.muli)
                   (result-bindings [%block_offset])
                   (result-types index)
-                  (operand-uses %block_id %block_dim))
+                  (operands %block_id %block_dim))
 
                 ;; Calculate: global_idx = block_offset + thread_id
                 (operation
                   (name arith.addi)
                   (result-bindings [%global_idx])
                   (result-types index)
-                  (operand-uses %block_offset %thread_id))
+                  (operands %block_offset %thread_id))
 
                 ;; Bounds check (optional, but good practice)
                 ;; if (global_idx < 1024) { ... }
@@ -84,12 +84,12 @@
                   (result-bindings [%in_bounds])
                   (result-types i1)
                   (attributes {:predicate (: 2 i64)})
-                  (operand-uses %global_idx %size))
+                  (operands %global_idx %size))
 
                 ;; Conditional execution
                 (operation
                   (name scf.if)
-                  (operand-uses %in_bounds)
+                  (operands %in_bounds)
                   (regions
                     (region
                       (block
@@ -98,26 +98,26 @@
                           (name memref.load)
                           (result-bindings [%a_val])
                           (result-types f32)
-                          (operand-uses %a %global_idx))
+                          (operands %a %global_idx))
 
                         ;; Load b[global_idx]
                         (operation
                           (name memref.load)
                           (result-bindings [%b_val])
                           (result-types f32)
-                          (operand-uses %b %global_idx))
+                          (operands %b %global_idx))
 
                         ;; Compute sum
                         (operation
                           (name arith.addf)
                           (result-bindings [%sum])
                           (result-types f32)
-                          (operand-uses %a_val %b_val))
+                          (operands %a_val %b_val))
 
                         ;; Store c[global_idx] = sum
                         (operation
                           (name memref.store)
-                          (operand-uses %sum %c %global_idx))
+                          (operands %sum %c %global_idx))
 
                         (operation
                           (name scf.yield))))))
@@ -168,7 +168,7 @@
        :blockSizeX %block_size
        :blockSizeY %c1
        :blockSizeZ %c1})
-    (operand-uses %a %b %c))
+    (operands %a %b %c))
 
   ;; Return success
   (constant %c0 (: 0 i32))

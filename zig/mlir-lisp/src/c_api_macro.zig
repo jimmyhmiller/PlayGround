@@ -78,8 +78,30 @@ pub fn wrapCTransformAsMacro(comptime c_fn: CTransformFn) MacroFn {
             const args_opaque: ?*anyopaque = @ptrCast(args_value);
 
             // 3. Call the C transformation function
-            const result_opaque = c_fn(c_allocator, args_opaque)
-                orelse return error.TransformationFailed;
+            const result_opaque = c_fn(c_allocator, args_opaque) orelse {
+                std.debug.print("ERROR: C transformation function returned null\n", .{});
+                std.debug.print("  Input value type: {s}\n", .{@tagName(args_value.type)});
+
+                // Try to print some debug info about the input
+                if (args_value.type == .list) {
+                    const vec = args_value.data.list;
+                    const slice = vec.slice();
+                    std.debug.print("  Input is a list with {} elements\n", .{slice.len});
+                    for (slice, 0..) |elem, i| {
+                        std.debug.print("    [{}] type={s}", .{ i, @tagName(elem.type) });
+                        if (elem.type == .identifier or elem.type == .number or
+                            elem.type == .string or elem.type == .true_lit or
+                            elem.type == .false_lit or elem.type == .keyword or
+                            elem.type == .symbol or elem.type == .value_id or
+                            elem.type == .block_id) {
+                            std.debug.print(" value=\"{s}\"", .{elem.data.atom});
+                        }
+                        std.debug.print("\n", .{});
+                    }
+                }
+
+                return error.TransformationFailed;
+            };
 
             // 4. Convert result back to *Value
             const result: *Value = @ptrCast(@alignCast(result_opaque));

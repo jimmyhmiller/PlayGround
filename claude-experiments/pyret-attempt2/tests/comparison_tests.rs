@@ -3047,6 +3047,37 @@ fn test_full_file_test_statistics() {
     let code = include_str!("pyret-files/full-files/tests/test-statistics.arr");
     assert_matches_pyret(code);
 }
+// ============================================================================
+// CATEGORY: Known JSON Serialization Issues (Minimal Failing Cases)
+// ============================================================================
+// These tests document the remaining differences between our parser and
+// Pyret's official parser. All issues are in JSON serialization, not parsing.
+
+#[test]
+fn test_fraction_simplification_issue() {
+    // FIXED! Fractions are now kept unsimplified like Pyret
+    // Output: {"type": "s-frac", "num": "6", "den": "3"}
+    assert_matches_pyret("6/3");
+}
+
+#[test]
+fn test_scientific_notation_negative_exponent_issue() {
+    // FIXED! We now correctly expand 1.5e-300 to exact fraction "3/2000...000"
+    // This was fixed by implementing arbitrary precision number expansion
+    assert_matches_pyret("1.5e-300");
+}
+
+#[test]
+fn test_rough_number_trailing_zeros_issue() {
+    // FIXED! We now correctly strip trailing zeros from rough numbers
+    // Our output: {"type": "s-num", "value": "~-6.92820323"}
+    // This was fixed by implementing proper rough number normalization
+    assert_matches_pyret("~-6.928203230");
+}
+
+// ============================================================================
+// CATEGORY: Full File Integration Tests
+// ============================================================================
 
 #[test]
 fn test_full_file_test_math() {

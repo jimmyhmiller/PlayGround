@@ -22,7 +22,7 @@
                   (attributes {:expected i32}))
                 (operation
                   (name irdl.results)
-                  (operand-uses %i32)
+                  (operands %i32)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))))))
 
 ;; Main function using custom.magic

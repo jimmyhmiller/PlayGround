@@ -45,7 +45,7 @@ test "lisp printer - arithmetic operation with operands" {
 
     // Check addi operation
     try std.testing.expect(std.mem.indexOf(u8, result, "(name arith.addi)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "(operand-uses %0 %1)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "(operands %0 %1)") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "(result-bindings [%2])") != null);
 
     std.debug.print("\n=== Arithmetic Operation Output ===\n{s}\n", .{result});

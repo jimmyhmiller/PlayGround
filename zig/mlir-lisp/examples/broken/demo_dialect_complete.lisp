@@ -38,13 +38,13 @@
                 (operation
                   (name irdl.attributes)
                   (attributes {:attributeValueNames ["value"]})
-                  (operand-uses %attr_constraint))
+                  (operands %attr_constraint))
 
                 ;; Results: one integer value
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %int_types))))))))))
+                  (operands %int_types))))))))))
 
 ;; ========================================
 ;; PART 2: PDL Transform to Lower demo.constant
@@ -80,10 +80,10 @@
                           (result-types !pdl.type))
                         (operation
                           (name pdl.operation)
-                          (attributes {:opName "demo.constant"
+                          (attributes {:opName "demo.constant"}
                                      :attributeValueNames ["value"]
-                                     :operandSegmentSizes array<i32: 0, 1, 1>})
-                          (operand-uses %value_attr %result_type)
+                                     :operandSegmentSizes array<i32: 0, 1, 1>)
+                          (operands %value_attr %result_type)
                           (result-bindings [%demo_op])
                           (result-types !pdl.operation))
 
@@ -91,17 +91,17 @@
                         (operation
                           (name pdl.rewrite)
                           (attributes {:operandSegmentSizes array<i32: 1, 0>})
-                          (operand-uses %demo_op)
+                          (operands %demo_op)
                           (regions
                             (region
                               (block
                                 ;; Create arith.constant with same value attribute
                                 (operation
                                   (name pdl.operation)
-                                  (attributes {:opName "arith.constant"
+                                  (attributes {:opName "arith.constant"}
                                              :attributeValueNames ["value"]
-                                             :operandSegmentSizes array<i32: 0, 1, 1>})
-                                  (operand-uses %value_attr %result_type)
+                                             :operandSegmentSizes array<i32: 0, 1, 1>)
+                                  (operands %value_attr %result_type)
                                   (result-bindings [%arith_op])
                                   (result-types !pdl.operation))
 
@@ -109,14 +109,14 @@
                                 (operation
                                   (name pdl.replace)
                                   (attributes {:operandSegmentSizes array<i32: 1, 1, 0>})
-                                  (operand-uses %demo_op %arith_op))))))))))
+                                  (operands %demo_op %arith_op))))))))))
 
                 ;; Transform sequence to apply the pattern
                 (operation
                   (name transform.sequence)
-                  (attributes {:failure_propagation_mode (: 1 i32)
-                             :operandSegmentSizes array<i32: 1, 0>})
-                  (operand-uses %root)
+                  (attributes {:failure_propagation_mode (: 1 i32)}
+                             :operandSegmentSizes array<i32: 1, 0>)
+                  (operands %root)
                   (result-types !transform.any_op)
                   (regions
                     (region
@@ -126,7 +126,7 @@
                         (operation
                           (name transform.pdl_match)
                           (attributes {:pattern_name @demo_to_arith})
-                          (operand-uses %arg1)
+                          (operands %arg1)
                           (result-bindings [%matched])
                           (result-types !transform.any_op))
                         (operation

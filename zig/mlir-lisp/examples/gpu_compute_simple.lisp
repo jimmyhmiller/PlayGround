@@ -26,7 +26,7 @@
                 ;; Launch GPU kernel with 1 block, 1 thread - no memory operations
                 (operation
                   (name gpu.launch)
-                  (operand-uses %c1 %c1 %c1 %c1 %c1 %c1)
+                  (operands %c1 %c1 %c1 %c1 %c1 %c1)
                   (attributes {:operandSegmentSizes array<i32: 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0>})
                   (regions
                     (region
@@ -38,4 +38,4 @@
                 ;; Return the value
                 (operation
                   (name func.return)
-                  (operand-uses %c42))))))))))
+                  (operands %c42))))))))))

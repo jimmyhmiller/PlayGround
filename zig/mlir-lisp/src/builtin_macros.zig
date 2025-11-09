@@ -594,10 +594,13 @@ fn constantMacro(
 
 /// op macro: General-purpose operation macro
 /// Forms:
-///   (op %N (: index) (memref.dim [%B %c1]))
-///   (op (: index) (memref.dim [%B %c1]))
-///   (op (memref.store [%value %C %i %j]))
-///   (op %result (: i32) (scf.if %cond) (region ...) (region ...))
+///   (op %N (: index) (memref.dim [%B %c1]))           - with binding, type, and operands
+///   (op (: index) (memref.dim [%B %c1]))              - with type and operands
+///   (op (memref.store [%value %C %i %j]))             - with operands only
+///   (op (memref.dim {attrs} [%B %c1]))                - with attributes and operands
+///   (op (memref.dim {attrs}))                         - with attributes, no operands
+///   (op (memref.dim))                                 - no attributes, no operands
+///   (op %result (: i32) (scf.if %cond) (region ...) (region ...)) - with regions
 /// Expands to: (operation (name ...) [result-bindings] [result-types] (operands ...) [regions])
 fn opMacro(
     allocator: std.mem.Allocator,
@@ -679,8 +682,10 @@ fn opMacro(
         }
     }
 
-    // Extract operands - should be a vector [operands...] at operands_index
+    // Extract operands - optional vector [operands...] at operands_index
     var operands_vec = PersistentVector(*Value).init(allocator, null);
+    var regions_start = operands_index;
+
     if (op_call.len() > operands_index) {
         const operands_arg = op_call.at(operands_index);
         if (operands_arg.type == .vector) {
@@ -688,16 +693,15 @@ fn opMacro(
             for (operands_arg.data.vector.slice()) |operand| {
                 operands_vec = try operands_vec.push(operand);
             }
-        } else {
-            std.debug.print("op macro: operands must be in a vector [...]\n", .{});
-            return error.InvalidMacroArgs;
+            // Regions start after the operands vector
+            regions_start = operands_index + 1;
         }
+        // If not a vector, treat it as the start of regions (operands are optional)
     }
 
-    // Extract regions from the operation call (after operands)
+    // Extract regions from the operation call (after operands, if any)
     var regions = std.ArrayList(*Value){};
     defer regions.deinit(allocator);
-    const regions_start = operands_index + 1;
     if (op_call.len() > regions_start) {
         var i: usize = regions_start;
         while (i < op_call.len()) : (i += 1) {

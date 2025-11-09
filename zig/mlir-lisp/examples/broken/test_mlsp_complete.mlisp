@@ -20,7 +20,7 @@
          (result-types !irdl.attribute))
         (operation
          (name irdl.attributes)
-         (operand-uses %13)
+         (operands %13)
          (attributes {:attributeValueNames ["value"]}))
         (operation
          (name irdl.is)
@@ -29,7 +29,7 @@
          (attributes {:expected !llvm.ptr}))
         (operation
          (name irdl.results)
-         (operand-uses %14)
+         (operands %14)
          (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>}))))))
     (operation
      (name irdl.operation)
@@ -45,11 +45,11 @@
          (attributes {:expected !llvm.ptr}))
         (operation
          (name irdl.operands)
-         (operand-uses %12)
+         (operands %12)
          (attributes {:names ["elements"] :variadicity #irdl<variadicity_array[ variadic]>}))
         (operation
          (name irdl.results)
-         (operand-uses %12)
+         (operands %12)
          (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})))))
     (operation
      (name irdl.operation)
@@ -65,7 +65,7 @@
          (attributes {:expected !llvm.ptr}))
         (operation
          (name irdl.operands)
-         (operand-uses %10)
+         (operands %10)
          (attributes {:names ["list"] :variadicity #irdl<variadicity_array[ single]>}))
         (operation
          (name irdl.is)
@@ -74,11 +74,11 @@
          (attributes {:expected i64}))
         (operation
          (name irdl.attributes)
-         (operand-uses %11)
+         (operands %11)
          (attributes {:attributeValueNames ["index"]}))
         (operation
          (name irdl.results)
-         (operand-uses %10)
+         (operands %10)
          (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})))))
     (operation
      (name irdl.operation)
@@ -99,11 +99,11 @@
          (attributes {:expected i64}))
         (operation
          (name irdl.operands)
-         (operand-uses %8 %9)
+         (operands %8 %9)
          (attributes {:names ["list" "index"] :variadicity #irdl<variadicity_array[ single,  single]>}))
         (operation
          (name irdl.results)
-         (operand-uses %8)
+         (operands %8)
          (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})))))))))
 
 
@@ -144,12 +144,12 @@
      (name mlsp.list)
      (result-bindings [%2])
      (result-types !llvm.ptr)
-     (operand-uses %0 %1))
+     (operands %0 %1))
     (operation
      (name mlsp.get_element)
      (result-bindings [%3])
      (result-types !llvm.ptr)
-     (operand-uses %2)
+     (operands %2)
      (attributes {:index (: 0 i64)}))
     (operation
      (name arith.constant)
@@ -160,7 +160,7 @@
      (name mlsp.get_element_dyn)
      (result-bindings [%5])
      (result-types !llvm.ptr)
-     (operand-uses %2 %4))
+     (operands %2 %4))
     (operation
      (name arith.constant)
      (result-bindings [%6])
@@ -168,5 +168,5 @@
      (attributes {:value (: 42 i64)}))
     (operation
      (name func.return)
-     (operand-uses %6)))))))))
+     (operands %6)))))))))
 

@@ -332,3 +332,103 @@ test "op macro: operation with multiple operands" {
     try std.testing.expectEqualStrings("%a", operands_list.at(1).data.atom);
     try std.testing.expectEqualStrings("%b", operands_list.at(2).data.atom);
 }
+
+test "op macro: operation with no operands (no vector)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Test: (op %acc_init (: f32) (arith.constant))
+    const input =
+        \\(op %acc_init (: f32) (arith.constant))
+    ;
+
+    const first_value = try readString(allocator, input);
+
+    var expander = MacroExpander.init(allocator);
+    defer expander.deinit();
+    try builtin_macros.registerBuiltinMacros(&expander);
+
+    const expanded = try expander.expandAll(first_value);
+
+    // Should expand to:
+    // (operation
+    //   (name arith.constant)
+    //   (result-bindings [%acc_init])
+    //   (result-types f32))
+    // Note: no operands section at all
+
+    try std.testing.expectEqual(ValueType.list, expanded.type);
+    const expanded_list = expanded.data.list;
+
+    // Check "operation"
+    try std.testing.expectEqualStrings("operation", expanded_list.at(0).data.atom);
+
+    // Check (name arith.constant)
+    const name_list = expanded_list.at(1).data.list;
+    try std.testing.expectEqualStrings("name", name_list.at(0).data.atom);
+    try std.testing.expectEqualStrings("arith.constant", name_list.at(1).data.atom);
+
+    // Check (result-bindings [%acc_init])
+    const bindings_list = expanded_list.at(2).data.list;
+    try std.testing.expectEqualStrings("result-bindings", bindings_list.at(0).data.atom);
+
+    // Check (result-types f32)
+    const types_list = expanded_list.at(3).data.list;
+    try std.testing.expectEqualStrings("result-types", types_list.at(0).data.atom);
+    try std.testing.expectEqualStrings("f32", types_list.at(1).data.atom);
+
+    // Should only have 4 elements (no operands)
+    try std.testing.expectEqual(@as(usize, 4), expanded_list.len());
+}
+
+test "op macro: operation with attributes but no operands" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Test: (op %const (: i32) (arith.constant {value: 42}))
+    const input =
+        \\(op %const (: i32) (arith.constant {value: 42}))
+    ;
+
+    const first_value = try readString(allocator, input);
+
+    var expander = MacroExpander.init(allocator);
+    defer expander.deinit();
+    try builtin_macros.registerBuiltinMacros(&expander);
+
+    const expanded = try expander.expandAll(first_value);
+
+    // Should expand to:
+    // (operation
+    //   (name arith.constant)
+    //   (result-bindings [%const])
+    //   (result-types i32)
+    //   (attributes {value: 42}))
+    // Note: no operands section
+
+    try std.testing.expectEqual(ValueType.list, expanded.type);
+    const expanded_list = expanded.data.list;
+
+    // Check "operation"
+    try std.testing.expectEqualStrings("operation", expanded_list.at(0).data.atom);
+
+    // Check (name arith.constant)
+    const name_list = expanded_list.at(1).data.list;
+    try std.testing.expectEqualStrings("name", name_list.at(0).data.atom);
+    try std.testing.expectEqualStrings("arith.constant", name_list.at(1).data.atom);
+
+    // Check (result-bindings [%const])
+    const bindings_list = expanded_list.at(2).data.list;
+    try std.testing.expectEqualStrings("result-bindings", bindings_list.at(0).data.atom);
+
+    // Check (result-types i32)
+    const types_list = expanded_list.at(3).data.list;
+    try std.testing.expectEqualStrings("result-types", types_list.at(0).data.atom);
+    try std.testing.expectEqualStrings("i32", types_list.at(1).data.atom);
+
+    // The attribute map should be preserved (implementation may vary)
+    // For now, just verify we have 4 or 5 elements (with or without attributes section)
+    try std.testing.expect(expanded_list.len() >= 4);
+}

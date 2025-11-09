@@ -60,10 +60,10 @@ See [`docs/grammar.md`](docs/grammar.md) for detailed syntax documentation.
             (name arith.addi)
             (result-bindings [%result])
             (result-types i32)
-            (operand-uses %a %b))
+            (operands %a %b))
           (operation
             (name func.return)
-            (operand-uses %result)))))))
+            (operands %result)))))))
 ```
 
 ## Documentation

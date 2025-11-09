@@ -1,14 +1,5 @@
 tools/benchmark/auto-report-programs/adding-ones-2000.arr  # FAIL despite earlier success (stack overflow (expression too deep))
-tools/benchmark/auto-report-programs/anf-loop-compiler.arr  # UNKNOWN: line=1047 content='occurs-any = for any(next-asgn :: J.JExpr%(is-j-assign) from...'
-tests/pyret/tests/test-equality.arr  # SUCCESS (verified)
-tests/pyret/tests/test-roughnum.arr  # FAIL despite earlier success (parse error)
 tests/pyret/tests/test-parse-errors.arr  # UNKNOWN: line=133 content=']...'
-tests/pyret/tests/test-statistics.arr  # SUCCESS (verified)
-tests/pyret/tests/test-math.arr  # SUCCESS (verified)
-tests/pyret/tests/test-adaptive-simpson.arr  # SUCCESS (verified)
-tests/pyret/tests/test-numbers.arr  # FAIL despite earlier success (parse error)
-tests/pyret/tests/test-within.arr  # FAIL despite earlier success (parse error)
-tests/pyret/tests/test-images.arr  # SUCCESS (verified)
 tests/pyret/tests/test-bar-chart.arr  # SUCCESS (verified)
 tests/type-check/good/tests-because.arr  # SUCCESS (verified)
 src/arr/trove/charts.arr  # UNKNOWN: line=303 content='high-outliers = for filter(shadow n from lst):...'
@@ -16,8 +7,6 @@ src/arr/trove/matrices.arr  # UNKNOWN: line=852 content='for raw-array-fold2<Num
 src/arr/trove/error.arr  # UNKNOWN: line=1162 content='.and-then({(v) block:...'
 src/arr/compiler/pyret.arr  # UNKNOWN: line=94 content=']...'
 src/arr/compiler/ast-util.arr  # UNKNOWN: line=394 content='with-params.{env: args-env}.option(_check)...'
-src/arr/compiler/compile-lib.arr  # UNKNOWN: line=309 content='{loadable :: Loadable; trace :: List} = compile-module(w.loc...'
 src/arr/compiler/resolve-scope.arr  # UNKNOWN: line=954 content='for fold(shadow which-env from which-env, n from imported-na...'
-src/arr/compiler/anf-loop-compiler.arr  # UNKNOWN: line=1047 content='occurs-any = for any(next-asgn :: J.JExpr%(is-j-assign) from...'
 src/arr/compiler/js-dag-utils.arr  # UNKNOWN: line=343 content='for CL.foldr(shadow acc from acc, stmt from stmts):...'
 src/arr/compiler/type-defaults.arr  # UNKNOWN: line=255 content=']...'

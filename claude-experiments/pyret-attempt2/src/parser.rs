@@ -1876,6 +1876,78 @@ impl Parser {
                 } else if self.matches(&TokenType::LBrack) {
                     // Bracket access
                     right = self.parse_bracket_expr(right)?;
+                } else if self.matches(&TokenType::Bang) {
+                    // Bang operator for ref field access or update
+                    let _bang_token = self.expect(TokenType::Bang)?;
+                    if self.matches(&TokenType::LBrace) {
+                        // Bang update: obj!{ field: value, ... }
+                        self.expect(TokenType::LBrace)?;
+                        let fields = if self.matches(&TokenType::RBrace) {
+                            Vec::new()
+                        } else {
+                            self.parse_comma_list(|p| p.parse_obj_field())?
+                        };
+                        let end = self.expect(TokenType::RBrace)?;
+
+                        let start_loc = match &right {
+                            Expr::SNum { l, .. } => l.clone(),
+                            Expr::SBool { l, .. } => l.clone(),
+                            Expr::SId { l, .. } => l.clone(),
+                            Expr::SOp { l, .. } => l.clone(),
+                            Expr::SParen { l, .. } => l.clone(),
+                            Expr::SApp { l, .. } => l.clone(),
+                            Expr::SDot { l, .. } => l.clone(),
+                            Expr::SBracket { l, .. } => l.clone(),
+                            Expr::STupleGet { l, .. } => l.clone(),
+                            Expr::SExtend { l, .. } => l.clone(),
+                            Expr::SUpdate { l, .. } => l.clone(),
+                            _ => self.current_loc(),
+                        };
+
+                        right = Expr::SUpdate {
+                            l: Loc::new(
+                                self.file_name.clone(),
+                                start_loc.start_line,
+                                start_loc.start_column,
+                                start_loc.start_char,
+                                end.location.end_line,
+                                end.location.end_col,
+                                end.location.end_pos,
+                            ),
+                            supe: Box::new(right),
+                            fields,
+                        };
+                    } else {
+                        // Bang field access: obj!field
+                        let field_token = self.parse_field_name()?;
+                        let start_loc = match &right {
+                            Expr::SNum { l, .. } => l.clone(),
+                            Expr::SBool { l, .. } => l.clone(),
+                            Expr::SId { l, .. } => l.clone(),
+                            Expr::SOp { l, .. } => l.clone(),
+                            Expr::SParen { l, .. } => l.clone(),
+                            Expr::SApp { l, .. } => l.clone(),
+                            Expr::SDot { l, .. } => l.clone(),
+                            Expr::SBracket { l, .. } => l.clone(),
+                            Expr::STupleGet { l, .. } => l.clone(),
+                            Expr::SExtend { l, .. } => l.clone(),
+                            Expr::SUpdate { l, .. } => l.clone(),
+                            _ => self.current_loc(),
+                        };
+                        right = Expr::SGetBang {
+                            l: Loc::new(
+                                self.file_name.clone(),
+                                start_loc.start_line,
+                                start_loc.start_column,
+                                start_loc.start_char,
+                                field_token.location.end_line,
+                                field_token.location.end_col,
+                                field_token.location.end_pos,
+                            ),
+                            obj: Box::new(right),
+                            field: field_token.value.clone(),
+                        };
+                    }
                 } else {
                     break;
                 }
@@ -2526,31 +2598,15 @@ impl Parser {
             ));
         }
 
-        // Simplify the fraction using GCD (Pyret does simplify fractions!)
-        // Try to parse as i64 for simplification, but fall back to string if too large
-        let (num, den) = if let (Ok(n), Ok(d)) = (num_str.parse::<i64>(), den_str.parse::<i64>()) {
-            // Use GCD to simplify
-            fn gcd(mut a: i64, mut b: i64) -> i64 {
-                a = a.abs();
-                b = b.abs();
-                while b != 0 {
-                    let temp = b;
-                    b = a % b;
-                    a = temp;
-                }
-                a
-            }
-
-            let g = gcd(n, d);
-            let simplified_num = n / g;
-            let simplified_den = d / g;
-            (simplified_num.to_string(), simplified_den.to_string())
-        } else {
-            // Numbers too large for i64, keep as strings without simplification
-            (num_str.to_string(), den_str.to_string())
-        };
-
-        Ok(Expr::SFrac { l: loc, num, den })
+        // Note: We don't simplify fractions to match official Pyret parser behavior
+        // The official parser keeps explicit fractions in their original form (e.g., 6/3 not 2/1)
+        // However, decimals converted to fractions ARE simplified (e.g., 2.5 → 5/2, not 25/10)
+        // That simplification happens in JSON serialization, not here
+        Ok(Expr::SFrac {
+            l: loc,
+            num: num_str.to_string(),
+            den: den_str.to_string()
+        })
     }
 
     /// rfrac-expr: ROUGHRATIONAL
@@ -3711,9 +3767,12 @@ impl Parser {
                 // Check if next tokens look like "binding FROM" (for-bindings)
                 // or just an expression (function call args)
                 let is_for_binding = if self.matches(&TokenType::Name) {
-                    // Peek ahead to see if there's a FROM after the name
+                    // Peek ahead to see if there's a FROM, Shadow, or :: after the name
+                    // Pattern can be: "name FROM", "shadow name FROM", or "name :: Type FROM"
                     let next_tok = self.peek_ahead(1);
-                    next_tok.token_type == TokenType::From || next_tok.token_type == TokenType::Shadow
+                    next_tok.token_type == TokenType::From
+                        || next_tok.token_type == TokenType::Shadow
+                        || next_tok.token_type == TokenType::ColonColon  // Type annotation
                 } else if self.matches(&TokenType::LBrace) {
                     // Could be tuple binding {x; y} FROM ...
                     // For now, assume it's a for-binding
@@ -4089,6 +4148,13 @@ impl Parser {
         } else {
             // Parse name
             self.parse_name()?;
+
+            // Check for optional type annotation: :: ann
+            if self.matches(&TokenType::ColonColon) {
+                self.advance(); // consume ::
+                self.parse_ann()?;
+            }
+
             Ok(())
         }
     }

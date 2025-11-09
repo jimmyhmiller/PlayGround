@@ -124,8 +124,47 @@ fn expand_scientific_notation(s: &str) -> Option<String> {
             return Some(if negative { format!("-{}", result) } else { result });
         }
     } else {
-        // Negative exponent - would create a fraction/decimal
-        None
+        // Negative exponent - create a fraction
+        // For example: 1.5e-300 -> "15/1000...000" (301 zeros)
+        // For example: 0.001e-300 -> "1/1000...000" (303 zeros)
+
+        let exponent_abs = (-exponent) as usize;
+
+        // Parse mantissa to get numerator
+        let (numerator, decimal_places) = if mantissa_str.contains('.') {
+            let dot_pos = mantissa_str.find('.')?;
+            let int_part = &mantissa_str[..dot_pos];
+            let frac_part = &mantissa_str[dot_pos + 1..];
+            let decimal_places = frac_part.len();
+
+            // Combine integer and fractional parts: 1.5 -> 15
+            let combined = format!("{}{}", int_part, frac_part);
+            // Strip leading zeros
+            let numerator = combined.trim_start_matches('0').to_string();
+            let numerator = if numerator.is_empty() { "0".to_string() } else { numerator };
+            (numerator, decimal_places)
+        } else {
+            (mantissa_str.to_string(), 0)
+        };
+
+        // Denominator is 10^(exponent_abs + decimal_places)
+        let total_exponent = exponent_abs + decimal_places;
+        let denominator = format!("1{}", "0".repeat(total_exponent));
+
+        // Simplify the fraction using GCD
+        use num_bigint::BigInt;
+        use std::str::FromStr;
+
+        let num_bigint = BigInt::from_str(&numerator).ok()?;
+        let den_bigint = BigInt::from_str(&denominator).ok()?;
+        let gcd = gcd_bigint(&num_bigint, &den_bigint);
+
+        let simplified_num = &num_bigint / &gcd;
+        let simplified_den = &den_bigint / &gcd;
+
+        // Return as fraction string "numerator/denominator"
+        let result = format!("{}/{}", simplified_num, simplified_den);
+        Some(if negative { format!("-{}", result) } else { result })
     }
 }
 
@@ -312,6 +351,29 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                         normalized = format!("~{}", normalized.strip_prefix("~+").unwrap());
                     }
 
+                    // Strip trailing zeros from decimal parts (e.g., ~-6.928203230 -> ~-6.92820323)
+                    // Only apply to non-scientific notation numbers
+                    if normalized.contains('.') && !normalized.contains('e') && !normalized.contains('E') {
+                        let (prefix, decimal_part) = if let Some(dot_idx) = normalized.rfind('.') {
+                            let (before_dot, with_dot) = normalized.split_at(dot_idx);
+                            (before_dot.to_string(), with_dot.to_string())
+                        } else {
+                            (normalized.clone(), String::new())
+                        };
+
+                        if !decimal_part.is_empty() {
+                            // decimal_part is ".123000" - strip trailing zeros
+                            let stripped = decimal_part.trim_end_matches('0');
+                            // Don't strip the decimal point itself - if we get just ".", add one zero
+                            let final_decimal = if stripped == "." {
+                                ".0".to_string()
+                            } else {
+                                stripped.to_string()
+                            };
+                            normalized = format!("{}{}", prefix, final_decimal);
+                        }
+                    }
+
                     let without_tilde = normalized.strip_prefix('~').unwrap();
 
                     // Handle scientific notation in input
@@ -381,6 +443,15 @@ fn expr_to_pyret_json(expr: &Expr) -> Value {
                     // Integer - use as-is (supports arbitrary precision!)
                     value.clone()
                 }
+            };
+
+            // Normalize negative zero: -0 -> 0, ~-0 -> ~0
+            let value_str = if value_str == "-0" {
+                "0".to_string()
+            } else if value_str == "~-0" {
+                "~0".to_string()
+            } else {
+                value_str
             };
 
             json!({

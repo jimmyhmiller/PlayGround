@@ -22,7 +22,7 @@
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %i32))))))))))
+                  (operands %i32))))))))))
 
 ;; ========================================
 ;; PART 2: PDL Pattern - custom.magic → arith.constant 42
@@ -43,7 +43,7 @@
                 (arguments [(: %arg0 !transform.any_op)])
                 (operation
                   (name transform.with_pdl_patterns)
-                  (operand-uses %arg0)
+                  (operands %arg0)
                   (regions
                     (region
                       (block
@@ -63,14 +63,14 @@
                                 (operation
                                   (name pdl.operation)
                                   (attributes {:opName "custom.magic" :operandSegmentSizes array<i32: 0, 0, 1>})
-                                  (operand-uses %type)
+                                  (operands %type)
                                   (result-bindings [%op])
                                   (result-types !pdl.operation))
                                 ;; Rewrite: arith.constant {value = 42 : i32}
                                 (operation
                                   (name pdl.rewrite)
                                   (attributes {:operandSegmentSizes array<i32: 1, 0>})
-                                  (operand-uses %op)
+                                  (operands %op)
                                   (regions
                                     (region
                                       (block
@@ -82,18 +82,18 @@
                                         (operation
                                           (name pdl.operation)
                                           (attributes {:attributeValueNames ["value"] :opName "arith.constant" :operandSegmentSizes array<i32: 0, 1, 1>})
-                                          (operand-uses %attr %type)
+                                          (operands %attr %type)
                                           (result-bindings [%new])
                                           (result-types !pdl.operation))
                                         (operation
                                           (name pdl.replace)
                                           (attributes {:operandSegmentSizes array<i32: 1, 1, 0>})
-                                          (operand-uses %op %new))))))))))
+                                          (operands %op %new))))))))))
                         ;; Transform sequence to apply the pattern
                         (operation
                           (name transform.sequence)
                           (attributes {:failures #transform<failure_propagation_mode propagate>})
-                          (operand-uses %payload)
+                          (operands %payload)
                           (regions
                             (region
                               (block [^bb1]
@@ -101,13 +101,13 @@
                                 (operation
                                   (name transform.pdl_match)
                                   (attributes {:pattern_name @replace_magic})
-                                  (operand-uses %arg1)
+                                  (operands %arg1)
                                   (result-bindings [%matched])
                                   (result-types !transform.any_op))
                                 (operation
-                                  (name transform.yield)))))))))))
+                                  (name transform.yield))))))))))
                 (operation
-                  (name transform.yield)))))))))
+                  (name transform.yield))))))))))
 
 ;; ========================================
 ;; PART 3: Application code

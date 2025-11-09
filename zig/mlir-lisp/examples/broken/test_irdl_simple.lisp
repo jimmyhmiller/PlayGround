@@ -27,13 +27,13 @@
                 (operation
                   (name irdl.attributes)
                   (attributes {:attributeValueNames ["value"]})
-                  (operand-uses %attr_type))
+                  (operands %attr_type))
 
                 ;; Results: one i32 value
                 (operation
                   (name irdl.results)
                   (attributes {:names ["result"] :variadicity #irdl<variadicity_array[ single]>})
-                  (operand-uses %i32_type))))))))))
+                  (operands %i32_type))))))))))
 
 ;; Step 2: Use the demo.constant operation
 (defn main [] i64

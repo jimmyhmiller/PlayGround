@@ -29,7 +29,7 @@
                     (attributes {:value (: 5 index)}))
                   (operation
                     (name gpu.launch)
-                    (operand-uses %20 %20 %20 %21 %20 %20)
+                    (operands %20 %20 %20 %21 %20 %20)
                     (attributes {:workgroup_attributions (: 0 i64)})
                     (attributes {:operandSegmentSizes array<i32: 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0>})
                     (regions
@@ -40,21 +40,21 @@
                             (name memref.load)
                             (result-bindings [%22])
                             (result-types f32)
-                            (operand-uses %arg1 %arg7))
+                            (operands %arg1 %arg7))
                           (operation
                             (name memref.load)
                             (result-bindings [%23])
                             (result-types f32)
-                            (operand-uses %arg2 %arg7))
+                            (operands %arg2 %arg7))
                           (operation
                             (name arith.addf)
                             (result-bindings [%24])
                             (result-types f32)
-                            (operand-uses %22 %23)
+                            (operands %22 %23)
                             (attributes {:fastmath #arith.fastmath<none>}))
                           (operation
                             (name memref.store)
-                            (operand-uses %24 %arg3 %arg7))
+                            (operands %24 %arg3 %arg7))
                           (operation
                             (name gpu.terminator))))))
                   (operation
@@ -105,96 +105,96 @@
                     (name memref.cast)
                     (result-bindings [%7])
                     (result-types memref<?xf32>)
-                    (operand-uses %4))
+                    (operands %4))
                   (operation
                     (name memref.cast)
                     (result-bindings [%8])
                     (result-types memref<?xf32>)
-                    (operand-uses %5))
+                    (operands %5))
                   (operation
                     (name memref.cast)
                     (result-bindings [%9])
                     (result-types memref<?xf32>)
-                    (operand-uses %6))
+                    (operands %6))
                   (operation
                     (name scf.for)
-                    (operand-uses %0 %2 %1)
+                    (operands %0 %2 %1)
                     (regions
                       (region
                         (block [^bb0]
                           (arguments [(: %arg0 index)])
                           (operation
                             (name memref.store)
-                            (operand-uses %3 %7 %arg0))
+                            (operands %3 %7 %arg0))
                           (operation
                             (name memref.store)
-                            (operand-uses %3 %8 %arg0))
+                            (operands %3 %8 %arg0))
                           (operation
                             (name scf.yield))))))
                   (operation
                     (name memref.cast)
                     (result-bindings [%10])
                     (result-types memref<*xf32>)
-                    (operand-uses %7))
+                    (operands %7))
                   (operation
                     (name memref.cast)
                     (result-bindings [%11])
                     (result-types memref<*xf32>)
-                    (operand-uses %8))
+                    (operands %8))
                   (operation
                     (name memref.cast)
                     (result-bindings [%12])
                     (result-types memref<*xf32>)
-                    (operand-uses %9))
+                    (operands %9))
                   (operation
                     (name gpu.host_register)
-                    (operand-uses %10))
+                    (operands %10))
                   (operation
                     (name gpu.host_register)
-                    (operand-uses %11))
+                    (operands %11))
                   (operation
                     (name gpu.host_register)
-                    (operand-uses %12))
+                    (operands %12))
                   (operation
                     (name func.call)
                     (result-bindings [%13])
                     (result-types memref<?xf32>)
-                    (operand-uses %7)
+                    (operands %7)
                     (attributes {:callee @mgpuMemGetDeviceMemRef1dFloat}))
                   (operation
                     (name func.call)
                     (result-bindings [%14])
                     (result-types memref<?xf32>)
-                    (operand-uses %8)
+                    (operands %8)
                     (attributes {:callee @mgpuMemGetDeviceMemRef1dFloat}))
                   (operation
                     (name func.call)
                     (result-bindings [%15])
                     (result-types memref<?xf32>)
-                    (operand-uses %9)
+                    (operands %9)
                     (attributes {:callee @mgpuMemGetDeviceMemRef1dFloat}))
                   (operation
                     (name memref.cast)
                     (result-bindings [%16])
                     (result-types memref<5xf32>)
-                    (operand-uses %13))
+                    (operands %13))
                   (operation
                     (name memref.cast)
                     (result-bindings [%17])
                     (result-types memref<5xf32>)
-                    (operand-uses %14))
+                    (operands %14))
                   (operation
                     (name memref.cast)
                     (result-bindings [%18])
                     (result-types memref<5xf32>)
-                    (operand-uses %15))
+                    (operands %15))
                   (operation
                     (name func.call)
-                    (operand-uses %16 %17 %18)
+                    (operands %16 %17 %18)
                     (attributes {:callee @vecadd}))
                   (operation
                     (name func.call)
-                    (operand-uses %12)
+                    (operands %12)
                     (attributes {:callee @printMemrefF32}))
                   (operation
                     (name func.return))))))

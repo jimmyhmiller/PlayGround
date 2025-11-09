@@ -121,7 +121,7 @@ We need to update our lisp syntax to properly represent the comma-separated vari
   (name irdl.operands)
   (attributes {:names ["list" "index"]
                :variadicity #irdl<variadicity_array[ single single]>})
-  (operand-uses %ptr_type %i64_type))
+  (operands %ptr_type %i64_type))
 ```
 
 ### Fixed (Should Work)
@@ -131,7 +131,7 @@ We need to update our lisp syntax to properly represent the comma-separated vari
   (name irdl.operands)
   (attributes {:names ["list" "index"]
                :variadicity #irdl<variadicity_array[ single, single]>})
-  (operand-uses %ptr_type %i64_type))
+  (operands %ptr_type %i64_type))
 ```
 
 **The comma matters!** Without it, MLIR parser treats it as malformed.
