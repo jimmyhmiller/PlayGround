@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::io::{self, Read};
+use num_bigint::BigInt;
+use num_traits::{Zero, ToPrimitive, One};
 
 /// Convert a Loc to Pyret's srcloc string representation
 fn loc_to_srcloc_string(loc: &Loc) -> String {
@@ -22,6 +24,212 @@ fn loc_to_srcloc_string(loc: &Loc) -> String {
 /// Convert our AST to Pyret's JSON format (no locations, specific field names)
 /// Convert a float to a fraction string representation
 /// E.g., 1.5 -> "3/2", 0.25 -> "1/4"
+fn decimal_string_to_fraction(s: &str) -> Option<(i64, i64)> {
+    // Parse a decimal string like "2.034" to a fraction (2034, 1000)
+    // Returns None if it doesn't contain a decimal point or can't be parsed
+
+    let (negative, s) = if s.starts_with('-') {
+        (true, &s[1..])
+    } else {
+        (false, s)
+    };
+
+    if !s.contains('.') {
+        return None; // Not a decimal
+    }
+
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+
+    let integer_part = if parts[0].is_empty() { "0" } else { parts[0] };
+    let decimal_part = parts[1];
+
+    // Convert to fraction: e.g., "2.034" -> 2034/1000
+    let num_digits = decimal_part.len();
+
+    // Check if the number of digits would cause overflow in i64
+    // 10^18 is the largest power of 10 that fits in i64
+    if num_digits > 18 {
+        return None; // Too many decimal places for i64, caller should use fallback
+    }
+
+    let denominator = 10_i64.pow(num_digits as u32);
+
+    // Combine integer and decimal parts
+    let numerator_str = format!("{}{}", integer_part, decimal_part);
+    let numerator: i64 = numerator_str.parse().ok()?;
+    let numerator = if negative { -numerator } else { numerator };
+
+    Some((numerator, denominator))
+}
+
+/// Expand scientific notation like "1e300" to exact integer string "1000...000"
+/// Returns None if the result wouldn't be an exact integer
+fn expand_scientific_notation(s: &str) -> Option<String> {
+    // Parse scientific notation: e.g., "1e300", "1.5e10", "-2e5"
+    let s = s.trim();
+    let (s, negative) = if s.starts_with('-') {
+        (&s[1..], true)
+    } else {
+        (s, false)
+    };
+
+    // Split on 'e' or 'E'
+    let parts: Vec<&str> = if s.contains('e') {
+        s.split('e').collect()
+    } else if s.contains('E') {
+        s.split('E').collect()
+    } else {
+        return None;
+    };
+
+    if parts.len() != 2 {
+        return None;
+    }
+
+    let mantissa_str = parts[0];
+    let exponent: i32 = parts[1].parse().ok()?;
+
+    // For positive exponents, we can expand to exact integer if there's no fractional part
+    // or if the exponent is large enough to eliminate it
+    if exponent >= 0 {
+        // Parse mantissa
+        if mantissa_str.contains('.') {
+            let dot_pos = mantissa_str.find('.')?;
+            let int_part = &mantissa_str[..dot_pos];
+            let frac_part = &mantissa_str[dot_pos + 1..];
+            let frac_len = frac_part.len() as i32;
+
+            // If exponent >= frac_len, we can make an exact integer
+            if exponent >= frac_len {
+                let combined = format!("{}{}", int_part, frac_part);
+                let zeros_to_add = exponent - frac_len;
+                let mut result = format!("{}{}", combined, "0".repeat(zeros_to_add as usize));
+                // Strip leading zeros (e.g., "0001000..." -> "1000...")
+                result = result.trim_start_matches('0').to_string();
+                // Handle the case where the result is all zeros
+                if result.is_empty() {
+                    result = "0".to_string();
+                }
+                return Some(if negative { format!("-{}", result) } else { result });
+            } else {
+                // Would have a fractional part
+                return None;
+            }
+        } else {
+            // No decimal point - simple case
+            let result = format!("{}{}", mantissa_str, "0".repeat(exponent as usize));
+            return Some(if negative { format!("-{}", result) } else { result });
+        }
+    } else {
+        // Negative exponent - would create a fraction/decimal
+        None
+    }
+}
+
+fn gcd_bigint(a: &BigInt, b: &BigInt) -> BigInt {
+    let mut a = a.clone();
+    let mut b = b.clone();
+
+    // Make positive
+    if a < BigInt::zero() {
+        a = -a;
+    }
+    if b < BigInt::zero() {
+        b = -b;
+    }
+
+    while !b.is_zero() {
+        let temp = b.clone();
+        b = &a % &b;
+        a = temp;
+    }
+    a
+}
+
+fn decimal_string_to_fraction_bigint(s: &str) -> Option<(BigInt, BigInt)> {
+    // Parse decimal string using BigInt for arbitrary precision
+
+    let (negative, s) = if s.starts_with('-') {
+        (true, &s[1..])
+    } else {
+        (false, s)
+    };
+
+    if !s.contains('.') {
+        return None;
+    }
+
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+
+    let integer_part = if parts[0].is_empty() { "0" } else { parts[0] };
+    let decimal_part = parts[1];
+
+    // Convert to fraction using BigInt
+    let num_digits = decimal_part.len();
+    let ten = BigInt::from(10);
+    let denominator = ten.pow(num_digits as u32);
+
+    // Combine integer and decimal parts
+    let numerator_str = format!("{}{}", integer_part, decimal_part);
+    let numerator: BigInt = numerator_str.parse().ok()?;
+    let numerator = if negative { -numerator } else { numerator };
+
+    Some((numerator, denominator))
+}
+
+fn decimal_string_to_fraction_with_simplification(s: &str) -> String {
+    // Convert decimal string to simplified fraction string
+    // Preserves arbitrary precision by working with strings
+
+    // Try i64 first for performance
+    if let Some((mut num, mut den)) = decimal_string_to_fraction(s) {
+        // Simplify the fraction
+        let g = gcd(num, den);
+        num /= g;
+        den /= g;
+
+        if den == 1 {
+            return format!("{}", num);
+        } else {
+            return format!("{}/{}", num, den);
+        }
+    }
+
+    // Fall back to BigInt for very large decimals
+    if let Some((num, den)) = decimal_string_to_fraction_bigint(s) {
+        // Simplify using BigInt GCD
+        let g = gcd_bigint(&num, &den);
+        let simplified_num = &num / &g;
+        let simplified_den = &den / &g;
+
+        if simplified_den == BigInt::from(1) {
+            format!("{}", simplified_num)
+        } else {
+            format!("{}/{}", simplified_num, simplified_den)
+        }
+    } else {
+        // Not a decimal, return as-is
+        s.to_string()
+    }
+}
+
+fn gcd(mut a: i64, mut b: i64) -> i64 {
+    a = a.abs();
+    b = b.abs();
+    while b != 0 {
+        let temp = b;
+        b = a % b;
+        a = temp;
+    }
+    a
+}
+
 fn float_to_fraction_string(f: f64) -> String {
     // If it's an integer, format it carefully to avoid precision loss
     if f.fract() == 0.0 {
@@ -36,15 +244,30 @@ fn float_to_fraction_string(f: f64) -> String {
         }
     }
 
-    // Convert to fraction using continued fractions algorithm
+    // Convert to string first to avoid floating point precision errors
+    let f_str = format!("{}", f);
+
+    // Try to parse as decimal string first (more accurate)
+    if let Some((mut num, mut den)) = decimal_string_to_fraction(&f_str) {
+        // Simplify the fraction
+        let g = gcd(num, den);
+        num /= g;
+        den /= g;
+
+        if den == 1 {
+            return format!("{}", num);
+        } else {
+            return format!("{}/{}", num, den);
+        }
+    }
+
+    // Fallback to old algorithm for non-decimal representations (shouldn't happen)
     let sign = if f < 0.0 { -1.0 } else { 1.0 };
     let f = f.abs();
 
-    // Find numerator and denominator
     let mut num = f;
     let mut den = 1.0;
 
-    // Multiply by powers of 10 until we get an integer numerator
     while num.fract() != 0.0 && den < 1e10 {
         num *= 10.0;
         den *= 10.0;
@@ -53,21 +276,10 @@ fn float_to_fraction_string(f: f64) -> String {
     let mut num = num as i64;
     let mut den = den as i64;
 
-    // Simplify the fraction by finding GCD
-    fn gcd(mut a: i64, mut b: i64) -> i64 {
-        while b != 0 {
-            let temp = b;
-            b = a % b;
-            a = temp;
-        }
-        a.abs()
-    }
-
     let g = gcd(num, den);
     num /= g;
     den /= g;
 
-    // Apply sign
     num = (num as f64 * sign) as i64;
 
     if den == 1 {
@@ -77,39 +289,98 @@ fn float_to_fraction_string(f: f64) -> String {
     }
 }
 
+fn format_scientific_notation(sci_str: &str, _value: f64) -> String {
+    // For now, just preserve the original scientific notation with lowercase 'e'
+    // Future: could normalize format (e.g., ensure mantissa is between 1 and 10)
+    sci_str.replace('E', "e")
+}
+
 fn expr_to_pyret_json(expr: &Expr) -> Value {
     match expr {
-        Expr::SNum { n, original, .. } => {
-            // Use original string if available (preserves precision for large integers)
-            // Otherwise convert to fraction string
-            let value_str = if let Some(orig) = original {
+        Expr::SNum { value, .. } => {
+            // Value is stored as a string to support arbitrary precision
+            let value_str = {
                 // Rough numbers (starting with ~) need normalization: strip trailing .0 and leading +
-                if orig.starts_with('~') {
-                    let mut normalized = if orig.ends_with(".0") {
-                        orig.strip_suffix(".0").unwrap().to_string()
+                if value.starts_with('~') {
+                    let mut normalized = if value.ends_with(".0") {
+                        value.strip_suffix(".0").unwrap().to_string()
                     } else {
-                        orig.clone()
+                        value.clone()
                     };
                     // Strip leading + after ~ (e.g., ~+1.5 -> ~1.5)
                     if normalized.starts_with("~+") {
                         normalized = format!("~{}", normalized.strip_prefix("~+").unwrap());
                     }
-                    // Convert very long decimal representations to scientific notation
-                    // This handles cases like ~0.000...0005 (many zeros) -> ~5e-324
-                    if normalized.len() > 50 {
-                        normalized = format!("~{:e}", n);
+
+                    let without_tilde = normalized.strip_prefix('~').unwrap();
+
+                    // Handle scientific notation in input
+                    if without_tilde.contains('e') || without_tilde.contains('E') {
+                        // Parse to f64 to convert to decimal
+                        if let Ok(n) = without_tilde.parse::<f64>() {
+                            // Convert to decimal and see if it's reasonable length
+                            let decimal_str = format!("{}", n);
+                            let decimal_form = format!("~{}", decimal_str);
+
+                            // If decimal form is short enough (<= 9 chars including ~), use it
+                            // Otherwise keep scientific notation
+                            // Examples: ~0.00001 (9 chars) expands, ~0.0000001 (11 chars) stays as ~1e-7
+                            if decimal_form.len() <= 9 {
+                                normalized = decimal_form;
+                            } else {
+                                // Keep scientific notation - format it properly from the float value
+                                let sci = format!("{:e}", n);
+                                // Normalize: add + for positive exponents
+                                let sci_normalized = if sci.contains("e") && !sci.contains("e-") {
+                                    sci.replace("e", "e+")
+                                } else {
+                                    sci
+                                };
+                                normalized = format!("~{}", sci_normalized);
+                            }
+                        }
                     }
+                    // Check if the normalized form is too long (e.g., ~0.000...005 with 324 zeros)
+                    // Convert very long decimals to scientific notation
+                    else if normalized.len() > 50 {
+                        // Parse to f64 for scientific notation formatting
+                        if let Ok(n) = without_tilde.parse::<f64>() {
+                            let sci = format!("{:e}", n);
+                            // Normalize: add + for positive exponents
+                            let sci_normalized = if sci.contains("e") && !sci.contains("e-") {
+                                sci.replace("e", "e+")
+                            } else {
+                                sci
+                            };
+                            normalized = format!("~{}", sci_normalized);
+                        }
+                    }
+
                     normalized
                 }
                 // For decimals (without scientific notation), convert to fraction
-                // For scientific notation or integers, use as-is
-                else if orig.contains('.') && !orig.contains('e') && !orig.contains('E') {
-                    float_to_fraction_string(*n)
+                // Use the original string to preserve precision for large decimals
+                // For scientific notation, expand to exact integer if possible
+                // For integers, use as-is
+                else if value.contains('e') || value.contains('E') {
+                    // Try to expand scientific notation to exact integer (e.g., 1e300 -> "1000...000")
+                    if let Some(expanded) = expand_scientific_notation(value) {
+                        expanded
+                    } else {
+                        // Can't expand to exact integer - parse to f64 and convert to fraction
+                        if let Ok(n) = value.parse::<f64>() {
+                            float_to_fraction_string(n)
+                        } else {
+                            value.clone() // Fallback if parse fails
+                        }
+                    }
+                } else if value.contains('.') {
+                    // Regular decimal - convert to simplified fraction
+                    decimal_string_to_fraction_with_simplification(value)
                 } else {
-                    orig.clone()
+                    // Integer - use as-is (supports arbitrary precision!)
+                    value.clone()
                 }
-            } else {
-                float_to_fraction_string(*n)
             };
 
             json!({
@@ -1031,10 +1302,11 @@ fn include_spec_to_pyret_json(spec: &pyret_attempt2::IncludeSpec) -> Value {
                 "name-spec": name_spec_to_pyret_json(name)
             })
         }
-        IncludeSpec::SIncludeData { name, .. } => {
+        IncludeSpec::SIncludeData { name, hidden, .. } => {
             json!({
                 "type": "s-include-data",
-                "name-spec": name_spec_to_pyret_json(name)
+                "name-spec": name_spec_to_pyret_json(name),
+                "hidden": hidden.iter().map(|h| name_to_pyret_json(h)).collect::<Vec<_>>()
             })
         }
         IncludeSpec::SIncludeModule { name, .. } => {

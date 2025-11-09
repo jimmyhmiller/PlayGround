@@ -453,32 +453,51 @@ pub const Printer = struct {
         try self.writer.writeByte('>');
     }
 
-    /// Grammar: memref-type ::= `memref` `<` dimension-list type (`,` layout-specification)? (`,` memory-space)? `>`
+    // Grammar: memref-type ::= ranked-memref-type | unranked-memref-type
+    // Grammar: ranked-memref-type ::= `memref` `<` dimension-list type (`,` layout-specification)? (`,` memory-space)? `>`
+    // Grammar: unranked-memref-type ::= `memref` `<` `*` `x` type (`,` memory-space)? `>`
     fn printMemRefType(self: *Printer, memref: ast.MemRefType) !void {
         try self.writer.writeAll("memref<");
 
-        // Print dimensions
-        for (memref.dimensions) |dim| {
-            switch (dim) {
-                .static => |size| try self.writer.print("{d}", .{size}),
-                .dynamic => try self.writer.writeByte('?'),
-            }
-            try self.writer.writeByte('x');
-        }
+        switch (memref) {
+            .ranked => |ranked| {
+                // Print dimensions
+                for (ranked.dimensions) |dim| {
+                    switch (dim) {
+                        .static => |size| try self.writer.print("{d}", .{size}),
+                        .dynamic => try self.writer.writeByte('?'),
+                    }
+                    try self.writer.writeByte('x');
+                }
 
-        // Print element type
-        try self.printType(memref.element_type.*);
+                // Print element type
+                try self.printType(ranked.element_type.*);
 
-        // Print layout if present
-        if (memref.layout) |layout| {
-            try self.writer.writeAll(", ");
-            try self.writer.writeAll(layout);
-        }
+                // Print layout if present
+                if (ranked.layout) |layout| {
+                    try self.writer.writeAll(", ");
+                    try self.writer.writeAll(layout);
+                }
 
-        // Print memory space if present
-        if (memref.memory_space) |mem_space| {
-            try self.writer.writeAll(", ");
-            try self.printAttributeValue(mem_space);
+                // Print memory space if present
+                if (ranked.memory_space) |mem_space| {
+                    try self.writer.writeAll(", ");
+                    try self.printAttributeValue(mem_space);
+                }
+            },
+            .unranked => |unranked| {
+                // Print *x for unranked
+                try self.writer.writeAll("*x");
+
+                // Print element type
+                try self.printType(unranked.element_type.*);
+
+                // Print memory space if present
+                if (unranked.memory_space) |mem_space| {
+                    try self.writer.writeAll(", ");
+                    try self.printAttributeValue(mem_space);
+                }
+            },
         }
 
         try self.writer.writeByte('>');

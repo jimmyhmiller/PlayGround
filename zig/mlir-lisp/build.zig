@@ -27,11 +27,7 @@ pub fn build(b: *std.Build) void {
         const possible_paths = [_][]const u8{
             "/opt/homebrew/opt/llvm", // Homebrew Apple Silicon
             "/usr/local/opt/llvm", // Homebrew Intel Mac
-            "/usr/lib/llvm-18", // Ubuntu/Debian LLVM 18
-            "/usr/lib/llvm-19", // Ubuntu/Debian LLVM 19
-            "/usr/lib/llvm-20", // Ubuntu/Debian LLVM 20
-            "/usr/local", // Standard Linux install
-            "/usr", // System install
+            "/usr/local", // Standard Linux install (locally built LLVM with ROCm)
         };
 
         for (possible_paths) |path| {

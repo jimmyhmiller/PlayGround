@@ -491,6 +491,11 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
         try shared_libs.append(allocator, rocm_runtime_lib);
         std.debug.print("Loading GPU runtime library: {s}\n", .{rocm_runtime_lib});
 
+        // Also load MLIR runner utils for printMemrefF32 and other utilities
+        const runner_utils_lib = "/usr/local/lib/libmlir_runner_utils.so";
+        try shared_libs.append(allocator, runner_utils_lib);
+        std.debug.print("Loading MLIR runner utils library: {s}\n", .{runner_utils_lib});
+
         // Update executor config with shared libs
         executor.config.shared_lib_paths = try allocator.dupe([]const u8, shared_libs.items);
     }

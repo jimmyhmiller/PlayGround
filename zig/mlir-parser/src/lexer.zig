@@ -52,6 +52,7 @@ pub const TokenType = enum {
     hash, // #
     double_colon, // ::
     question, // ?
+    star, // *
 
     // Keywords
     kw_loc,
@@ -158,6 +159,7 @@ pub const Lexer = struct {
             ';' => self.makeToken(.semicolon),
             '=' => self.makeToken(.equal),
             '?' => self.makeToken(.question),
+            '*' => self.makeToken(.star),
 
             // Grammar: function-type uses `->`
             '-' => if (self.match('>')) self.makeToken(.arrow) else self.makeToken(.invalid),

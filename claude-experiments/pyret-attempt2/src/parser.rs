@@ -950,8 +950,23 @@ impl Parser {
             self.advance(); // consume DATA
             let name = self.parse_name_spec()?;
 
-            // TODO: Parse optional hiding-spec when needed
-            // For now, just handle the name
+            // Parse optional hiding-spec: hiding (name1, name2, ...)
+            let hidden = if self.matches(&TokenType::Hiding) {
+                self.advance(); // consume HIDING
+                // Accept either LParen or ParenSpace
+                if !self.matches(&TokenType::LParen) && !self.matches(&TokenType::ParenSpace) {
+                    return Err(ParseError::expected(
+                        TokenType::LParen,
+                        self.peek().clone(),
+                    ));
+                }
+                self.advance(); // consume (
+                let names = self.parse_comma_list(|p| p.parse_name())?;
+                self.expect(TokenType::RParen)?;
+                names
+            } else {
+                Vec::new()
+            };
 
             let end = if self.current > 0 {
                 self.tokens[self.current - 1].clone()
@@ -962,6 +977,7 @@ impl Parser {
             Ok(IncludeSpec::SIncludeData {
                 l: self.make_loc(&start, &end),
                 name,
+                hidden,
             })
         } else if self.matches(&TokenType::Module) {
             // include-module-spec: MODULE name-spec
@@ -2450,19 +2466,13 @@ impl Parser {
             token.location.end_pos,
         );
 
-        // Parse as float (integers and decimals)
-        let n: f64 = token
-            .value
-            .parse()
-            .map_err(|_| ParseError::invalid("number", &token, "Invalid number format"))?;
-
-        // Store original string to preserve precision for large integers
-        Ok(Expr::SNum { l: loc, n, original: Some(token.value.clone()) })
+        // Store as string to support arbitrary precision (like SFrac/SRfrac)
+        Ok(Expr::SNum { l: loc, value: token.value.clone() })
     }
 
     /// rough-num-expr: ROUGHNUMBER
     /// Parses rough (approximate) numbers like ~0.8 or ~42
-    /// Represented as SNum with the tilde preserved in the original string
+    /// Represented as SNum with the tilde preserved in the value string
     fn parse_rough_num(&mut self) -> ParseResult<Expr> {
         let token = self.expect(TokenType::RoughNumber)?;
         let loc = Loc::new(
@@ -2475,14 +2485,8 @@ impl Parser {
             token.location.end_pos,
         );
 
-        // Parse the number part (skip the ~)
-        let num_str = token.value.trim_start_matches('~');
-        let n: f64 = num_str
-            .parse()
-            .map_err(|_| ParseError::invalid("rough number", &token, "Invalid number format"))?;
-
-        // Store original string INCLUDING the tilde
-        Ok(Expr::SNum { l: loc, n, original: Some(token.value.clone()) })
+        // Store as string INCLUDING the tilde to support arbitrary precision
+        Ok(Expr::SNum { l: loc, value: token.value.clone() })
     }
 
     /// frac-expr: RATIONAL
@@ -2510,11 +2514,11 @@ impl Parser {
         }
 
         // Strip leading '+' from numerator (Pyret normalizes +3 to 3)
-        let num = parts[0].trim_start_matches('+').to_string();
-        let den = parts[1].to_string();
+        let num_str = parts[0].trim_start_matches('+');
+        let den_str = parts[1];
 
         // Validate that denominator is not zero (check string representation)
-        if den == "0" {
+        if den_str == "0" {
             return Err(ParseError::invalid(
                 "rational",
                 &token,
@@ -2522,9 +2526,30 @@ impl Parser {
             ));
         }
 
-        // Note: We don't simplify fractions to match official Pyret parser behavior
-        // The official parser keeps fractions in their original form (e.g., 8/10 not 4/5)
-        // We store numerator and denominator as strings to support arbitrary precision
+        // Simplify the fraction using GCD (Pyret does simplify fractions!)
+        // Try to parse as i64 for simplification, but fall back to string if too large
+        let (num, den) = if let (Ok(n), Ok(d)) = (num_str.parse::<i64>(), den_str.parse::<i64>()) {
+            // Use GCD to simplify
+            fn gcd(mut a: i64, mut b: i64) -> i64 {
+                a = a.abs();
+                b = b.abs();
+                while b != 0 {
+                    let temp = b;
+                    b = a % b;
+                    a = temp;
+                }
+                a
+            }
+
+            let g = gcd(n, d);
+            let simplified_num = n / g;
+            let simplified_den = d / g;
+            (simplified_num.to_string(), simplified_den.to_string())
+        } else {
+            // Numbers too large for i64, keep as strings without simplification
+            (num_str.to_string(), den_str.to_string())
+        };
+
         Ok(Expr::SFrac { l: loc, num, den })
     }
 

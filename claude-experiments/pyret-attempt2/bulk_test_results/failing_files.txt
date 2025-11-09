@@ -1,16 +1,15 @@
 tools/benchmark/auto-report-programs/adding-ones-2000.arr  # FAIL despite earlier success (stack overflow (expression too deep))
 tools/benchmark/auto-report-programs/anf-loop-compiler.arr  # UNKNOWN: line=1047 content='occurs-any = for any(next-asgn :: J.JExpr%(is-j-assign) from...'
-tests/pyret/tests/test-roughnum.arr  # SUCCESS (verified)
+tests/pyret/tests/test-equality.arr  # SUCCESS (verified)
+tests/pyret/tests/test-roughnum.arr  # FAIL despite earlier success (parse error)
 tests/pyret/tests/test-parse-errors.arr  # UNKNOWN: line=133 content=']...'
-tests/pyret/tests/test-rounding.arr  # SUCCESS (verified)
 tests/pyret/tests/test-statistics.arr  # SUCCESS (verified)
-tests/pyret/tests/test-math.arr  # UNKNOWN: line=14 content='min([list: 1/10, 1/100, 1/100000000000000000000000]) is 1/10...'
-tests/pyret/tests/modules/test-import-data-from-data-star.arr  # SUCCESS (verified)
+tests/pyret/tests/test-math.arr  # SUCCESS (verified)
 tests/pyret/tests/test-adaptive-simpson.arr  # SUCCESS (verified)
-tests/pyret/tests/test-numbers.arr  # UNKNOWN: line=300 content='rough-p-over-q = ~812687218752923223460064283612774865041325...'
-tests/pyret/tests/test-within.arr  # UNKNOWN: line=164 content='within-abs(0.1)(0, 16236617687846825556281301518037323038237...'
+tests/pyret/tests/test-numbers.arr  # FAIL despite earlier success (parse error)
+tests/pyret/tests/test-within.arr  # FAIL despite earlier success (parse error)
+tests/pyret/tests/test-images.arr  # SUCCESS (verified)
 tests/pyret/tests/test-bar-chart.arr  # SUCCESS (verified)
-tests/type-check/good/tests.arr  # SUCCESS (verified)
 tests/type-check/good/tests-because.arr  # SUCCESS (verified)
 src/arr/trove/charts.arr  # UNKNOWN: line=303 content='high-outliers = for filter(shadow n from lst):...'
 src/arr/trove/matrices.arr  # UNKNOWN: line=852 content='for raw-array-fold2<Number, Number, Number>(acc from Equal, ...'

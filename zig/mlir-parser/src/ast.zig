@@ -245,9 +245,17 @@ pub const BuiltinType = union(enum) {
                 allocator.destroy(t.element_type);
             },
             .memref => |*m| {
-                allocator.free(m.dimensions);
-                m.element_type.deinit(allocator);
-                allocator.destroy(m.element_type);
+                switch (m.*) {
+                    .ranked => |*ranked| {
+                        allocator.free(ranked.dimensions);
+                        ranked.element_type.deinit(allocator);
+                        allocator.destroy(ranked.element_type);
+                    },
+                    .unranked => |*unranked| {
+                        unranked.element_type.deinit(allocator);
+                        allocator.destroy(unranked.element_type);
+                    },
+                }
             },
             .vector => |*v| {
                 allocator.free(v.dimensions);
@@ -301,10 +309,23 @@ pub const TensorType = struct {
     };
 };
 
-pub const MemRefType = struct {
+// Grammar: memref-type ::= ranked-memref-type | unranked-memref-type
+// Grammar: ranked-memref-type ::= `memref` `<` dimension-list type (`,` layout-specification)? (`,` memory-space)? `>`
+// Grammar: unranked-memref-type ::= `memref` `<` `*` `x` type (`,` memory-space)? `>`
+pub const MemRefType = union(enum) {
+    ranked: RankedMemRefType,
+    unranked: UnrankedMemRefType,
+};
+
+pub const RankedMemRefType = struct {
     dimensions: []TensorType.Dimension,
     element_type: *Type,
     layout: ?[]const u8, // Layout specification (simplified for now)
+    memory_space: ?AttributeValue,
+};
+
+pub const UnrankedMemRefType = struct {
+    element_type: *Type,
     memory_space: ?AttributeValue,
 };
 

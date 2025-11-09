@@ -44,30 +44,29 @@ fn test_parse_number() {
 
 #[test]
 fn test_parse_decimal_as_rational() {
-    // Test that decimals are converted to rationals (Pyret behavior)
+    // Test that decimals are parsed as SNum
+    // (Conversion to fractions happens during JSON serialization)
     let expr = parse_expr("3.14").expect("Failed to parse");
 
     match expr {
-        Expr::SFrac { num, den, .. } => {
-            // 3.14 = 314/100 = 157/50 (simplified)
-            assert_eq!(num, 157);
-            assert_eq!(den, 50);
+        Expr::SNum { n, .. } => {
+            assert!((n - 3.14).abs() < 1e-10);
         }
-        _ => panic!("Expected SFrac for decimal, got {:?}", expr),
+        _ => panic!("Expected SNum for decimal, got {:?}", expr),
     }
 }
 
 #[test]
 fn test_parse_simple_decimal() {
-    // Test 2.5 = 5/2
+    // Test 2.5 is parsed as SNum
+    // (Conversion to fractions happens during JSON serialization)
     let expr = parse_expr("2.5").expect("Failed to parse");
 
     match expr {
-        Expr::SFrac { num, den, .. } => {
-            assert_eq!(num, 5);
-            assert_eq!(den, 2);
+        Expr::SNum { n, .. } => {
+            assert!((n - 2.5).abs() < 1e-10);
         }
-        _ => panic!("Expected SFrac, got {:?}", expr),
+        _ => panic!("Expected SNum, got {:?}", expr),
     }
 }
 
@@ -78,8 +77,8 @@ fn test_parse_explicit_rational() {
 
     match expr {
         Expr::SFrac { num, den, .. } => {
-            assert_eq!(num, 3);
-            assert_eq!(den, 4);
+            assert_eq!(num, "3");
+            assert_eq!(den, "4");
         }
         _ => panic!("Expected SFrac, got {:?}", expr),
     }
@@ -92,8 +91,8 @@ fn test_parse_rational_simplification() {
 
     match expr {
         Expr::SFrac { num, den, .. } => {
-            assert_eq!(num, 3);
-            assert_eq!(den, 4);
+            assert_eq!(num, "3");
+            assert_eq!(den, "4");
         }
         _ => panic!("Expected SFrac, got {:?}", expr),
     }
@@ -332,9 +331,9 @@ fn test_parse_paren_with_binop() {
                 Expr::SOp { op, left, right, .. } => {
                     assert_eq!(op, "op+");
                     match (*left, *right) {
-                        (Expr::SNum { n: n1, .. }, Expr::SNum { n: n2, .. }) => {
-                            assert_eq!(n1, 1.0);
-                            assert_eq!(n2, 2.0);
+                        (Expr::SNum { value: v1, .. }, Expr::SNum { value: v2, .. }) => {
+                            assert_eq!(v1, "1");
+                            assert_eq!(v2, "2");
                         }
                         _ => panic!("Expected SNum operands"),
                     }
