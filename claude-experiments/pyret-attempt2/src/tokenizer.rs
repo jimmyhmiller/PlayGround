@@ -1,34 +1,5 @@
 use std::fmt;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SrcLoc {
-    pub start_line: usize,
-    pub start_col: usize,
-    pub start_pos: usize,
-    pub end_line: usize,
-    pub end_col: usize,
-    pub end_pos: usize,
-}
-
-impl SrcLoc {
-    pub fn new(
-        start_line: usize,
-        start_col: usize,
-        start_pos: usize,
-        end_line: usize,
-        end_col: usize,
-        end_pos: usize,
-    ) -> Self {
-        SrcLoc {
-            start_line,
-            start_col,
-            start_pos,
-            end_line,
-            end_col,
-            end_pos,
-        }
-    }
-}
+use crate::ast::{Loc, FileId};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenType {
@@ -201,11 +172,11 @@ impl fmt::Display for TokenType {
 pub struct Token {
     pub token_type: TokenType,
     pub value: String,
-    pub location: SrcLoc,
+    pub location: Loc,
 }
 
 impl Token {
-    pub fn new(token_type: TokenType, value: String, location: SrcLoc) -> Self {
+    pub fn new(token_type: TokenType, value: String, location: Loc) -> Self {
         Token {
             token_type,
             value,
@@ -222,10 +193,11 @@ pub struct Tokenizer {
     len: usize,
     paren_is_for_exp: bool,
     prior_whitespace: bool,
+    file_id: FileId,
 }
 
 impl Tokenizer {
-    pub fn new(input: &str) -> Self {
+    pub fn new(input: &str, file_id: FileId) -> Self {
         let chars: Vec<char> = input.chars().collect();
         let len = chars.len();
         Tokenizer {
@@ -236,6 +208,7 @@ impl Tokenizer {
             len,
             paren_is_for_exp: true,
             prior_whitespace: false,
+            file_id,
         }
     }
 
@@ -270,6 +243,32 @@ impl Tokenizer {
         } else {
             None
         }
+    }
+
+    /// Create a point location at the current position
+    fn loc(&self) -> Loc {
+        Loc::new(
+            self.file_id,
+            self.line,
+            self.col,
+            self.pos,
+            self.line,
+            self.col,
+            self.pos,
+        )
+    }
+
+    /// Create a Loc spanning from start to current position
+    fn span_from(&self, start_line: usize, start_col: usize, start_pos: usize) -> Loc {
+        Loc::new(
+            self.file_id,
+            start_line,
+            start_col,
+            start_pos,
+            self.line,
+            self.col,
+            self.pos,
+        )
     }
 
     fn starts_with(&self, s: &str) -> bool {
@@ -323,7 +322,7 @@ impl Tokenizer {
         if self.pos > start_pos {
             self.paren_is_for_exp = true;
             self.prior_whitespace = true;
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             Some(Token::new(TokenType::Ws, String::new(), loc))
         } else {
             None
@@ -348,7 +347,7 @@ impl Tokenizer {
             self.advance();
         }
 
-        let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+        let loc = self.span_from(start_line, start_col, start_pos);
         Some(Token::new(TokenType::Comment, String::new(), loc))
     }
 
@@ -380,7 +379,7 @@ impl Tokenizer {
             }
         }
 
-        let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+        let loc = self.span_from(start_line, start_col, start_pos);
 
         if nesting_depth == 0 {
             Some(Token::new(TokenType::BlockComment, String::new(), loc))
@@ -515,7 +514,7 @@ impl Tokenizer {
             }
         }
 
-        let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+        let loc = self.span_from(start_line, start_col, start_pos);
         let raw_value: String = self.input[start_pos..self.pos].iter().collect();
 
         if terminated {
@@ -561,7 +560,7 @@ impl Tokenizer {
             }
         }
 
-        let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+        let loc = self.span_from(start_line, start_col, start_pos);
         let raw_value: String = self.input[start_pos..self.pos].iter().collect();
 
         if terminated {
@@ -624,7 +623,7 @@ impl Tokenizer {
                 while matches!(self.current_char(), Some(ch) if Self::is_digit(ch)) {
                     self.advance();
                 }
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 let value: String = self.input[start_pos..self.pos].iter().collect();
                 self.paren_is_for_exp = false;
                 self.prior_whitespace = false;
@@ -651,7 +650,7 @@ impl Tokenizer {
                 // No digits after dot - backtrack
                 self.pos = dot_pos;
                 self.col -= 1;
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 let value: String = self.input[start_pos..self.pos].iter().collect();
                 self.paren_is_for_exp = false;
                 self.prior_whitespace = false;
@@ -679,7 +678,7 @@ impl Tokenizer {
             }
         }
 
-        let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+        let loc = self.span_from(start_line, start_col, start_pos);
         let value: String = self.input[start_pos..self.pos].iter().collect();
         self.paren_is_for_exp = false;
         self.prior_whitespace = false;
@@ -700,42 +699,42 @@ impl Tokenizer {
         // These need to be checked first because '=' and '<' are not valid identifier chars
         if self.starts_with("is-not<=>") {
             for _ in 0..9 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::IsNotSpaceship, "is-not<=>".to_string(), loc));
         }
         if self.starts_with("is-not==") {
             for _ in 0..8 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::IsNotEqualEqual, "is-not==".to_string(), loc));
         }
         if self.starts_with("is-not=~") {
             for _ in 0..8 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::IsNotEqualTilde, "is-not=~".to_string(), loc));
         }
         if self.starts_with("is<=>") {
             for _ in 0..5 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::IsSpaceship, "is<=>".to_string(), loc));
         }
         if self.starts_with("is==") {
             for _ in 0..4 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::IsEqualEqual, "is==".to_string(), loc));
         }
         if self.starts_with("is=~") {
             for _ in 0..4 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::IsEqualTilde, "is=~".to_string(), loc));
@@ -744,88 +743,88 @@ impl Tokenizer {
         // Check for special keyword-colon combinations before scanning as identifier
         if self.starts_with("block:") {
             for _ in 0..6 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Block, "block:".to_string(), loc));
         }
         if self.starts_with("check:") {
             for _ in 0..6 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::CheckColon, "check:".to_string(), loc));
         }
         if self.starts_with("doc:") {
             for _ in 0..4 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Doc, "doc:".to_string(), loc));
         }
         if self.starts_with("else:") {
             for _ in 0..5 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::ElseColon, "else:".to_string(), loc));
         }
         if self.starts_with("examples:") {
             for _ in 0..9 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::ExamplesColon, "examples:".to_string(), loc));
         }
         if self.starts_with("provide:") {
             for _ in 0..8 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::ProvideColon, "provide:".to_string(), loc));
         }
         if self.starts_with("row:") {
             for _ in 0..4 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Row, "row:".to_string(), loc));
         }
         if self.starts_with("sharing:") {
             for _ in 0..8 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Sharing, "sharing:".to_string(), loc));
         }
         if self.starts_with("source:") {
             for _ in 0..7 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::SourceColon, "source:".to_string(), loc));
         }
         if self.starts_with("load-table:") {
             for _ in 0..11 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.prior_whitespace = false;
             self.paren_is_for_exp = true;
             return Some(Token::new(TokenType::LoadTable, "load-table:".to_string(), loc));
         }
         if self.starts_with("table:") {
             for _ in 0..6 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Table, "table:".to_string(), loc));
         }
         if self.starts_with("where:") {
             for _ in 0..6 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Where, "where:".to_string(), loc));
         }
         if self.starts_with("with:") {
             for _ in 0..5 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::With, "with:".to_string(), loc));
@@ -866,7 +865,7 @@ impl Tokenizer {
         }
 
         let value: String = self.input[start_pos..self.pos].iter().collect();
-        let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+        let loc = self.span_from(start_line, start_col, start_pos);
 
         // Check for keywords (checking multi-word keywords first)
         if value == "else" && self.pos < self.len {
@@ -885,7 +884,7 @@ impl Tokenizer {
                 if !matches!(self.peek_char(2), Some(ch) if Self::is_ident_continue(ch) || ch == '-') {
                     self.advance();
                     self.advance();
-                    let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                    let loc = self.span_from(start_line, start_col, start_pos);
                     self.paren_is_for_exp = false;
                     self.prior_whitespace = false;
                     return Some(Token::new(TokenType::ElseIf, "else if".to_string(), loc));
@@ -990,177 +989,177 @@ impl Tokenizer {
         // Check multi-character symbols first
         if self.starts_with("block:") {
             for _ in 0..6 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Block, "block:".to_string(), loc));
         }
         if self.starts_with("check:") {
             for _ in 0..6 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::CheckColon, "check:".to_string(), loc));
         }
         if self.starts_with("doc:") {
             for _ in 0..4 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Doc, "doc:".to_string(), loc));
         }
         if self.starts_with("else:") {
             for _ in 0..5 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::ElseColon, "else:".to_string(), loc));
         }
         if self.starts_with("examples:") {
             for _ in 0..9 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::ExamplesColon, "examples:".to_string(), loc));
         }
         if self.starts_with("otherwise:") {
             for _ in 0..10 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::OtherwiseColon, "otherwise:".to_string(), loc));
         }
         if self.starts_with("provide:") {
             for _ in 0..8 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::ProvideColon, "provide:".to_string(), loc));
         }
         if self.starts_with("row:") {
             for _ in 0..4 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Row, "row:".to_string(), loc));
         }
         if self.starts_with("sharing:") {
             for _ in 0..8 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Sharing, "sharing:".to_string(), loc));
         }
         if self.starts_with("source:") {
             for _ in 0..7 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::SourceColon, "source:".to_string(), loc));
         }
         if self.starts_with("load-table:") {
             for _ in 0..11 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.prior_whitespace = false;
             self.paren_is_for_exp = true;
             return Some(Token::new(TokenType::LoadTable, "load-table:".to_string(), loc));
         }
         if self.starts_with("table:") {
             for _ in 0..6 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Table, "table:".to_string(), loc));
         }
         if self.starts_with("then:") {
             for _ in 0..5 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::ThenColon, "then:".to_string(), loc));
         }
         if self.starts_with("where:") {
             for _ in 0..6 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Where, "where:".to_string(), loc));
         }
         if self.starts_with("with:") {
             for _ in 0..5 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::With, "with:".to_string(), loc));
         }
         if self.starts_with("...") {
             for _ in 0..3 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::DotDotDot, "...".to_string(), loc));
         }
         if self.starts_with("<=>") {
             for _ in 0..3 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Spaceship, "<=>".to_string(), loc));
         }
         if self.starts_with("->") {
             for _ in 0..2 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::ThinArrow, "->".to_string(), loc));
         }
         if self.starts_with(":=") {
             for _ in 0..2 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::ColonEquals, ":=".to_string(), loc));
         }
         if self.starts_with("::") {
             for _ in 0..2 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::ColonColon, "::".to_string(), loc));
         }
         if self.starts_with("<=") {
             for _ in 0..2 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Leq, "<=".to_string(), loc));
         }
         if self.starts_with(">=") {
             for _ in 0..2 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Geq, ">=".to_string(), loc));
         }
         if self.starts_with("==") {
             for _ in 0..2 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::EqualEqual, "==".to_string(), loc));
         }
         if self.starts_with("=~") {
             for _ in 0..2 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::EqualTilde, "=~".to_string(), loc));
         }
         if self.starts_with("<>") {
             for _ in 0..2 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::Neq, "<>".to_string(), loc));
         }
         if self.starts_with("=>") {
             for _ in 0..2 { self.advance(); }
-            let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+            let loc = self.span_from(start_line, start_col, start_pos);
             self.paren_is_for_exp = true;
             self.prior_whitespace = false;
             return Some(Token::new(TokenType::ThickArrow, "=>".to_string(), loc));
@@ -1170,7 +1169,7 @@ impl Tokenizer {
         match ch {
             '[' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 let token_type = if self.prior_whitespace || self.paren_is_for_exp {
                     TokenType::BrackSpace
                 } else {
@@ -1182,26 +1181,26 @@ impl Tokenizer {
             }
             ']' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::RBrack, "]".to_string(), loc))
             }
             '{' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.paren_is_for_exp = true;
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::LBrace, "{".to_string(), loc))
             }
             '}' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::RBrace, "}".to_string(), loc))
             }
             '(' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 let token_type = if self.prior_whitespace || self.paren_is_for_exp {
                     TokenType::ParenSpace
                 } else {
@@ -1213,7 +1212,7 @@ impl Tokenizer {
             }
             ')' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 // After ), paren should be treated like after a name/number (can be followed by function call)
                 self.paren_is_for_exp = false;
                 self.prior_whitespace = false;
@@ -1221,65 +1220,65 @@ impl Tokenizer {
             }
             ';' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Semi, ";".to_string(), loc))
             }
             '\\' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Backslash, "\\".to_string(), loc))
             }
             '.' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Dot, ".".to_string(), loc))
             }
             '!' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Bang, "!".to_string(), loc))
             }
             '%' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Percent, "%".to_string(), loc))
             }
             ',' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.paren_is_for_exp = true;
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Comma, ",".to_string(), loc))
             }
             ':' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.paren_is_for_exp = true;
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Colon, ":".to_string(), loc))
             }
             '|' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.paren_is_for_exp = true;
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Bar, "|".to_string(), loc))
             }
             '=' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.paren_is_for_exp = true;
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Equals, "=".to_string(), loc))
             }
             '<' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 let token_type = if self.prior_whitespace || self.paren_is_for_exp {
                     TokenType::Lt
                 } else {
@@ -1291,42 +1290,42 @@ impl Tokenizer {
             }
             '>' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.paren_is_for_exp = false; // After >, allow ParenNoSpace for function application
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Gt, ">".to_string(), loc))
             }
             '*' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.paren_is_for_exp = true;
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Times, "*".to_string(), loc))
             }
             '^' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.paren_is_for_exp = true;
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Caret, "^".to_string(), loc))
             }
             '+' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.paren_is_for_exp = true;
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Plus, "+".to_string(), loc))
             }
             '-' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.paren_is_for_exp = true;
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Dash, "-".to_string(), loc))
             }
             '/' => {
                 self.advance();
-                let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+                let loc = self.span_from(start_line, start_col, start_pos);
                 self.paren_is_for_exp = true;
                 self.prior_whitespace = false;
                 Some(Token::new(TokenType::Slash, "/".to_string(), loc))
@@ -1345,7 +1344,7 @@ impl Tokenizer {
             return Some(Token::new(
                 TokenType::Eof,
                 String::new(),
-                SrcLoc::new(self.line, self.col, self.pos, self.line, self.col, self.pos),
+                self.loc(),
             ));
         }
 
@@ -1384,7 +1383,7 @@ impl Tokenizer {
         let start_col = self.col;
         let start_pos = self.pos;
         let ch = self.advance()?;
-        let loc = SrcLoc::new(start_line, start_col, start_pos, self.line, self.col, self.pos);
+        let loc = self.span_from(start_line, start_col, start_pos);
         Some(Token::new(
             TokenType::BadOper,
             ch.to_string(),
@@ -1413,10 +1412,17 @@ impl Tokenizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::FileRegistry;
+
+    fn test_tokenizer(input: &str) -> Tokenizer {
+        let mut registry = FileRegistry::new();
+        let file_id = registry.register("test.arr".to_string());
+        Tokenizer::new(input, file_id)
+    }
 
     #[test]
     fn test_tokenize_simple_keywords() {
-        let mut tokenizer = Tokenizer::new("fun if else end");
+        let mut tokenizer = test_tokenizer("fun if else end");
         let tokens = tokenizer.tokenize();
 
         assert_eq!(tokens.len(), 5); // 4 keywords + EOF
@@ -1429,7 +1435,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_numbers() {
-        let mut tokenizer = Tokenizer::new("42 3.14 1/2 ~3.14");
+        let mut tokenizer = test_tokenizer("42 3.14 1/2 ~3.14");
         let tokens = tokenizer.tokenize();
 
         assert_eq!(tokens[0].token_type, TokenType::Number);
@@ -1444,7 +1450,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_strings() {
-        let mut tokenizer = Tokenizer::new(r#""hello" 'world'"#);
+        let mut tokenizer = test_tokenizer(r#""hello" 'world'"#);
         let tokens = tokenizer.tokenize();
 
         assert_eq!(tokens[0].token_type, TokenType::String);
@@ -1455,7 +1461,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_identifiers() {
-        let mut tokenizer = Tokenizer::new("foo bar-baz my-long-name");
+        let mut tokenizer = test_tokenizer("foo bar-baz my-long-name");
         let tokens = tokenizer.tokenize();
 
         assert_eq!(tokens[0].token_type, TokenType::Name);
@@ -1468,7 +1474,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_symbols() {
-        let mut tokenizer = Tokenizer::new("( ) [ ] { } , ;");
+        let mut tokenizer = test_tokenizer("( ) [ ] { } , ;");
         let tokens = tokenizer.tokenize();
 
         assert!(matches!(tokens[0].token_type, TokenType::ParenSpace | TokenType::ParenNoSpace));
@@ -1483,7 +1489,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_comments() {
-        let mut tokenizer = Tokenizer::new("# line comment\nfun");
+        let mut tokenizer = test_tokenizer("# line comment\nfun");
         let tokens = tokenizer.tokenize();
 
         // Comments are skipped
@@ -1492,7 +1498,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_block_comment() {
-        let mut tokenizer = Tokenizer::new("#| block comment |# fun");
+        let mut tokenizer = test_tokenizer("#| block comment |# fun");
         let tokens = tokenizer.tokenize();
 
         // Block comments are skipped
@@ -1506,7 +1512,7 @@ fun add(x, y):
   x + y
 end
 "#;
-        let mut tokenizer = Tokenizer::new(code);
+        let mut tokenizer = test_tokenizer(code);
         let tokens = tokenizer.tokenize();
 
         assert!(tokens.iter().any(|t| t.token_type == TokenType::Fun));

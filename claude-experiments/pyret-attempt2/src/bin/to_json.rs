@@ -1,4 +1,4 @@
-use pyret_attempt2::Parser;
+use pyret_attempt2::{Parser, FileRegistry};
 use pyret_attempt2::tokenizer::Tokenizer;
 use std::env;
 use std::fs;
@@ -17,9 +17,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         buffer
     };
 
-    let mut tokenizer = Tokenizer::new(&input);
+    // Create file registry and register the file
+    let mut registry = FileRegistry::new();
+    let file_id = registry.register("input.arr".to_string());
+
+    let mut tokenizer = Tokenizer::new(&input, file_id);
     let tokens = tokenizer.tokenize();
-    let mut parser = Parser::new(tokens, "input.arr".to_string());
+    let mut parser = Parser::new(tokens, file_id);
     let expr = parser.parse_expr()?;
 
     let json = serde_json::to_string_pretty(&expr)?;

@@ -1,10 +1,13 @@
-use pyret_attempt2::{Parser, Expr, Member, Name, ConstructModifier, LetBind, Bind, Program, Provide};
+use pyret_attempt2::{Parser, Expr, Member, Name, ConstructModifier, Bind, Program, Provide, FileRegistry};
 use pyret_attempt2::tokenizer::Tokenizer;
 
 /// Helper to parse a string into an expression
 /// This expects a complete expression with no trailing tokens (enforces EOF)
 fn parse_expr(input: &str) -> Result<Expr, Box<dyn std::error::Error>> {
-    let mut tokenizer = Tokenizer::new(input);
+    let mut registry = FileRegistry::new();
+    let file_id = registry.register("test.arr".to_string());
+
+    let mut tokenizer = Tokenizer::new(input, file_id);
     let tokens = tokenizer.tokenize();
 
     // Debug: print tokens for troubleshooting
@@ -12,13 +15,16 @@ fn parse_expr(input: &str) -> Result<Expr, Box<dyn std::error::Error>> {
         eprintln!("Tokens for '{}': {:?}", input, tokens.iter().map(|t| format!("{:?}", t.token_type)).collect::<Vec<_>>());
     }
 
-    let mut parser = Parser::new(tokens, "test.arr".to_string());
+    let mut parser = Parser::new(tokens, file_id);
     Ok(parser.parse_expr_complete()?)
 }
 
 /// Helper to parse a string into a program
 fn parse_program(input: &str) -> Result<Program, Box<dyn std::error::Error>> {
-    let mut tokenizer = Tokenizer::new(input);
+    let mut registry = FileRegistry::new();
+    let file_id = registry.register("test.arr".to_string());
+
+    let mut tokenizer = Tokenizer::new(input, file_id);
     let tokens = tokenizer.tokenize();
 
     // Debug: print tokens for troubleshooting
@@ -26,7 +32,7 @@ fn parse_program(input: &str) -> Result<Program, Box<dyn std::error::Error>> {
         eprintln!("Tokens for '{}': {:?}", input, tokens.iter().map(|t| format!("{:?}", t.token_type)).collect::<Vec<_>>());
     }
 
-    let mut parser = Parser::new(tokens, "test.arr".to_string());
+    let mut parser = Parser::new(tokens, file_id);
     Ok(parser.parse_program()?)
 }
 

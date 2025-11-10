@@ -6,32 +6,78 @@
 //! Reference: /pyret-lang/src/arr/trove/ast.arr
 
 use serde::Serialize;
+use std::collections::HashMap;
 
 // ============================================================================
 // SECTION 1: Source Locations
 // ============================================================================
 
+/// File identifier - lightweight ID that can be mapped to a filename
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct FileId(pub u32);
+
+/// Registry for mapping file IDs to filenames
+pub struct FileRegistry {
+    files: HashMap<FileId, String>,
+    next_id: u32,
+}
+
+impl Default for FileRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FileRegistry {
+    pub fn new() -> Self {
+        FileRegistry {
+            files: HashMap::new(),
+            next_id: 0,
+        }
+    }
+
+    /// Register a filename and get its ID
+    pub fn register(&mut self, filename: String) -> FileId {
+        let id = FileId(self.next_id);
+        self.next_id += 1;
+        self.files.insert(id, filename);
+        id
+    }
+
+    /// Get the filename for a file ID
+    pub fn get_name(&self, id: FileId) -> Option<&str> {
+        self.files.get(&id).map(|s| s.as_str())
+    }
+}
+
 /// Source location information for AST nodes
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// Now lightweight and Copy - uses file ID instead of string
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Loc {
-    pub source: String,
-    #[serde(rename = "start-line")]
+    pub file_id: FileId,
     pub start_line: usize,
-    #[serde(rename = "start-column")]
     pub start_column: usize,
-    #[serde(rename = "start-char")]
     pub start_char: usize,
-    #[serde(rename = "end-line")]
     pub end_line: usize,
-    #[serde(rename = "end-column")]
     pub end_column: usize,
-    #[serde(rename = "end-char")]
     pub end_char: usize,
+}
+
+// Dummy Serialize implementation - actual serialization handled manually in to_pyret_json.rs
+impl Serialize for Loc {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // This is a dummy implementation - we handle Loc serialization manually
+        // in to_pyret_json.rs using the FileRegistry
+        serializer.serialize_str("dummy-loc")
+    }
 }
 
 impl Loc {
     pub fn new(
-        source: String,
+        file_id: FileId,
         start_line: usize,
         start_column: usize,
         start_char: usize,
@@ -40,13 +86,27 @@ impl Loc {
         end_char: usize,
     ) -> Self {
         Loc {
-            source,
+            file_id,
             start_line,
             start_column,
             start_char,
             end_line,
             end_column,
             end_char,
+        }
+    }
+
+    /// Combine this location with another to create a span from the start of self to the end of other
+    /// Ergonomic syntax: start.span(end)
+    pub fn span(self, end: Loc) -> Self {
+        Loc {
+            file_id: self.file_id,
+            start_line: self.start_line,
+            start_column: self.start_column,
+            start_char: self.start_char,
+            end_line: end.end_line,
+            end_column: end.end_column,
+            end_char: end.end_char,
         }
     }
 }

@@ -12,16 +12,19 @@
 /// - ideal-thorny-kingfisher: Parser accepts trailing tokens
 /// - oily-awkward-hedgehog: Parser accepts multiple expressions
 /// - reflecting-enchanting-caribou: Parser accepts invalid characters
-use pyret_attempt2::{Parser, Expr};
+use pyret_attempt2::{Parser, Expr, FileRegistry};
 use pyret_attempt2::tokenizer::Tokenizer;
 use pyret_attempt2::error::ParseError;
 
 /// Helper to parse a string into an expression
 /// Uses parse_expr_complete() to ensure all tokens are consumed
 fn parse_expr(input: &str) -> Result<Expr, ParseError> {
-    let mut tokenizer = Tokenizer::new(input);
+    let mut registry = FileRegistry::new();
+    let file_id = registry.register("test.arr".to_string());
+
+    let mut tokenizer = Tokenizer::new(input, file_id);
     let tokens = tokenizer.tokenize();
-    let mut parser = Parser::new(tokens, "test.arr".to_string());
+    let mut parser = Parser::new(tokens, file_id);
     parser.parse_expr_complete()
 }
 

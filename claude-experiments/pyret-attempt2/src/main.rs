@@ -26,7 +26,11 @@ fun factorial(n):
 end
 "#;
 
-    let mut tokenizer = Tokenizer::new(code);
+    // Create file registry and register the file
+    let mut registry = FileRegistry::new();
+    let file_id = registry.register("example.arr".to_string());
+
+    let mut tokenizer = Tokenizer::new(code, file_id);
     let tokens = tokenizer.tokenize();
 
     println!("Code:\n{}", code);
@@ -43,7 +47,7 @@ end
                 token.value.clone()
             },
             token.location.start_line,
-            token.location.start_col
+            token.location.start_column
         );
     }
 }
@@ -51,33 +55,37 @@ end
 fn demo_ast_json() {
     println!("\n🌳 AST JSON Serialization Example:\n");
 
+    // Create file registry and register the file
+    let mut registry = FileRegistry::new();
+    let file_id = registry.register("example.arr".to_string());
+
     // Create a simple program AST manually
-    let loc = Loc::new("example.arr".to_string(), 1, 0, 0, 1, 10, 10);
+    let loc = Loc::new(file_id, 1, 0, 0, 1, 10, 10);
 
     // Simple number expression: 42
     let num_expr = Expr::SNum {
-        l: loc.clone(),
+        l: loc,
         value: "42".to_string(),
     };
 
     // String expression: "Hello Pyret"
     let str_expr = Expr::SStr {
-        l: loc.clone(),
+        l: loc,
         s: "Hello Pyret".to_string(),
     };
 
     // Block with two statements
     let block = Expr::SBlock {
-        l: loc.clone(),
+        l: loc,
         stmts: vec![Box::new(num_expr), Box::new(str_expr)],
     };
 
     // Create a minimal program
     let program = Program::new(
-        loc.clone(),
+        loc,
         None,                                     // no use statement
-        Provide::SProvideNone { l: loc.clone() }, // provide-none
-        ProvideTypes::SProvideTypesNone { l: loc.clone() }, // provide-types-none
+        Provide::SProvideNone { l: loc }, // provide-none
+        ProvideTypes::SProvideTypesNone { l: loc }, // provide-types-none
         vec![],                                   // no provide blocks
         vec![],                                   // no imports
         block,
@@ -100,7 +108,9 @@ mod tests {
     #[test]
     fn test_tokenizer() {
         let code = "fun factorial(n): n end";
-        let mut tokenizer = Tokenizer::new(code);
+        let mut registry = FileRegistry::new();
+        let file_id = registry.register("test.arr".to_string());
+        let mut tokenizer = Tokenizer::new(code, file_id);
         let tokens = tokenizer.tokenize();
 
         assert!(!tokens.is_empty());
@@ -110,7 +120,9 @@ mod tests {
 
     #[test]
     fn test_ast_serialization() {
-        let loc = Loc::new("test.arr".to_string(), 1, 0, 0, 1, 1, 1);
+        let mut registry = FileRegistry::new();
+        let file_id = registry.register("test.arr".to_string());
+        let loc = Loc::new(file_id, 1, 0, 0, 1, 1, 1);
         let expr = Expr::SNum { l: loc, value: "123".to_string() };
 
         let json = serde_json::to_string(&expr).unwrap();

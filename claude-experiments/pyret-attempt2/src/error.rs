@@ -65,7 +65,7 @@ impl ParseError {
 fn format_location(token: &Token) -> String {
     format!(
         "{}:{}:{}",
-        token.location.start_line, token.location.start_col, token.location.start_pos
+        token.location.start_line, token.location.start_column, token.location.start_char
     )
 }
 
