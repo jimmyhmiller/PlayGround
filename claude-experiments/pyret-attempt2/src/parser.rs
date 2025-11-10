@@ -19,7 +19,6 @@ type PreludeResult = (Option<Use>, Provide, ProvideTypes, Vec<ProvideBlock>, Vec
 pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
-    position: usize, // Alias for current, used for checkpointing
     _file_id: FileId,
 }
 
@@ -34,7 +33,6 @@ impl Parser {
         Parser {
             tokens,
             current: 0,
-            position: 0,
             _file_id: file_id,
         }
     }
@@ -53,7 +51,6 @@ impl Parser {
     fn advance(&mut self) -> &Token {
         if !self.is_at_end() {
             self.current += 1;
-            self.position = self.current;
         }
         &self.tokens[self.current - 1]
     }
@@ -101,7 +98,85 @@ impl Parser {
 
     fn restore(&mut self, checkpoint: usize) {
         self.current = checkpoint;
-        self.position = checkpoint;
+    }
+
+    // ========== Token Matching Helpers ==========
+
+    /// Accept any form of left paren (LParen, ParenSpace, ParenNoSpace)
+    fn expect_any_lparen(&mut self) -> ParseResult<Token> {
+        let token = self.peek().clone();
+        if matches!(token.token_type, TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace) {
+            self.advance();
+            Ok(token)
+        } else {
+            Err(ParseError::expected(TokenType::LParen, token))
+        }
+    }
+
+    /// Accept any form of left bracket (LBrack, BrackSpace)
+    fn expect_any_lbrack(&mut self) -> ParseResult<Token> {
+        let token = self.peek().clone();
+        if matches!(token.token_type, TokenType::LBrack | TokenType::BrackSpace) {
+            self.advance();
+            Ok(token)
+        } else {
+            Err(ParseError::expected(TokenType::LBrack, token))
+        }
+    }
+
+    /// Check if current token is any form of left paren
+    fn is_lparen(&self) -> bool {
+        matches!(self.peek().token_type, TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace)
+    }
+
+    // ========== Common Parsing Patterns ==========
+
+    /// Parse optional generic type parameters: <T, U, V>
+    /// Returns empty vec if no type parameters present
+    fn parse_opt_type_params(&mut self) -> ParseResult<Vec<Name>> {
+        if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
+            self.advance();
+            let params = self.parse_comma_list(|p| p.parse_name())?;
+            self.expect(TokenType::Gt)?;
+            Ok(params)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Parse optional doc string: doc: "string"
+    /// Returns empty string if no doc present
+    fn parse_opt_doc_string(&mut self) -> ParseResult<String> {
+        if self.matches(&TokenType::Doc) {
+            self.advance();
+            let doc_token = self.expect(TokenType::String)?;
+            Ok(doc_token.value.clone())
+        } else {
+            Ok(String::new())
+        }
+    }
+
+    /// Parse block separator (BLOCK or COLON)
+    /// Returns true if block: was used, false if : was used
+    fn parse_block_separator(&mut self) -> ParseResult<bool> {
+        if self.matches(&TokenType::Block) {
+            self.advance();
+            Ok(true)
+        } else {
+            self.expect(TokenType::Colon)?;
+            Ok(false)
+        }
+    }
+
+    /// Parse optional return type annotation: -> Type
+    /// Returns ABlank if no annotation present
+    fn parse_opt_return_ann(&mut self) -> ParseResult<Ann> {
+        if self.matches(&TokenType::ThinArrow) {
+            self.advance();
+            self.parse_ann()
+        } else {
+            Ok(Ann::ABlank)
+        }
     }
 
     // ========== Name Helpers ==========
@@ -206,15 +281,9 @@ impl Parser {
 
         self.advance(); // consume HIDING
 
-        // Accept either LParen or ParenSpace (whitespace-sensitive)
-        if !self.matches(&TokenType::LParen) && !self.matches(&TokenType::ParenSpace) {
-            return Err(ParseError::expected(
-                TokenType::LParen,
-                self.peek().clone(),
-            ));
-        }
+        // Accept any form of left paren
+        self.expect_any_lparen()?;
 
-        self.advance(); // consume (
         let names = self.parse_comma_list(|p| p.parse_name())?;
         self.expect(TokenType::RParen)?;
 
@@ -1115,16 +1184,8 @@ impl Parser {
             // Check for refinement: %(predicate)
             if self.matches(&TokenType::Percent) {
                 self.advance(); // consume '%'
-                // Expect opening paren (can be LParen, ParenSpace, or ParenNoSpace)
-                let paren_token = self.peek().clone();
-                match paren_token.token_type {
-                    TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace => {
-                        self.advance();
-                    }
-                    _ => {
-                        return Err(ParseError::expected(TokenType::LParen, paren_token));
-                    }
-                }
+                // Expect any form of left paren
+                self.expect_any_lparen()?;
                 let predicate = self.parse_expr()?;
                 let end_token = self.expect(TokenType::RParen)?; // consume ')'
                 let pred_loc = name_token.location.span(end_token.location);
@@ -2368,11 +2429,6 @@ impl Parser {
         })
     }
 
-    /// Parse a member (same as obj-field, but used in data definitions)
-    fn parse_member(&mut self) -> ParseResult<Member> {
-        self.parse_obj_field()
-    }
-
     /// obj-field: key COLON binop-expr
     ///          | REF key [COLONCOLON ann] COLON binop-expr
     ///          | METHOD key fun-header (BLOCK|COLON) doc-string block where-clause END
@@ -2438,25 +2494,10 @@ impl Parser {
 
         // Parse fun-header: ty-params args return-ann
         // Parse optional type parameters: <T, U, V>
-        let params = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
-            self.advance(); // consume '<' or '<' (no space)
-            let type_params = self.parse_comma_list(|p| p.parse_name())?;
-            self.expect(TokenType::Gt)?; // consume '>'
-            type_params
-        } else {
-            Vec::new()
-        };
+        let params = self.parse_opt_type_params()?;
 
-        // Expect opening paren (can be LParen or ParenSpace or ParenNoSpace)
-        let paren_token = self.peek().clone();
-        match paren_token.token_type {
-            TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace => {
-                self.advance();
-            }
-            _ => {
-                return Err(ParseError::expected(TokenType::LParen, paren_token));
-            }
-        }
+        // Expect any form of left paren
+        self.expect_any_lparen()?;
 
         // Parse parameters (comma-separated bindings)
         let args = if self.matches(&TokenType::RParen) {
@@ -2469,30 +2510,13 @@ impl Parser {
         self.expect(TokenType::RParen)?;
 
         // Optional type annotation: -> ann
-        let ann = if self.matches(&TokenType::ThinArrow) {
-            self.expect(TokenType::ThinArrow)?;
-            self.parse_ann()?
-        } else {
-            Ann::ABlank
-        };
+        let ann = self.parse_opt_return_ann()?;
 
         // Parse body separator (COLON or BLOCK)
-        let blocky = if self.matches(&TokenType::Block) {
-            self.advance();
-            true
-        } else {
-            self.expect(TokenType::Colon)?;
-            false
-        };
+        let blocky = self.parse_block_separator()?;
 
         // Parse optional doc string: doc: "string"
-        let doc = if self.matches(&TokenType::Doc) {
-            self.advance(); // consume doc:
-            let doc_token = self.expect(TokenType::String)?;
-            doc_token.value.clone()
-        } else {
-            String::new()
-        };
+        let doc = self.parse_opt_doc_string()?;
 
         // Parse method body (statements until END or WHERE)
         let mut body_stmts = Vec::new();
@@ -3072,13 +3096,7 @@ impl Parser {
         let ann = Ann::ABlank;
 
         // Parse body separator (COLON or BLOCK)
-        let blocky = if self.matches(&TokenType::Block) {
-            self.advance();
-            true
-        } else {
-            self.expect(TokenType::Colon)?;
-            false
-        };
+        let blocky = self.parse_block_separator()?;
 
         // Parse the body (statements until END)
         let mut body_stmts = Vec::new();
@@ -3516,14 +3534,7 @@ impl Parser {
         self.expect(TokenType::ColonColon)?;
 
         // Parse optional type parameters <T, U>
-        let params = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
-            self.advance(); // consume <
-            let params = self.parse_comma_list(|p| p.parse_name())?;
-            self.expect(TokenType::Gt)?; // consume >
-            params
-        } else {
-            Vec::new()
-        };
+        let params = self.parse_opt_type_params()?;
 
         // Parse type annotation
         // Contract statements allow noparen-arrow-ann: args -> ret without parentheses
@@ -3576,8 +3587,10 @@ impl Parser {
         if args.len() == 1 {
             Ok(args.into_iter().next().unwrap())
         } else {
-            // Multiple args without arrow is invalid, but return the first one
-            Ok(args.into_iter().next().unwrap())
+            Err(ParseError::general(
+                self.peek(),
+                "Contract annotation requires arrow (->) when using multiple arguments"
+            ))
         }
     }
 
@@ -3637,11 +3650,8 @@ impl Parser {
     fn parse_cases_expr(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::Cases)?;
 
-        // Expect opening paren (ParenSpace because cases sets paren_is_for_exp)
-        if !self.matches(&TokenType::LParen) && !self.matches(&TokenType::ParenSpace) {
-            return Err(ParseError::expected(TokenType::LParen, self.peek().clone()));
-        }
-        self.advance(); // consume the paren
+        // Expect any form of left paren
+        self.expect_any_lparen()?;
 
         // Parse type annotation
         let typ = self.parse_ann()?;
@@ -3653,13 +3663,7 @@ impl Parser {
         let val = self.parse_expr()?;
 
         // Expect colon or block
-        let blocky = if self.matches(&TokenType::Block) {
-            self.advance();
-            true
-        } else {
-            self.expect(TokenType::Colon)?;
-            false
-        };
+        let blocky = self.parse_block_separator()?;
 
         // Parse branches (each starts with |)
         let mut branches = Vec::new();
@@ -3810,13 +3814,7 @@ impl Parser {
         let test = self.parse_expr()?;
 
         // Expect colon or block
-        let blocky = if self.matches(&TokenType::Block) {
-            self.advance();
-            true
-        } else {
-            self.expect(TokenType::Colon)?;
-            false
-        };
+        let blocky = self.parse_block_separator()?;
 
         // Parse the block (statements until end)
         let mut block_stmts = Vec::new();
@@ -3928,16 +3926,8 @@ impl Parser {
             Vec::new()
         };
 
-        // Expect opening paren (can be LParen, ParenSpace, or ParenNoSpace)
-        let paren_token = self.peek().clone();
-        match paren_token.token_type {
-            TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace => {
-                self.advance();
-            }
-            _ => {
-                return Err(ParseError::expected(TokenType::LParen, paren_token));
-            }
-        }
+        // Expect any form of left paren
+        self.expect_any_lparen()?;
 
         // Parse parameters (comma-separated bindings)
         let args = if self.matches(&TokenType::RParen) {
@@ -3950,30 +3940,13 @@ impl Parser {
         self.expect(TokenType::RParen)?;
 
         // Optional return type annotation: -> ann
-        let ann = if self.matches(&TokenType::ThinArrow) {
-            self.expect(TokenType::ThinArrow)?;
-            self.parse_ann()?
-        } else {
-            Ann::ABlank
-        };
+        let ann = self.parse_opt_return_ann()?;
 
         // Parse body separator (COLON or BLOCK)
-        let blocky = if self.matches(&TokenType::Block) {
-            self.advance();
-            true
-        } else {
-            self.expect(TokenType::Colon)?;
-            false
-        };
+        let blocky = self.parse_block_separator()?;
 
         // Parse optional doc string: doc: "string"
-        let doc = if self.matches(&TokenType::Doc) {
-            self.advance(); // consume doc:
-            let doc_token = self.expect(TokenType::String)?;
-            doc_token.value.clone()
-        } else {
-            String::new()
-        };
+        let doc = self.parse_opt_doc_string()?;
 
         // Parse function body (statements until END or WHERE)
         let mut body_stmts = Vec::new();
@@ -4041,17 +4014,8 @@ impl Parser {
             Vec::new()
         };
 
-        // Expect opening paren (can be LParen, ParenSpace, or ParenNoSpace)
-        // ParenNoSpace can appear after type parameters: lam<A>()
-        if self.matches(&TokenType::LParen) {
-            self.expect(TokenType::LParen)?;
-        } else if self.matches(&TokenType::ParenSpace) {
-            self.expect(TokenType::ParenSpace)?;
-        } else if self.matches(&TokenType::ParenNoSpace) {
-            self.expect(TokenType::ParenNoSpace)?;
-        } else {
-            return Err(ParseError::unexpected(self.peek().clone()));
-        }
+        // Expect any form of left paren (ParenNoSpace can appear after type parameters: lam<A>())
+        self.expect_any_lparen()?;
 
         // Parse parameters (comma-separated bindings)
         let args = if self.matches(&TokenType::RParen) {
@@ -4075,22 +4039,10 @@ impl Parser {
         };
 
         // Expect colon or block before body
-        let blocky = if self.matches(&TokenType::Block) {
-            self.advance();
-            true
-        } else {
-            self.expect(TokenType::Colon)?;
-            false
-        };
+        let blocky = self.parse_block_separator()?;
 
         // Parse optional doc string: doc: "string"
-        let doc = if self.matches(&TokenType::Doc) {
-            self.advance(); // consume doc:
-            let doc_token = self.expect(TokenType::String)?;
-            doc_token.value.clone()
-        } else {
-            String::new()
-        };
+        let doc = self.parse_opt_doc_string()?;
 
         // Parse body as a block of statements
         let mut stmts = Vec::new();
@@ -4131,12 +4083,8 @@ impl Parser {
     fn parse_curly_lambda_expr(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::LBrace)?;
 
-        // Expect opening paren (can be LParen or ParenSpace)
-        if self.matches(&TokenType::LParen) {
-            self.expect(TokenType::LParen)?;
-        } else {
-            self.expect(TokenType::ParenSpace)?;
-        }
+        // Expect any form of left paren
+        self.expect_any_lparen()?;
 
         // Parse parameters (comma-separated bindings)
         let args = if self.matches(&TokenType::RParen) {
@@ -4149,13 +4097,7 @@ impl Parser {
         self.expect(TokenType::RParen)?;
 
         // Check if this is a blocky lambda {(x) block: ...} or regular {(x): ...}
-        let blocky = if self.matches(&TokenType::Block) {
-            self.expect(TokenType::Block)?;
-            true
-        } else {
-            self.expect(TokenType::Colon)?;
-            false
-        };
+        let blocky = self.parse_block_separator()?;
 
         // Parse body as a block of statements
         // Body continues until we hit the closing brace
@@ -4192,16 +4134,8 @@ impl Parser {
     fn parse_method_expr(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::Method)?;
 
-        // Expect opening paren (can be LParen, ParenSpace, or ParenNoSpace)
-        let paren_token = self.peek().clone();
-        match paren_token.token_type {
-            TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace => {
-                self.advance();
-            }
-            _ => {
-                return Err(ParseError::expected(TokenType::LParen, paren_token));
-            }
-        }
+        // Expect any form of left paren
+        self.expect_any_lparen()?;
 
         // Parse parameters (comma-separated bindings)
         // First should be `self`
@@ -4215,30 +4149,13 @@ impl Parser {
         self.expect(TokenType::RParen)?;
 
         // Optional return type annotation: -> ann
-        let ann = if self.matches(&TokenType::ThinArrow) {
-            self.expect(TokenType::ThinArrow)?;
-            self.parse_ann()?
-        } else {
-            Ann::ABlank
-        };
+        let ann = self.parse_opt_return_ann()?;
 
         // Parse body separator (COLON or BLOCK)
-        let blocky = if self.matches(&TokenType::Block) {
-            self.advance();
-            true
-        } else {
-            self.expect(TokenType::Colon)?;
-            false
-        };
+        let blocky = self.parse_block_separator()?;
 
         // Parse optional doc string: doc: "string"
-        let doc = if self.matches(&TokenType::Doc) {
-            self.advance(); // consume doc:
-            let doc_token = self.expect(TokenType::String)?;
-            doc_token.value.clone()
-        } else {
-            String::new()
-        };
+        let doc = self.parse_opt_doc_string()?;
 
         // Parse method body (statements until END or WHERE)
         let mut body_stmts = Vec::new();
@@ -4357,7 +4274,7 @@ impl Parser {
             // Grammar: fields: field (COMMA field)* [COMMA]
             let mut members = Vec::new();
             while !self.matches(&TokenType::End) && !self.matches(&TokenType::Where) && !self.is_at_end() {
-                members.push(self.parse_member()?);
+                members.push(self.parse_obj_field()?);
 
                 // Check for optional comma separator
                 if self.matches(&TokenType::Comma) {
@@ -4514,7 +4431,7 @@ impl Parser {
             && !self.matches(&TokenType::Sharing)
             && !self.matches(&TokenType::Where)
             && !self.is_at_end() {
-            members.push(self.parse_member()?);
+            members.push(self.parse_obj_field()?);
             // Members might be separated by commas
             if self.matches(&TokenType::Comma) {
                 self.advance();
