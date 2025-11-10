@@ -1017,6 +1017,8 @@ pub const Parser = struct {
     fn parseRegions(self: *Parser, section: *Value) ParseError![]Region {
         // (regions REGION*)
         const list = section.data.list;
+        std.debug.print("[PARSER] parseRegions: list has {d} elements\n", .{list.len()});
+
         var regions = std.ArrayList(Region){};
         errdefer {
             for (regions.items) |*region| {
@@ -1028,6 +1030,16 @@ pub const Parser = struct {
         var i: usize = 1;
         while (i < list.len()) : (i += 1) {
             const region_value = list.at(i);
+            std.debug.print("[PARSER] parseRegions: element {d} type={s}\n", .{i, @tagName(region_value.type)});
+            if (region_value.type == .list) {
+                const inner = region_value.data.list;
+                if (inner.len() > 0) {
+                    const first = inner.at(0);
+                    if (first.type == .identifier) {
+                        std.debug.print("[PARSER] parseRegions: element {d} is list starting with '{s}'\n", .{i, first.data.atom});
+                    }
+                }
+            }
             const region = try self.parseRegion(region_value);
             try regions.append(self.allocator, region);
         }
@@ -1045,6 +1057,7 @@ pub const Parser = struct {
         const first = list.at(0);
         if (first.type != .identifier) return error.ExpectedIdentifier;
         if (!std.mem.eql(u8, first.data.atom, "region")) {
+            std.debug.print("[PARSER] ERROR: Expected 'region' but got '{s}'\n", .{first.data.atom});
             return error.UnexpectedStructure;
         }
 
