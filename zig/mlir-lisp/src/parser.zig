@@ -1100,6 +1100,23 @@ pub const Parser = struct {
         const block_id = @intFromPtr(value);
         std.debug.print("[PARSER BLOCK-{d}] Parsing block with {d} total elements\n", .{block_id, list.len()});
 
+        // Debug: print all elements in the block list
+        var debug_idx: usize = 0;
+        while (debug_idx < list.len()) : (debug_idx += 1) {
+            const debug_item = list.at(debug_idx);
+            if (debug_item.type == .list) {
+                const debug_list = debug_item.data.list;
+                if (debug_list.len() > 0) {
+                    const debug_first = debug_list.at(0);
+                    if (debug_first.type == .identifier) {
+                        std.debug.print("[PARSER BLOCK-{d}] Element at idx {d}: ({s} ...)\n", .{block_id, debug_idx, debug_first.data.atom});
+                    }
+                }
+            } else {
+                std.debug.print("[PARSER BLOCK-{d}] Element at idx {d}: {s}\n", .{block_id, debug_idx, @tagName(debug_item.type)});
+            }
+        }
+
         var block = Block{
             .label = null,
             .arguments = &[_]Argument{},
