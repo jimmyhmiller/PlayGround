@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use pyret_attempt2::{Tokenizer, Parser};
+//! use pyret_attempt2::{Tokenizer, Parser, FileRegistry};
 //!
 //! let source = r#"
 //! fun factorial(n):
@@ -16,10 +16,13 @@
 //! end
 //! "#;
 //!
-//! let mut tokenizer = Tokenizer::new(source);
+//! let mut registry = FileRegistry::new();
+//! let file_id = registry.register("test.arr".to_string());
+//!
+//! let mut tokenizer = Tokenizer::new(source, file_id);
 //! let tokens = tokenizer.tokenize();
 //!
-//! let mut parser = Parser::new(tokens, "test.arr".to_string());
+//! let mut parser = Parser::new(tokens, file_id);
 //! let program = parser.parse_program().unwrap();
 //!
 //! let json = serde_json::to_string_pretty(&program).unwrap();
@@ -30,6 +33,7 @@ pub mod ast;
 pub mod error;
 pub mod parser;
 pub mod tokenizer;
+pub mod pyret_json;
 
 // Re-export main types
 pub use ast::*;

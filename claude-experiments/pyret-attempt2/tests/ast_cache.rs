@@ -126,39 +126,26 @@ pub fn load_or_generate_cached_ast(code: &str) -> Result<Value, String> {
 }
 
 /// Compare Rust AST with cached Pyret AST
-/// For now, this uses the to_pyret_json binary as a subprocess
-/// TODO: Refactor to_pyret_json.rs into a library module
+/// Parses code directly using the library, no subprocess needed
 pub fn compare_with_cached_pyret(code: &str) -> Result<bool, String> {
-    use std::process::Command;
-
-    // Compute hash for unique temp file
-    let hash = compute_hash(code);
+    use pyret_attempt2::{Parser, Tokenizer, FileRegistry};
+    use pyret_attempt2::pyret_json::program_to_pyret_json;
 
     // Load or generate cached Pyret AST
     let pyret_ast = load_or_generate_cached_ast(code)?;
 
-    // Write code to unique temp file (use hash to avoid collisions in parallel tests)
-    let temp_file = format!("/tmp/rust_parser_test_{}.arr", hash);
-    fs::write(&temp_file, code)
-        .map_err(|e| format!("Failed to write temp file: {}", e))?;
+    // Parse with Rust parser directly (no subprocess!)
+    let mut registry = FileRegistry::new();
+    let file_id = registry.register("test.arr".to_string());
 
-    // Parse with Rust parser using to_pyret_json binary
-    let output = Command::new(env!("CARGO"))
-        .args(&["run", "--bin", "to_pyret_json", &temp_file])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .map_err(|e| format!("Failed to run to_pyret_json: {}", e))?;
+    let mut tokenizer = Tokenizer::new(code, file_id);
+    let tokens = tokenizer.tokenize();
+    let mut parser = Parser::new(tokens, file_id);
 
-    if !output.status.success() {
-        return Err(format!(
-            "Rust parser failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
+    let program = parser.parse_program()
+        .map_err(|e| format!("Rust parser failed: {:?}", e))?;
 
-    let rust_json_str = String::from_utf8_lossy(&output.stdout);
-    let rust_ast: Value = serde_json::from_str(&rust_json_str)
-        .map_err(|e| format!("Failed to parse Rust JSON: {}", e))?;
+    let rust_ast = program_to_pyret_json(&program, &registry);
 
     // Normalize both for comparison
     let pyret_normalized = normalize_json(pyret_ast);

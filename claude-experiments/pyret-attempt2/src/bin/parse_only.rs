@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::process;
-use pyret_attempt2::Parser;
+use pyret_attempt2::{Parser, FileRegistry};
 use pyret_attempt2::tokenizer::Tokenizer;
 
 fn main() {
@@ -23,12 +23,16 @@ fn main() {
         }
     };
 
+    // Create file registry and register the file
+    let mut registry = FileRegistry::new();
+    let file_id = registry.register(input_file.to_string());
+
     // Tokenize
-    let mut tokenizer = Tokenizer::new(&source);
+    let mut tokenizer = Tokenizer::new(&source, file_id);
     let tokens = tokenizer.tokenize();
 
     // Parse the source code
-    let mut parser = Parser::new(tokens, input_file.to_string());
+    let mut parser = Parser::new(tokens, file_id);
     match parser.parse_program() {
         Ok(_program) => {
             // Success! Just exit with 0

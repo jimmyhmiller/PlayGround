@@ -167,15 +167,77 @@ pub const Builder = struct {
         }
     }
 
+    /// Try to infer result type from operation attributes (for terse syntax)
+    /// Currently handles:
+    /// - arith.constant: infer from :value attribute type
+    /// - arith.{addi,subi,muli,divi,...}: infer from first operand type
+    fn inferResultType(self: *Builder, operation: *const parser.Operation) !?mlir.MlirType {
+        // For arith.constant, try to extract type from :value attribute
+        if (std.mem.eql(u8, operation.name, "arith.constant")) {
+            for (operation.attributes) |*attr| {
+                if (std.mem.eql(u8, attr.key, "value")) {
+                    const value = attr.value.value;
+                    if (value.type == .has_type) {
+                        // Extract the type from (: value type)
+                        const type_value = value.data.has_type.type_expr;
+                        const type_expr = parser.TypeExpr{ .value = type_value };
+                        return try self.buildType(&type_expr);
+                    }
+                }
+            }
+        }
+
+        // For arithmetic binary operations, infer from first operand
+        if (std.mem.startsWith(u8, operation.name, "arith.")) {
+            const op_suffix = operation.name[6..]; // Skip "arith."
+            const is_binary_op = std.mem.eql(u8, op_suffix, "addi") or
+                std.mem.eql(u8, op_suffix, "subi") or
+                std.mem.eql(u8, op_suffix, "muli") or
+                std.mem.eql(u8, op_suffix, "divsi") or
+                std.mem.eql(u8, op_suffix, "divui") or
+                std.mem.eql(u8, op_suffix, "remsi") or
+                std.mem.eql(u8, op_suffix, "remui") or
+                std.mem.eql(u8, op_suffix, "andi") or
+                std.mem.eql(u8, op_suffix, "ori") or
+                std.mem.eql(u8, op_suffix, "xori");
+
+            if (is_binary_op and operation.operands.len >= 1) {
+                // Get the type of the first operand
+                const first_operand_id = operation.operands[0];
+                if (self.value_map.get(first_operand_id)) |mlir_value| {
+                    return mlir.c.mlirValueGetType(mlir_value);
+                }
+            }
+        }
+
+        return null;
+    }
+
     /// Build a single operation
     fn buildOperation(self: *Builder, operation: *const parser.Operation) BuildError!mlir.MlirOperation {
+        std.debug.print("[DEBUG] Building operation: {s}", .{operation.name});
+        if (operation.result_bindings.len > 0) {
+            std.debug.print(" (will bind: {s})", .{operation.result_bindings[0]});
+        }
+        std.debug.print("\n", .{});
+
         // Parse result types
         var result_types = std.ArrayList(mlir.MlirType){};
         defer result_types.deinit(self.allocator);
 
-        for (operation.result_types) |*type_expr| {
-            const ty = try self.buildType(type_expr);
-            try result_types.append(self.allocator, ty);
+        if (operation.result_types.len > 0) {
+            // Explicit result types provided (verbose syntax)
+            for (operation.result_types) |*type_expr| {
+                const ty = try self.buildType(type_expr);
+                try result_types.append(self.allocator, ty);
+            }
+        } else if (operation.result_bindings.len > 0) {
+            // Terse syntax with result binding but no explicit types
+            // Try to infer the type
+            if (try self.inferResultType(operation)) |ty| {
+                try result_types.append(self.allocator, ty);
+            }
+            // If we can't infer and there's a binding, we'll get a type error from MLIR
         }
 
         // Parse operands (look up SSA values)
@@ -183,7 +245,17 @@ pub const Builder = struct {
         defer operands.deinit(self.allocator);
 
         for (operation.operands) |operand_id| {
-            const value = self.value_map.get(operand_id) orelse return error.UnknownValue;
+            const value = self.value_map.get(operand_id) orelse {
+                std.debug.print("\n[DEBUG] UnknownValue error:\n", .{});
+                std.debug.print("  Operation: {s}\n", .{operation.name});
+                std.debug.print("  Looking for operand: {s}\n", .{operand_id});
+                std.debug.print("  Current value_map contents:\n", .{});
+                var iter = self.value_map.iterator();
+                while (iter.next()) |entry| {
+                    std.debug.print("    - {s}\n", .{entry.key_ptr.*});
+                }
+                return error.UnknownValue;
+            };
             try operands.append(self.allocator, value);
         }
 
@@ -229,6 +301,7 @@ pub const Builder = struct {
         for (operation.result_bindings, 0..) |binding, i| {
             const result = mlir.Operation.getResult(mlir_op, i);
             try self.value_map.put(binding, result);
+            std.debug.print("[DEBUG] Registered value: {s}\n", .{binding});
         }
 
         return mlir_op;
@@ -792,7 +865,9 @@ pub const Builder = struct {
 
     /// Build operations in a block (called after all blocks in region are created)
     fn buildBlockOperations(self: *Builder, block: *const parser.Block, mlir_block: mlir.MlirBlock) BuildError!void {
-        for (block.operations) |*operation| {
+        std.debug.print("[BUILDER] Building block with {d} operations\n", .{block.operations.len});
+        for (block.operations, 0..) |*operation, i| {
+            std.debug.print("[BUILDER] Building operation {d}/{d}: {s}\n", .{i+1, block.operations.len, operation.name});
             const mlir_op = try self.buildOperation(operation);
             mlir.Block.appendOperation(mlir_block, mlir_op);
         }

@@ -257,6 +257,11 @@ pub const Parser = struct {
         return result.toOwnedSlice(allocator);
     }
 
+    /// Check if an identifier is a terse operation name (contains a dot)
+    fn isTerseOperation(name: []const u8) bool {
+        return std.mem.indexOf(u8, name, ".") != null;
+    }
+
     /// Parse top-level MLIR module
     pub fn parseModule(self: *Parser, value: *Value) ParseError!MlirModule {
         // Accept either (mlir ...) or unwrapped (TYPE_ALIAS | OPERATION)*
@@ -270,13 +275,16 @@ pub const Parser = struct {
         var parse_single_item = false;
         const first = list.at(0);
         if (first.type == .identifier) {
-            if (std.mem.eql(u8, first.data.atom, "mlir")) {
+            const name = first.data.atom;
+            if (std.mem.eql(u8, name, "mlir")) {
                 // Has mlir wrapper - skip it
                 start_index = 1;
-            } else if (std.mem.eql(u8, first.data.atom, "operation") or
-                      std.mem.eql(u8, first.data.atom, "type-alias") or
-                      std.mem.eql(u8, first.data.atom, "attribute-alias")) {
-                // This is a single operation/alias, not a list of them
+            } else if (std.mem.eql(u8, name, "operation") or
+                      std.mem.eql(u8, name, "type-alias") or
+                      std.mem.eql(u8, name, "attribute-alias") or
+                      std.mem.eql(u8, name, "declare") or
+                      isTerseOperation(name)) {
+                // This is a single operation/alias/declare, not a list of them
                 parse_single_item = true;
             }
         }
@@ -308,15 +316,22 @@ pub const Parser = struct {
 
         // If this is a single item (not wrapped), parse it directly
         if (parse_single_item) {
-            if (std.mem.eql(u8, first.data.atom, "operation")) {
+            const name = first.data.atom;
+            if (std.mem.eql(u8, name, "operation")) {
                 const op = try self.parseOperation(value);
                 try operations.append(self.allocator, op);
-            } else if (std.mem.eql(u8, first.data.atom, "type-alias")) {
+            } else if (std.mem.eql(u8, name, "type-alias")) {
                 const alias = try self.parseTypeAlias(value);
                 try type_aliases.append(self.allocator, alias);
-            } else if (std.mem.eql(u8, first.data.atom, "attribute-alias")) {
+            } else if (std.mem.eql(u8, name, "attribute-alias")) {
                 const alias = try self.parseAttributeAlias(value);
                 try attribute_aliases.append(self.allocator, alias);
+            } else if (std.mem.eql(u8, name, "declare")) {
+                const op = try self.parseDeclare(value);
+                try operations.append(self.allocator, op);
+            } else if (isTerseOperation(name)) {
+                const op = try self.parseTerseOperation(value);
+                try operations.append(self.allocator, op);
             }
 
             return MlirModule{
@@ -338,14 +353,21 @@ pub const Parser = struct {
             const item_name = item_list.at(0);
             if (item_name.type != .identifier) continue;
 
-            if (std.mem.eql(u8, item_name.data.atom, "type-alias")) {
+            const name = item_name.data.atom;
+            if (std.mem.eql(u8, name, "type-alias")) {
                 const alias = try self.parseTypeAlias(item);
                 try type_aliases.append(self.allocator, alias);
-            } else if (std.mem.eql(u8, item_name.data.atom, "attribute-alias")) {
+            } else if (std.mem.eql(u8, name, "attribute-alias")) {
                 const alias = try self.parseAttributeAlias(item);
                 try attribute_aliases.append(self.allocator, alias);
-            } else if (std.mem.eql(u8, item_name.data.atom, "operation")) {
+            } else if (std.mem.eql(u8, name, "operation")) {
                 const op = try self.parseOperation(item);
+                try operations.append(self.allocator, op);
+            } else if (std.mem.eql(u8, name, "declare")) {
+                const op = try self.parseDeclare(item);
+                try operations.append(self.allocator, op);
+            } else if (isTerseOperation(name)) {
+                const op = try self.parseTerseOperation(item);
                 try operations.append(self.allocator, op);
             }
         }
@@ -554,6 +576,199 @@ pub const Parser = struct {
         }
 
         return operation;
+    }
+
+    /// Parse a declare form: (declare name expr)
+    /// Example: (declare my-var (arith.constant {:value 42}))
+    fn parseDeclare(self: *Parser, value: *Value) ParseError!Operation {
+        if (value.type != .list) return error.ExpectedList;
+
+        const list = value.data.list;
+        if (list.len() != 3) {
+            std.debug.print("\nerror: Invalid declare structure\n", .{});
+            std.debug.print("Expected: (declare name expr)\n", .{});
+            std.debug.print("Found: list with {d} elements\n", .{list.len()});
+            return error.UnexpectedStructure;
+        }
+
+        const first = list.at(0);
+        if (first.type != .identifier or !std.mem.eql(u8, first.data.atom, "declare")) {
+            return error.UnexpectedStructure;
+        }
+
+        // Get the variable name
+        const name_value = list.at(1);
+        if (name_value.type != .identifier) {
+            std.debug.print("\nerror: Expected identifier as declare name\n", .{});
+            return error.ExpectedIdentifier;
+        }
+        const var_name = name_value.data.atom;
+
+        // Parse the expression - could be a has_type or a regular operation
+        const expr = list.at(2);
+
+        var operation: Operation = undefined;
+        var explicit_type: ?TypeExpr = null;
+
+        // Check if this is a type annotation: (: expr type)
+        if (expr.type == .has_type) {
+            // Extract the inner expression and type
+            const inner_expr = expr.data.has_type.value;
+            const type_value = expr.data.has_type.type_expr;
+
+            // Parse the inner expression
+            if (inner_expr.type != .list) {
+                std.debug.print("\nerror: Expected expression inside type annotation\n", .{});
+                return error.ExpectedList;
+            }
+
+            const inner_list = inner_expr.data.list;
+            if (inner_list.isEmpty()) return error.UnexpectedStructure;
+
+            const inner_first = inner_list.at(0);
+            if (inner_first.type != .identifier) return error.ExpectedIdentifier;
+
+            const inner_name = inner_first.data.atom;
+            if (std.mem.eql(u8, inner_name, "operation")) {
+                operation = try self.parseOperation(inner_expr);
+            } else if (isTerseOperation(inner_name)) {
+                operation = try self.parseTerseOperation(inner_expr);
+            } else {
+                std.debug.print("\nerror: Unsupported expression in type annotation: {s}\n", .{inner_name});
+                return error.UnexpectedStructure;
+            }
+
+            // Save the explicit type
+            explicit_type = TypeExpr{ .value = type_value };
+
+        } else if (expr.type == .list) {
+            // Regular expression without type annotation
+            const expr_list = expr.data.list;
+            if (expr_list.isEmpty()) return error.UnexpectedStructure;
+
+            const expr_first = expr_list.at(0);
+            if (expr_first.type != .identifier) return error.ExpectedIdentifier;
+
+            const expr_name = expr_first.data.atom;
+            if (std.mem.eql(u8, expr_name, "operation")) {
+                operation = try self.parseOperation(expr);
+            } else if (isTerseOperation(expr_name)) {
+                operation = try self.parseTerseOperation(expr);
+            } else {
+                std.debug.print("\nerror: Unsupported expression in declare: {s}\n", .{expr_name});
+                return error.UnexpectedStructure;
+            }
+        } else {
+            std.debug.print("\nerror: Expected operation or type annotation in declare\n", .{});
+            return error.UnexpectedStructure;
+        }
+
+        // Create a result binding with the variable name (as a value ID)
+        // We need to prepend % to make it a proper value ID
+        var result_binding = std.ArrayList(u8){};
+        errdefer result_binding.deinit(self.allocator);
+        try result_binding.append(self.allocator, '%');
+        try result_binding.appendSlice(self.allocator, var_name);
+        const binding_str = try result_binding.toOwnedSlice(self.allocator);
+
+        // Allocate a single-element array for the binding
+        var bindings = try self.allocator.alloc([]const u8, 1);
+        bindings[0] = binding_str;
+
+        // Update the operation with the result binding
+        operation.result_bindings = bindings;
+
+        // If an explicit type was provided, use it
+        if (explicit_type) |type_expr| {
+            var types = try self.allocator.alloc(TypeExpr, 1);
+            types[0] = type_expr;
+            operation.result_types = types;
+        }
+
+        return operation;
+    }
+
+    /// Parse a terse operation: (op.name [attrs?] operands...)
+    /// Example: (arith.addi %a %b) or (arith.constant {:value 42})
+    fn parseTerseOperation(self: *Parser, value: *Value) ParseError!Operation {
+        if (value.type != .list) return error.ExpectedList;
+
+        const list = value.data.list;
+        if (list.isEmpty()) return error.UnexpectedStructure;
+
+        const first = list.at(0);
+        if (first.type != .identifier) return error.ExpectedIdentifier;
+
+        const op_name = first.data.atom;
+
+        // Parse optional attributes (second element if it's a map)
+        var attrs_start: usize = 1;
+        var attributes: []Attribute = &[_]Attribute{};
+
+        if (list.len() > 1) {
+            const maybe_attrs = list.at(1);
+            if (maybe_attrs.type == .map) {
+                // Parse the attribute map
+                const map = maybe_attrs.data.map;
+                var attr_list = std.ArrayList(Attribute){};
+                errdefer {
+                    for (attr_list.items) |*attr| {
+                        attr.deinit(self.allocator);
+                    }
+                    attr_list.deinit(self.allocator);
+                }
+
+                // Map is stored as flat list of k,v pairs
+                var i: usize = 0;
+                while (i + 1 < map.len()) : (i += 2) {
+                    const key = map.at(i);
+                    const val = map.at(i + 1);
+
+                    if (key.type != .keyword) {
+                        std.debug.print("\nerror: Expected keyword in attribute map\n", .{});
+                        return error.ExpectedKeyword;
+                    }
+
+                    const key_name = key.keywordToName();
+                    try attr_list.append(self.allocator, Attribute{
+                        .key = key_name,
+                        .value = AttrExpr{ .value = val },
+                    });
+                }
+
+                attributes = try attr_list.toOwnedSlice(self.allocator);
+                attrs_start = 2; // Skip the map
+            }
+        }
+
+        // Parse operands (remaining elements)
+        var operands = std.ArrayList([]const u8){};
+        errdefer operands.deinit(self.allocator);
+
+        var i: usize = attrs_start;
+        while (i < list.len()) : (i += 1) {
+            const operand = list.at(i);
+            // For terse syntax, operands should be value IDs
+            if (operand.type != .value_id) {
+                std.debug.print("\nerror: Expected value ID in terse operation at position {d}, got {s}\n", .{ i, @tagName(operand.type) });
+                if (operand.type == .identifier) {
+                    std.debug.print("Found identifier '{s}' - did you mean '%{s}'?\n", .{ operand.data.atom, operand.data.atom });
+                }
+                return error.ExpectedValueId;
+            }
+            try operands.append(self.allocator, operand.data.atom);
+        }
+
+        return Operation{
+            .name = op_name,
+            .result_bindings = &[_][]const u8{}, // No explicit bindings in terse syntax
+            .result_types = &[_]TypeExpr{},      // No explicit types in terse syntax
+            .operands = try operands.toOwnedSlice(self.allocator),
+            .attributes = attributes,
+            .successors = &[_]Successor{},
+            .regions = &[_]Region{},
+            .location = null,
+        };
     }
 
     fn parseName(self: *Parser, section: *Value) ParseError![]const u8 {
@@ -869,6 +1084,9 @@ pub const Parser = struct {
             return error.UnexpectedStructure;
         }
 
+        const block_id = @intFromPtr(value);
+        std.debug.print("[PARSER BLOCK-{d}] Parsing block with {d} total elements\n", .{block_id, list.len()});
+
         var block = Block{
             .label = null,
             .arguments = &[_]Argument{},
@@ -903,9 +1121,12 @@ pub const Parser = struct {
             const item_first = item_list.at(0);
             if (item_first.type != .identifier) continue;
 
-            if (std.mem.eql(u8, item_first.data.atom, "arguments")) {
+            const item_name = item_first.data.atom;
+            if (std.mem.eql(u8, item_name, "arguments")) {
                 block.arguments = try self.parseArguments(item);
-            } else if (std.mem.eql(u8, item_first.data.atom, "operation")) {
+            } else if (std.mem.eql(u8, item_name, "operation") or
+                      std.mem.eql(u8, item_name, "declare") or
+                      isTerseOperation(item_name)) {
                 // Parse operations
                 var operations = std.ArrayList(Operation){};
                 errdefer {
@@ -918,19 +1139,46 @@ pub const Parser = struct {
                 var op_idx = idx;
                 while (op_idx < list.len()) : (op_idx += 1) {
                     const op_value = list.at(op_idx);
-                    if (op_value.type != .list) continue;
+                    if (op_value.type != .list) {
+                        std.debug.print("[PARSER] Skipping non-list at idx {d}: {s}\n", .{op_idx, @tagName(op_value.type)});
+                        continue;
+                    }
 
                     const op_list = op_value.data.list;
-                    if (op_list.isEmpty()) continue;
+                    if (op_list.isEmpty()) {
+                        std.debug.print("[PARSER] Skipping empty list at idx {d}\n", .{op_idx});
+                        continue;
+                    }
 
                     const op_first = op_list.at(0);
-                    if (op_first.type != .identifier) continue;
-                    if (!std.mem.eql(u8, op_first.data.atom, "operation")) continue;
+                    if (op_first.type != .identifier) {
+                        std.debug.print("[PARSER] Skipping list with non-identifier first elem at idx {d}: {s}\n", .{op_idx, @tagName(op_first.type)});
+                        continue;
+                    }
 
-                    const op = try self.parseOperation(op_value);
-                    try operations.append(self.allocator, op);
+                    const op_name = op_first.data.atom;
+                    std.debug.print("[PARSER BLOCK-{d}] Found operation candidate '{s}' at idx {d}\n", .{block_id, op_name, op_idx});
+                    if (std.mem.eql(u8, op_name, "operation")) {
+                        const op = self.parseOperation(op_value) catch |err| {
+                            std.debug.print("[PARSER] ERROR parsing verbose operation at idx {d}: {s}\n", .{op_idx, @errorName(err)});
+                            return err;
+                        };
+                        try operations.append(self.allocator, op);
+                        std.debug.print("[PARSER] Parsed verbose operation\n", .{});
+                    } else if (std.mem.eql(u8, op_name, "declare")) {
+                        const op = try self.parseDeclare(op_value);
+                        try operations.append(self.allocator, op);
+                        std.debug.print("[PARSER] Parsed declare operation\n", .{});
+                    } else if (isTerseOperation(op_name)) {
+                        const op = try self.parseTerseOperation(op_value);
+                        try operations.append(self.allocator, op);
+                        std.debug.print("[PARSER] Parsed terse operation\n", .{});
+                    } else {
+                        std.debug.print("[PARSER] Skipping non-operation: {s}\n", .{op_name});
+                    }
                 }
 
+                std.debug.print("[PARSER BLOCK-{d}] Collected {d} operations for block\n", .{block_id, operations.items.len});
                 block.operations = try operations.toOwnedSlice(self.allocator);
                 break;
             }
