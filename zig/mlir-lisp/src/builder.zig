@@ -866,10 +866,29 @@ pub const Builder = struct {
     /// Build operations in a block (called after all blocks in region are created)
     fn buildBlockOperations(self: *Builder, block: *const parser.Block, mlir_block: mlir.MlirBlock) BuildError!void {
         std.debug.print("[BUILDER] Building block with {d} operations\n", .{block.operations.len});
+
+        // Build operations in correct order: operations with result_bindings first
+        // This handles cases where operations are parsed in wrong order (e.g., func.return before scf.if)
+        var built_count: usize = 0;
+
+        // First pass: build operations with result bindings
         for (block.operations, 0..) |*operation, i| {
-            std.debug.print("[BUILDER] Building operation {d}/{d}: {s}\n", .{i+1, block.operations.len, operation.name});
-            const mlir_op = try self.buildOperation(operation);
-            mlir.Block.appendOperation(mlir_block, mlir_op);
+            if (operation.result_bindings.len > 0) {
+                std.debug.print("[BUILDER] Building operation {d}/{d}: {s} (has result bindings)\n", .{i+1, block.operations.len, operation.name});
+                const mlir_op = try self.buildOperation(operation);
+                mlir.Block.appendOperation(mlir_block, mlir_op);
+                built_count += 1;
+            }
+        }
+
+        // Second pass: build operations without result bindings
+        for (block.operations, 0..) |*operation, i| {
+            if (operation.result_bindings.len == 0) {
+                std.debug.print("[BUILDER] Building operation {d}/{d}: {s} (no result bindings)\n", .{i+1, block.operations.len, operation.name});
+                const mlir_op = try self.buildOperation(operation);
+                mlir.Block.appendOperation(mlir_block, mlir_op);
+                built_count += 1;
+            }
         }
     }
 };
