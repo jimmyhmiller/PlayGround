@@ -4880,7 +4880,7 @@ impl Parser {
                 let name_loc = name_tok.location;
                 self.expect(TokenType::Colon)?;
                 let value_expr = self.parse_binop_expr()?;
-                let value_loc = self.extract_loc(&value_expr);
+                let value_loc = *value_expr.get_loc();
                 let value = Box::new(value_expr);
 
                 // Build the location
@@ -4914,17 +4914,13 @@ impl Parser {
 
         Ok(SpyField {
             node_type: "s-spy-expr".to_string(),
-            l: self.extract_loc(&expr),
+            l: *expr.get_loc(),
             name,
             value: Box::new(expr),
             implicit_label,
         })
     }
 
-    /// Extract location from an expression
-    fn extract_loc(&self, expr: &Expr) -> Loc {
-        *expr.get_loc()
-    }
 }
 
 // ============================================================================
