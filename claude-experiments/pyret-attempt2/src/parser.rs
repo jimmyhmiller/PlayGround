@@ -2968,11 +2968,11 @@ impl Parser {
 
         self.expect(TokenType::ParenNoSpace)?;
 
-        // Parse arguments as comma-separated list
+        // Parse arguments as comma-separated list (no trailing commas allowed)
         let args = if self.matches(&TokenType::RParen) {
             Vec::new()
         } else {
-            self.parse_comma_list(|p| p.parse_expr().map(Box::new))?
+            self.parse_comma_list_no_trailing(|p| p.parse_expr().map(Box::new))?
         };
 
         let end = self.expect(TokenType::RParen)?;
@@ -5503,6 +5503,27 @@ impl Parser {
                 Ok(item) => items.push(item),
                 Err(_) => break, // Trailing comma - stop here
             }
+        }
+
+        Ok(items)
+    }
+
+    /// Parse comma-separated list without allowing trailing commas
+    /// Used for function arguments where trailing commas are not allowed
+    fn parse_comma_list_no_trailing<T, F>(&mut self, parser: F) -> ParseResult<Vec<T>>
+    where
+        F: Fn(&mut Self) -> ParseResult<T>,
+    {
+        let mut items = Vec::new();
+
+        // Parse first item
+        items.push(parser(self)?);
+
+        // Parse remaining items
+        while self.matches(&TokenType::Comma) {
+            self.advance(); // consume comma
+            // After a comma, we MUST have another item (no trailing commas)
+            items.push(parser(self)?);
         }
 
         Ok(items)

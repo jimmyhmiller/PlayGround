@@ -1,43 +1,29 @@
 /// Comprehensive integration tests that compare our Rust parser
-/// against the official Pyret parser using the comparison script.
+/// against the official Pyret parser using cached ASTs.
 ///
 /// These tests ensure that our parser produces identical ASTs to
 /// the official Pyret implementation for all supported syntax.
 ///
-/// Note: Tests in this file use a global lock to run serially to avoid
-/// race conditions with shared temp files in the comparison script.
-use std::process::Command;
-use std::path::Path;
-use std::sync::Mutex;
+/// Note: Caching enabled! Run `cargo run --bin cache-generator` to rebuild cache.
+mod ast_cache;
 
-// Global lock to ensure tests run serially
-static TEST_LOCK: Mutex<()> = Mutex::new(());
-
-/// Helper to run the comparison and check if parsers match
+/// Helper to run the comparison using cached Pyret ASTs
 fn compare_with_pyret(expr: &str) -> bool {
-    let script_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/compare_parsers.sh");
-
-    let output = Command::new("bash")
-        .arg(&script_path)
-        .arg(expr)
-        .output()
-        .expect("Failed to run comparison script");
-
-    // The script exits with 0 if identical, 1 if different
-    output.status.success()
+    match ast_cache::compare_with_cached_pyret(expr) {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("Cache comparison error: {}", e);
+            eprintln!("Hint: Run `cargo run --bin cache-generator` to rebuild cache");
+            false
+        }
+    }
 }
 
 /// Helper that asserts our parser matches Pyret's parser
-/// Uses a global lock to ensure serial execution
+/// Now uses cached ASTs for much faster execution!
 fn assert_matches_pyret(expr: &str) {
-    // Handle poisoned mutex (from panics in other tests)
-    let _lock = match TEST_LOCK.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-
     if !compare_with_pyret(expr) {
-        panic!("Expression '{}' produces different AST than official Pyret parser. Run:\n  ./compare_parsers.sh \"{}\"", expr, expr);
+        panic!("Expression '{}' produces different AST than official Pyret parser. Run:\n  cargo run --bin cache-generator  # to rebuild cache\n  ./compare_parsers.sh \"{}\"  # to debug", expr, expr);
     }
 }
 
