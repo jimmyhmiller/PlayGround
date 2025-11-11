@@ -254,7 +254,7 @@ pub const Printer = struct {
     }
 
     /// Print a Value (from reader.zig)
-    fn printValue(self: *Printer, value: *const Value) PrintError!void {
+    pub fn printValue(self: *Printer, value: *const Value) PrintError!void {
         switch (value.type) {
             .identifier => try self.buffer.writer(self.allocator).writeAll(value.data.atom),
             .value_id => try self.buffer.writer(self.allocator).writeAll(value.data.atom),

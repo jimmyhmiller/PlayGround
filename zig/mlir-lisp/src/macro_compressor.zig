@@ -556,6 +556,66 @@ fn compressGenericOp(allocator: std.mem.Allocator, op_list: PersistentVector(*Va
     return try createList(allocator, result_vec);
 }
 
+/// Check if a list is a terse operation call (contains a dot in the first identifier)
+fn isTerseOperation(value: *const Value) bool {
+    if (value.type != .list) return false;
+    const list = value.data.list;
+    if (list.len() == 0) return false;
+    const first = list.at(0);
+    if (first.type != .identifier) return false;
+    const name = first.data.atom;
+    return std.mem.indexOf(u8, name, ".") != null;
+}
+
+/// Compress terse arith.constant to constant macro
+/// (arith.constant {:value (: val type)}) → (constant (: val type))
+fn compressTerseArithConstant(allocator: std.mem.Allocator, terse_list: PersistentVector(*Value)) !*Value {
+    // Get attributes map
+    if (terse_list.len() < 2) return error.MissingAttributes;
+    const attrs_val = terse_list.at(1);
+    if (attrs_val.type != .map) return error.InvalidAttributes;
+
+    // Find :value in the attributes map
+    const attrs_map = attrs_val.data.map;
+    var typed_value: ?*Value = null;
+    var i: usize = 0;
+    while (i < attrs_map.len()) : (i += 2) {
+        const key = attrs_map.at(i);
+        if (key.type == .keyword and std.mem.eql(u8, key.data.atom, ":value")) {
+            if (i + 1 < attrs_map.len()) {
+                typed_value = attrs_map.at(i + 1);
+            }
+            break;
+        }
+    }
+    const value_expr = typed_value orelse return error.MissingValueAttribute;
+
+    // Build result: (constant (: val type))
+    var result_vec = PersistentVector(*Value).init(allocator, null);
+    result_vec = try result_vec.push(try createIdentifier(allocator, "constant"));
+    result_vec = try result_vec.push(value_expr);
+
+    return try createList(allocator, result_vec);
+}
+
+/// Try to compress a terse operation to its macro form
+/// (arith.constant {...}) → (constant ...)
+/// (arith.addi ...) → stays as is (handled by op compression)
+fn tryCompressTerseOperation(allocator: std.mem.Allocator, value: *Value) !?*Value {
+    if (!isTerseOperation(value)) return null;
+
+    const list = value.data.list;
+    const first = list.at(0);
+    const name = first.data.atom;
+
+    // Only compress arith.constant for now
+    if (std.mem.eql(u8, name, "arith.constant")) {
+        return compressTerseArithConstant(allocator, list) catch null;
+    }
+
+    return null;
+}
+
 /// Try to compress an operation value to its macro form
 /// Returns the compressed form if successful, or null if it should stay as-is
 fn tryCompressOperation(allocator: std.mem.Allocator, value: *Value) !?*Value {
@@ -598,6 +658,12 @@ fn tryCompressOperation(allocator: std.mem.Allocator, value: *Value) !?*Value {
 pub fn compressMacros(allocator: std.mem.Allocator, value: *Value) error{OutOfMemory}!*Value {
     // Try to compress this value if it's an operation
     if (try tryCompressOperation(allocator, value)) |compressed| {
+        // Recursively compress the result
+        return compressMacros(allocator, compressed);
+    }
+
+    // Try to compress terse operations
+    if (try tryCompressTerseOperation(allocator, value)) |compressed| {
         // Recursively compress the result
         return compressMacros(allocator, compressed);
     }

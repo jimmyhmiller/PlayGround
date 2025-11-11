@@ -215,11 +215,6 @@ pub const Builder = struct {
 
     /// Build a single operation
     fn buildOperation(self: *Builder, operation: *const parser.Operation) BuildError!mlir.MlirOperation {
-        std.debug.print("[DEBUG] Building operation: {s}", .{operation.name});
-        if (operation.result_bindings.len > 0) {
-            std.debug.print(" (will bind: {s})", .{operation.result_bindings[0]});
-        }
-        std.debug.print("\n", .{});
 
         // Parse result types
         var result_types = std.ArrayList(mlir.MlirType){};
@@ -245,17 +240,7 @@ pub const Builder = struct {
         defer operands.deinit(self.allocator);
 
         for (operation.operands) |operand_id| {
-            const value = self.value_map.get(operand_id) orelse {
-                std.debug.print("\n[DEBUG] UnknownValue error:\n", .{});
-                std.debug.print("  Operation: {s}\n", .{operation.name});
-                std.debug.print("  Looking for operand: {s}\n", .{operand_id});
-                std.debug.print("  Current value_map contents:\n", .{});
-                var iter = self.value_map.iterator();
-                while (iter.next()) |entry| {
-                    std.debug.print("    - {s}\n", .{entry.key_ptr.*});
-                }
-                return error.UnknownValue;
-            };
+            const value = self.value_map.get(operand_id) orelse return error.UnknownValue;
             try operands.append(self.allocator, value);
         }
 
@@ -301,7 +286,6 @@ pub const Builder = struct {
         for (operation.result_bindings, 0..) |binding, i| {
             const result = mlir.Operation.getResult(mlir_op, i);
             try self.value_map.put(binding, result);
-            std.debug.print("[DEBUG] Registered value: {s}\n", .{binding});
         }
 
         return mlir_op;
@@ -865,9 +849,7 @@ pub const Builder = struct {
 
     /// Build operations in a block (called after all blocks in region are created)
     fn buildBlockOperations(self: *Builder, block: *const parser.Block, mlir_block: mlir.MlirBlock) BuildError!void {
-        std.debug.print("[BUILDER] Building block with {d} operations\n", .{block.operations.len});
-        for (block.operations, 0..) |*operation, i| {
-            std.debug.print("[BUILDER] Building operation {d}/{d}: {s}\n", .{i+1, block.operations.len, operation.name});
+        for (block.operations) |*operation| {
             const mlir_op = try self.buildOperation(operation);
             mlir.Block.appendOperation(mlir_block, mlir_op);
         }
