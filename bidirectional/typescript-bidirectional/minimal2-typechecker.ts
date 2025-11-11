@@ -180,15 +180,11 @@ export function typesEqual(a: Type, b: Type): boolean {
 }
 
 export function typeToString(type: Type): string {
-  switch (type.kind) {
-    case 'number': return 'number'
-    case 'string': return 'string'
-    case 'boolean': return 'boolean'
-    case 'void': return 'void'
-    case 'function':
-      const params = type.params.map(typeToString).join(', ')
-      return `(${params}) -> ${typeToString(type.to)}`
+  if (type.kind === 'function') {
+    const params = type.params.map(typeToString).join(', ')
+    return `(${params}) -> ${typeToString(type.to)}`
   }
+  return type.kind
 }
 
 // Examples that work:

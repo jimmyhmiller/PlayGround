@@ -16,7 +16,7 @@
     (regions
       (region
         (block [^entry]
-          (arguments [ (: %n i32)])
+          (arguments [(: %n i32)])
 
           ;; ✅ TERSE: Check if n <= 1 (with type annotation for cmpi)
           (declare c1 (arith.constant {:value (: 1 i32)}))

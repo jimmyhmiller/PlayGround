@@ -1,103 +1,131 @@
-use pyret_attempt2::{ast::*, tokenizer::Tokenizer};
+use clap::{Parser as ClapParser, ValueEnum};
+use pyret_attempt2::{ast::*, parser::Parser, tokenizer::Tokenizer};
+use std::fs;
+use std::path::PathBuf;
 
-fn main() {
-    println!("Pyret Parser - Phase 1: AST & Tokenizer");
-    println!("{}", "=".repeat(70));
-
-    // Demonstrate tokenizer
-    demo_tokenizer();
-
-    println!("\n{}", "=".repeat(70));
-
-    // Demonstrate AST JSON serialization
-    demo_ast_json();
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum Mode {
+    /// Tokenize the input and print tokens
+    Tokenize,
+    /// Parse the input and print the raw AST (Debug format)
+    Parse,
+    /// Parse the input and output Pyret-compatible JSON
+    Json,
 }
 
-fn demo_tokenizer() {
-    println!("\n📝 Tokenizer Example:\n");
+#[derive(ClapParser, Debug)]
+#[command(name = "pyret-parser")]
+#[command(about = "A Pyret parser with multiple output modes", long_about = None)]
+struct Args {
+    /// Input file to process
+    #[arg(value_name = "FILE")]
+    input: Option<PathBuf>,
 
-    let code = r#"
-fun factorial(n):
-  if n == 0:
-    1
-  else:
-    n * factorial(n - 1)
-  end
-end
-"#;
+    /// Output mode
+    #[arg(short, long, value_enum, default_value = "json")]
+    mode: Mode,
 
-    // Create file registry and register the file
+    /// Print tokens/AST with pretty formatting
+    #[arg(short, long)]
+    pretty: bool,
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    // Read input from file or run demo
+    let (code, filename) = if let Some(input_path) = args.input {
+        let code = fs::read_to_string(&input_path)?;
+        let filename = input_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("input.arr")
+            .to_string();
+        (code, filename)
+    } else {
+        // No file provided, run demo
+        println!("No input file provided. Run with --help for usage.");
+        println!("\nExample usage:");
+        println!("  cargo run -- --mode tokenize myfile.arr");
+        println!("  cargo run -- --mode parse myfile.arr");
+        println!("  cargo run -- --mode json myfile.arr");
+        println!("  cargo run -- myfile.arr  (defaults to json mode)");
+        return Ok(());
+    };
+
+    // Create file registry
     let mut registry = FileRegistry::new();
-    let file_id = registry.register("example.arr".to_string());
+    let file_id = registry.register(filename.clone());
 
-    let mut tokenizer = Tokenizer::new(code, file_id);
+    // Tokenize the input
+    let mut tokenizer = Tokenizer::new(&code, file_id);
     let tokens = tokenizer.tokenize();
 
-    println!("Code:\n{}", code);
-    println!("Tokens found: {}\n", tokens.len());
-
-    for (i, token) in tokens.iter().take(15).enumerate() {
-        println!(
-            "  {:2}. {:20} | {:15} | {}:{}",
-            i + 1,
-            format!("{:?}", token.token_type),
-            if token.value.len() > 15 {
-                format!("{}...", &token.value[..12])
+    match args.mode {
+        Mode::Tokenize => {
+            if args.pretty {
+                println!("File: {}", filename);
+                println!("Total tokens: {}\n", tokens.len());
+                for (i, token) in tokens.iter().enumerate() {
+                    println!(
+                        "{:4}. {:25} | {:20} | {}:{}",
+                        i + 1,
+                        format!("{:?}", token.token_type),
+                        if token.value.len() > 20 {
+                            format!("{}...", &token.value[..17])
+                        } else {
+                            token.value.clone()
+                        },
+                        token.location.start_line,
+                        token.location.start_column
+                    );
+                }
             } else {
-                token.value.clone()
-            },
-            token.location.start_line,
-            token.location.start_column
-        );
+                // Output debug format for tokens
+                for token in &tokens {
+                    println!("{:?}", token);
+                }
+            }
+        }
+        Mode::Parse => {
+            let mut parser = Parser::new(tokens, file_id);
+            match parser.parse_program() {
+                Ok(program) => {
+                    if args.pretty {
+                        println!("File: {}", filename);
+                        println!("Parse successful!\n");
+                        println!("{:#?}", program);
+                    } else {
+                        println!("{:?}", program);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Parse error: {:?}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Mode::Json => {
+            let mut parser = Parser::new(tokens, file_id);
+            match parser.parse_program() {
+                Ok(program) => {
+                    // Use the to_pyret_json conversion
+                    let json_str = if args.pretty {
+                        serde_json::to_string_pretty(&program)?
+                    } else {
+                        serde_json::to_string(&program)?
+                    };
+                    println!("{}", json_str);
+                }
+                Err(e) => {
+                    eprintln!("Parse error: {:?}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
     }
-}
 
-fn demo_ast_json() {
-    println!("\n🌳 AST JSON Serialization Example:\n");
-
-    // Create file registry and register the file
-    let mut registry = FileRegistry::new();
-    let file_id = registry.register("example.arr".to_string());
-
-    // Create a simple program AST manually
-    let loc = Loc::new(file_id, 1, 0, 0, 1, 10, 10);
-
-    // Simple number expression: 42
-    let num_expr = Expr::SNum {
-        l: loc,
-        value: "42".to_string(),
-    };
-
-    // String expression: "Hello Pyret"
-    let str_expr = Expr::SStr {
-        l: loc,
-        s: "Hello Pyret".to_string(),
-    };
-
-    // Block with two statements
-    let block = Expr::SBlock {
-        l: loc,
-        stmts: vec![Box::new(num_expr), Box::new(str_expr)],
-    };
-
-    // Create a minimal program
-    let program = Program::new(
-        loc,
-        None,                                     // no use statement
-        Provide::SProvideNone { l: loc }, // provide-none
-        ProvideTypes::SProvideTypesNone { l: loc }, // provide-types-none
-        vec![],                                   // no provide blocks
-        vec![],                                   // no imports
-        block,
-    );
-
-    // Serialize to JSON
-    let json = serde_json::to_string_pretty(&program).unwrap();
-
-    println!("Generated AST as JSON:\n");
-    println!("{}", json);
-
-    println!("\n✅ JSON serialization working correctly!");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -114,8 +142,12 @@ mod tests {
         let tokens = tokenizer.tokenize();
 
         assert!(!tokens.is_empty());
-        assert!(tokens.iter().any(|t| t.token_type == TokenType::Fun));
-        assert!(tokens.iter().any(|t| t.token_type == TokenType::Name && t.value == "factorial"));
+        assert!(tokens
+            .iter()
+            .any(|t| t.token_type == TokenType::Fun));
+        assert!(tokens
+            .iter()
+            .any(|t| t.token_type == TokenType::Name && t.value == "factorial"));
     }
 
     #[test]
@@ -123,7 +155,10 @@ mod tests {
         let mut registry = FileRegistry::new();
         let file_id = registry.register("test.arr".to_string());
         let loc = Loc::new(file_id, 1, 0, 0, 1, 1, 1);
-        let expr = Expr::SNum { l: loc, value: "123".to_string() };
+        let expr = Expr::SNum {
+            l: loc,
+            value: "123".to_string(),
+        };
 
         let json = serde_json::to_string(&expr).unwrap();
         // Our AST uses "value" field internally (as string for arbitrary precision)
