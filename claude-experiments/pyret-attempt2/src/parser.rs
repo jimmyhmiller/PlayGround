@@ -121,6 +121,18 @@ impl Parser {
         start.span(self.last_loc())
     }
 
+    /// Compute location for a block from its statements
+    /// If block is empty, use fallback location (typically current token)
+    fn block_loc(&self, stmts: &[Box<Expr>], fallback: Loc) -> Loc {
+        if stmts.is_empty() {
+            fallback
+        } else {
+            let first = stmts.first().unwrap().get_loc();
+            let last = stmts.last().unwrap().get_loc();
+            first.span(*last)
+        }
+    }
+
     // ========== Token Matching Helpers ==========
 
     /// Accept any form of left paren (LParen, ParenSpace, ParenNoSpace)
@@ -2733,6 +2745,7 @@ impl Parser {
         };
 
         // Parse the body (statements until else/elseif/end)
+        let body_start = self.start_loc();
         let mut then_stmts = Vec::new();
         while !self.matches(&TokenType::ElseColon)
             && !self.matches(&TokenType::ElseIf)
@@ -2744,15 +2757,17 @@ impl Parser {
         }
 
         // Create the body as an SBlock
+        let body_loc = self.block_loc(&then_stmts, body_start);
         let body = Expr::SBlock {
-            l: self.peek().location, // TODO: proper location
+            l: body_loc,
             stmts: then_stmts,
         };
 
-        // Create the first branch
+        // Create the first branch (span from test to body)
+        let branch_loc = test.get_loc().span(body_loc);
         let mut branches = vec![IfBranch {
             node_type: "s-if-branch".to_string(),
-            l: self.peek().location, // TODO: proper location
+            l: branch_loc,
             test: Box::new(test),
             body: Box::new(body),
         }];
@@ -2763,6 +2778,7 @@ impl Parser {
             let test = self.parse_expr()?;
             self.expect(TokenType::Colon)?;
 
+            let elseif_body_start = self.start_loc();
             let mut elseif_stmts = Vec::new();
             while !self.matches(&TokenType::ElseColon)
                 && !self.matches(&TokenType::ElseIf)
@@ -2773,14 +2789,16 @@ impl Parser {
                 elseif_stmts.push(Box::new(stmt));
             }
 
+            let elseif_body_loc = self.block_loc(&elseif_stmts, elseif_body_start);
             let body = Expr::SBlock {
-                l: self.peek().location, // TODO: proper location
+                l: elseif_body_loc,
                 stmts: elseif_stmts,
             };
 
+            let elseif_branch_loc = test.get_loc().span(elseif_body_loc);
             branches.push(IfBranch {
                 node_type: "s-if-branch".to_string(),
-                l: self.peek().location, // TODO: proper location
+                l: elseif_branch_loc,
                 test: Box::new(test),
                 body: Box::new(body),
             });
@@ -2790,14 +2808,16 @@ impl Parser {
         let else_expr = if self.matches(&TokenType::ElseColon) {
             self.advance();
 
+            let else_start = self.start_loc();
             let mut else_stmts = Vec::new();
             while !self.matches(&TokenType::End) && !self.is_at_end() {
                 let stmt = self.parse_block_statement()?;
                 else_stmts.push(Box::new(stmt));
             }
 
+            let else_loc = self.block_loc(&else_stmts, else_start);
             Some(Box::new(Expr::SBlock {
-                l: self.peek().location, // TODO: proper location
+                l: else_loc,
                 stmts: else_stmts,
             }))
         } else {
@@ -3033,10 +3053,11 @@ impl Parser {
                 // Parse the value expression
                 let value = Box::new(self.parse_expr()?);
 
-                // Create ForBind
+                // Create ForBind (location spans from bind to value)
+                let bind_loc = bind.get_loc().span(*value.get_loc());
                 bindings.push(ForBind {
                     node_type: "s-for-bind".to_string(),
-                    l: self.peek().location, // TODO: proper location from bind to value
+                    l: bind_loc,
                     bind,
                     value,
                 });
@@ -3060,6 +3081,7 @@ impl Parser {
         let blocky = self.parse_block_separator()?;
 
         // Parse the body (statements until END)
+        let body_start = self.start_loc();
         let mut body_stmts = Vec::new();
         while !self.matches(&TokenType::End) && !self.is_at_end() {
             let stmt = self.parse_block_statement()?;
@@ -3067,8 +3089,9 @@ impl Parser {
         }
 
         // Create the body as an SBlock
+        let body_loc = self.block_loc(&body_stmts, body_start);
         let body = Box::new(Expr::SBlock {
-            l: self.peek().location, // TODO: proper location
+            l: body_loc,
             stmts: body_stmts,
         });
 

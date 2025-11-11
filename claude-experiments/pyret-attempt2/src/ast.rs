@@ -262,6 +262,16 @@ pub enum Bind {
     },
 }
 
+impl Bind {
+    /// Get the location of this binding
+    pub fn get_loc(&self) -> &Loc {
+        match self {
+            Bind::SBind { l, .. } => l,
+            Bind::STupleBind { l, .. } => l,
+        }
+    }
+}
+
 /// Let binding (for let-expr)
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type")]
