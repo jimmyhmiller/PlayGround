@@ -210,6 +210,28 @@ pub const Builder = struct {
             }
         }
 
+        // For scf.if, infer from yielded values in the first region
+        if (std.mem.eql(u8, operation.name, "scf.if")) {
+            if (operation.regions.len >= 1) {
+                const then_region = operation.regions[0];
+                if (then_region.blocks.len >= 1) {
+                    const then_block = then_region.blocks[0];
+                    // Find the scf.yield operation (should be last after implicit insertion)
+                    for (then_block.operations) |*block_op| {
+                        if (std.mem.eql(u8, block_op.name, "scf.yield")) {
+                            // Get type of yielded value
+                            if (block_op.operands.len >= 1) {
+                                const yielded_id = block_op.operands[0];
+                                if (self.value_map.get(yielded_id)) |mlir_value| {
+                                    return mlir.c.mlirValueGetType(mlir_value);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         return null;
     }
 
