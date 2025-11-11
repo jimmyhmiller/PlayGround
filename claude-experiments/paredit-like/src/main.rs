@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod cli;
 pub mod parinfer;
+pub mod parinfer_simple;
 pub mod parser;
 pub mod refactor;
 
@@ -19,7 +20,7 @@ fn main() -> Result<()> {
             diff,
         } => {
             let source = cli::read_file(&file)?;
-            let parinfer = parinfer::Parinfer::new(&source);
+            let parinfer = parinfer_simple::Parinfer::new(&source);
             let modified = parinfer.balance()?;
 
             let output = Output {

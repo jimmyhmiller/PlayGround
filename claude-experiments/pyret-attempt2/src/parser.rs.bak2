@@ -1046,20 +1046,16 @@ impl Parser {
 
             // Parse argument types (comma-separated)
             // Special case: ( -> RetType) has no args, just check for immediate arrow
-            let args = if !self.matches(&TokenType::RParen) && !self.matches(&TokenType::ThinArrow) {
-                // Parse first arg, then check for more with commas
-                let first_arg = self.parse_ann()?;
-                if self.matches(&TokenType::Comma) {
-                    self.advance(); // consume first comma
-                    let mut all_args = vec![first_arg];
-                    all_args.extend(self.parse_comma_list_no_trailing(|p| p.parse_ann())?);
-                    all_args
-                } else {
-                    vec![first_arg]
+            let mut args = Vec::new();
+            if !self.matches(&TokenType::RParen) && !self.matches(&TokenType::ThinArrow) {
+                args.push(self.parse_ann()?);
+
+                // Check for arrow or comma
+                while self.matches(&TokenType::Comma) {
+                    self.advance(); // consume comma
+                    args.push(self.parse_ann()?);
                 }
-            } else {
-                Vec::new()
-            };
+            }
 
             // Expect arrow
             if self.matches(&TokenType::ThinArrow) {
@@ -2993,11 +2989,18 @@ impl Parser {
                 // This is a function call
                 self.advance(); // consume (
 
-                let args: Vec<Box<Expr>> = if !self.matches(&TokenType::RParen) {
-                    self.parse_comma_list(|p| Ok(Box::new(p.parse_binop_expr()?)))?
-                } else {
-                    Vec::new()
-                };
+                let mut args = Vec::new();
+                if !self.matches(&TokenType::RParen) {
+                    args.push(Box::new(self.parse_binop_expr()?));
+
+                    while self.matches(&TokenType::Comma) {
+                        self.advance(); // consume comma
+                        if self.matches(&TokenType::RParen) {
+                            break; // trailing comma
+                        }
+                        args.push(Box::new(self.parse_binop_expr()?));
+                    }
+                }
 
                 let rparen = self.expect(TokenType::RParen)?;
 
@@ -3109,33 +3112,32 @@ impl Parser {
 
         // Additional bindings (comma-separated)
         // Each can be either: binding = expr  OR  var binding = expr
-        if self.matches(&TokenType::Comma) {
-            self.advance(); // consume first comma
-            binds.extend(self.parse_comma_list_no_trailing(|p| {
-                // Check if this is a var binding
-                let is_var = p.matches(&TokenType::Var);
-                if is_var {
-                    p.expect(TokenType::Var)?;
-                    let bind = p.parse_bind()?;
-                    p.expect(TokenType::Equals)?;
-                    let value = p.parse_binop_expr()?;
-                    Ok(LetBind::SVarBind {
-                        l: p.peek().location,
-                        b: bind,
-                        value: Box::new(value),
-                    })
-                } else {
-                    // Regular let binding
-                    let bind = p.parse_bind()?;
-                    p.expect(TokenType::Equals)?;
-                    let value = p.parse_binop_expr()?;
-                    Ok(LetBind::SLetBind {
-                        l: p.peek().location,
-                        b: bind,
-                        value: Box::new(value),
-                    })
-                }
-            })?);
+        while self.matches(&TokenType::Comma) {
+            self.expect(TokenType::Comma)?;
+
+            // Check if this is a var binding
+            let is_var = self.matches(&TokenType::Var);
+            if is_var {
+                self.expect(TokenType::Var)?;
+                let bind = self.parse_bind()?;
+                self.expect(TokenType::Equals)?;
+                let value = self.parse_binop_expr()?;
+                binds.push(LetBind::SVarBind {
+                    l: self.peek().location,
+                    b: bind,
+                    value: Box::new(value),
+                });
+            } else {
+                // Regular let binding
+                let bind = self.parse_bind()?;
+                self.expect(TokenType::Equals)?;
+                let value = self.parse_binop_expr()?;
+                binds.push(LetBind::SLetBind {
+                    l: self.peek().location,
+                    b: bind,
+                    value: Box::new(value),
+                });
+            }
         }
 
         // Must have a body with (BLOCK|COLON) block END
@@ -3339,9 +3341,11 @@ impl Parser {
         // Parse the value expression
         let value = self.parse_expr()?;
 
+        let end = self.last_token(&start);
+
         // Create an s-let with tuple bind
         Ok(Expr::SLet {
-            l: self.make_span(start),
+            l: start.location.span(end.location),
             name: tuple_bind,
             value: Box::new(value),
             keyword_val: false,
@@ -3369,19 +3373,19 @@ impl Parser {
         });
 
         // Parse additional bindings if present (COMMA let-expr)*
-        if self.matches(&TokenType::Comma) {
-            self.advance(); // consume first comma
-            binds.extend(self.parse_comma_list_no_trailing(|p| {
-                let bind = p.parse_bind()?;
-                p.expect(TokenType::Equals)?;
-                let value = p.parse_expr()?;
-                Ok(LetrecBind {
-                    node_type: "s-letrec-bind".to_string(),
-                    l: p.peek().location,
-                    b: bind,
-                    value: Box::new(value),
-                })
-            })?);
+        while self.matches(&TokenType::Comma) {
+            self.advance();
+
+            let bind = self.parse_bind()?;
+            self.expect(TokenType::Equals)?;
+            let value = self.parse_expr()?;
+
+            binds.push(LetrecBind {
+                node_type: "s-letrec-bind".to_string(),
+                l: self.peek().location,
+                b: bind,
+                value: Box::new(value),
+            });
         }
 
         // Parse body: (BLOCK|COLON) block END
@@ -3432,8 +3436,10 @@ impl Parser {
         // Parse value expression
         let value = self.parse_expr()?;
 
+        let end = self.last_token(&start);
+
         Ok(Expr::SLet {
-            l: self.make_span(start),
+            l: start.location.span(end.location),
             name: bind,
             value: Box::new(value),
             keyword_val: false,
@@ -3498,8 +3504,10 @@ impl Parser {
         // Contract statements allow noparen-arrow-ann: args -> ret without parentheses
         let ann = self.parse_contract_ann()?;
 
+        let end = self.last_token(&start);
+
         Ok(Expr::SContract {
-            l: self.make_span(start),
+            l: start.location.span(end.location),
             name,
             params,
             ann,
@@ -3512,15 +3520,13 @@ impl Parser {
         let start_pos = self.current;
 
         // Parse comma-separated annotations (arguments)
-        let first_arg = self.parse_ann()?;
-        let args = if self.matches(&TokenType::Comma) {
-            self.advance(); // consume first comma
-            let mut all_args = vec![first_arg];
-            all_args.extend(self.parse_comma_list_no_trailing(|p| p.parse_ann())?);
-            all_args
-        } else {
-            vec![first_arg]
-        };
+        let mut args = vec![self.parse_ann()?];
+
+        // Check for additional arguments separated by commas
+        while self.matches(&TokenType::Comma) {
+            self.advance(); // consume comma
+            args.push(self.parse_ann()?);
+        }
 
         // Check if there's an arrow (for noparen-arrow-ann)
         if self.matches(&TokenType::ThinArrow) {
@@ -3567,10 +3573,12 @@ impl Parser {
         // Parse value expression
         let value = self.parse_expr()?;
 
+        let end = self.last_token(&start);
+
         // Return SLet (simple let binding statement)
         // This is for implicit let bindings like: x = 5
         Ok(Expr::SLet {
-            l: self.make_span(start),
+            l: start.location.span(end.location),
             name: bind,
             value: Box::new(value),
             keyword_val: false,
@@ -3591,9 +3599,11 @@ impl Parser {
         // Parse value expression
         let value = self.parse_expr()?;
 
+        let end = self.last_token(&start);
+
         // This is an assignment, not a var declaration
         Ok(Expr::SAssign {
-            l: self.make_span(start),
+            l: start.location.span(end.location),
             id: name,
             value: Box::new(value),
         })
@@ -3799,20 +3809,6 @@ impl Parser {
 // SECTION 8: Function Parsing
 // ============================================================================
 
-/// Helper struct for parsing function-like constructs (fun, lam, method)
-struct FunctionParts {
-    name: String,
-    type_params: Vec<Name>,
-    args: Vec<Bind>,
-    ann: Ann,
-    blocky: bool,
-    doc: String,
-    body: Box<Expr>,
-    check_loc: Option<Loc>,
-    check: Option<Box<Expr>>,
-    end_loc: Loc,
-}
-
 impl Parser {
     /// fun-expr: FUN name<typarams>(args) ann: doc body where END
     /// Parses function declarations like: fun f(x): x + 1 end
@@ -3877,57 +3873,46 @@ impl Parser {
         })
     }
 
-    /// Shared parsing logic for function-like constructs
-    /// Configurable via flags to handle differences between fun/lam/method
-    fn parse_function_body(
-        &mut self,
-        parse_name: bool,
-        parse_type_params: bool,
-        parse_where: bool,
-        allow_coloncolon_ann: bool,  // Lambda allows :: in addition to ->
-    ) -> ParseResult<FunctionParts> {
-        // 1. Parse optional name
-        let name = if parse_name {
-            let name_token = self.expect(TokenType::Name)?;
-            name_token.value.clone()
-        } else {
-            String::new()
-        };
+    fn parse_fun_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::Fun)?;
 
-        // 2. Parse optional type parameters <T, U, V>
-        let type_params = if parse_type_params {
-            self.parse_opt_type_params()?
+        // Parse function name
+        let name_token = self.expect(TokenType::Name)?;
+        let name = name_token.value.clone();
+
+        // Parse optional type parameters <T, U, V>
+        let params: Vec<Name> = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
+            self.advance(); // consume '<'
+            let type_params = self.parse_comma_list(|p| p.parse_name())?;
+            self.expect(TokenType::Gt)?; // consume '>'
+            type_params
         } else {
             Vec::new()
         };
 
-        // 3. Parse parameters (args)
+        // Expect any form of left paren
         self.expect_any_lparen()?;
+
+        // Parse parameters (comma-separated bindings)
         let args = if self.matches(&TokenType::RParen) {
             Vec::new()
         } else {
             self.parse_comma_list(|p| p.parse_bind())?
         };
+
+        // Expect closing paren
         self.expect(TokenType::RParen)?;
 
-        // 4. Parse optional return annotation (-> or :: for lambdas)
-        let ann = if self.matches(&TokenType::ThinArrow) {
-            self.advance();
-            self.parse_ann()?
-        } else if allow_coloncolon_ann && self.matches(&TokenType::ColonColon) {
-            self.advance();
-            self.parse_ann()?
-        } else {
-            Ann::ABlank
-        };
+        // Optional return type annotation: -> ann
+        let ann = self.parse_opt_return_ann()?;
 
-        // 5. Parse block separator (: or block:)
+        // Parse body separator (COLON or BLOCK)
         let blocky = self.parse_block_separator()?;
 
-        // 6. Parse optional doc string
+        // Parse optional doc string: doc: "string"
         let doc = self.parse_opt_doc_string()?;
 
-        // 7. Parse body statements until END or WHERE
+        // Parse function body (statements until END or WHERE)
         let mut body_stmts = Vec::new();
         while !self.matches(&TokenType::End)
             && !self.matches(&TokenType::Where)
@@ -3937,9 +3922,10 @@ impl Parser {
             body_stmts.push(Box::new(stmt));
         }
 
-        // 8. Parse optional where clause
-        let (check, check_loc) = if parse_where && self.matches(&TokenType::Where) {
+        // Parse optional where clause
+        let (check, check_loc) = if self.matches(&TokenType::Where) {
             let where_token = self.advance().clone();
+            // The check-loc should just point to the WHERE keyword itself
             let check_loc = where_token.location.span(where_token.location);
             let mut where_stmts = Vec::new();
             while !self.matches(&TokenType::End) && !self.is_at_end() {
@@ -3955,46 +3941,25 @@ impl Parser {
             (None, None)
         };
 
-        // 9. Expect END keyword
         let end = self.expect(TokenType::End)?;
 
-        // 10. Wrap body statements in SBlock
+        // Wrap body in SBlock
         let body = Box::new(Expr::SBlock {
             l: self.peek().location,
             stmts: body_stmts,
         });
 
-        Ok(FunctionParts {
+        Ok(Expr::SFun {
+            l: start.location.span(end.location),
             name,
-            type_params,
+            params,
             args,
             ann,
-            blocky,
             doc,
             body,
             check_loc,
             check,
-            end_loc: end.location,
-        })
-    }
-
-    fn parse_fun_expr(&mut self) -> ParseResult<Expr> {
-        let start = self.expect(TokenType::Fun)?;
-
-        // Use shared helper: fun has name, type params, where clause, no :: ann
-        let parts = self.parse_function_body(true, true, true, false)?;
-
-        Ok(Expr::SFun {
-            l: start.location.span(parts.end_loc),
-            name: parts.name,
-            params: parts.type_params,
-            args: parts.args,
-            ann: parts.ann,
-            doc: parts.doc,
-            body: parts.body,
-            check_loc: parts.check_loc,
-            check: parts.check,
-            blocky: parts.blocky,
+            blocky,
         })
     }
 
@@ -4003,20 +3968,76 @@ impl Parser {
     fn parse_lambda_expr(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::Lam)?;
 
-        // Use shared helper: lam has no name, has type params, no where clause, allows :: ann
-        let parts = self.parse_function_body(false, true, false, true)?;
+        // Parse optional type parameters <T, U, V>
+        let params: Vec<Name> = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
+            self.advance(); // consume '<'
+            let type_params = self.parse_comma_list(|p| p.parse_name())?;
+            self.expect(TokenType::Gt)?; // consume '>'
+            type_params
+        } else {
+            Vec::new()
+        };
+
+        // Expect any form of left paren (ParenNoSpace can appear after type parameters: lam<A>())
+        self.expect_any_lparen()?;
+
+        // Parse parameters (comma-separated bindings)
+        let args = if self.matches(&TokenType::RParen) {
+            Vec::new()
+        } else {
+            self.parse_comma_list(|p| p.parse_bind())?
+        };
+
+        // Expect closing paren
+        self.expect(TokenType::RParen)?;
+
+        // Optional return type annotation: -> ann OR :: ann
+        let ann = if self.matches(&TokenType::ThinArrow) {
+            self.expect(TokenType::ThinArrow)?;
+            self.parse_ann()?
+        } else if self.matches(&TokenType::ColonColon) {
+            self.expect(TokenType::ColonColon)?;
+            self.parse_ann()?
+        } else {
+            Ann::ABlank
+        };
+
+        // Expect colon or block before body
+        let blocky = self.parse_block_separator()?;
+
+        // Parse optional doc string: doc: "string"
+        let doc = self.parse_opt_doc_string()?;
+
+        // Parse body as a block of statements
+        let mut stmts = Vec::new();
+        while !self.matches(&TokenType::End) && !self.matches(&TokenType::Where) && !self.is_at_end() {
+            let stmt = self.parse_block_statement()?;
+            stmts.push(Box::new(stmt));
+        }
+
+        // Parse optional where clause
+        // TODO: Handle where clauses in lambdas
+
+        // Expect end keyword
+        let end = self.expect(TokenType::End)?;
+
+        // Body is the block of statements
+        let body = Expr::SBlock {
+            l: self.peek().location,
+            stmts,
+        };
 
         Ok(Expr::SLam {
-            l: start.location.span(parts.end_loc),
+            l: start.location.span(end.location),
             name: String::new(), // Anonymous lambda
-            params: parts.type_params,
-            args: parts.args,
-            ann: parts.ann,
-            doc: parts.doc,
-            body: parts.body,
-            check_loc: None,  // Lambdas don't have where clauses
+            params,  // Type parameters (e.g., <A, B>)
+            args,
+            ann,
+            doc,
+            body: Box::new(body),
+            check_loc: None,
             check: None,
-            blocky: parts.blocky,
+            blocky,
         })
     }
 
@@ -4077,20 +4098,81 @@ impl Parser {
     fn parse_method_expr(&mut self) -> ParseResult<Expr> {
         let start = self.expect(TokenType::Method)?;
 
-        // Use shared helper: method has no name/type params, has where clause, no :: ann
-        let parts = self.parse_function_body(false, false, true, false)?;
+        // Expect any form of left paren
+        self.expect_any_lparen()?;
+
+        // Parse parameters (comma-separated bindings)
+        // First should be `self`
+        let args = if self.matches(&TokenType::RParen) {
+            Vec::new()
+        } else {
+            self.parse_comma_list(|p| p.parse_bind())?
+        };
+
+        // Expect closing paren
+        self.expect(TokenType::RParen)?;
+
+        // Optional return type annotation: -> ann
+        let ann = self.parse_opt_return_ann()?;
+
+        // Parse body separator (COLON or BLOCK)
+        let blocky = self.parse_block_separator()?;
+
+        // Parse optional doc string: doc: "string"
+        let doc = self.parse_opt_doc_string()?;
+
+        // Parse method body (statements until END or WHERE)
+        let mut body_stmts = Vec::new();
+        while !self.matches(&TokenType::End)
+            && !self.matches(&TokenType::Where)
+            && !self.is_at_end()
+        {
+            let stmt = self.parse_block_statement()?;
+            body_stmts.push(Box::new(stmt));
+        }
+
+        // Parse optional where clause
+        let (check, check_loc) = if self.matches(&TokenType::Where) {
+            let where_token = self.advance().clone();
+            // The check-loc should just point to the WHERE keyword itself
+            let check_loc = where_token.location.span(where_token.location);
+            let mut where_stmts = Vec::new();
+            while !self.matches(&TokenType::End) && !self.is_at_end() {
+                let stmt = self.parse_expr()?;
+                where_stmts.push(Box::new(stmt));
+            }
+            let check_block = Box::new(Expr::SBlock {
+                l: check_loc,
+                stmts: where_stmts,
+            });
+            (Some(check_block), Some(check_loc))
+        } else {
+            (None, None)
+        };
+
+        // Expect closing END
+        let end = self.expect(TokenType::End)?;
+
+        // Create location spanning entire method expression
+        let loc = start.location.span(end.location);
+
+        // Create block body
+        let body = Box::new(Expr::SBlock {
+            l: loc,
+            stmts: body_stmts,
+        });
 
         Ok(Expr::SMethod {
-            l: start.location.span(parts.end_loc),
-            name: String::new(),   // Methods have no name
-            params: Vec::new(),    // Methods have no type parameters
-            args: parts.args,
-            ann: parts.ann,
-            doc: parts.doc,
-            body: parts.body,
-            check_loc: parts.check_loc,
-            check: parts.check,
-            blocky: parts.blocky,
+            l: loc,
+            name: String::new(), // Methods have no name
+            params: Vec::new(),  // Methods have no type parameters
+            args,
+            ann,
+            doc,
+            body,
+            check_loc,
+            check,
+            blocky,
         })
     }
 }
@@ -4217,7 +4299,7 @@ impl Parser {
         let start = self.start_loc();
         let name_token = self.expect(TokenType::Name)?;
         let name = name_token.value.clone();
-        let constr_loc = name_token.location;
+        let constr_loc = name_token.location.span(name_token.location);
 
         // Check if this is a constructor variant with arguments
         if self.matches(&TokenType::LParen)
@@ -4241,8 +4323,10 @@ impl Parser {
                 Vec::new()
             };
 
+            let end = self.last_token(&start);
+
             Ok(Variant::SVariant {
-                l: self.make_span(start),
+                l: start.location.span(end.location),
                 constr_loc,
                 name,
                 members,
@@ -4257,8 +4341,10 @@ impl Parser {
                 Vec::new()
             };
 
+            let end = self.last_token(&start);
+
             Ok(Variant::SSingletonVariant {
-                l: self.make_span(start),
+                l: start.location.span(end.location),
                 name,
                 with_members,
             })
@@ -4287,9 +4373,11 @@ impl Parser {
             self.parse_bind()?
         };
 
+        let end = self.last_token(&start);
+
         Ok(VariantMember {
             node_type: "s-variant-member".to_string(),
-            l: self.make_span(start),
+            l: start.location.span(end.location),
             member_type,
             bind,
         })
@@ -4633,7 +4721,20 @@ impl Parser {
         let mut contents = Vec::new();
 
         if !self.matches(&TokenType::End) {
-            contents = self.parse_comma_list(|p| p.parse_spy_expr())?;
+            // Parse first spy-expr
+            contents.push(self.parse_spy_expr()?);
+
+            // Parse additional spy-exprs with comma separators
+            while self.matches(&TokenType::Comma) {
+                self.advance(); // consume comma
+
+                // Allow optional trailing comma
+                if self.matches(&TokenType::End) {
+                    break;
+                }
+
+                contents.push(self.parse_spy_expr()?);
+            }
         }
 
         let end = self.expect(TokenType::End)?;
