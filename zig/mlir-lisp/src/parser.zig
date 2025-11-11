@@ -753,21 +753,45 @@ pub const Parser = struct {
             }
         }
 
-        // Parse operands (remaining elements)
+        // Parse operands and regions (remaining elements)
         var operands = std.ArrayList([]const u8){};
         errdefer operands.deinit(self.allocator);
 
+        var regions = std.ArrayList(Region){};
+        errdefer {
+            for (regions.items) |*region| {
+                region.deinit(self.allocator);
+            }
+            regions.deinit(self.allocator);
+        }
+
         var i: usize = attrs_start;
         while (i < list.len()) : (i += 1) {
-            const operand = list.at(i);
-            // For terse syntax, operands should be value IDs
-            if (operand.type != .value_id) {
-                std.debug.print("\nerror: Expected value ID in terse operation at position {d}, got {s}\n", .{ i, @tagName(operand.type) });
+            const elem = list.at(i);
+
+            // Check if this is a (region ...) form
+            if (elem.type == .list) {
+                const elem_list = elem.data.list;
+                if (!elem_list.isEmpty()) {
+                    const elem_first = elem_list.at(0);
+                    if (elem_first.type == .identifier and
+                        std.mem.eql(u8, elem_first.data.atom, "region")) {
+                        // Parse as region with parent op name for implicit terminators
+                        const region = try self.parseTerseRegionWithParent(elem, op_name);
+                        try regions.append(self.allocator, region);
+                        continue;
+                    }
+                }
+            }
+
+            // Otherwise, must be an operand (value ID)
+            if (elem.type != .value_id) {
+                std.debug.print("\nerror: Expected value ID or (region ...) in terse operation at position {d}, got {s}\n", .{ i, @tagName(elem.type) });
                 std.debug.print("Problematic expression: ", .{});
                 const printer_mod = @import("printer.zig");
                 var printer = printer_mod.Printer.init(self.allocator);
                 defer printer.deinit();
-                printer.printValue(operand) catch {};
+                printer.printValue(elem) catch {};
                 std.debug.print("{s}\n", .{printer.getOutput()});
 
                 var printer2 = printer_mod.Printer.init(self.allocator);
@@ -776,12 +800,12 @@ pub const Parser = struct {
                 printer2.printValue(value) catch {};
                 std.debug.print("{s}\n", .{printer2.getOutput()});
 
-                if (operand.type == .identifier) {
-                    std.debug.print("Found identifier '{s}' - did you mean '%{s}'?\n", .{ operand.data.atom, operand.data.atom });
+                if (elem.type == .identifier) {
+                    std.debug.print("Found identifier '{s}' - did you mean '%{s}'?\n", .{ elem.data.atom, elem.data.atom });
                 }
                 return error.ExpectedValueId;
             }
-            try operands.append(self.allocator, operand.data.atom);
+            try operands.append(self.allocator, elem.data.atom);
         }
 
         return Operation{
@@ -791,7 +815,7 @@ pub const Parser = struct {
             .operands = try operands.toOwnedSlice(self.allocator),
             .attributes = attributes,
             .successors = &[_]Successor{},
-            .regions = &[_]Region{},
+            .regions = try regions.toOwnedSlice(self.allocator),
             .location = null,
         };
     }
@@ -1061,8 +1085,96 @@ pub const Parser = struct {
         return regions.toOwnedSlice(self.allocator);
     }
 
-    fn parseRegion(self: *Parser, value: *Value) ParseError!Region {
-        // (region BLOCK+)
+    /// Check if an operation is a terminator
+    fn isTerminator(op_name: []const u8) bool {
+        return std.mem.eql(u8, op_name, "func.return") or
+            std.mem.eql(u8, op_name, "scf.yield") or
+            std.mem.eql(u8, op_name, "scf.condition") or
+            std.mem.eql(u8, op_name, "cf.br") or
+            std.mem.eql(u8, op_name, "cf.cond_br") or
+            std.mem.eql(u8, op_name, "cf.switch");
+    }
+
+    /// Get the appropriate terminator name for an operation
+    fn getTerminatorForOp(op_name: []const u8) []const u8 {
+        // For scf.* operations, use scf.yield
+        if (std.mem.startsWith(u8, op_name, "scf.")) {
+            return "scf.yield";
+        }
+        // For func.func, use func.return
+        if (std.mem.startsWith(u8, op_name, "func.")) {
+            return "func.return";
+        }
+        // Default to scf.yield for unknown operations
+        return "scf.yield";
+    }
+
+    /// Insert an implicit terminator at the end of a block if needed
+    /// For terse syntax: if last operation doesn't produce a terminator,
+    /// auto-insert one that yields the result of the last operation
+    fn insertImplicitTerminator(
+        self: *Parser,
+        operations: *std.ArrayList(Operation),
+        parent_op_name: []const u8,
+    ) !void {
+        if (operations.items.len == 0) {
+            // Empty block - insert terminator with no operands
+            const terminator_name = getTerminatorForOp(parent_op_name);
+            const terminator = Operation{
+                .name = terminator_name,
+                .result_bindings = &[_][]const u8{},
+                .result_types = &[_]TypeExpr{},
+                .operands = &[_][]const u8{},
+                .attributes = &[_]Attribute{},
+                .successors = &[_]Successor{},
+                .regions = &[_]Region{},
+                .location = null,
+            };
+            try operations.append(self.allocator, terminator);
+            return;
+        }
+
+        const last_op = &operations.items[operations.items.len - 1];
+
+        // If last operation is already a terminator, we're done
+        if (isTerminator(last_op.name)) {
+            return;
+        }
+
+        // Insert terminator that yields the last operation's result
+        const terminator_name = getTerminatorForOp(parent_op_name);
+
+        // Determine what to yield: if last operation has result bindings, yield those
+        const operands = if (last_op.result_bindings.len > 0) blk: {
+            // Allocate and copy result bindings
+            const ops = try self.allocator.alloc([]const u8, last_op.result_bindings.len);
+            for (last_op.result_bindings, 0..) |binding, i| {
+                ops[i] = binding;
+            }
+            break :blk ops;
+        } else blk: {
+            break :blk try self.allocator.alloc([]const u8, 0);
+        };
+
+        const terminator = Operation{
+            .name = terminator_name,
+            .result_bindings = &[_][]const u8{},
+            .result_types = &[_]TypeExpr{},
+            .operands = operands,
+            .attributes = &[_]Attribute{},
+            .successors = &[_]Successor{},
+            .regions = &[_]Region{},
+            .location = null,
+        };
+        try operations.append(self.allocator, terminator);
+    }
+
+    /// Parse a region in terse syntax with parent operation name for implicit terminators
+    fn parseTerseRegionWithParent(
+        self: *Parser,
+        value: *Value,
+        parent_op_name: []const u8,
+    ) ParseError!Region {
         if (value.type != .list) return error.ExpectedList;
 
         const list = value.data.list;
@@ -1072,24 +1184,180 @@ pub const Parser = struct {
         if (first.type != .identifier) return error.ExpectedIdentifier;
         if (!std.mem.eql(u8, first.data.atom, "region")) return error.UnexpectedStructure;
 
-        var blocks = std.ArrayList(Block){};
+        // Terse syntax: Create implicit block with operations
+        var operations = std.ArrayList(Operation){};
         errdefer {
-            for (blocks.items) |*block| {
-                block.deinit(self.allocator);
+            for (operations.items) |*op| {
+                op.deinit(self.allocator);
             }
-            blocks.deinit(self.allocator);
+            operations.deinit(self.allocator);
         }
 
         var i: usize = 1;
         while (i < list.len()) : (i += 1) {
-            const block_value = list.at(i);
-            const block = try self.parseBlock(block_value);
-            try blocks.append(self.allocator, block);
+            const op_value = list.at(i);
+
+            // Handle bare value IDs - they should be yielded directly
+            if (op_value.type == .value_id) {
+                // This is a bare value ID like %val - create implicit yield
+                const yield_name = getTerminatorForOp(parent_op_name);
+                const value_id = op_value.data.atom;
+
+                // Allocate operands array
+                const operands = try self.allocator.alloc([]const u8, 1);
+                operands[0] = value_id;
+
+                const yield_op = Operation{
+                    .name = yield_name,
+                    .result_bindings = &[_][]const u8{},
+                    .result_types = &[_]TypeExpr{},
+                    .operands = operands,
+                    .attributes = &[_]Attribute{},
+                    .successors = &[_]Successor{},
+                    .regions = &[_]Region{},
+                    .location = null,
+                };
+                try operations.append(self.allocator, yield_op);
+                continue;
+            }
+
+            if (op_value.type != .list) continue;
+
+            const op_list = op_value.data.list;
+            if (op_list.isEmpty()) continue;
+
+            const op_first = op_list.at(0);
+            if (op_first.type != .identifier) continue;
+
+            const op_name = op_first.data.atom;
+            const operation = if (std.mem.eql(u8, op_name, "operation"))
+                try self.parseOperation(op_value)
+            else if (std.mem.eql(u8, op_name, "declare"))
+                try self.parseDeclare(op_value)
+            else if (isTerseOperation(op_name))
+                try self.parseTerseOperation(op_value)
+            else
+                continue;
+
+            try operations.append(self.allocator, operation);
         }
 
-        return Region{
-            .blocks = try blocks.toOwnedSlice(self.allocator),
+        // Insert implicit terminator if needed (for regions with operations but no terminator)
+        try self.insertImplicitTerminator(&operations, parent_op_name);
+
+        const block = Block{
+            .label = null,
+            .arguments = &[_]Argument{},
+            .operations = try operations.toOwnedSlice(self.allocator),
         };
+
+        const blocks = try self.allocator.alloc(Block, 1);
+        blocks[0] = block;
+
+        return Region{
+            .blocks = blocks,
+        };
+    }
+
+    fn parseRegion(self: *Parser, value: *Value) ParseError!Region {
+        // (region BLOCK+) - verbose
+        // OR
+        // (region OPERATION*) - terse (implicit block with no args)
+        if (value.type != .list) return error.ExpectedList;
+
+        const list = value.data.list;
+        if (list.isEmpty()) return error.UnexpectedStructure;
+
+        const first = list.at(0);
+        if (first.type != .identifier) return error.ExpectedIdentifier;
+        if (!std.mem.eql(u8, first.data.atom, "region")) return error.UnexpectedStructure;
+
+        // Check if this is terse (no explicit blocks) or verbose (explicit blocks)
+        const is_terse = if (list.len() > 1) blk: {
+            const second = list.at(1);
+            if (second.type == .list) {
+                const second_list = second.data.list;
+                if (!second_list.isEmpty()) {
+                    const second_first = second_list.at(0);
+                    if (second_first.type == .identifier) {
+                        // If it starts with "block", it's verbose
+                        break :blk !std.mem.eql(u8, second_first.data.atom, "block");
+                    }
+                }
+            }
+            // Not a list or doesn't start with identifier - assume terse
+            break :blk true;
+        } else blk: {
+            break :blk true; // Empty region is terse
+        };
+
+        if (is_terse) {
+            // Terse syntax: Create implicit block with operations
+            var operations = std.ArrayList(Operation){};
+            errdefer {
+                for (operations.items) |*op| {
+                    op.deinit(self.allocator);
+                }
+                operations.deinit(self.allocator);
+            }
+
+            var i: usize = 1;
+            while (i < list.len()) : (i += 1) {
+                const op_value = list.at(i);
+                if (op_value.type != .list) continue;
+
+                const op_list = op_value.data.list;
+                if (op_list.isEmpty()) continue;
+
+                const op_first = op_list.at(0);
+                if (op_first.type != .identifier) continue;
+
+                const op_name = op_first.data.atom;
+                const operation = if (std.mem.eql(u8, op_name, "operation"))
+                    try self.parseOperation(op_value)
+                else if (std.mem.eql(u8, op_name, "declare"))
+                    try self.parseDeclare(op_value)
+                else if (isTerseOperation(op_name))
+                    try self.parseTerseOperation(op_value)
+                else
+                    continue;
+
+                try operations.append(self.allocator, operation);
+            }
+
+            const block = Block{
+                .label = null,
+                .arguments = &[_]Argument{},
+                .operations = try operations.toOwnedSlice(self.allocator),
+            };
+
+            const blocks = try self.allocator.alloc(Block, 1);
+            blocks[0] = block;
+
+            return Region{
+                .blocks = blocks,
+            };
+        } else {
+            // Verbose syntax: Parse explicit blocks
+            var blocks = std.ArrayList(Block){};
+            errdefer {
+                for (blocks.items) |*block| {
+                    block.deinit(self.allocator);
+                }
+                blocks.deinit(self.allocator);
+            }
+
+            var i: usize = 1;
+            while (i < list.len()) : (i += 1) {
+                const block_value = list.at(i);
+                const block = try self.parseBlock(block_value);
+                try blocks.append(self.allocator, block);
+            }
+
+            return Region{
+                .blocks = try blocks.toOwnedSlice(self.allocator),
+            };
+        }
     }
 
     fn parseBlock(self: *Parser, value: *Value) ParseError!Block {

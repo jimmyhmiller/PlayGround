@@ -22,33 +22,25 @@
           (declare c1 (arith.constant {:value (: 1 i32)}))
           (declare cond (: (arith.cmpi {:predicate (: 3 i64)} %n %c1) i1))
 
-          ;; scf.if still verbose (no terse syntax yet)
-          (operation
-            (name scf.if)
-            (result-bindings [%result])
-            (result-types i32)
-            (operands %cond)
-            (regions
-              ;; Then region
-              (region
-                (block
-                  (arguments [])
-                  (operation
-                    (name scf.yield)
-                    (operands %n))))
+          ;; ✅ TERSE scf.if with regions and implicit yields!
+          (declare result (:
+            (scf.if %cond
+              (region %n)              ;; Then: implicit (scf.yield %n)
+              (region                   ;; Else: compute fib(n-1) + fib(n-2)
+                ;; ✅ TERSE: Compute fib(n-1)
+                (declare c1_rec (arith.constant {:value (: 1 i32)}))
+                (declare n_minus_1 (arith.subi %n %c1_rec))
+                (declare fib_n_minus_1 (: (func.call {:callee @fibonacci} %n_minus_1) i32))
 
-              ;; Else region - ALL TERSE!
-              (region
-                (block
-                  (arguments [])
-                  
-                  (scf.yield
-                   (arith.addi
-                    (: (func.call {:callee @fibonacci}
-                                  (arith.subi %n
-                                              (arith.constant {:value (: 1 i32)}))) i32)
-                    (: (func.call {:callee @fibonacci}
-                                  (arith.subi %n (arith.constant {:value (: 2 i32)}))) i32)))))))
+                ;; ✅ TERSE: Compute fib(n-2)
+                (declare c2 (arith.constant {:value (: 2 i32)}))
+                (declare n_minus_2 (arith.subi %n %c2))
+                (declare fib_n_minus_2 (: (func.call {:callee @fibonacci} %n_minus_2) i32))
+
+                ;; ✅ TERSE: Add results
+                (declare sum (arith.addi %fib_n_minus_1 %fib_n_minus_2))
+                %sum))                ;; Implicit (scf.yield %sum)
+            i32))
 
           ;; Return result (TERSE!)
           (func.return %result)))))

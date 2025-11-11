@@ -5,8 +5,29 @@
 
 set -e
 
-PYRET_REPO="/Users/jimmyhmiller/Documents/Code/open-source/pyret-lang"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Check if PYRET_REPO environment variable is set
+if [ -z "$PYRET_REPO" ]; then
+    echo "ERROR: PYRET_REPO environment variable is not set."
+    echo ""
+    echo "Usage: PYRET_REPO=/path/to/pyret-lang $0"
+    echo ""
+    echo "Or set it permanently in your shell profile:"
+    echo "  export PYRET_REPO=/path/to/pyret-lang"
+    echo ""
+    exit 1
+fi
+
+# Validate that PYRET_REPO points to a valid pyret-lang repository
+if [ ! -f "$PYRET_REPO/ast-to-json.jarr" ]; then
+    echo "ERROR: $PYRET_REPO does not contain ast-to-json.jarr"
+    echo "Please ensure PYRET_REPO points to a valid pyret-lang repository."
+    exit 1
+fi
+
+echo "Using Pyret repository: $PYRET_REPO"
 
 # Colors for output
 RED='\033[0;31m'
@@ -34,8 +55,9 @@ echo ""
 echo "Cache directory: $CACHE_DIR"
 echo ""
 echo "Building parser in release mode..."
+cd "$PROJECT_ROOT"
 cargo build --release --bin to_pyret_json 2>&1 | grep -v "warning:"
-PARSER_BIN="$SCRIPT_DIR/target/release/to_pyret_json"
+PARSER_BIN="$PROJECT_ROOT/target/release/to_pyret_json"
 echo "Parser built at: $PARSER_BIN"
 echo ""
 echo "Finding all .arr files in $PYRET_REPO ..."
@@ -55,7 +77,7 @@ echo "=================================================="
 echo ""
 
 # Create results directory
-RESULTS_DIR="$SCRIPT_DIR/bulk_test_results"
+RESULTS_DIR="$PROJECT_ROOT/bulk_test_results"
 mkdir -p "$RESULTS_DIR"
 PASSING_LOG="$RESULTS_DIR/passing_files.txt"
 FAILING_LOG="$RESULTS_DIR/failing_files.txt"

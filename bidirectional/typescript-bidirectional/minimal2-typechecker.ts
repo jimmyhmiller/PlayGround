@@ -1,14 +1,14 @@
 // Extended minimal bidirectional type checker
 // Supports multiple parameters, if expressions, binary operations, void type
 
-type Type =
+export type Type =
   | { kind: 'number' }
   | { kind: 'string' }
   | { kind: 'boolean' }
   | { kind: 'void' }
   | { kind: 'function', params: Type[], to: Type }
 
-type Expr =
+export type Expr =
   | { kind: 'number', value: number }
   | { kind: 'string', value: string }
   | { kind: 'boolean', value: boolean }
@@ -20,10 +20,10 @@ type Expr =
   | { kind: 'binop', op: '+' | '*' | '>' | '<' | '>=' | '<=' | '===' | '!==' | '-' | '/', left: Expr, right: Expr }
   | { kind: 'sequence', exprs: Expr[] }
 
-type Context = Map<string, Type>
+export type Context = Map<string, Type>
 
 // Synthesis: expr ⇒ type
-function synth(ctx: Context, expr: Expr): Type {
+export function synth(ctx: Context, expr: Expr): Type {
   switch (expr.kind) {
     case 'number':
       return { kind: 'number' }
@@ -140,7 +140,7 @@ function synth(ctx: Context, expr: Expr): Type {
 }
 
 // Checking: expr ⇐ type
-function check(ctx: Context, expr: Expr, expected: Type): void {
+export function check(ctx: Context, expr: Expr, expected: Type): void {
   switch (expr.kind) {
     case 'lambda':
       if (expected.kind !== 'function') {
@@ -167,7 +167,7 @@ function check(ctx: Context, expr: Expr, expected: Type): void {
   }
 }
 
-function typesEqual(a: Type, b: Type): boolean {
+export function typesEqual(a: Type, b: Type): boolean {
   if (a.kind !== b.kind) return false
   if (a.kind === 'function' && b.kind === 'function') {
     if (a.params.length !== b.params.length) return false
@@ -179,7 +179,7 @@ function typesEqual(a: Type, b: Type): boolean {
   return true
 }
 
-function typeToString(type: Type): string {
+export function typeToString(type: Type): string {
   switch (type.kind) {
     case 'number': return 'number'
     case 'string': return 'string'
