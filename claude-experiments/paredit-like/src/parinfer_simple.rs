@@ -69,16 +69,27 @@ impl Parinfer {
         let lines: Vec<&str> = self.source.lines().collect();
         let mut result_lines = Vec::new();
         let mut delim_stack: Vec<DelimInfo> = Vec::new();
+        let mut in_string = false;
+        let mut in_comment = false;
 
         for (line_idx, line) in lines.iter().enumerate() {
             let line_indent = line.chars().take_while(|c| c.is_whitespace()).count();
             let mut new_line = String::new();
-            let mut in_string = false;
-            let mut in_comment = false;
             let mut escape_next = false;
 
+            // Reset comment state at start of each line (comments don't span lines)
+            in_comment = false;
+
+            // Check if line ends with multiple closing delimiters
+            let trimmed = line.trim_end();
+            let has_closing_tail = trimmed.len() > 0 &&
+                trimmed.chars().rev().take_while(|&c| matches!(c, ')' | ']' | '}')).count() > 1;
+
+            // Convert line to vec of chars for easier indexing
+            let line_chars: Vec<char> = line.chars().collect();
+
             // Process characters in the line
-            for ch in line.chars() {
+            for (char_idx, &ch) in line_chars.iter().enumerate() {
                 // Handle escape sequences
                 if escape_next {
                     escape_next = false;
@@ -122,8 +133,34 @@ impl Parinfer {
                     // Check if this closing delimiter matches the top of stack
                     if let Some(open_info) = delim_stack.last() {
                         if open_info.delim_type.matches(&close_type) {
-                            delim_stack.pop();
-                            new_line.push(ch);
+                            // Check if remaining chars on this line are all closing delimiters
+                            let in_closing_tail = line_chars[char_idx..].iter()
+                                .all(|&c| matches!(c, ')' | ']' | '}' | ' ' | '\t'));
+
+                            // Only apply indentation-based filtering if:
+                            // - We have multiple closing delimiters at end of line, AND
+                            // - This closer is part of that tail
+                            let should_filter = has_closing_tail && in_closing_tail;
+
+                            if should_filter {
+                                // Check indentation to decide if we should accept this closer
+                                let next_indent = Self::find_next_indent(&lines, line_idx);
+                                let at_eof = line_idx == lines.len() - 1 ||
+                                            lines.iter().skip(line_idx + 1).all(|l| l.trim().is_empty() || l.trim().starts_with(';'));
+
+                                let dedenting = next_indent < line_indent;
+                                let should_close = !dedenting || open_info.line_indent >= next_indent;
+
+                                if should_close || at_eof {
+                                    delim_stack.pop();
+                                    new_line.push(ch);
+                                }
+                                // Otherwise skip it - delimiter should stay open for next line
+                            } else {
+                                // Normal closing delimiter (not in a tail), always accept
+                                delim_stack.pop();
+                                new_line.push(ch);
+                            }
                         }
                         // If doesn't match, skip it (mismatched delimiter)
                     }
@@ -138,20 +175,16 @@ impl Parinfer {
             if !in_string && !in_comment {
                 let next_indent = Self::find_next_indent(&lines, line_idx);
 
-                // Close delimiters that were opened on lines with indent > next_indent
-                let mut to_close = Vec::new();
+                // Close delimiters that were opened at indentation > next_indent
+                // Add them to the end of the current line (Lisp convention)
                 while let Some(open_info) = delim_stack.last() {
                     if next_indent < line_indent && open_info.line_indent > next_indent {
-                        to_close.push(open_info.delim_type);
+                        let delim_type = open_info.delim_type;
                         delim_stack.pop();
+                        new_line.push(delim_type.close_char());
                     } else {
                         break;
                     }
-                }
-
-                // Add closing delimiters to the line
-                for delim_type in to_close {
-                    new_line.push(delim_type.close_char());
                 }
             }
 
@@ -159,9 +192,13 @@ impl Parinfer {
         }
 
         // Close any remaining open delimiters at the end of file
-        while let Some(open_info) = delim_stack.pop() {
+        // Add them all to the last line (Lisp convention)
+        // Only if we're not inside a string (unclosed strings leave delimiters unclosed)
+        if !in_string && !in_comment {
             if let Some(last_line) = result_lines.last_mut() {
-                last_line.push(open_info.delim_type.close_char());
+                while let Some(open_info) = delim_stack.pop() {
+                    last_line.push(open_info.delim_type.close_char());
+                }
             }
         }
 

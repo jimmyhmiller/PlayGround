@@ -1,0 +1,13 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f651eca45f2d8ff1eb4483a5091d79ba3832dd9cd55273a5470021e4c9e3c394 # shrinks to input = "\"\"{\""
+cc 3446c3378fb80565cdaafad7808802569de583600f4b9a22a0ce79b0b6badded # shrinks to input = "\"]"
+cc 5a69fcffb5f57613de6054e7021cee7b11c27f9fb129ef9ecd9786fbf0023fa5 # shrinks to input = "\"has (paren inside\""
+cc adeeda94d2cd844e8ad26009127996cc20a369eda8d083507b6ccb644052c6c4 # shrinks to input = "{\"\\\""
+cc 8013d3e0c7b7c1a619ca50c55ccb6e74e44e0d37792b759c4bed55a64eab4211 # shrinks to input = "{;"
+cc d03e3523accf1e34d5f9798b10455436793f47e51ff84c308767e9dd1a0d60a3 # shrinks to input = "¡{¡\0}"
+cc 67758fbcacfe533827aea424594a7a6c76b455bc984b1a4c1c3b01d6badcf328 # shrinks to input = "{¡ࠀ¡a}"

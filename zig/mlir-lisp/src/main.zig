@@ -597,7 +597,7 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
 
     std.debug.print("✓ MLIR module created successfully!\n", .{});
 
-    // Print the MLIR
+    // Print the MLIR (may crash if malformed)
     std.debug.print("\nGenerated MLIR:\n", .{});
     std.debug.print("----------------------------------------\n", .{});
     if (use_generic_format) {

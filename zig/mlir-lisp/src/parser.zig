@@ -659,7 +659,19 @@ pub const Parser = struct {
                 return error.UnexpectedStructure;
             }
         } else {
-            std.debug.print("\nerror: Expected operation or type annotation in declare\n", .{});
+            std.debug.print("\nerror: Expected operation or type annotation in declare, got {s}\n", .{@tagName(expr.type)});
+            if (expr.type == .value_id) {
+                std.debug.print("Note: declare with a plain value ID like (declare {s} {s}) is not allowed.\n", .{ var_name, expr.data.atom });
+                std.debug.print("This might happen if nested operations were flattened but declare wasn't updated.\n", .{});
+                std.debug.print("The flattener should NOT flatten the expression inside declare.\n", .{});
+            } else {
+                std.debug.print("Expression type: {s}\n", .{@tagName(expr.type)});
+                const printer_mod = @import("printer.zig");
+                var printer = printer_mod.Printer.init(self.allocator);
+                defer printer.deinit();
+                printer.printValue(expr) catch {};
+                std.debug.print("Expression: {s}\n", .{printer.getOutput()});
+            }
             return error.UnexpectedStructure;
         }
 
@@ -751,6 +763,19 @@ pub const Parser = struct {
             // For terse syntax, operands should be value IDs
             if (operand.type != .value_id) {
                 std.debug.print("\nerror: Expected value ID in terse operation at position {d}, got {s}\n", .{ i, @tagName(operand.type) });
+                std.debug.print("Problematic expression: ", .{});
+                const printer_mod = @import("printer.zig");
+                var printer = printer_mod.Printer.init(self.allocator);
+                defer printer.deinit();
+                printer.printValue(operand) catch {};
+                std.debug.print("{s}\n", .{printer.getOutput()});
+
+                var printer2 = printer_mod.Printer.init(self.allocator);
+                defer printer2.deinit();
+                std.debug.print("Full terse operation: ", .{});
+                printer2.printValue(value) catch {};
+                std.debug.print("{s}\n", .{printer2.getOutput()});
+
                 if (operand.type == .identifier) {
                     std.debug.print("Found identifier '{s}' - did you mean '%{s}'?\n", .{ operand.data.atom, operand.data.atom });
                 }
@@ -1017,7 +1042,6 @@ pub const Parser = struct {
     fn parseRegions(self: *Parser, section: *Value) ParseError![]Region {
         // (regions REGION*)
         const list = section.data.list;
-        std.debug.print("[PARSER] parseRegions: list has {d} elements\n", .{list.len()});
 
         var regions = std.ArrayList(Region){};
         errdefer {
@@ -1030,16 +1054,6 @@ pub const Parser = struct {
         var i: usize = 1;
         while (i < list.len()) : (i += 1) {
             const region_value = list.at(i);
-            std.debug.print("[PARSER] parseRegions: element {d} type={s}\n", .{i, @tagName(region_value.type)});
-            if (region_value.type == .list) {
-                const inner = region_value.data.list;
-                if (inner.len() > 0) {
-                    const first = inner.at(0);
-                    if (first.type == .identifier) {
-                        std.debug.print("[PARSER] parseRegions: element {d} is list starting with '{s}'\n", .{i, first.data.atom});
-                    }
-                }
-            }
             const region = try self.parseRegion(region_value);
             try regions.append(self.allocator, region);
         }
@@ -1056,10 +1070,7 @@ pub const Parser = struct {
 
         const first = list.at(0);
         if (first.type != .identifier) return error.ExpectedIdentifier;
-        if (!std.mem.eql(u8, first.data.atom, "region")) {
-            std.debug.print("[PARSER] ERROR: Expected 'region' but got '{s}'\n", .{first.data.atom});
-            return error.UnexpectedStructure;
-        }
+        if (!std.mem.eql(u8, first.data.atom, "region")) return error.UnexpectedStructure;
 
         var blocks = std.ArrayList(Block){};
         errdefer {
@@ -1095,26 +1106,6 @@ pub const Parser = struct {
             std.debug.print("This suggests a region contains operations directly instead of blocks\n", .{});
             std.debug.print("Regions must contain (block ...) wrappers\n", .{});
             return error.UnexpectedStructure;
-        }
-
-        const block_id = @intFromPtr(value);
-        std.debug.print("[PARSER BLOCK-{d}] Parsing block with {d} total elements\n", .{block_id, list.len()});
-
-        // Debug: print all elements in the block list
-        var debug_idx: usize = 0;
-        while (debug_idx < list.len()) : (debug_idx += 1) {
-            const debug_item = list.at(debug_idx);
-            if (debug_item.type == .list) {
-                const debug_list = debug_item.data.list;
-                if (debug_list.len() > 0) {
-                    const debug_first = debug_list.at(0);
-                    if (debug_first.type == .identifier) {
-                        std.debug.print("[PARSER BLOCK-{d}] Element at idx {d}: ({s} ...)\n", .{block_id, debug_idx, debug_first.data.atom});
-                    }
-                }
-            } else {
-                std.debug.print("[PARSER BLOCK-{d}] Element at idx {d}: {s}\n", .{block_id, debug_idx, @tagName(debug_item.type)});
-            }
         }
 
         var block = Block{
@@ -1169,46 +1160,26 @@ pub const Parser = struct {
                 var op_idx = idx;
                 while (op_idx < list.len()) : (op_idx += 1) {
                     const op_value = list.at(op_idx);
-                    if (op_value.type != .list) {
-                        std.debug.print("[PARSER] Skipping non-list at idx {d}: {s}\n", .{op_idx, @tagName(op_value.type)});
-                        continue;
-                    }
+                    if (op_value.type != .list) continue;
 
                     const op_list = op_value.data.list;
-                    if (op_list.isEmpty()) {
-                        std.debug.print("[PARSER] Skipping empty list at idx {d}\n", .{op_idx});
-                        continue;
-                    }
+                    if (op_list.isEmpty()) continue;
 
                     const op_first = op_list.at(0);
-                    if (op_first.type != .identifier) {
-                        std.debug.print("[PARSER] Skipping list with non-identifier first elem at idx {d}: {s}\n", .{op_idx, @tagName(op_first.type)});
-                        continue;
-                    }
+                    if (op_first.type != .identifier) continue;
 
                     const op_name = op_first.data.atom;
-                    std.debug.print("[PARSER BLOCK-{d}] Found operation candidate '{s}' at idx {d}\n", .{block_id, op_name, op_idx});
                     if (std.mem.eql(u8, op_name, "operation")) {
-                        const op = self.parseOperation(op_value) catch |err| {
-                            std.debug.print("[PARSER] ERROR parsing verbose operation at idx {d}: {s}\n", .{op_idx, @errorName(err)});
-                            return err;
-                        };
+                        const op = try self.parseOperation(op_value);
                         try operations.append(self.allocator, op);
-                        std.debug.print("[PARSER] Parsed verbose operation\n", .{});
                     } else if (std.mem.eql(u8, op_name, "declare")) {
                         const op = try self.parseDeclare(op_value);
                         try operations.append(self.allocator, op);
-                        std.debug.print("[PARSER] Parsed declare operation\n", .{});
                     } else if (isTerseOperation(op_name)) {
                         const op = try self.parseTerseOperation(op_value);
                         try operations.append(self.allocator, op);
-                        std.debug.print("[PARSER] Parsed terse operation\n", .{});
-                    } else {
-                        std.debug.print("[PARSER] Skipping non-operation: {s}\n", .{op_name});
                     }
                 }
-
-                std.debug.print("[PARSER BLOCK-{d}] Collected {d} operations for block\n", .{block_id, operations.items.len});
                 block.operations = try operations.toOwnedSlice(self.allocator);
                 break;
             }

@@ -178,7 +178,7 @@ pub const OperationFlattener = struct {
         return new_value;
     }
 
-    /// Check if a Value is an operation (starts with "operation")
+    /// Check if a Value is an operation (starts with "operation", "declare", or terse op like "func.return")
     fn isOperation(self: *OperationFlattener, value: *Value) !bool {
         _ = self;
         if (value.type != .list) return false;
@@ -186,7 +186,21 @@ pub const OperationFlattener = struct {
         if (list.len() == 0) return false;
         const first = list.at(0);
         if (first.type != .identifier) return false;
-        return std.mem.eql(u8, first.data.atom, "operation");
+
+        const name = first.data.atom;
+
+        // Check for verbose operation syntax
+        if (std.mem.eql(u8, name, "operation")) return true;
+
+        // Check for declare syntax
+        if (std.mem.eql(u8, name, "declare")) return true;
+
+        // Check for terse operation syntax (contains a dot, like "func.return", "arith.constant")
+        for (name) |c| {
+            if (c == '.') return true;
+        }
+
+        return false;
     }
 
     /// Flatten a list of operations (main algorithm)
@@ -219,6 +233,37 @@ pub const OperationFlattener = struct {
     /// Flatten a single operation - handles nested operations in operands
     fn flattenOperation(self: *OperationFlattener, op_value: *Value) anyerror!OperationFlattenResult {
         const list = op_value.data.list;
+
+        // Check if this is a declare form: (declare NAME VALUE)
+        // Declare should NOT be flattened - the parser handles it
+        if (list.len() > 0) {
+            const first = list.at(0);
+            if (first.type == .identifier and std.mem.eql(u8, first.data.atom, "declare")) {
+                // Return declare as-is, don't flatten
+                return OperationFlattenResult{
+                    .hoisted_operations = &[_]*Value{},
+                    .operation = op_value,
+                };
+            }
+        }
+
+        // Check if this is a terse operation (first element contains a dot)
+        if (list.len() > 0) {
+            const first = list.at(0);
+            if (first.type == .identifier) {
+                const name = first.data.atom;
+                // Check for dot in name (terse operation like "arith.addi")
+                for (name) |c| {
+                    if (c == '.') {
+                        // This is a terse operation, convert to verbose first
+                        const verbose_op = try self.terseToVerbose(op_value);
+                        // Now flatten the verbose operation
+                        return try self.flattenOperation(verbose_op);
+                    }
+                }
+            }
+        }
+
         var new_list = PersistentVector(*Value).init(self.allocator, null);
         var all_hoisted = std.ArrayList(*Value){};
 
@@ -309,6 +354,36 @@ pub const OperationFlattener = struct {
 
     /// Flatten a single operand - returns the value ID to use and any hoisted operations
     fn flattenOperand(self: *OperationFlattener, operand: *Value) anyerror!FlattenResult {
+        // Check if this is a type annotation (: expr type)
+        if (operand.type == .has_type) {
+            // This is a type annotation - flatten the expression inside
+            const expr = operand.data.has_type.value;
+            const type_expr = operand.data.has_type.type_expr;
+
+            // Recursively flatten the expression
+            const result = try self.flattenOperand(expr);
+
+            // If the expression had no hoisted operations, pass through unchanged
+            if (result.hoisted_operations.len == 0) {
+                return FlattenResult{
+                    .hoisted_operations = &[_]*Value{},
+                    .value_id = operand,
+                };
+            }
+
+            // Expression was flattened - we need to add the type to the hoisted operation
+            // The last hoisted operation is the one that produces the result we care about
+            if (result.hoisted_operations.len > 0) {
+                const last_op = result.hoisted_operations[result.hoisted_operations.len - 1];
+                // Add result-types section to the last hoisted operation
+                const op_with_type = try self.addResultTypes(last_op, type_expr);
+                // Replace the last operation with the typed version
+                result.hoisted_operations[result.hoisted_operations.len - 1] = op_with_type;
+            }
+
+            return result;
+        }
+
         // If it's not a list, it's already a value ID or other atom - pass through
         if (operand.type != .list) {
             return FlattenResult{
@@ -330,6 +405,17 @@ pub const OperationFlattener = struct {
         if (first.type == .identifier and std.mem.eql(u8, first.data.atom, "operation")) {
             // This is a nested operation - flatten it recursively
             return try self.flattenNestedOperation(operand);
+        }
+
+        // Check if this is a terse operation (contains a dot in the name)
+        if (first.type == .identifier) {
+            const name = first.data.atom;
+            for (name) |c| {
+                if (c == '.') {
+                    // This is a terse operation - treat it like a nested operation
+                    return try self.flattenTerseOperation(operand);
+                }
+            }
         }
 
         // Not a nested operation, pass through
@@ -395,6 +481,126 @@ pub const OperationFlattener = struct {
             .hoisted_operations = try all_hoisted.toOwnedSlice(self.allocator),
             .value_id = result_value_id.?,
         };
+    }
+
+    /// Convert a terse operation to verbose format
+    /// (arith.addi {:attr val} %a %b) => (operation (name arith.addi) (attributes ...) (operands %a %b))
+    fn terseToVerbose(self: *OperationFlattener, terse_op: *Value) anyerror!*Value {
+        const list = terse_op.data.list;
+        if (list.len() == 0) {
+            return terse_op;
+        }
+
+        const first = list.at(0);
+        if (first.type != .identifier) {
+            return terse_op;
+        }
+
+        const op_name = first.data.atom;
+
+        // Convert terse operation to verbose format
+        var verbose_list = PersistentVector(*Value).init(self.allocator, null);
+
+        // Add "operation" identifier
+        verbose_list = try verbose_list.push(try self.makeIdentifier("operation"));
+
+        // Add name section: (name op.name)
+        var name_list = PersistentVector(*Value).init(self.allocator, null);
+        name_list = try name_list.push(try self.makeIdentifier("name"));
+        name_list = try name_list.push(try self.makeIdentifier(op_name));
+        const name_section = try self.allocator.create(Value);
+        name_section.* = Value{
+            .type = .list,
+            .data = .{ .list = name_list },
+        };
+        verbose_list = try verbose_list.push(name_section);
+
+        // Add operands section: (operands ...)
+        var operands_list = PersistentVector(*Value).init(self.allocator, null);
+        operands_list = try operands_list.push(try self.makeIdentifier("operands"));
+
+        // Process operands (skip attributes if present)
+        var start_idx: usize = 1;
+        if (list.len() > 1) {
+            const second = list.at(1);
+            if (second.type == .map) {
+                // Has attributes, add them
+                var attrs_list = PersistentVector(*Value).init(self.allocator, null);
+                attrs_list = try attrs_list.push(try self.makeIdentifier("attributes"));
+                attrs_list = try attrs_list.push(second);
+                const attrs_section = try self.allocator.create(Value);
+                attrs_section.* = Value{
+                    .type = .list,
+                    .data = .{ .list = attrs_list },
+                };
+                verbose_list = try verbose_list.push(attrs_section);
+                start_idx = 2;
+            }
+        }
+
+        // Add all operands
+        for (list.slice()[start_idx..]) |operand| {
+            operands_list = try operands_list.push(operand);
+        }
+
+        const operands_section = try self.allocator.create(Value);
+        operands_section.* = Value{
+            .type = .list,
+            .data = .{ .list = operands_list },
+        };
+        verbose_list = try verbose_list.push(operands_section);
+
+        // Create verbose operation value
+        const verbose_op = try self.allocator.create(Value);
+        verbose_op.* = Value{
+            .type = .list,
+            .data = .{ .list = verbose_list },
+        };
+
+        return verbose_op;
+    }
+
+    /// Flatten a terse operation (e.g., (arith.addi %a %b))
+    /// Converts it to verbose format and then flattens it
+    fn flattenTerseOperation(self: *OperationFlattener, terse_op: *Value) anyerror!FlattenResult {
+        const verbose_op = try self.terseToVerbose(terse_op);
+        // Now flatten the verbose operation
+        return try self.flattenNestedOperation(verbose_op);
+    }
+
+    /// Add result-types section to an operation
+    fn addResultTypes(self: *OperationFlattener, op_value: *Value, type_value: *Value) !*Value {
+        const list = op_value.data.list;
+        var new_list = PersistentVector(*Value).init(self.allocator, null);
+
+        // Add "operation" identifier first
+        new_list = try new_list.push(list.at(0));
+
+        // Create result-types section: (result-types TYPE)
+        var types_list = PersistentVector(*Value).init(self.allocator, null);
+        types_list = try types_list.push(try self.makeIdentifier("result-types"));
+        types_list = try types_list.push(type_value);
+
+        const types_section = try self.allocator.create(Value);
+        types_section.* = Value{
+            .type = .list,
+            .data = .{ .list = types_list },
+        };
+
+        // Add result-types section
+        new_list = try new_list.push(types_section);
+
+        // Add rest of the sections
+        for (list.slice()[1..]) |section| {
+            new_list = try new_list.push(section);
+        }
+
+        const new_op = try self.allocator.create(Value);
+        new_op.* = Value{
+            .type = .list,
+            .data = .{ .list = new_list },
+        };
+        return new_op;
     }
 
     /// Add result-bindings section to an operation
