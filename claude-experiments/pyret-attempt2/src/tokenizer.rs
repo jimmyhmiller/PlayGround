@@ -272,14 +272,12 @@ impl Tokenizer {
     }
 
     fn starts_with(&self, s: &str) -> bool {
-        let chars: Vec<char> = s.chars().collect();
-        if self.pos + chars.len() > self.len {
-            return false;
-        }
-        for (i, ch) in chars.iter().enumerate() {
-            if self.input[self.pos + i] != *ch {
+        let mut char_count = 0;
+        for ch in s.chars() {
+            if self.pos + char_count >= self.len || self.input[self.pos + char_count] != ch {
                 return false;
             }
+            char_count += 1;
         }
         true
     }

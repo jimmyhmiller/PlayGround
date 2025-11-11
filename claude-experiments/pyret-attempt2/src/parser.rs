@@ -145,21 +145,6 @@ impl Parser {
         }
     }
 
-    /// Accept any form of left bracket (LBrack, BrackSpace)
-    fn expect_any_lbrack(&mut self) -> ParseResult<Token> {
-        let token_type = self.peek().token_type.clone();
-        if matches!(token_type, TokenType::LBrack | TokenType::BrackSpace) {
-            Ok(self.advance().clone())
-        } else {
-            Err(ParseError::expected(TokenType::LBrack, self.peek().clone()))
-        }
-    }
-
-    /// Check if current token is any form of left paren
-    fn is_lparen(&self) -> bool {
-        matches!(self.peek().token_type, TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace)
-    }
-
     // ========== Common Parsing Patterns ==========
 
     /// Parse optional generic type parameters: <T, U, V>
