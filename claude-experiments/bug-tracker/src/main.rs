@@ -424,17 +424,42 @@ fn close_bug(project: Option<PathBuf>, bug_id: String) -> Result<(), Box<dyn std
     let content = fs::read_to_string(&bugs_file)?;
 
     // Pattern to match a bug section with the given ID
-    let bug_pattern = format!(r"(?s)## .*?\[{}\].*?---\s*\n", regex::escape(&bug_id));
-    let re = Regex::new(&bug_pattern)?;
+    // We'll match line by line to avoid crossing into other bug sections
+    let header_pattern = format!(r"(?m)^## .*?\[{}\]", regex::escape(&bug_id));
+    let header_re = Regex::new(&header_pattern)?;
 
-    if !re.is_match(&content) {
-        return Err(format!("Bug with ID '{}' not found", bug_id).into());
+    // Find the bug header
+    let header_match = header_re.find(&content)
+        .ok_or_else(|| format!("Bug with ID '{}' not found", bug_id))?;
+
+    let start = header_match.start();
+
+    // Find the end by looking for the "---" separator after the header
+    // But stop if we encounter another "## " header first
+    let after_header = &content[header_match.end()..];
+    let separator_pattern = Regex::new(r"(?m)^---\s*\n")?;
+    let next_header_pattern = Regex::new(r"(?m)^## ")?;
+
+    let separator_pos = separator_pattern.find(after_header)
+        .ok_or_else(|| format!("Malformed bug entry for ID '{}'", bug_id))?;
+
+    // Check if there's another header before the separator (would indicate corruption)
+    if let Some(next_header) = next_header_pattern.find(after_header) {
+        if next_header.start() < separator_pos.start() {
+            return Err(format!("Malformed bug entry for ID '{}': found another header before separator", bug_id).into());
+        }
     }
 
-    let new_content = re.replace(&content, "");
+    // The end position is after the separator
+    let end = header_match.end() + separator_pos.end();
+
+    // Remove the bug section
+    let mut new_content = String::new();
+    new_content.push_str(&content[..start]);
+    new_content.push_str(&content[end..]);
 
     // Write back the modified content
-    fs::write(&bugs_file, new_content.as_ref())?;
+    fs::write(&bugs_file, &new_content)?;
 
     println!("✓ Bug '{}' closed and removed from {}", bug_id, bugs_file.display());
     Ok(())
