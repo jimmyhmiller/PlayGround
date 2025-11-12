@@ -29,6 +29,15 @@ fi
 
 echo "Using Pyret repository: $PYRET_REPO"
 
+# Ensure npm dependencies are installed in the Pyret repository
+if [ ! -d "$PYRET_REPO/node_modules" ]; then
+    echo "Installing npm dependencies in Pyret repository..."
+    cd "$PYRET_REPO"
+    npm install
+    cd "$PROJECT_ROOT"
+    echo
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'

@@ -1922,6 +1922,7 @@ impl Parser {
             TokenType::CheckColon => self.parse_check_expr(),
             TokenType::Check => self.parse_check_expr(),
             TokenType::ExamplesColon => self.parse_check_expr(),
+            TokenType::Examples => self.parse_check_expr(),
             TokenType::Spy => self.parse_spy_stmt(),
             TokenType::Method => self.parse_method_expr(),
             TokenType::Table => self.parse_table_expr(),
@@ -2607,8 +2608,8 @@ impl Parser {
         } else if self.matches(&TokenType::Var) {
             // Var binding: var x := 5
             self.parse_var_expr()
-        } else if self.matches(&TokenType::CheckColon) || self.matches(&TokenType::Check) || self.matches(&TokenType::ExamplesColon) {
-            // Check block: check: ... end or check "name": ... end or examples: ... end
+        } else if self.matches(&TokenType::CheckColon) || self.matches(&TokenType::Check) || self.matches(&TokenType::ExamplesColon) || self.matches(&TokenType::Examples) {
+            // Check block: check: ... end or check "name": ... end or examples: ... end or examples "name": ... end
             self.parse_check_expr()
         } else if self.matches(&TokenType::LBrace) {
             // Check if this is a tuple destructuring: {a; b} = {1; 2}
@@ -4678,10 +4679,11 @@ impl Parser {
     fn parse_check_expr(&mut self) -> ParseResult<Expr> {
         let start_token = self.peek().clone();
 
-        // Check for three patterns:
+        // Check for four patterns:
         // 1. check: ... end (CheckColon token)
         // 2. check "string": ... end (Check String Colon tokens)
         // 3. examples: ... end (ExamplesColon token) - keyword-check is false for examples
+        // 4. examples "string": ... end (Examples String Colon tokens) - keyword-check is false
         let (start, name, keyword_check) = if self.matches(&TokenType::CheckColon) {
             let tok = self.advance().clone();
             (tok, None, true)
@@ -4699,10 +4701,21 @@ impl Parser {
             self.expect(TokenType::Colon)?;
 
             (start_token, Some(name_str), true)
+        } else if self.matches(&TokenType::Examples) {
+            self.advance(); // consume EXAMPLES
+
+            // Expect a string for the name
+            let name_token = self.expect(TokenType::String)?;
+            let name_str = name_token.value.clone();
+
+            // Expect colon
+            self.expect(TokenType::Colon)?;
+
+            (start_token, Some(name_str), false) // examples with name has keyword-check = false
         } else {
             return Err(ParseError::general(
                 &start_token,
-                "Expected 'check:', 'examples:', or 'check \"name\":'",
+                "Expected 'check:', 'examples:', 'check \"name\":', or 'examples \"name\":'",
             ));
         };
 
