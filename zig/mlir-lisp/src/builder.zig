@@ -274,6 +274,12 @@ pub const Builder = struct {
 
     /// Build a single operation
     fn buildOperation(self: *Builder, operation: *const parser.Operation) BuildError!mlir.MlirOperation {
+        std.debug.print("  Building operation: {s} (bindings: {d}, operands: {d}, regions: {d})\n", .{
+            operation.name,
+            operation.result_bindings.len,
+            operation.operands.len,
+            operation.regions.len,
+        });
 
         // Parse operands (look up SSA values) - needed before type inference
         var operands = std.ArrayList(mlir.MlirValue){};

@@ -1,0 +1,154 @@
+# Base commit: 8a133f0b6a3f5cacbcee4dffb22f6e9d12f02645 (Merge pull request #1787 from brownplt/horizon)
+diff --git a/src/arr/trove/json-structs.arr b/src/arr/trove/json-structs.arr
+index b1e125a4b..6ab787477 100644
+--- a/src/arr/trove/json-structs.arr
++++ b/src/arr/trove/json-structs.arr
+@@ -6,6 +6,81 @@ import string-dict as SD
+ include lists
+ include arrays
+ 
++fun escape-json-string(s :: String) -> String:
++  doc: ```Escapes a string for JSON serialization according to RFC 8259.
++       This includes escaping control characters, quotes, and backslashes.```
++
++  # Convert a number (0-15) to its hex digit
++  fun num-to-hex-digit(n :: Number) -> String:
++    if n == 0: "0"
++    else if n == 1: "1"
++    else if n == 2: "2"
++    else if n == 3: "3"
++    else if n == 4: "4"
++    else if n == 5: "5"
++    else if n == 6: "6"
++    else if n == 7: "7"
++    else if n == 8: "8"
++    else if n == 9: "9"
++    else if n == 10: "a"
++    else if n == 11: "b"
++    else if n == 12: "c"
++    else if n == 13: "d"
++    else if n == 14: "e"
++    else: "f"
++    end
++  end
++
++  # Convert a number to 4-digit hex string
++  fun to-hex-4digit(n :: Number) -> String:
++    d3 = num-modulo(num-floor(n / 4096), 16)
++    d2 = num-modulo(num-floor(n / 256), 16)
++    d1 = num-modulo(num-floor(n / 16), 16)
++    d0 = num-modulo(n, 16)
++    num-to-hex-digit(d3) + num-to-hex-digit(d2) + num-to-hex-digit(d1) + num-to-hex-digit(d0)
++  end
++
++  # Helper function to escape a single character
++  fun escape-char(c :: String, idx :: Number) -> String:
++    code = string-to-code-point(c)
++    if code == 34: # " (double quote)
++      '\\"'
++    else if code == 92: # \ (backslash)
++      '\\\\'
++    else if code == 8: # \b (backspace)
++      '\\b'
++    else if code == 12: # \f (form feed)
++      '\\f'
++    else if code == 10: # \n (newline)
++      '\\n'
++    else if code == 13: # \r (carriage return)
++      '\\r'
++    else if code == 9: # \t (tab)
++      '\\t'
++    else if (code >= 0) and (code <= 31): # Other control characters
++      # Format as \uXXXX
++      "\\u" + to-hex-4digit(code)
++    else:
++      c
++    end
++  end
++
++  # Build the escaped string character by character
++  # Using a list to collect parts, then join at the end for better performance
++  len = string-length(s)
++  fun build-escaped(idx :: Number, parts :: List<String>) -> String:
++    if idx >= len:
++      '"' + parts.reverse().join-str("") + '"'
++    else:
++      char = string-char-at(s, idx)
++      escaped = escape-char(char, idx)
++      build-escaped(idx + 1, link(escaped, parts))
++    end
++  end
++
++  build-escaped(0, empty)
++end
++
+ data JSON:
+   | j-obj(dict :: SD.StringDict<JSON>) with:
+     method native(self) block:
+@@ -50,7 +125,7 @@ data JSON:
+       self.s
+     end,
+     method serialize(self):
+-      torepr(self.s)
++      escape-json-string(self.s)
+     end
+   | j-bool(b :: Boolean) with:
+     method native(self):
+diff --git a/tests/pyret/tests/test-json.arr b/tests/pyret/tests/test-json.arr
+index b05f14d25..4fad4a900 100644
+--- a/tests/pyret/tests/test-json.arr
++++ b/tests/pyret/tests/test-json.arr
+@@ -89,3 +89,53 @@ check "tojson":
+   J.tojson([array: 1, 2, 3]) is
+     J.j-arr([list: J.j-num(1), J.j-num(2), J.j-num(3)])
+ end
++
++check "string escaping":
++  # Test that control characters are properly escaped in JSON output
++
++  # Newline should be escaped as \n
++  newline-str = ```line1
++line2```
++  J.tojson(newline-str).serialize() is "\"line1\\nline2\""
++
++  # Tab should be escaped as \t
++  tab-str = "tab" + string-from-code-point(9) + "here"
++  J.tojson(tab-str).serialize() is "\"tab\\there\""
++
++  # Carriage return should be escaped as \r
++  # Note: Using string-from-code-point to create \r since it's hard to type
++  cr-str = "text" + string-from-code-point(13) + "more"
++  J.tojson(cr-str).serialize() is "\"text\\rmore\""
++
++  # Backspace should be escaped as \b
++  bs-str = "text" + string-from-code-point(8) + "more"
++  J.tojson(bs-str).serialize() is "\"text\\bmore\""
++
++  # Form feed should be escaped as \f
++  ff-str = "text" + string-from-code-point(12) + "more"
++  J.tojson(ff-str).serialize() is "\"text\\fmore\""
++
++  # Double quote should be escaped as \"
++  quote-str = "Say \"hello\""
++  J.tojson(quote-str).serialize() is "\"Say \\\"hello\\\"\""
++
++  # Backslash should be escaped as \\
++  backslash-str = "path" + string-from-code-point(92) + "to" + string-from-code-point(92) + "file"
++  J.tojson(backslash-str).serialize() is "\"path\\\\to\\\\file\""
++
++  # Other control characters (code point < 32) should be escaped as \uXXXX
++  null-char = string-from-code-point(0)
++  J.tojson(null-char).serialize() is "\"\\u0000\""
++
++  # ASCII code 1 should be \u0001
++  soh-char = string-from-code-point(1)
++  J.tojson(soh-char).serialize() is "\"\\u0001\""
++
++  # ASCII code 31 should be \u001f
++  unit-sep = string-from-code-point(31)
++  J.tojson(unit-sep).serialize() is "\"\\u001f\""
++
++  # Regular printable characters should not be escaped
++  normal-str = "Hello, world! 123"
++  J.tojson(normal-str).serialize() is "\"Hello, world! 123\""
++end
