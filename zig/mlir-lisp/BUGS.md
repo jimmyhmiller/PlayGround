@@ -16,10 +16,10 @@ To add, close, or list bugs, use:
 
 This file tracks bugs discovered during development.
 
-## Segmentation fault during mlirOperationPrint with complex recursive program [flimsy-defiant-dingo]
+## Segmentation fault during mlirOperationPrint with complex recursive program [dear-ignorant-dormouse]
 
-**ID:** flimsy-defiant-dingo
-**Timestamp:** 2025-11-11 22:25:42
+**ID:** dear-ignorant-dormouse
+**Timestamp:** 2025-11-11 22:54:37
 **Severity:** critical
 **Location:** src/mlir/c.zig (print() at line 118)
 **Tags:** mlir, segfault, printing, recursion

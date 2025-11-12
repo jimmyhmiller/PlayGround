@@ -253,9 +253,13 @@ pub const OperationFlattener = struct {
         return new_value;
     }
 
-    /// Check if a Value is an operation (starts with "operation", "declare", or terse op like "func.return")
+    /// Check if a Value is an operation (starts with "operation", "declare", terse op, or has_type)
     fn isOperation(self: *OperationFlattener, value: *Value) !bool {
         _ = self;
+
+        // has_type expressions like (: (func.call ...) i32) are operations that need flattening
+        if (value.type == .has_type) return true;
+
         if (value.type != .list) return false;
         const list = value.data.list;
         if (list.len() == 0) return false;
@@ -451,6 +455,33 @@ pub const OperationFlattener = struct {
 
     /// Flatten a single operation - handles nested operations in operands
     fn flattenOperation(self: *OperationFlattener, op_value: *Value) anyerror!OperationFlattenResult {
+        // Handle has_type expressions: (: (operation ...) type)
+        if (op_value.type == .has_type) {
+            const inner_expr = op_value.data.has_type.value;
+            const type_expr = op_value.data.has_type.type_expr;
+
+            // Flatten the inner expression
+            const result = try self.flattenOperation(inner_expr);
+
+            // If the inner expression had no hoisted operations, return as-is
+            if (result.hoisted_operations.len == 0) {
+                return OperationFlattenResult{
+                    .hoisted_operations = &[_]*Value{},
+                    .operation = op_value,
+                };
+            }
+
+            // Add the type to the last hoisted operation (the one that produces the result)
+            if (result.hoisted_operations.len > 0) {
+                const last_op = result.hoisted_operations[result.hoisted_operations.len - 1];
+                const op_with_type = try self.addResultTypes(last_op, type_expr);
+                result.hoisted_operations[result.hoisted_operations.len - 1] = op_with_type;
+            }
+
+            // Return the hoisted operations and the value ID from the result
+            return result;
+        }
+
         const list = op_value.data.list;
 
         // Check if this is a declare form: (declare NAME VALUE)
