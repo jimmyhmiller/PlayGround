@@ -597,7 +597,17 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
 
     std.debug.print("✓ MLIR module created successfully!\n", .{});
 
-    // Verify the module before printing to catch malformed IR
+    // Print the MLIR first to see what was generated
+    std.debug.print("\nGenerated MLIR:\n", .{});
+    std.debug.print("----------------------------------------\n", .{});
+    if (use_generic_format) {
+        mlir_module.printGeneric();
+    } else {
+        mlir_module.print();
+    }
+    std.debug.print("----------------------------------------\n\n", .{});
+
+    // Verify the module after printing
     std.debug.print("\nVerifying MLIR module...\n", .{});
     if (!mlir_module.verify()) {
         std.debug.print("ERROR: Module verification failed!\n", .{});
@@ -608,16 +618,6 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
         return error.ModuleVerificationFailed;
     }
     std.debug.print("✓ Module verification passed!\n", .{});
-
-    // Print the MLIR
-    std.debug.print("\nGenerated MLIR:\n", .{});
-    std.debug.print("----------------------------------------\n", .{});
-    if (use_generic_format) {
-        mlir_module.printGeneric();
-    } else {
-        mlir_module.print();
-    }
-    std.debug.print("----------------------------------------\n\n", .{});
 
     // Check if the module has a main function (recursively search through regions)
     const has_main = blk: {
