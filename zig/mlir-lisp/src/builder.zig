@@ -146,11 +146,9 @@ pub const Builder = struct {
         const body = mod.getBody();
 
         // Build each operation
-        for (operations, 0..) |operation, i| {
-            std.debug.print("Building operation {}/{}: {s}\n", .{ i + 1, operations.len, operation.name });
+        for (operations) |operation| {
             const mlir_op = try self.buildOperation(operation);
             mlir.Block.appendOperation(body, mlir_op);
-            std.debug.print("  ✓ Operation {s} built successfully\n", .{operation.name});
         }
 
         return mod;
