@@ -597,8 +597,8 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
 
     std.debug.print("✓ MLIR module created successfully!\n", .{});
 
-    // Print the MLIR (may crash if malformed)
-    std.debug.print("\nGenerated MLIR:\n", .{});
+    // Print the MLIR BEFORE verifying to see what was generated
+    std.debug.print("\nGenerated MLIR (before verification):\n", .{});
     std.debug.print("----------------------------------------\n", .{});
     if (use_generic_format) {
         mlir_module.printGeneric();
@@ -606,6 +606,18 @@ fn runFile(backing_allocator: std.mem.Allocator, file_path: []const u8, transfor
         mlir_module.print();
     }
     std.debug.print("----------------------------------------\n\n", .{});
+
+    // Verify the module after printing
+    std.debug.print("\nVerifying MLIR module...\n", .{});
+    if (!mlir_module.verify()) {
+        std.debug.print("ERROR: Module verification failed!\n", .{});
+        std.debug.print("The generated MLIR is malformed. This usually means:\n", .{});
+        std.debug.print("  - Invalid operation structure or nesting\n", .{});
+        std.debug.print("  - Missing required attributes or regions\n", .{});
+        std.debug.print("  - Type mismatches\n", .{});
+        return error.ModuleVerificationFailed;
+    }
+    std.debug.print("✓ Module verification passed!\n", .{});
 
     // Check if the module has a main function (recursively search through regions)
     const has_main = blk: {

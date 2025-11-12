@@ -2143,30 +2143,30 @@ impl Parser {
         )
     }
 
-    /// Parse a binary operator token and return the operator name
-    fn parse_binop(&mut self) -> ParseResult<String> {
+    /// Parse a binary operator token and return the operator
+    fn parse_binop(&mut self) -> ParseResult<BinOp> {
         let token = self.peek().clone();
         let op = match token.token_type {
-            TokenType::Plus => "op+",
-            TokenType::Dash => "op-",
-            TokenType::Times => "op*",
-            TokenType::Slash => "op/",
-            TokenType::Leq => "op<=",
-            TokenType::Geq => "op>=",
-            TokenType::EqualEqual => "op==",
-            TokenType::Spaceship => "op<=>",
-            TokenType::EqualTilde => "op=~",
-            TokenType::Neq => "op<>",
-            TokenType::Lt => "op<",
-            TokenType::Gt => "op>",
-            TokenType::And => "opand",
-            TokenType::Or => "opor",
-            TokenType::Caret => "op^",
+            TokenType::Plus => BinOp::Plus,
+            TokenType::Dash => BinOp::Minus,
+            TokenType::Times => BinOp::Times,
+            TokenType::Slash => BinOp::Divide,
+            TokenType::Leq => BinOp::Leq,
+            TokenType::Geq => BinOp::Geq,
+            TokenType::EqualEqual => BinOp::Equal,
+            TokenType::Spaceship => BinOp::Spaceship,
+            TokenType::EqualTilde => BinOp::Roughly,
+            TokenType::Neq => BinOp::Neq,
+            TokenType::Lt => BinOp::Lt,
+            TokenType::Gt => BinOp::Gt,
+            TokenType::And => BinOp::And,
+            TokenType::Or => BinOp::Or,
+            TokenType::Caret => BinOp::Caret,
             _ => return Err(ParseError::unexpected(token)),
         };
 
         self.advance();
-        Ok(op.to_string())
+        Ok(op)
     }
 
     /// Parse a check operator token and return CheckOp enum

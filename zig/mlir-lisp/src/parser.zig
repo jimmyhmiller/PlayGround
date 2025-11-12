@@ -1261,6 +1261,33 @@ pub const Parser = struct {
                 continue;
             }
 
+            // Handle typed values like (: %val type) - yield the inner value
+            if (op_value.type == .has_type) {
+                const inner_value = op_value.data.has_type.value;
+                if (inner_value.type == .value_id) {
+                    const yield_name = getTerminatorForOp(parent_op_name);
+                    const value_id = inner_value.data.atom;
+
+                    // Allocate operands array
+                    const operands = try self.allocator.alloc([]const u8, 1);
+                    operands[0] = value_id;
+
+                    const yield_op = Operation{
+                        .name = yield_name,
+                        .result_bindings = &[_][]const u8{},
+                        .result_types = &[_]TypeExpr{},
+                        .operands = operands,
+                        .attributes = &[_]Attribute{},
+                        .successors = &[_]Successor{},
+                        .regions = &[_]Region{},
+                        .location = null,
+                    };
+                    try operations.append(self.allocator, yield_op);
+                    continue;
+                }
+                // If the inner value is a list (operation), it will be handled below
+            }
+
             if (op_value.type != .list) continue;
 
             const op_list = op_value.data.list;

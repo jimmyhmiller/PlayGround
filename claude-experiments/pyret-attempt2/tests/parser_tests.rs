@@ -1,4 +1,4 @@
-use pyret_attempt2::{Parser, Expr, Member, Name, ConstructModifier, Bind, Program, Provide, FileRegistry};
+use pyret_attempt2::{Parser, Expr, Member, Name, ConstructModifier, Bind, Program, Provide, FileRegistry, BinOp};
 use pyret_attempt2::tokenizer::Tokenizer;
 
 /// Helper to parse a string into an expression
@@ -189,7 +189,7 @@ fn test_parse_simple_addition() {
 
     match expr {
         Expr::SOp { op, left, right, .. } => {
-            assert_eq!(op, "op+");
+            assert_eq!(op, BinOp::Plus);
 
             match *left {
                 Expr::SNum { value, .. } => assert_eq!(value, "1"),
@@ -212,7 +212,7 @@ fn test_parse_left_associative() {
 
     match expr {
         Expr::SOp { op, left, right, .. } => {
-            assert_eq!(op, "op+");
+            assert_eq!(op, BinOp::Plus);
 
             // Right should be just 3
             match *right {
@@ -223,7 +223,7 @@ fn test_parse_left_associative() {
             // Left should be (1 + 2)
             match *left {
                 Expr::SOp { op, left, right, .. } => {
-                    assert_eq!(op, "op+");
+                    assert_eq!(op, BinOp::Plus);
                     match *left {
                         Expr::SNum { value, .. } => assert_eq!(value, "1"),
                         _ => panic!("Expected inner left to be SNum(1)"),
@@ -247,7 +247,7 @@ fn test_parse_multiple_operators() {
     // With flat precedence and left-associativity, this should be (x + y) * z
     match expr {
         Expr::SOp { op, .. } => {
-            assert_eq!(op, "op*");
+            assert_eq!(op, BinOp::Times);
         }
         _ => panic!("Expected SOp, got {:?}", expr),
     }
@@ -259,7 +259,7 @@ fn test_parse_subtraction() {
 
     match expr {
         Expr::SOp { op, left, right, .. } => {
-            assert_eq!(op, "op-");
+            assert_eq!(op, BinOp::Minus);
 
             match *left {
                 Expr::SNum { value, .. } => assert_eq!(value, "10"),
@@ -281,7 +281,7 @@ fn test_parse_comparison() {
 
     match expr {
         Expr::SOp { op, .. } => {
-            assert_eq!(op, "op<");
+            assert_eq!(op, BinOp::Lt);
         }
         _ => panic!("Expected SOp, got {:?}", expr),
     }
@@ -293,7 +293,7 @@ fn test_parse_logical_and() {
 
     match expr {
         Expr::SOp { op, .. } => {
-            assert_eq!(op, "opand");
+            assert_eq!(op, BinOp::And);
         }
         _ => panic!("Expected SOp, got {:?}", expr),
     }
@@ -336,7 +336,7 @@ fn test_parse_paren_with_binop() {
         Expr::SParen { expr, .. } => {
             match *expr {
                 Expr::SOp { op, left, right, .. } => {
-                    assert_eq!(op, "op+");
+                    assert_eq!(op, BinOp::Plus);
                     match (*left, *right) {
                         (Expr::SNum { value: v1, .. }, Expr::SNum { value: v2, .. }) => {
                             assert_eq!(v1, "1");
@@ -484,13 +484,13 @@ fn test_parse_function_call_with_expr_args() {
 
             // First arg should be (1 + 2)
             match &*args[0] {
-                Expr::SOp { op, .. } => assert_eq!(op, "op+"),
+                Expr::SOp { op, .. } => assert_eq!(*op, BinOp::Plus),
                 _ => panic!("Expected SOp for first arg"),
             }
 
             // Second arg should be (3 * 4)
             match &*args[1] {
-                Expr::SOp { op, .. } => assert_eq!(op, "op*"),
+                Expr::SOp { op, .. } => assert_eq!(*op, BinOp::Times),
                 _ => panic!("Expected SOp for second arg"),
             }
         }
@@ -544,7 +544,7 @@ fn test_parse_function_in_binop() {
 
     match expr {
         Expr::SOp { op, left, right, .. } => {
-            assert_eq!(op, "op+");
+            assert_eq!(op, BinOp::Plus);
 
             // Left should be f(x)
             match *left {
@@ -570,13 +570,13 @@ fn test_parse_paren_changes_associativity() {
 
     match expr {
         Expr::SOp { op, right, .. } => {
-            assert_eq!(op, "op+");
+            assert_eq!(op, BinOp::Plus);
 
             // Right should be parenthesized (2 * 3)
             match *right {
                 Expr::SParen { expr, .. } => {
                     match *expr {
-                        Expr::SOp { op, .. } => assert_eq!(op, "op*"),
+                        Expr::SOp { op, .. } => assert_eq!(op, BinOp::Times),
                         _ => panic!("Expected SOp inside paren"),
                     }
                 }
@@ -734,13 +734,13 @@ fn test_parse_construct_with_expressions() {
 
             // First element should be 1 + 2
             match &*values[0] {
-                Expr::SOp { op, .. } => assert_eq!(op, "op+"),
+                Expr::SOp { op, .. } => assert_eq!(*op, BinOp::Plus),
                 _ => panic!("Expected SOp"),
             }
 
             // Second element should be 3 * 4
             match &*values[1] {
-                Expr::SOp { op, .. } => assert_eq!(op, "op*"),
+                Expr::SOp { op, .. } => assert_eq!(*op, BinOp::Times),
                 _ => panic!("Expected SOp"),
             }
         }
@@ -843,7 +843,7 @@ fn test_parse_dot_access_in_binop() {
 
     match expr {
         Expr::SOp { op, left, right, .. } => {
-            assert_eq!(op, "op+");
+            assert_eq!(op, BinOp::Plus);
 
             // Left should be obj.x
             match &*left {
@@ -998,7 +998,7 @@ fn test_parse_bracket_with_expression() {
         Expr::SBracket { field, .. } => {
             // Field should be i + 1
             match &*field {
-                Expr::SOp { op, .. } => assert_eq!(op, "op+"),
+                Expr::SOp { op, .. } => assert_eq!(*op, BinOp::Plus),
                 _ => panic!("Expected SOp"),
             }
         }
@@ -1098,7 +1098,7 @@ fn test_parse_object_with_expressions() {
                 Member::SDataField { name, value, .. } => {
                     assert_eq!(name, "sum");
                     match value.as_ref() {
-                        Expr::SOp { op, .. } => assert_eq!(op, "op+"),
+                        Expr::SOp { op, .. } => assert_eq!(*op, BinOp::Plus),
                         _ => panic!("Expected SOp"),
                     }
                 }
@@ -1373,13 +1373,13 @@ fn test_parse_block_multiple_expressions() {
 
                     // First statement: 1 + 2
                     match stmts[0].as_ref() {
-                        Expr::SOp { op, .. } => assert_eq!(op, "op+"),
+                        Expr::SOp { op, .. } => assert_eq!(*op, BinOp::Plus),
                         _ => panic!("Expected SOp for first statement"),
                     }
 
                     // Second statement: 3 * 4
                     match stmts[1].as_ref() {
-                        Expr::SOp { op, .. } => assert_eq!(op, "op*"),
+                        Expr::SOp { op, .. } => assert_eq!(*op, BinOp::Times),
                         _ => panic!("Expected SOp for second statement"),
                     }
                 }
@@ -1528,7 +1528,7 @@ fn test_parse_let_with_expression() {
 
             // Value should be SOp (2 + 3)
             match *value {
-                Expr::SOp { ref op, .. } => assert_eq!(op, "op+"),
+                Expr::SOp { ref op, .. } => assert_eq!(*op, BinOp::Plus),
                 _ => panic!("Expected SOp"),
             }
         }
@@ -1577,7 +1577,7 @@ fn test_parse_simple_for() {
                 Expr::SBlock { ref stmts, .. } => {
                     assert_eq!(stmts.len(), 1);
                     match stmts[0].as_ref() {
-                        Expr::SOp { op, .. } => assert_eq!(op, "op+"),
+                        Expr::SOp { op, .. } => assert_eq!(*op, BinOp::Plus),
                         _ => panic!("Expected SOp in body"),
                     }
                 }

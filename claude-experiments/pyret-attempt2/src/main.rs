@@ -1,5 +1,5 @@
 use clap::{Parser as ClapParser, ValueEnum};
-use pyret_attempt2::{ast::*, parser::Parser, tokenizer::Tokenizer};
+use pyret_attempt2::{ast::*, parser::Parser, tokenizer::Tokenizer, SchemeCompiler};
 use std::fs;
 use std::path::PathBuf;
 
@@ -11,6 +11,8 @@ enum Mode {
     Parse,
     /// Parse the input and output Pyret-compatible JSON
     Json,
+    /// Compile to R4RS Scheme
+    Scheme,
 }
 
 #[derive(ClapParser, Debug)]
@@ -49,6 +51,7 @@ fn main() -> anyhow::Result<()> {
         println!("  cargo run -- --mode tokenize myfile.arr");
         println!("  cargo run -- --mode parse myfile.arr");
         println!("  cargo run -- --mode json myfile.arr");
+        println!("  cargo run -- --mode scheme myfile.arr");
         println!("  cargo run -- myfile.arr  (defaults to json mode)");
         return Ok(());
     };
@@ -116,6 +119,27 @@ fn main() -> anyhow::Result<()> {
                         serde_json::to_string(&program)?
                     };
                     println!("{}", json_str);
+                }
+                Err(e) => {
+                    eprintln!("Parse error: {:?}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Mode::Scheme => {
+            let mut parser = Parser::new(tokens, file_id);
+            match parser.parse_program() {
+                Ok(program) => {
+                    let mut compiler = SchemeCompiler::new();
+                    match compiler.compile_program(&program) {
+                        Ok(scheme_code) => {
+                            println!("{}", scheme_code);
+                        }
+                        Err(e) => {
+                            eprintln!("Compilation error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("Parse error: {:?}", e);

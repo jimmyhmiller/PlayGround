@@ -482,6 +482,15 @@ pub const OperationFlattener = struct {
             return result;
         }
 
+        // If this is not a list, it's a simple value (value_id, identifier, etc.)
+        // Return it as-is with no hoisted operations
+        if (op_value.type != .list) {
+            return OperationFlattenResult{
+                .hoisted_operations = &[_]*Value{},
+                .operation = op_value,
+            };
+        }
+
         const list = op_value.data.list;
 
         // Check if this is a declare form: (declare NAME VALUE)

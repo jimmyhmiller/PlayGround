@@ -30,6 +30,7 @@
 //! ```
 
 pub mod ast;
+pub mod codegen;
 pub mod error;
 pub mod parser;
 pub mod tokenizer;
@@ -37,6 +38,7 @@ pub mod pyret_json;
 
 // Re-export main types
 pub use ast::*;
+pub use codegen::SchemeCompiler;
 pub use error::{ParseError, ParseResult};
 pub use parser::Parser;
 pub use tokenizer::Tokenizer;
