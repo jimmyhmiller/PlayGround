@@ -62,8 +62,7 @@ fn main() {
     println!("=========================\n");
 
     // Ensure cache directories exist
-    fs::create_dir_all("tests/pyret-cache/asts")
-        .expect("Failed to create cache directory");
+    fs::create_dir_all("tests/pyret-cache/asts").expect("Failed to create cache directory");
 
     // Read comparison_tests.rs and extract test inputs
     let test_file = fs::read_to_string("tests/comparison_tests.rs")
@@ -165,7 +164,12 @@ fn main() {
             continue;
         }
 
-        print!("[{}/{}] Generating {} ... ", i + 1, test_inputs.len(), test_name);
+        print!(
+            "[{}/{}] Generating {} ... ",
+            i + 1,
+            test_inputs.len(),
+            test_name
+        );
         std::io::stdout().flush().unwrap();
 
         match run_pyret_parser(code) {

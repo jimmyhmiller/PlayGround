@@ -166,9 +166,7 @@ mod tests {
         let tokens = tokenizer.tokenize();
 
         assert!(!tokens.is_empty());
-        assert!(tokens
-            .iter()
-            .any(|t| t.token_type == TokenType::Fun));
+        assert!(tokens.iter().any(|t| t.token_type == TokenType::Fun));
         assert!(tokens
             .iter()
             .any(|t| t.token_type == TokenType::Name && t.value == "factorial"));

@@ -1,5 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
-use pyret_attempt2::{Parser, Tokenizer, FileId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use pyret_attempt2::{FileId, Parser, Tokenizer};
 
 /// Generate a large valid Pyret program with various constructs
 fn generate_large_pyret_code(num_lines: usize) -> String {
@@ -51,10 +51,7 @@ fn generate_large_pyret_code(num_lines: usize) -> String {
             }
             5 => {
                 // Lambda
-                code.push_str(&format!(
-                    "mapper{} = lam(x): x + {} end\n\n",
-                    i, i
-                ));
+                code.push_str(&format!("mapper{} = lam(x): x + {} end\n\n", i, i));
             }
             6 => {
                 // Object literal
@@ -74,7 +71,13 @@ fn generate_large_pyret_code(num_lines: usize) -> String {
                 // Check block
                 code.push_str(&format!(
                     "check \"test{}\":\n  {} + {} is {}\n  {} * {} is {}\nend\n\n",
-                    i, i, 1, i + 1, i, 2, i * 2
+                    i,
+                    i,
+                    1,
+                    i + 1,
+                    i,
+                    2,
+                    i * 2
                 ));
             }
             _ => {

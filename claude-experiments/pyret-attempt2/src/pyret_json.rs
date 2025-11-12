@@ -1,7 +1,7 @@
-use crate::{Expr, Program, Loc, FileRegistry};
-use serde_json::{json, Value};
+use crate::{Expr, FileRegistry, Loc, Program};
 use num_bigint::BigInt;
 use num_traits::Zero;
+use serde_json::{json, Value};
 
 /// Convert a Loc to Pyret's srcloc string representation
 pub fn loc_to_srcloc_string(loc: &Loc, registry: &FileRegistry) -> String {
@@ -110,7 +110,11 @@ pub fn expand_scientific_notation(s: &str) -> Option<String> {
                 if result.is_empty() {
                     result = "0".to_string();
                 }
-                Some(if negative { format!("-{}", result) } else { result })
+                Some(if negative {
+                    format!("-{}", result)
+                } else {
+                    result
+                })
             } else {
                 // Would have a fractional part
                 None
@@ -118,7 +122,11 @@ pub fn expand_scientific_notation(s: &str) -> Option<String> {
         } else {
             // No decimal point - simple case
             let result = format!("{}{}", mantissa_str, "0".repeat(exponent as usize));
-            Some(if negative { format!("-{}", result) } else { result })
+            Some(if negative {
+                format!("-{}", result)
+            } else {
+                result
+            })
         }
     } else {
         // Negative exponent - create a fraction
@@ -138,7 +146,11 @@ pub fn expand_scientific_notation(s: &str) -> Option<String> {
             let combined = format!("{}{}", int_part, frac_part);
             // Strip leading zeros
             let numerator = combined.trim_start_matches('0').to_string();
-            let numerator = if numerator.is_empty() { "0".to_string() } else { numerator };
+            let numerator = if numerator.is_empty() {
+                "0".to_string()
+            } else {
+                numerator
+            };
             (numerator, decimal_places)
         } else {
             (mantissa_str.to_string(), 0)
@@ -161,7 +173,11 @@ pub fn expand_scientific_notation(s: &str) -> Option<String> {
 
         // Return as fraction string "numerator/denominator"
         let result = format!("{}/{}", simplified_num, simplified_den);
-        Some(if negative { format!("-{}", result) } else { result })
+        Some(if negative {
+            format!("-{}", result)
+        } else {
+            result
+        })
     }
 }
 
@@ -271,7 +287,8 @@ pub fn float_to_fraction_string(f: f64) -> String {
     if f.fract() == 0.0 {
         // For very large numbers, f64 loses precision
         // So we need to format them more carefully
-        if f.abs() < 9007199254740992.0 {  // 2^53 - max safe integer in f64
+        if f.abs() < 9007199254740992.0 {
+            // 2^53 - max safe integer in f64
             return format!("{}", f as i64);
         } else {
             // For numbers beyond f64's precision, format as float
@@ -362,7 +379,7 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                             // First check the exponent
                             let sci = format!("{:e}", n);
                             if let Some(e_pos) = sci.find('e') {
-                                if let Ok(exponent) = sci[e_pos+1..].parse::<i32>() {
+                                if let Ok(exponent) = sci[e_pos + 1..].parse::<i32>() {
                                     if (-6..0).contains(&exponent) {
                                         // Expand to decimal form
                                         // e.g., 1e-5 -> 0.00001
@@ -392,7 +409,7 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                             // Pyret uses scientific notation for exponents < -6 (e.g., 1e-7)
                             let sci = format!("{:e}", n);
                             if let Some(e_pos) = sci.find('e') {
-                                if let Ok(exponent) = sci[e_pos+1..].parse::<i32>() {
+                                if let Ok(exponent) = sci[e_pos + 1..].parse::<i32>() {
                                     if exponent < -6 {
                                         // Use scientific notation with normalized format
                                         format!("~{}", normalize_scientific_notation(&sci))
@@ -472,7 +489,13 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "id": name_to_pyret_json(id, registry)
             })
         }
-        Expr::SOp { op, op_l, left, right, .. } => {
+        Expr::SOp {
+            op,
+            op_l,
+            left,
+            right,
+            ..
+        } => {
             json!({
                 "type": "s-op",
                 "op": op,
@@ -501,7 +524,12 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "params": params.iter().map(|x| ann_to_pyret_json(x, registry)).collect::<Vec<_>>()
             })
         }
-        Expr::SConstruct { modifier, constructor, values, .. } => {
+        Expr::SConstruct {
+            modifier,
+            constructor,
+            values,
+            ..
+        } => {
             json!({
                 "type": "s-construct",
                 "modifier": modifier_to_pyret_json(modifier, registry),
@@ -530,7 +558,12 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "field": expr_to_pyret_json(field, registry)
             })
         }
-        Expr::SCheck { name, body, keyword_check, .. } => {
+        Expr::SCheck {
+            name,
+            body,
+            keyword_check,
+            ..
+        } => {
             json!({
                 "type": "s-check",
                 "name": name.as_ref(),
@@ -538,7 +571,14 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "keyword-check": keyword_check
             })
         }
-        Expr::SCheckTest { op, refinement, left, right, cause, .. } => {
+        Expr::SCheckTest {
+            op,
+            refinement,
+            left,
+            right,
+            cause,
+            ..
+        } => {
             json!({
                 "type": "s-check-test",
                 "op": check_op_to_pyret_json(op, registry),
@@ -560,7 +600,18 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "fields": fields.iter().map(|x| member_to_pyret_json(x, registry)).collect::<Vec<_>>()
             })
         }
-        Expr::SFun { name, params, args, ann, doc, body, check, check_loc, blocky, .. } => {
+        Expr::SFun {
+            name,
+            params,
+            args,
+            ann,
+            doc,
+            body,
+            check,
+            check_loc,
+            blocky,
+            ..
+        } => {
             json!({
                 "type": "s-fun",
                 "name": name,
@@ -574,7 +625,18 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "blocky": blocky
             })
         }
-        Expr::SMethod { name, params, args, ann, doc, body, check, check_loc, blocky, .. } => {
+        Expr::SMethod {
+            name,
+            params,
+            args,
+            ann,
+            doc,
+            body,
+            check,
+            check_loc,
+            blocky,
+            ..
+        } => {
             json!({
                 "type": "s-method",
                 "name": name,
@@ -588,7 +650,18 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "blocky": blocky
             })
         }
-        Expr::SLam { name, params, args, ann, doc, body, check, check_loc, blocky, .. } => {
+        Expr::SLam {
+            name,
+            params,
+            args,
+            ann,
+            doc,
+            body,
+            check,
+            check_loc,
+            blocky,
+            ..
+        } => {
             json!({
                 "type": "s-lam",
                 "name": name,
@@ -620,7 +693,12 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "fields": fields.iter().map(|f| expr_to_pyret_json(f.as_ref(), registry)).collect::<Vec<_>>()
             })
         }
-        Expr::STupleGet { tup, index, index_loc, .. } => {
+        Expr::STupleGet {
+            tup,
+            index,
+            index_loc,
+            ..
+        } => {
             json!({
                 "type": "s-tuple-get",
                 "tup": expr_to_pyret_json(tup, registry),
@@ -628,14 +706,21 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "index-loc": loc_to_srcloc_string(index_loc, registry)
             })
         }
-        Expr::SIf { branches, blocky, .. } => {
+        Expr::SIf {
+            branches, blocky, ..
+        } => {
             json!({
                 "type": "s-if",
                 "branches": branches.iter().map(|x| if_branch_to_pyret_json(x, registry)).collect::<Vec<_>>(),
                 "blocky": blocky
             })
         }
-        Expr::SIfElse { branches, _else, blocky, .. } => {
+        Expr::SIfElse {
+            branches,
+            _else,
+            blocky,
+            ..
+        } => {
             json!({
                 "type": "s-if-else",
                 "branches": branches.iter().map(|x| if_branch_to_pyret_json(x, registry)).collect::<Vec<_>>(),
@@ -643,14 +728,21 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "blocky": blocky
             })
         }
-        Expr::SIfPipe { branches, blocky, .. } => {
+        Expr::SIfPipe {
+            branches, blocky, ..
+        } => {
             json!({
                 "type": "s-if-pipe",
                 "branches": branches.iter().map(|x| if_pipe_branch_to_pyret_json(x, registry)).collect::<Vec<_>>(),
                 "blocky": blocky
             })
         }
-        Expr::SIfPipeElse { branches, _else, blocky, .. } => {
+        Expr::SIfPipeElse {
+            branches,
+            _else,
+            blocky,
+            ..
+        } => {
             json!({
                 "type": "s-if-pipe-else",
                 "branches": branches.iter().map(|x| if_pipe_branch_to_pyret_json(x, registry)).collect::<Vec<_>>(),
@@ -658,7 +750,14 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "blocky": blocky
             })
         }
-        Expr::SFor { iterator, bindings, ann, body, blocky, .. } => {
+        Expr::SFor {
+            iterator,
+            bindings,
+            ann,
+            body,
+            blocky,
+            ..
+        } => {
             json!({
                 "type": "s-for",
                 "iterator": expr_to_pyret_json(iterator, registry),
@@ -668,7 +767,13 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "blocky": blocky
             })
         }
-        Expr::SCases { typ, val, branches, blocky, .. } => {
+        Expr::SCases {
+            typ,
+            val,
+            branches,
+            blocky,
+            ..
+        } => {
             json!({
                 "type": "s-cases",
                 "typ": ann_to_pyret_json(typ, registry),
@@ -677,7 +782,14 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "blocky": blocky
             })
         }
-        Expr::SCasesElse { typ, val, branches, _else, blocky, .. } => {
+        Expr::SCasesElse {
+            typ,
+            val,
+            branches,
+            _else,
+            blocky,
+            ..
+        } => {
             json!({
                 "type": "s-cases-else",
                 "typ": ann_to_pyret_json(typ, registry),
@@ -687,7 +799,12 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "blocky": blocky
             })
         }
-        Expr::SLetExpr { binds, body, blocky, .. } => {
+        Expr::SLetExpr {
+            binds,
+            body,
+            blocky,
+            ..
+        } => {
             json!({
                 "type": "s-let-expr",
                 "binds": binds.iter().map(|x| let_bind_to_pyret_json(x, registry)).collect::<Vec<_>>(),
@@ -695,7 +812,12 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "blocky": blocky
             })
         }
-        Expr::SLet { name, value, keyword_val, .. } => {
+        Expr::SLet {
+            name,
+            value,
+            keyword_val,
+            ..
+        } => {
             json!({
                 "type": "s-let",
                 "name": bind_to_pyret_json(name, registry),
@@ -703,7 +825,12 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "keyword-val": keyword_val
             })
         }
-        Expr::SLetrec { binds, body, blocky, .. } => {
+        Expr::SLetrec {
+            binds,
+            body,
+            blocky,
+            ..
+        } => {
             json!({
                 "type": "s-letrec",
                 "binds": binds.iter().map(|x| letrec_bind_to_pyret_json(x, registry)).collect::<Vec<_>>(),
@@ -732,7 +859,12 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "value": expr_to_pyret_json(value, registry)
             })
         }
-        Expr::SWhen { test, block, blocky, .. } => {
+        Expr::SWhen {
+            test,
+            block,
+            blocky,
+            ..
+        } => {
             json!({
                 "type": "s-when",
                 "test": expr_to_pyret_json(test, registry),
@@ -740,7 +872,9 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "blocky": blocky
             })
         }
-        Expr::SType { name, params, ann, .. } => {
+        Expr::SType {
+            name, params, ann, ..
+        } => {
             json!({
                 "type": "s-type",
                 "name": name_to_pyret_json(name, registry),
@@ -755,7 +889,16 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "namet": name_to_pyret_json(namet, registry)
             })
         }
-        Expr::SData { name, params, mixins, variants, shared_members, check_loc, check, .. } => {
+        Expr::SData {
+            name,
+            params,
+            mixins,
+            variants,
+            shared_members,
+            check_loc,
+            check,
+            ..
+        } => {
             json!({
                 "type": "s-data",
                 "name": name,
@@ -767,7 +910,16 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "check": check.as_ref().map(|c| expr_to_pyret_json(c, registry))
             })
         }
-        Expr::SDataExpr { name, params, mixins, variants, shared_members, check_loc, check, .. } => {
+        Expr::SDataExpr {
+            name,
+            params,
+            mixins,
+            variants,
+            shared_members,
+            check_loc,
+            check,
+            ..
+        } => {
             json!({
                 "type": "s-data-expr",
                 "name": name,
@@ -807,7 +959,9 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "fields": fields.iter().map(|x| member_to_pyret_json(x, registry)).collect::<Vec<_>>()
             })
         }
-        Expr::SSpyBlock { message, contents, .. } => {
+        Expr::SSpyBlock {
+            message, contents, ..
+        } => {
             json!({
                 "type": "s-spy-block",
                 "message": message.as_ref().map(|m| expr_to_pyret_json(m, registry)),
@@ -846,7 +1000,9 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "table": expr_to_pyret_json(table, registry)
             })
         }
-        Expr::SContract { name, params, ann, .. } => {
+        Expr::SContract {
+            name, params, ann, ..
+        } => {
             json!({
                 "type": "s-contract",
                 "name": name_to_pyret_json(name, registry),
@@ -859,7 +1015,11 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "type": "s-template"
             })
         }
-        Expr::STableExtend { column_binds, extensions, .. } => {
+        Expr::STableExtend {
+            column_binds,
+            extensions,
+            ..
+        } => {
             json!({
                 "type": "s-table-extend",
                 "column-binds": column_binds_to_pyret_json(column_binds, registry),
@@ -885,7 +1045,9 @@ pub fn member_to_pyret_json(member: &crate::Member, registry: &FileRegistry) -> 
                 "value": expr_to_pyret_json(value, registry)
             })
         }
-        Member::SMutableField { name, ann, value, .. } => {
+        Member::SMutableField {
+            name, ann, value, ..
+        } => {
             json!({
                 "type": "s-mutable-field",
                 "name": name,
@@ -933,7 +1095,13 @@ pub fn spy_field_to_pyret_json(field: &crate::SpyField, registry: &FileRegistry)
 pub fn variant_to_pyret_json(variant: &crate::Variant, registry: &FileRegistry) -> Value {
     use crate::Variant;
     match variant {
-        Variant::SVariant { name, constr_loc, members, with_members, .. } => {
+        Variant::SVariant {
+            name,
+            constr_loc,
+            members,
+            with_members,
+            ..
+        } => {
             json!({
                 "type": "s-variant",
                 "name": name,
@@ -942,7 +1110,9 @@ pub fn variant_to_pyret_json(variant: &crate::Variant, registry: &FileRegistry) 
                 "with-members": with_members.iter().map(|x| member_to_pyret_json(x, registry)).collect::<Vec<_>>()
             })
         }
-        Variant::SSingletonVariant { name, with_members, .. } => {
+        Variant::SSingletonVariant {
+            name, with_members, ..
+        } => {
             json!({
                 "type": "s-singleton-variant",
                 "name": name,
@@ -952,7 +1122,10 @@ pub fn variant_to_pyret_json(variant: &crate::Variant, registry: &FileRegistry) 
     }
 }
 
-pub fn variant_member_to_pyret_json(member: &crate::VariantMember, registry: &FileRegistry) -> Value {
+pub fn variant_member_to_pyret_json(
+    member: &crate::VariantMember,
+    registry: &FileRegistry,
+) -> Value {
     json!({
         "type": "s-variant-member",
         "member-type": variant_member_type_to_pyret_json(&member.member_type, registry),
@@ -960,7 +1133,10 @@ pub fn variant_member_to_pyret_json(member: &crate::VariantMember, registry: &Fi
     })
 }
 
-pub fn variant_member_type_to_pyret_json(member_type: &crate::VariantMemberType, _registry: &FileRegistry) -> Value {
+pub fn variant_member_type_to_pyret_json(
+    member_type: &crate::VariantMemberType,
+    _registry: &FileRegistry,
+) -> Value {
     use crate::VariantMemberType;
     match member_type {
         VariantMemberType::SNormal => json!({"type": "s-normal"}),
@@ -982,7 +1158,12 @@ pub fn ann_to_pyret_json(ann: &crate::Ann, registry: &FileRegistry) -> Value {
             "obj": name_to_pyret_json(obj, registry),
             "field": field
         }),
-        Ann::AArrow { args, ret, use_parens, .. } => json!({
+        Ann::AArrow {
+            args,
+            ret,
+            use_parens,
+            ..
+        } => json!({
             "type": "a-arrow",
             "args": args.iter().map(|x| ann_to_pyret_json(x, registry)).collect::<Vec<_>>(),
             "ret": ann_to_pyret_json(ret, registry),
@@ -1013,7 +1194,7 @@ pub fn ann_to_pyret_json(ann: &crate::Ann, registry: &FileRegistry) -> Value {
         _ => json!({
             "type": "UNSUPPORTED",
             "debug": format!("{:?}", ann)
-        })
+        }),
     }
 }
 
@@ -1036,7 +1217,10 @@ pub fn check_op_to_pyret_json(op: &crate::CheckOp, _registry: &FileRegistry) -> 
     }
 }
 
-pub fn modifier_to_pyret_json(modifier: &crate::ConstructModifier, _registry: &FileRegistry) -> Value {
+pub fn modifier_to_pyret_json(
+    modifier: &crate::ConstructModifier,
+    _registry: &FileRegistry,
+) -> Value {
     use crate::ConstructModifier;
     match modifier {
         ConstructModifier::SConstructNormal => json!({"type": "s-construct-normal"}),
@@ -1089,7 +1273,9 @@ pub fn name_to_pyret_json(name: &crate::Name, _registry: &FileRegistry) -> Value
 pub fn bind_to_pyret_json(bind: &crate::Bind, registry: &FileRegistry) -> Value {
     use crate::Bind;
     match bind {
-        Bind::SBind { id, ann, shadows, .. } => {
+        Bind::SBind {
+            id, ann, shadows, ..
+        } => {
             json!({
                 "type": "s-bind",
                 "name": name_to_pyret_json(id, registry),
@@ -1097,7 +1283,9 @@ pub fn bind_to_pyret_json(bind: &crate::Bind, registry: &FileRegistry) -> Value 
                 "shadows": shadows
             })
         }
-        Bind::STupleBind { fields, as_name, .. } => {
+        Bind::STupleBind {
+            fields, as_name, ..
+        } => {
             json!({
                 "type": "s-tuple-bind",
                 "fields": fields.iter().map(|x| bind_to_pyret_json(x, registry)).collect::<Vec<_>>(),
@@ -1115,7 +1303,10 @@ pub fn if_branch_to_pyret_json(branch: &crate::IfBranch, registry: &FileRegistry
     })
 }
 
-pub fn if_pipe_branch_to_pyret_json(branch: &crate::IfPipeBranch, registry: &FileRegistry) -> Value {
+pub fn if_pipe_branch_to_pyret_json(
+    branch: &crate::IfPipeBranch,
+    registry: &FileRegistry,
+) -> Value {
     json!({
         "type": "s-if-pipe-branch",
         "test": expr_to_pyret_json(&branch.test, registry),
@@ -1134,7 +1325,13 @@ pub fn for_bind_to_pyret_json(for_bind: &crate::ForBind, registry: &FileRegistry
 pub fn cases_branch_to_pyret_json(branch: &crate::CasesBranch, registry: &FileRegistry) -> Value {
     use crate::CasesBranch;
     match branch {
-        CasesBranch::SCasesBranch { name, pattern_loc, args, body, .. } => {
+        CasesBranch::SCasesBranch {
+            name,
+            pattern_loc,
+            args,
+            body,
+            ..
+        } => {
             json!({
                 "type": "s-cases-branch",
                 "name": name,
@@ -1143,7 +1340,12 @@ pub fn cases_branch_to_pyret_json(branch: &crate::CasesBranch, registry: &FileRe
                 "body": expr_to_pyret_json(body, registry)
             })
         }
-        CasesBranch::SSingletonCasesBranch { name, pattern_loc, body, .. } => {
+        CasesBranch::SSingletonCasesBranch {
+            name,
+            pattern_loc,
+            body,
+            ..
+        } => {
             json!({
                 "type": "s-singleton-cases-branch",
                 "name": name,
@@ -1186,7 +1388,10 @@ pub fn let_bind_to_pyret_json(let_bind: &crate::LetBind, registry: &FileRegistry
     }
 }
 
-pub fn letrec_bind_to_pyret_json(letrec_bind: &crate::LetrecBind, registry: &FileRegistry) -> Value {
+pub fn letrec_bind_to_pyret_json(
+    letrec_bind: &crate::LetrecBind,
+    registry: &FileRegistry,
+) -> Value {
     json!({
         "type": "s-letrec-bind",
         "bind": bind_to_pyret_json(&letrec_bind.b, registry),
@@ -1247,7 +1452,10 @@ pub fn a_field_to_pyret_json(field: &crate::AField, registry: &FileRegistry) -> 
     })
 }
 
-pub fn provide_types_to_pyret_json(provide_types: &crate::ProvideTypes, registry: &FileRegistry) -> Value {
+pub fn provide_types_to_pyret_json(
+    provide_types: &crate::ProvideTypes,
+    registry: &FileRegistry,
+) -> Value {
     use crate::ProvideTypes;
     match provide_types {
         ProvideTypes::SProvideTypes { anns, .. } => {
@@ -1265,7 +1473,10 @@ pub fn provide_types_to_pyret_json(provide_types: &crate::ProvideTypes, registry
     }
 }
 
-pub fn provide_block_to_pyret_json(provide_block: &crate::ProvideBlock, registry: &FileRegistry) -> Value {
+pub fn provide_block_to_pyret_json(
+    provide_block: &crate::ProvideBlock,
+    registry: &FileRegistry,
+) -> Value {
     json!({
         "type": "s-provide-block",
         "path": provide_block.path.iter().map(|x| name_to_pyret_json(x, registry)).collect::<Vec<_>>(),
@@ -1313,7 +1524,9 @@ pub fn import_to_pyret_json(import: &crate::Import, registry: &FileRegistry) -> 
                 "import-type": import_type_to_pyret_json(import, registry)
             })
         }
-        Import::SIncludeFrom { module_path, names, .. } => {
+        Import::SIncludeFrom {
+            module_path, names, ..
+        } => {
             json!({
                 "type": "s-include-from",
                 "mod": module_path.iter().map(|x| name_to_pyret_json(x, registry)).collect::<Vec<_>>(),
@@ -1334,7 +1547,12 @@ pub fn import_to_pyret_json(import: &crate::Import, registry: &FileRegistry) -> 
                 "import-type": import_type_to_pyret_json(import, registry)
             })
         }
-        Import::SImportTypes { import, types, name, .. } => {
+        Import::SImportTypes {
+            import,
+            types,
+            name,
+            ..
+        } => {
             json!({
                 "type": "s-import-types",
                 "import-type": import_type_to_pyret_json(import, registry),
@@ -1345,7 +1563,10 @@ pub fn import_to_pyret_json(import: &crate::Import, registry: &FileRegistry) -> 
     }
 }
 
-pub fn import_type_to_pyret_json(import_type: &crate::ImportType, _registry: &FileRegistry) -> Value {
+pub fn import_type_to_pyret_json(
+    import_type: &crate::ImportType,
+    _registry: &FileRegistry,
+) -> Value {
     use crate::ImportType;
     match import_type {
         ImportType::SConstImport { module, .. } => {
@@ -1427,10 +1648,15 @@ pub fn name_spec_to_pyret_json(name_spec: &crate::NameSpec, registry: &FileRegis
     }
 }
 
-pub fn load_table_spec_to_pyret_json(spec: &crate::LoadTableSpec, registry: &FileRegistry) -> Value {
+pub fn load_table_spec_to_pyret_json(
+    spec: &crate::LoadTableSpec,
+    registry: &FileRegistry,
+) -> Value {
     use crate::LoadTableSpec;
     match spec {
-        LoadTableSpec::SSanitize { name, sanitizer, .. } => {
+        LoadTableSpec::SSanitize {
+            name, sanitizer, ..
+        } => {
             json!({
                 "type": "s-sanitize",
                 "name": name_to_pyret_json(name, registry),
@@ -1446,7 +1672,10 @@ pub fn load_table_spec_to_pyret_json(spec: &crate::LoadTableSpec, registry: &Fil
     }
 }
 
-pub fn column_binds_to_pyret_json(column_binds: &crate::ColumnBinds, registry: &FileRegistry) -> Value {
+pub fn column_binds_to_pyret_json(
+    column_binds: &crate::ColumnBinds,
+    registry: &FileRegistry,
+) -> Value {
     json!({
         "type": "s-column-binds",
         "binds": column_binds.binds.iter().map(|b| bind_to_pyret_json(b, registry)).collect::<Vec<_>>(),
@@ -1454,10 +1683,15 @@ pub fn column_binds_to_pyret_json(column_binds: &crate::ColumnBinds, registry: &
     })
 }
 
-pub fn table_extend_field_to_pyret_json(field: &crate::TableExtendField, registry: &FileRegistry) -> Value {
+pub fn table_extend_field_to_pyret_json(
+    field: &crate::TableExtendField,
+    registry: &FileRegistry,
+) -> Value {
     use crate::TableExtendField;
     match field {
-        TableExtendField::STableExtendField { name, value, ann, .. } => {
+        TableExtendField::STableExtendField {
+            name, value, ann, ..
+        } => {
             json!({
                 "type": "s-table-extend-field",
                 "name": name,
@@ -1465,7 +1699,13 @@ pub fn table_extend_field_to_pyret_json(field: &crate::TableExtendField, registr
                 "ann": ann_to_pyret_json(ann, registry)
             })
         }
-        TableExtendField::STableExtendReducer { name, reducer, col, ann, .. } => {
+        TableExtendField::STableExtendReducer {
+            name,
+            reducer,
+            col,
+            ann,
+            ..
+        } => {
             json!({
                 "type": "s-table-extend-reducer",
                 "name": name,
@@ -1476,4 +1716,3 @@ pub fn table_extend_field_to_pyret_json(field: &crate::TableExtendField, registr
         }
     }
 }
-

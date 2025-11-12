@@ -1,3 +1,5 @@
+use pyret_attempt2::error::ParseError;
+use pyret_attempt2::tokenizer::Tokenizer;
 /// Comprehensive error handling tests
 ///
 /// These tests ensure that the parser:
@@ -12,9 +14,7 @@
 /// - ideal-thorny-kingfisher: Parser accepts trailing tokens
 /// - oily-awkward-hedgehog: Parser accepts multiple expressions
 /// - reflecting-enchanting-caribou: Parser accepts invalid characters
-use pyret_attempt2::{Parser, Expr, FileRegistry};
-use pyret_attempt2::tokenizer::Tokenizer;
-use pyret_attempt2::error::ParseError;
+use pyret_attempt2::{Expr, FileRegistry, Parser};
 
 /// Helper to parse a string into an expression
 /// Uses parse_expr_complete() to ensure all tokens are consumed
@@ -103,7 +103,10 @@ fn test_error_operator_without_operands() {
 #[test]
 fn test_error_missing_comma_in_args() {
     let result = parse_expr("f(x y)");
-    assert!(result.is_err(), "Should error on missing comma between args");
+    assert!(
+        result.is_err(),
+        "Should error on missing comma between args"
+    );
 }
 
 #[test]
@@ -162,7 +165,10 @@ fn test_error_dot_without_field() {
 #[test]
 fn test_error_dot_with_number() {
     let _result = parse_expr("obj.123");
-    assert!(_result.is_err(), "Should error on dot with number (not an identifier)");
+    assert!(
+        _result.is_err(),
+        "Should error on dot with number (not an identifier)"
+    );
 }
 
 #[test]
@@ -190,7 +196,10 @@ fn test_error_whitespace_only() {
 #[test]
 fn test_error_empty_parens_as_expr() {
     let result = parse_expr("()");
-    assert!(result.is_err(), "Should error on empty parens (not a valid expr)");
+    assert!(
+        result.is_err(),
+        "Should error on empty parens (not a valid expr)"
+    );
 }
 
 // ============================================================================
@@ -354,9 +363,7 @@ fn test_error_message_contains_context() {
         let err_str = format!("{:?}", err);
         // Error should mention the problem (unclosed paren, unexpected EOF, etc.)
         assert!(
-            err_str.contains("paren") ||
-            err_str.contains("EOF") ||
-            err_str.contains("expect"),
+            err_str.contains("paren") || err_str.contains("EOF") || err_str.contains("expect"),
             "Error message should provide context: {}",
             err_str
         );
@@ -370,9 +377,7 @@ fn test_error_message_for_trailing_operator() {
         let err_str = format!("{:?}", err);
         // Should mention missing operand or unexpected EOF
         assert!(
-            err_str.contains("EOF") ||
-            err_str.contains("expect") ||
-            err_str.contains("operand"),
+            err_str.contains("EOF") || err_str.contains("expect") || err_str.contains("operand"),
             "Error message should indicate missing operand: {}",
             err_str
         );

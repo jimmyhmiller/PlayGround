@@ -10,7 +10,13 @@ use crate::error::{ParseError, ParseResult};
 use crate::tokenizer::{Token, TokenType};
 
 // Type alias for complex return type
-type PreludeResult = (Option<Use>, Provide, ProvideTypes, Vec<ProvideBlock>, Vec<Import>);
+type PreludeResult = (
+    Option<Use>,
+    Provide,
+    ProvideTypes,
+    Vec<ProvideBlock>,
+    Vec<Import>,
+);
 
 // ============================================================================
 // SECTION 1: Parser Struct and Core Methods
@@ -27,7 +33,14 @@ impl Parser {
         // Filter out comments and block comments as they're not part of the AST
         let tokens: Vec<Token> = tokens
             .into_iter()
-            .filter(|t| !matches!(t.token_type, TokenType::Comment | TokenType::BlockComment | TokenType::UnterminatedBlockComment))
+            .filter(|t| {
+                !matches!(
+                    t.token_type,
+                    TokenType::Comment
+                        | TokenType::BlockComment
+                        | TokenType::UnterminatedBlockComment
+                )
+            })
             .collect();
 
         Parser {
@@ -138,7 +151,10 @@ impl Parser {
     /// Accept any form of left paren (LParen, ParenSpace, ParenNoSpace)
     fn expect_any_lparen(&mut self) -> ParseResult<Token> {
         let token_type = self.peek().token_type.clone();
-        if matches!(token_type, TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace) {
+        if matches!(
+            token_type,
+            TokenType::LParen | TokenType::ParenSpace | TokenType::ParenNoSpace
+        ) {
             Ok(self.advance().clone())
         } else {
             Err(ParseError::expected(TokenType::LParen, self.peek().clone()))
@@ -481,10 +497,12 @@ impl Parser {
                     // Extract location and string from Name enum
                     let (name_loc, name_str) = match &first_name {
                         Name::SName { l, s } => (*l, s.clone()),
-                        _ => return Err(ParseError::general(
-                            self.peek(),
-                            "Expected identifier for import source",
-                        )),
+                        _ => {
+                            return Err(ParseError::general(
+                                self.peek(),
+                                "Expected identifier for import source",
+                            ))
+                        }
                     };
 
                     // Check for special import like file("...")
@@ -607,9 +625,9 @@ impl Parser {
             // Parse additional arguments if present
             if self.matches(&TokenType::Comma) {
                 self.advance();
-                args.extend(self.parse_comma_list_no_trailing(|p| {
-                    Ok(p.expect(TokenType::String)?.value)
-                })?);
+                args.extend(
+                    self.parse_comma_list_no_trailing(|p| Ok(p.expect(TokenType::String)?.value))?,
+                );
             }
 
             self.expect(TokenType::RParen)?;
@@ -1000,7 +1018,7 @@ impl Parser {
                     // Check for comma (continue) or closing brace (done)
                     if self.matches(&TokenType::Comma) {
                         self.advance(); // consume comma
-                        // Allow trailing comma
+                                        // Allow trailing comma
                         if self.matches(&TokenType::RBrace) {
                             break;
                         }
@@ -1022,7 +1040,7 @@ impl Parser {
 
                 while self.matches(&TokenType::Semi) {
                     self.advance(); // consume semicolon
-                    // Allow trailing semicolon
+                                    // Allow trailing semicolon
                     if self.matches(&TokenType::RBrace) {
                         break;
                     }
@@ -1043,7 +1061,8 @@ impl Parser {
 
             // Parse argument types (comma-separated)
             // Special case: ( -> RetType) has no args, just check for immediate arrow
-            let args = if !self.matches(&TokenType::RParen) && !self.matches(&TokenType::ThinArrow) {
+            let args = if !self.matches(&TokenType::RParen) && !self.matches(&TokenType::ThinArrow)
+            {
                 // Parse first arg, then check for more with commas
                 let first_arg = self.parse_ann()?;
                 if self.matches(&TokenType::Comma) {
@@ -1095,10 +1114,7 @@ impl Parser {
 
             // Handle dotted names: E.Either, Module.Type, etc.
             // Build up nested ADot nodes for chains like A.B.C
-            let mut base_ann: Ann = Ann::AName {
-                l: loc,
-                id: name,
-            };
+            let mut base_ann: Ann = Ann::AName { l: loc, id: name };
 
             while self.matches(&TokenType::Dot) {
                 self.advance(); // consume dot
@@ -1121,7 +1137,12 @@ impl Parser {
                             other => other.clone(),
                         }
                     }
-                    _ => return Err(ParseError::general(&field_token, "Invalid dotted type annotation")),
+                    _ => {
+                        return Err(ParseError::general(
+                            &field_token,
+                            "Invalid dotted type annotation",
+                        ))
+                    }
                 };
 
                 base_ann = Ann::ADot {
@@ -1132,24 +1153,25 @@ impl Parser {
             }
 
             // Check for type application: List<T>, Map<K, V>, etc.
-            let mut result_ann = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
-                self.advance(); // consume '<'
-                let type_args = self.parse_comma_list(|p| p.parse_ann())?;
-                let end_token = self.expect(TokenType::Gt)?; // consume '>'
-                let app_loc = name_token.location.span(end_token.location);
-                Ann::AApp {
-                    l: app_loc,
-                    ann: Box::new(base_ann),
-                    args: type_args,
-                }
-            } else {
-                base_ann
-            };
+            let mut result_ann =
+                if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
+                    self.advance(); // consume '<'
+                    let type_args = self.parse_comma_list(|p| p.parse_ann())?;
+                    let end_token = self.expect(TokenType::Gt)?; // consume '>'
+                    let app_loc = name_token.location.span(end_token.location);
+                    Ann::AApp {
+                        l: app_loc,
+                        ann: Box::new(base_ann),
+                        args: type_args,
+                    }
+                } else {
+                    base_ann
+                };
 
             // Check for refinement: %(predicate)
             if self.matches(&TokenType::Percent) {
                 self.advance(); // consume '%'
-                // Expect any form of left paren
+                                // Expect any form of left paren
                 self.expect_any_lparen()?;
                 let predicate = self.parse_expr()?;
                 let end_token = self.expect(TokenType::RParen)?; // consume ')'
@@ -1191,7 +1213,7 @@ impl Parser {
                 // shadow {x; y}
                 return Err(ParseError::general(
                     self.peek(),
-                    "Shadow keyword cannot be used before tuple bindings"
+                    "Shadow keyword cannot be used before tuple bindings",
                 ));
             }
 
@@ -1301,7 +1323,7 @@ impl Parser {
             if self.matches(&TokenType::LBrace) {
                 return Err(ParseError::general(
                     self.peek(),
-                    "Shadow keyword cannot be used before tuple bindings"
+                    "Shadow keyword cannot be used before tuple bindings",
                 ));
             }
 
@@ -1406,8 +1428,9 @@ impl Parser {
                     if self.matches(&TokenType::Number) {
                         // Tuple access: x.{2}
                         let index_token = self.expect(TokenType::Number)?;
-                        let index: usize = index_token.value.parse()
-                            .map_err(|_| ParseError::invalid("tuple index", &index_token, "Invalid number"))?;
+                        let index: usize = index_token.value.parse().map_err(|_| {
+                            ParseError::invalid("tuple index", &index_token, "Invalid number")
+                        })?;
                         let index_loc = index_token.location.span(index_token.location);
                         let end = self.expect(TokenType::RBrace)?;
 
@@ -1527,8 +1550,9 @@ impl Parser {
                         // Tuple access with braces: .{number}
                         if self.matches(&TokenType::Number) {
                             let index_token = self.expect(TokenType::Number)?;
-                            let index: usize = index_token.value.parse()
-                                .map_err(|_| ParseError::invalid("tuple index", &index_token, "Invalid number"))?;
+                            let index: usize = index_token.value.parse().map_err(|_| {
+                                ParseError::invalid("tuple index", &index_token, "Invalid number")
+                            })?;
                             let index_loc = index_token.location.span(index_token.location);
                             let end = self.expect(TokenType::RBrace)?;
 
@@ -1653,7 +1677,7 @@ impl Parser {
             // Parse optional refinement: is%(refinement-fn)
             let refinement = if self.matches(&TokenType::Percent) {
                 self.advance(); // consume %
-                // Refinement is a parenthesized expression (function call)
+                                // Refinement is a parenthesized expression (function call)
                 if self.matches(&TokenType::ParenNoSpace) || self.matches(&TokenType::ParenSpace) {
                     let refinement_expr = self.parse_prim_expr()?;
                     // Unwrap SParen to get the inner expression
@@ -1678,7 +1702,10 @@ impl Parser {
             let right = if matches!(op, CheckOp::SOpRaisesNot { .. }) {
                 // does-not-raise is unary - no right-hand side
                 None
-            } else if !self.is_at_end() && !matches!(self.peek().token_type, TokenType::Eof | TokenType::End) && !self.is_check_op() {
+            } else if !self.is_at_end()
+                && !matches!(self.peek().token_type, TokenType::Eof | TokenType::End)
+                && !self.is_check_op()
+            {
                 // Parse a binary expression (which includes primitives, postfix ops, and binary ops)
                 // But don't parse another check operator (they're at the same/lower precedence level)
                 let right_expr = self.parse_binop_expr_no_check()?;
@@ -1765,8 +1792,9 @@ impl Parser {
                     // Tuple access
                     self.expect(TokenType::LBrace)?;
                     let index_token = self.expect(TokenType::Number)?;
-                    let index: usize = index_token.value.parse()
-                        .map_err(|_| ParseError::invalid("tuple index", &index_token, "Invalid number"))?;
+                    let index: usize = index_token.value.parse().map_err(|_| {
+                        ParseError::invalid("tuple index", &index_token, "Invalid number")
+                    })?;
                     let index_loc = index_token.location.span(index_token.location);
                     let end = self.expect(TokenType::RBrace)?;
                     let start_loc = left.get_loc();
@@ -1881,7 +1909,9 @@ impl Parser {
             TokenType::True | TokenType::False => self.parse_bool(),
             TokenType::String => self.parse_str(),
             TokenType::Name => self.parse_id_expr(),
-            TokenType::ParenSpace | TokenType::LParen | TokenType::ParenNoSpace => self.parse_paren_expr(),
+            TokenType::ParenSpace | TokenType::LParen | TokenType::ParenNoSpace => {
+                self.parse_paren_expr()
+            }
             TokenType::BrackSpace | TokenType::LBrack => self.parse_construct_expr(),
             TokenType::LBrace => {
                 // Distinguish between curly brace lambda {(x): ...}, tuple {(x + 1); 2}, and object {x: 1}
@@ -1947,7 +1977,10 @@ impl Parser {
         let loc = token.location;
 
         // Store as string to support arbitrary precision (like SFrac/SRfrac)
-        Ok(Expr::SNum { l: loc, value: token.value.clone() })
+        Ok(Expr::SNum {
+            l: loc,
+            value: token.value.clone(),
+        })
     }
 
     /// rough-num-expr: ROUGHNUMBER
@@ -1958,7 +1991,10 @@ impl Parser {
         let loc = token.location;
 
         // Store as string INCLUDING the tilde to support arbitrary precision
-        Ok(Expr::SNum { l: loc, value: token.value.clone() })
+        Ok(Expr::SNum {
+            l: loc,
+            value: token.value.clone(),
+        })
     }
 
     /// frac-expr: RATIONAL
@@ -1997,7 +2033,7 @@ impl Parser {
         Ok(Expr::SFrac {
             l: loc,
             num: num_str.to_string(),
-            den: den_str.to_string()
+            den: den_str.to_string(),
         })
     }
 
@@ -2075,9 +2111,7 @@ impl Parser {
     fn parse_template_expr(&mut self) -> ParseResult<Expr> {
         let token = self.expect(TokenType::DotDotDot)?;
 
-        Ok(Expr::STemplate {
-            l: token.location,
-        })
+        Ok(Expr::STemplate { l: token.location })
     }
 
     /// id-expr: NAME
@@ -2092,10 +2126,7 @@ impl Parser {
             self.token_to_name(&token)
         };
 
-        Ok(Expr::SId {
-            l: loc,
-            id,
-        })
+        Ok(Expr::SId { l: loc, id })
     }
 
     /// Check if current token is a binary operator
@@ -2181,13 +2212,31 @@ impl Parser {
             TokenType::IsNot => CheckOp::SOpIsNot { l },
             TokenType::IsNotRoughly => CheckOp::SOpIsNotRoughly { l },
             // is<op> variants
-            TokenType::IsSpaceship => CheckOp::SOpIsOp { l, op: "op<=>".to_string() },
-            TokenType::IsEqualEqual => CheckOp::SOpIsOp { l, op: "op==".to_string() },
-            TokenType::IsEqualTilde => CheckOp::SOpIsOp { l, op: "op=~".to_string() },
+            TokenType::IsSpaceship => CheckOp::SOpIsOp {
+                l,
+                op: "op<=>".to_string(),
+            },
+            TokenType::IsEqualEqual => CheckOp::SOpIsOp {
+                l,
+                op: "op==".to_string(),
+            },
+            TokenType::IsEqualTilde => CheckOp::SOpIsOp {
+                l,
+                op: "op=~".to_string(),
+            },
             // is-not<op> variants
-            TokenType::IsNotSpaceship => CheckOp::SOpIsNotOp { l, op: "op<=>".to_string() },
-            TokenType::IsNotEqualEqual => CheckOp::SOpIsNotOp { l, op: "op==".to_string() },
-            TokenType::IsNotEqualTilde => CheckOp::SOpIsNotOp { l, op: "op=~".to_string() },
+            TokenType::IsNotSpaceship => CheckOp::SOpIsNotOp {
+                l,
+                op: "op<=>".to_string(),
+            },
+            TokenType::IsNotEqualEqual => CheckOp::SOpIsNotOp {
+                l,
+                op: "op==".to_string(),
+            },
+            TokenType::IsNotEqualTilde => CheckOp::SOpIsNotOp {
+                l,
+                op: "op=~".to_string(),
+            },
             // other check operators
             TokenType::Satisfies => CheckOp::SOpSatisfies { l },
             TokenType::Violates => CheckOp::SOpSatisfiesNot { l }, // violates = satisfies-not
@@ -2309,8 +2358,9 @@ impl Parser {
         // For objects, we expect: name COLON or REF name COLON
 
         // Try to determine the type by checking if the first token looks like an object field
-        let is_tuple = if self.matches(&TokenType::Ref) ||
-                          (self.matches(&TokenType::Name) && self.peek_ahead(1).token_type == TokenType::Colon) {
+        let is_tuple = if self.matches(&TokenType::Ref)
+            || (self.matches(&TokenType::Name) && self.peek_ahead(1).token_type == TokenType::Colon)
+        {
             // This looks like an object field (ref x: or name:)
             false
         } else {
@@ -2608,7 +2658,11 @@ impl Parser {
         } else if self.matches(&TokenType::Var) {
             // Var binding: var x := 5
             self.parse_var_expr()
-        } else if self.matches(&TokenType::CheckColon) || self.matches(&TokenType::Check) || self.matches(&TokenType::ExamplesColon) || self.matches(&TokenType::Examples) {
+        } else if self.matches(&TokenType::CheckColon)
+            || self.matches(&TokenType::Check)
+            || self.matches(&TokenType::ExamplesColon)
+            || self.matches(&TokenType::Examples)
+        {
             // Check block: check: ... end or check "name": ... end or examples: ... end or examples "name": ... end
             self.parse_check_expr()
         } else if self.matches(&TokenType::LBrace) {
@@ -2617,12 +2671,11 @@ impl Parser {
             let checkpoint = self.checkpoint();
 
             // Try to parse the tuple pattern and see if = follows
-            if self.parse_tuple_for_destructure().is_ok()
-                && self.matches(&TokenType::Equals) {
-                    // Yes! This is tuple destructuring
-                    self.restore(checkpoint);
-                    return self.parse_tuple_destructure_expr();
-                }
+            if self.parse_tuple_for_destructure().is_ok() && self.matches(&TokenType::Equals) {
+                // Yes! This is tuple destructuring
+                self.restore(checkpoint);
+                return self.parse_tuple_destructure_expr();
+            }
 
             // Not tuple destructuring, restore and parse as expression
             self.restore(checkpoint);
@@ -2853,7 +2906,8 @@ impl Parser {
             let is_otherwise = if self.matches(&TokenType::OtherwiseColon) {
                 self.advance(); // consume "otherwise:"
                 true
-            } else if self.peek().token_type == TokenType::Name && self.peek().value == "otherwise" {
+            } else if self.peek().token_type == TokenType::Name && self.peek().value == "otherwise"
+            {
                 self.advance(); // consume "otherwise"
                 self.expect(TokenType::Colon)?; // consume ":"
                 true
@@ -2890,7 +2944,10 @@ impl Parser {
                     self.advance(); // consume "then"
                     self.expect(TokenType::Colon)?; // consume ":"
                 } else {
-                    return Err(ParseError::general(self.peek(), "Expected 'then:' after test expression"));
+                    return Err(ParseError::general(
+                        self.peek(),
+                        "Expected 'then:' after test expression",
+                    ));
                 }
 
                 // Parse the body
@@ -2980,7 +3037,7 @@ impl Parser {
                     // Pattern can be: "name FROM" or "name :: Type FROM"
                     let next_tok = self.peek_ahead(1);
                     next_tok.token_type == TokenType::From
-                        || next_tok.token_type == TokenType::ColonColon  // Type annotation
+                        || next_tok.token_type == TokenType::ColonColon // Type annotation
                 } else if self.matches(&TokenType::LBrace) {
                     // Could be tuple binding {x; y} FROM ...
                     // For now, assume it's a for-binding
@@ -3557,7 +3614,7 @@ impl Parser {
         } else {
             Err(ParseError::general(
                 self.peek(),
-                "Contract annotation requires arrow (->) when using multiple arguments"
+                "Contract annotation requires arrow (->) when using multiple arguments",
             ))
         }
     }
@@ -3665,55 +3722,59 @@ impl Parser {
             // Track whether parentheses were present to distinguish:
             // - | foo => ... (singleton, no parens)
             // - | foo() => ... (regular branch with empty args, parens present)
-            let (has_parens, args) = if self.matches(&TokenType::LParen) || self.matches(&TokenType::ParenNoSpace) {
-                self.advance(); // consume (
+            let (has_parens, args) =
+                if self.matches(&TokenType::LParen) || self.matches(&TokenType::ParenNoSpace) {
+                    self.advance(); // consume (
 
-                let args = if self.matches(&TokenType::RParen) {
-                    Vec::new()
+                    let args = if self.matches(&TokenType::RParen) {
+                        Vec::new()
+                    } else {
+                        // Parse comma-separated bindings
+                        self.parse_comma_list(|p| {
+                            // Check for optional 'ref' keyword
+                            let field_type = if p.matches(&TokenType::Ref) {
+                                p.advance(); // consume 'ref'
+                                CasesBindType::SRef
+                            } else {
+                                CasesBindType::SNormal
+                            };
+
+                            // Parse binding - could be tuple bind { x; y } or regular bind
+                            let bind = if p.matches(&TokenType::LBrace) {
+                                p.parse_tuple_bind()?
+                            } else {
+                                p.parse_bind()?
+                            };
+
+                            let l = match &bind {
+                                Bind::SBind { l, .. } => *l,
+                                Bind::STupleBind { l, .. } => *l,
+                            };
+                            Ok(CasesBind {
+                                node_type: "s-cases-bind".to_string(),
+                                l,
+                                field_type,
+                                bind,
+                            })
+                        })?
+                    };
+
+                    let rparen = self.expect(TokenType::RParen)?;
+                    pattern_loc = pattern_start.location.span(rparen.location);
+                    (true, args) // parens were present
                 } else {
-                    // Parse comma-separated bindings
-                    self.parse_comma_list(|p| {
-                        // Check for optional 'ref' keyword
-                        let field_type = if p.matches(&TokenType::Ref) {
-                            p.advance(); // consume 'ref'
-                            CasesBindType::SRef
-                        } else {
-                            CasesBindType::SNormal
-                        };
-
-                        // Parse binding - could be tuple bind { x; y } or regular bind
-                        let bind = if p.matches(&TokenType::LBrace) {
-                            p.parse_tuple_bind()?
-                        } else {
-                            p.parse_bind()?
-                        };
-
-                        let l = match &bind {
-                            Bind::SBind { l, .. } => *l,
-                            Bind::STupleBind { l, .. } => *l,
-                        };
-                        Ok(CasesBind {
-                            node_type: "s-cases-bind".to_string(),
-                            l,
-                            field_type,
-                            bind,
-                        })
-                    })?
+                    (false, Vec::new()) // no parens
                 };
-
-                let rparen = self.expect(TokenType::RParen)?;
-                pattern_loc = pattern_start.location.span(rparen.location);
-                (true, args) // parens were present
-            } else {
-                (false, Vec::new()) // no parens
-            };
 
             // Expect =>
             self.expect(TokenType::ThickArrow)?;
 
             // Parse body (statements until next | or end)
             let mut body_stmts = Vec::new();
-            while !self.matches(&TokenType::Bar) && !self.matches(&TokenType::End) && !self.is_at_end() {
+            while !self.matches(&TokenType::Bar)
+                && !self.matches(&TokenType::End)
+                && !self.is_at_end()
+            {
                 let stmt = self.parse_block_statement()?;
                 body_stmts.push(Box::new(stmt));
             }
@@ -3839,14 +3900,15 @@ impl Parser {
         let name = self.parse_name()?;
 
         // Parse optional type parameters <T, U, V>
-        let params: Vec<Name> = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
-            self.advance(); // consume '<'
-            let type_params = self.parse_comma_list(|p| p.parse_name())?;
-            self.expect(TokenType::Gt)?; // consume '>'
-            type_params
-        } else {
-            Vec::new()
-        };
+        let params: Vec<Name> =
+            if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
+                self.advance(); // consume '<'
+                let type_params = self.parse_comma_list(|p| p.parse_name())?;
+                self.expect(TokenType::Gt)?; // consume '>'
+                type_params
+            } else {
+                Vec::new()
+            };
 
         // Expect equals
         self.expect(TokenType::Equals)?;
@@ -3895,7 +3957,7 @@ impl Parser {
         parse_name: bool,
         parse_type_params: bool,
         parse_where: bool,
-        allow_coloncolon_ann: bool,  // Lambda allows :: in addition to ->
+        allow_coloncolon_ann: bool, // Lambda allows :: in addition to ->
     ) -> ParseResult<FunctionParts> {
         // 1. Parse optional name
         let name = if parse_name {
@@ -4025,7 +4087,7 @@ impl Parser {
             ann: parts.ann,
             doc: parts.doc,
             body: parts.body,
-            check_loc: None,  // Lambdas don't have where clauses
+            check_loc: None, // Lambdas don't have where clauses
             check: None,
             blocky: parts.blocky,
         })
@@ -4075,12 +4137,12 @@ impl Parser {
             name: String::new(), // Anonymous lambda
             params: Vec::new(),  // No type parameters in curly brace syntax
             args,
-            ann: Ann::ABlank,    // No return type annotation in curly brace syntax
-            doc: String::new(),  // No doc string in curly brace syntax
+            ann: Ann::ABlank,   // No return type annotation in curly brace syntax
+            doc: String::new(), // No doc string in curly brace syntax
             body: Box::new(body),
             check_loc: None,
             check: None,
-            blocky,              // Set based on whether block: or : was used
+            blocky, // Set based on whether block: or : was used
         })
     }
 
@@ -4093,8 +4155,8 @@ impl Parser {
 
         Ok(Expr::SMethod {
             l: start.location.span(parts.end_loc),
-            name: String::new(),   // Methods have no name
-            params: Vec::new(),    // Methods have no type parameters
+            name: String::new(), // Methods have no name
+            params: Vec::new(),  // Methods have no type parameters
             args: parts.args,
             ann: parts.ann,
             doc: parts.doc,
@@ -4120,14 +4182,15 @@ impl Parser {
         let name = name_token.value.clone();
 
         // Parse optional type parameters <T, U, V>
-        let params: Vec<Name> = if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
-            self.advance(); // consume '<'
-            let type_params = self.parse_comma_list(|p| p.parse_name())?;
-            self.expect(TokenType::Gt)?; // consume '>'
-            type_params
-        } else {
-            Vec::new()
-        };
+        let params: Vec<Name> =
+            if self.matches(&TokenType::Lt) || self.matches(&TokenType::LtNoSpace) {
+                self.advance(); // consume '<'
+                let type_params = self.parse_comma_list(|p| p.parse_name())?;
+                self.expect(TokenType::Gt)?; // consume '>'
+                type_params
+            } else {
+                Vec::new()
+            };
 
         // Expect colon
         self.expect(TokenType::Colon)?;
@@ -4144,7 +4207,8 @@ impl Parser {
         if !self.matches(&TokenType::End)
             && !self.matches(&TokenType::Sharing)
             && !self.matches(&TokenType::Where)
-            && !self.matches(&TokenType::With) {
+            && !self.matches(&TokenType::With)
+        {
             variants.push(self.parse_variant()?);
         }
 
@@ -4154,7 +4218,8 @@ impl Parser {
             if !self.matches(&TokenType::End)
                 && !self.matches(&TokenType::Sharing)
                 && !self.matches(&TokenType::Where)
-                && !self.matches(&TokenType::With) {
+                && !self.matches(&TokenType::With)
+            {
                 variants.push(self.parse_variant()?);
             }
         }
@@ -4166,13 +4231,16 @@ impl Parser {
             // Parse shared members (comma-separated method/field definitions)
             // Grammar: fields: field (COMMA field)* [COMMA]
             let mut members = Vec::new();
-            while !self.matches(&TokenType::End) && !self.matches(&TokenType::Where) && !self.is_at_end() {
+            while !self.matches(&TokenType::End)
+                && !self.matches(&TokenType::Where)
+                && !self.is_at_end()
+            {
                 members.push(self.parse_obj_field()?);
 
                 // Check for optional comma separator
                 if self.matches(&TokenType::Comma) {
                     self.advance(); // consume comma
-                    // If we see END or WHERE after comma, it's a trailing comma - stop parsing
+                                    // If we see END or WHERE after comma, it's a trailing comma - stop parsing
                     if self.matches(&TokenType::End) || self.matches(&TokenType::Where) {
                         break;
                     }
@@ -4233,7 +4301,8 @@ impl Parser {
         // Check if this is a constructor variant with arguments
         if self.matches(&TokenType::LParen)
             || self.matches(&TokenType::ParenSpace)
-            || self.matches(&TokenType::ParenNoSpace) {
+            || self.matches(&TokenType::ParenNoSpace)
+        {
             self.advance(); // consume opening paren
 
             // Parse variant members (comma-separated)
@@ -4318,7 +4387,8 @@ impl Parser {
             && !self.matches(&TokenType::Bar)
             && !self.matches(&TokenType::Sharing)
             && !self.matches(&TokenType::Where)
-            && !self.is_at_end() {
+            && !self.is_at_end()
+        {
             members.push(self.parse_obj_field()?);
             // Members might be separated by commas
             if self.matches(&TokenType::Comma) {
@@ -4473,7 +4543,10 @@ impl Parser {
                 let col_loc = match &col {
                     Name::SUnderscore { l } => l,
                     Name::SName { l, .. } => l,
-                    Name::SGlobal { .. } | Name::SModuleGlobal { .. } | Name::SAtom { .. } | Name::STypeGlobal { .. } => {
+                    Name::SGlobal { .. }
+                    | Name::SModuleGlobal { .. }
+                    | Name::SAtom { .. }
+                    | Name::STypeGlobal { .. } => {
                         // These don't have locations, use field_start as fallback
                         &field_start
                     }
@@ -4559,7 +4632,10 @@ impl Parser {
 
         // Parse comma-separated column headers
         let mut headers = Vec::new();
-        if !self.matches(&TokenType::SourceColon) && !self.matches(&TokenType::Sanitize) && !self.matches(&TokenType::End) {
+        if !self.matches(&TokenType::SourceColon)
+            && !self.matches(&TokenType::Sanitize)
+            && !self.matches(&TokenType::End)
+        {
             loop {
                 let name_token = self.expect(TokenType::Name)?;
                 let name = name_token.value.clone();
@@ -4732,10 +4808,7 @@ impl Parser {
 
         // Create the block for the body
         let body_loc = start.location.span(end.location);
-        let body = Box::new(Expr::SBlock {
-            l: body_loc,
-            stmts,
-        });
+        let body = Box::new(Expr::SBlock { l: body_loc, stmts });
 
         Ok(Expr::SCheck {
             l: start.location.span(end.location),
@@ -4840,7 +4913,6 @@ impl Parser {
             implicit_label,
         })
     }
-
 }
 
 // ============================================================================
@@ -4888,7 +4960,7 @@ impl Parser {
         // Parse remaining items
         while self.matches(&TokenType::Comma) {
             self.advance(); // consume comma
-            // After a comma, we MUST have another item (no trailing commas)
+                            // After a comma, we MUST have another item (no trailing commas)
             items.push(parser(self)?);
         }
 

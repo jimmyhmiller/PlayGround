@@ -33,8 +33,8 @@ pub mod ast;
 pub mod codegen;
 pub mod error;
 pub mod parser;
-pub mod tokenizer;
 pub mod pyret_json;
+pub mod tokenizer;
 
 // Re-export main types
 pub use ast::*;
