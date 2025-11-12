@@ -3984,10 +3984,9 @@ impl Parser {
         self.expect(TokenType::RParen)?;
 
         // 4. Parse optional return annotation (-> or :: for lambdas)
-        let ann = if self.matches(&TokenType::ThinArrow) {
-            self.advance();
-            self.parse_ann()?
-        } else if allow_coloncolon_ann && self.matches(&TokenType::ColonColon) {
+        let ann = if self.matches(&TokenType::ThinArrow)
+            || (allow_coloncolon_ann && self.matches(&TokenType::ColonColon))
+        {
             self.advance();
             self.parse_ann()?
         } else {

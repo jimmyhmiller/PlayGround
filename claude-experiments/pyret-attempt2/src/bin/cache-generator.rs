@@ -31,7 +31,7 @@ fn run_pyret_parser(code: &str) -> Result<String, String> {
     let pyret_json_tool = "pyret-json/ast-to-json.jarr";
 
     // Verify the file exists
-    if !fs::metadata(pyret_json_tool).is_ok() {
+    if fs::metadata(pyret_json_tool).is_err() {
         return Err(format!("Could not find {}", pyret_json_tool));
     }
 
