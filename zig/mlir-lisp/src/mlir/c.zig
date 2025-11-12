@@ -14,6 +14,7 @@ pub const c = @cImport({
     @cInclude("mlir-c/Transforms.h");
     @cInclude("mlir-c/Conversion.h");
     @cInclude("mlir-c/ExecutionEngine.h");
+    @cInclude("mlir-c/Interfaces.h");
     @cInclude("mlir-c/Dialect/IRDL.h");
     @cInclude("mlir-c/Dialect/Transform.h");
     @cInclude("mlir-c/Dialect/Transform/Interpreter.h");

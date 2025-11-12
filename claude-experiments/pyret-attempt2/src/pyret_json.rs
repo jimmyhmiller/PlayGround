@@ -472,10 +472,11 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "id": name_to_pyret_json(id, registry)
             })
         }
-        Expr::SOp { op, left, right, .. } => {
+        Expr::SOp { op, op_l, left, right, .. } => {
             json!({
                 "type": "s-op",
                 "op": op,
+                "op-l": loc_to_srcloc_string(op_l, registry),
                 "left": expr_to_pyret_json(left, registry),
                 "right": expr_to_pyret_json(right, registry)
             })
@@ -619,11 +620,12 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "fields": fields.iter().map(|f| expr_to_pyret_json(f.as_ref(), registry)).collect::<Vec<_>>()
             })
         }
-        Expr::STupleGet { tup, index, .. } => {
+        Expr::STupleGet { tup, index, index_loc, .. } => {
             json!({
                 "type": "s-tuple-get",
                 "tup": expr_to_pyret_json(tup, registry),
-                "index": index
+                "index": index,
+                "index-loc": loc_to_srcloc_string(index_loc, registry)
             })
         }
         Expr::SIf { branches, blocky, .. } => {
@@ -924,10 +926,11 @@ pub fn spy_field_to_pyret_json(field: &crate::SpyField, registry: &FileRegistry)
 pub fn variant_to_pyret_json(variant: &crate::Variant, registry: &FileRegistry) -> Value {
     use crate::Variant;
     match variant {
-        Variant::SVariant { name, members, with_members, .. } => {
+        Variant::SVariant { name, constr_loc, members, with_members, .. } => {
             json!({
                 "type": "s-variant",
                 "name": name,
+                "constr-loc": loc_to_srcloc_string(constr_loc, registry),
                 "members": members.iter().map(|x| variant_member_to_pyret_json(x, registry)).collect::<Vec<_>>(),
                 "with-members": with_members.iter().map(|x| member_to_pyret_json(x, registry)).collect::<Vec<_>>()
             })
@@ -953,8 +956,8 @@ pub fn variant_member_to_pyret_json(member: &crate::VariantMember, registry: &Fi
 pub fn variant_member_type_to_pyret_json(member_type: &crate::VariantMemberType, _registry: &FileRegistry) -> Value {
     use crate::VariantMemberType;
     match member_type {
-        VariantMemberType::SNormal => json!("s-normal"),
-        VariantMemberType::SMutable => json!("s-mutable"),
+        VariantMemberType::SNormal => json!({"type": "s-normal"}),
+        VariantMemberType::SMutable => json!({"type": "s-mutable"}),
     }
 }
 
@@ -1029,8 +1032,8 @@ pub fn check_op_to_pyret_json(op: &crate::CheckOp, _registry: &FileRegistry) -> 
 pub fn modifier_to_pyret_json(modifier: &crate::ConstructModifier, _registry: &FileRegistry) -> Value {
     use crate::ConstructModifier;
     match modifier {
-        ConstructModifier::SConstructNormal => json!("s-construct-normal"),
-        ConstructModifier::SConstructLazy => json!("s-construct-lazy"),
+        ConstructModifier::SConstructNormal => json!({"type": "s-construct-normal"}),
+        ConstructModifier::SConstructLazy => json!({"type": "s-construct-lazy"}),
     }
 }
 
@@ -1124,18 +1127,20 @@ pub fn for_bind_to_pyret_json(for_bind: &crate::ForBind, registry: &FileRegistry
 pub fn cases_branch_to_pyret_json(branch: &crate::CasesBranch, registry: &FileRegistry) -> Value {
     use crate::CasesBranch;
     match branch {
-        CasesBranch::SCasesBranch { name, args, body, .. } => {
+        CasesBranch::SCasesBranch { name, pattern_loc, args, body, .. } => {
             json!({
                 "type": "s-cases-branch",
                 "name": name,
+                "pat-loc": loc_to_srcloc_string(pattern_loc, registry),
                 "args": args.iter().map(|x| cases_bind_to_pyret_json(x, registry)).collect::<Vec<_>>(),
                 "body": expr_to_pyret_json(body, registry)
             })
         }
-        CasesBranch::SSingletonCasesBranch { name, body, .. } => {
+        CasesBranch::SSingletonCasesBranch { name, pattern_loc, body, .. } => {
             json!({
                 "type": "s-singleton-cases-branch",
                 "name": name,
+                "pat-loc": loc_to_srcloc_string(pattern_loc, registry),
                 "body": expr_to_pyret_json(body, registry)
             })
         }

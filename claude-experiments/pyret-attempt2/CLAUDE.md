@@ -221,7 +221,7 @@ cargo test
 cargo test --test comparison_tests
 
 # Compare specific code
-./compare_parsers.sh "your pyret code here"
+./scripts/compare_parsers.sh "your pyret code here"
 ```
 
 ## 📚 Essential Documentation
@@ -494,7 +494,7 @@ The parser now handles the complete Pyret language as tested in the comparison t
 4. Add JSON serialization in `src/bin/to_pyret_json.rs`
 5. Add tests in `tests/parser_tests.rs`
 6. Update comparison test (remove `#[ignore]`)
-7. Run `cargo test` and `./compare_parsers.sh "code"`
+7. Run `cargo test` and `./scripts/compare_parsers.sh "code"`
 
 ## ✅ Tests Status
 
@@ -507,7 +507,7 @@ cargo test --test comparison_tests
 cat FAILING_TESTS.md
 
 # Test specific feature
-./compare_parsers.sh "fun f(x): x + 1 end"
+./scripts/compare_parsers.sh "fun f(x): x + 1 end"
 ```
 
 **69/73 parser unit tests passing** (94.5%) - 4 pre-existing failures in decimal/rational tests
@@ -532,7 +532,7 @@ DEBUG_TOKENS=1 cargo test test_name
 cargo test test_pyret_match_simple_fun
 
 # Compare with official parser
-./compare_parsers.sh "your code"
+./scripts/compare_parsers.sh "your code"
 ```
 
 ### Common Patterns
@@ -572,7 +572,7 @@ let items = self.parse_comma_list(|p| p.parse_expr())?;
 - **AST Definitions:** `src/ast.rs:292-808`
 - **Parser Implementation:** `src/parser.rs`
 - **Test Examples:** `tests/comparison_tests.rs`
-- **Comparison Tool:** `./compare_parsers.sh`
+- **Comparison Tool:** `./scripts/compare_parsers.sh`
 
 ## 🎯 Parser Completion Status
 

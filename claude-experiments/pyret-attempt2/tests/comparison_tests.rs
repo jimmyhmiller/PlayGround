@@ -23,7 +23,7 @@ fn compare_with_pyret(expr: &str) -> bool {
 /// Now uses cached ASTs for much faster execution!
 fn assert_matches_pyret(expr: &str) {
     if !compare_with_pyret(expr) {
-        panic!("Expression '{}' produces different AST than official Pyret parser. Run:\n  cargo run --bin cache-generator  # to rebuild cache\n  ./compare_parsers.sh \"{}\"  # to debug", expr, expr);
+        panic!("Expression '{}' produces different AST than official Pyret parser. Run:\n  cargo run --bin cache-generator  # to rebuild cache\n  ./scripts/compare_parsers.sh \"{}\"  # to debug", expr, expr);
     }
 }
 

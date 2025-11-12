@@ -15,7 +15,7 @@ cargo test --test comparison_tests
 DEBUG_TOKENS=1 cargo test test_name
 
 # Compare with official Pyret parser
-./compare_parsers.sh "your pyret code here"
+./scripts/compare_parsers.sh "your pyret code here"
 
 # Build
 cargo build
@@ -215,7 +215,7 @@ cargo test --test comparison_tests -- --ignored --list
 # 3. Add code to src/parser.rs
 # 4. Remove #[ignore] from test
 # 5. Run: cargo test test_any_type
-# 6. Validate: ./compare_parsers.sh "x :: Any = 42"
+# 6. Validate: ./scripts/compare_parsers.sh "x :: Any = 42"
 ```
 
 ## 🧪 Testing
@@ -253,9 +253,9 @@ We validate that our parser produces **identical ASTs** to the official Pyret pa
 
 ```bash
 # Compare any expression
-./compare_parsers.sh "2 + 3"
-./compare_parsers.sh "fun f(x): x + 1 end"
-./compare_parsers.sh "data Box: | box(ref v) end"
+./scripts/compare_parsers.sh "2 + 3"
+./scripts/compare_parsers.sh "fun f(x): x + 1 end"
+./scripts/compare_parsers.sh "data Box: | box(ref v) end"
 
 # Output JSON from Rust parser
 echo "2 + 3" | cargo run --bin to_pyret_json
