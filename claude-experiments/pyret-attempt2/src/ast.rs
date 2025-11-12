@@ -323,6 +323,59 @@ pub struct ForBind {
 // SECTION 5: Expressions (60+ variants)
 // ============================================================================
 
+/// Binary operators in Pyret
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinOp {
+    Plus,      // op+
+    Minus,     // op-
+    Times,     // op*
+    Divide,    // op/
+    Leq,       // op<=
+    Geq,       // op>=
+    Equal,     // op==
+    Spaceship, // op<=>
+    Roughly,   // op=~
+    Neq,       // op<>
+    Lt,        // op<
+    Gt,        // op>
+    And,       // opand
+    Or,        // opor
+    Caret,     // op^
+}
+
+impl BinOp {
+    /// Convert to the string representation used in the AST
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BinOp::Plus => "op+",
+            BinOp::Minus => "op-",
+            BinOp::Times => "op*",
+            BinOp::Divide => "op/",
+            BinOp::Leq => "op<=",
+            BinOp::Geq => "op>=",
+            BinOp::Equal => "op==",
+            BinOp::Spaceship => "op<=>",
+            BinOp::Roughly => "op=~",
+            BinOp::Neq => "op<>",
+            BinOp::Lt => "op<",
+            BinOp::Gt => "op>",
+            BinOp::And => "opand",
+            BinOp::Or => "opor",
+            BinOp::Caret => "op^",
+        }
+    }
+}
+
+// Custom Serialize implementation to output as string
+impl Serialize for BinOp {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// Expression nodes
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type")]
@@ -574,7 +627,7 @@ pub enum Expr {
         l: Loc,
         #[serde(rename = "op-l")]
         op_l: Loc,
-        op: String,
+        op: BinOp,
         left: Box<Expr>,
         right: Box<Expr>,
     },

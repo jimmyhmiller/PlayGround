@@ -113,6 +113,12 @@ pub const Module = struct {
         return c.mlirModuleGetBody(self.module);
     }
 
+    /// Verify that the module is well-formed
+    pub fn verify(self: *Module) bool {
+        const op = self.getOperation();
+        return c.mlirOperationVerify(op);
+    }
+
     pub fn print(self: *Module) void {
         const op = self.getOperation();
         c.mlirOperationPrint(op, &printCallback, null);
@@ -427,6 +433,11 @@ pub const Operation = struct {
 
     pub fn getFirstRegion(op: MlirOperation) MlirRegion {
         return c.mlirOperationGetFirstRegion(op);
+    }
+
+    /// Verify that an operation is well-formed
+    pub fn verify(op: MlirOperation) bool {
+        return c.mlirOperationVerify(op);
     }
 };
 

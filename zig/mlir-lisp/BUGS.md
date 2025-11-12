@@ -16,27 +16,3 @@ To add, close, or list bugs, use:
 
 This file tracks bugs discovered during development.
 
-## Segmentation fault during mlirOperationPrint with complex recursive program [dear-ignorant-dormouse]
-
-**ID:** dear-ignorant-dormouse
-**Timestamp:** 2025-11-11 22:54:37
-**Severity:** critical
-**Location:** src/mlir/c.zig (print() at line 118)
-**Tags:** mlir, segfault, printing, recursion
-
-### Description
-
-When running examples/complex_math.lisp (10 functions with mutual recursion), parsing and IR building succeeds but MLIR crashes with segfault during print operation. The crash occurs in libMLIR.dylib during mlirOperationPrint.
-
-### Minimal Reproducing Case
-
-Run: ./zig-out/bin/mlir_lisp examples/complex_math.lisp - parsing succeeds, crashes during MLIR print
-
-### Code Snippet
-
-```
-c.mlirOperationPrint(op, &printCallback, null);
-```
-
----
-
