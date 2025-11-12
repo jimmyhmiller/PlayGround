@@ -3,9 +3,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
-use std::io::Write;
 
 #[derive(Serialize, Deserialize)]
 struct CacheIndex {
@@ -95,9 +95,11 @@ pub fn load_or_generate_cached_ast(code: &str) -> Result<Value, String> {
     let temp_output = NamedTempFile::with_suffix(".json")
         .map_err(|e| format!("Failed to create temp output file: {}", e))?;
 
-    temp_input.write_all(code.as_bytes())
+    temp_input
+        .write_all(code.as_bytes())
         .map_err(|e| format!("Failed to write temp input file: {}", e))?;
-    temp_input.flush()
+    temp_input
+        .flush()
         .map_err(|e| format!("Failed to flush temp input file: {}", e))?;
 
     let input_path = temp_input.path();
@@ -128,8 +130,7 @@ pub fn load_or_generate_cached_ast(code: &str) -> Result<Value, String> {
         .map_err(|e| format!("Failed to parse Pyret JSON: {}", e))?;
 
     // Cache it for future use
-    fs::write(&cache_file, &json_str)
-        .map_err(|e| format!("Failed to write cache file: {}", e))?;
+    fs::write(&cache_file, &json_str).map_err(|e| format!("Failed to write cache file: {}", e))?;
 
     // NamedTempFile automatically cleans up when dropped
 
@@ -139,8 +140,8 @@ pub fn load_or_generate_cached_ast(code: &str) -> Result<Value, String> {
 /// Compare Rust AST with cached Pyret AST
 /// Parses code directly using the library, no subprocess needed
 pub fn compare_with_cached_pyret(code: &str) -> Result<bool, String> {
-    use pyret_attempt2::{Parser, Tokenizer, FileRegistry};
     use pyret_attempt2::pyret_json::program_to_pyret_json;
+    use pyret_attempt2::{FileRegistry, Parser, Tokenizer};
 
     // Load or generate cached Pyret AST
     let pyret_ast = load_or_generate_cached_ast(code)?;
@@ -153,7 +154,8 @@ pub fn compare_with_cached_pyret(code: &str) -> Result<bool, String> {
     let tokens = tokenizer.tokenize();
     let mut parser = Parser::new(tokens, file_id);
 
-    let program = parser.parse_program()
+    let program = parser
+        .parse_program()
         .map_err(|e| format!("Rust parser failed: {:?}", e))?;
 
     let rust_ast = program_to_pyret_json(&program, &registry);

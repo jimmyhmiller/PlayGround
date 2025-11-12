@@ -1,6 +1,6 @@
-use pyret_attempt2::{Parser, FileRegistry};
-use pyret_attempt2::tokenizer::Tokenizer;
 use pyret_attempt2::pyret_json::program_to_pyret_json;
+use pyret_attempt2::tokenizer::Tokenizer;
+use pyret_attempt2::{FileRegistry, Parser};
 use std::env;
 use std::fs;
 use std::io::{self, Read};

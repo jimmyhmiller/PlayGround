@@ -381,7 +381,6 @@ impl Serialize for BinOp {
 #[serde(tag = "type")]
 pub enum Expr {
     // ========== Control Flow ==========
-
     /// If expression without else
     #[serde(rename = "s-if")]
     SIf {
@@ -450,15 +449,14 @@ pub enum Expr {
     },
 
     // ========== Functions & Lambdas ==========
-
     /// Function definition
     #[serde(rename = "s-fun")]
     SFun {
         l: Loc,
         name: String,
-        params: Vec<Name>,      // Type parameters
-        args: Vec<Bind>,        // Value parameters
-        ann: Ann,               // Return type
+        params: Vec<Name>, // Type parameters
+        args: Vec<Bind>,   // Value parameters
+        ann: Ann,          // Return type
         doc: String,
         body: Box<Expr>,
         #[serde(rename = "_check-loc")]
@@ -503,7 +501,6 @@ pub enum Expr {
     },
 
     // ========== Bindings ==========
-
     /// Let binding statement
     #[serde(rename = "s-let")]
     SLet {
@@ -549,7 +546,6 @@ pub enum Expr {
     },
 
     // ========== Type System ==========
-
     /// Type alias definition
     #[serde(rename = "s-type")]
     SType {
@@ -561,11 +557,7 @@ pub enum Expr {
 
     /// Newtype definition
     #[serde(rename = "s-newtype")]
-    SNewtype {
-        l: Loc,
-        name: Name,
-        namet: Name,
-    },
+    SNewtype { l: Loc, name: Name, namet: Name },
 
     /// Type-let expression
     #[serde(rename = "s-type-let-expr")]
@@ -586,7 +578,6 @@ pub enum Expr {
     },
 
     // ========== Data Definitions ==========
-
     /// Data type definition
     #[serde(rename = "s-data")]
     SData {
@@ -620,7 +611,6 @@ pub enum Expr {
     },
 
     // ========== Operators ==========
-
     /// Binary operation
     #[serde(rename = "s-op")]
     SOp {
@@ -643,7 +633,6 @@ pub enum Expr {
     },
 
     // ========== Primitives ==========
-
     /// Number literal
     /// Stores the number as a string to support arbitrary precision (like SFrac/SRfrac)
     #[serde(rename = "s-num")]
@@ -666,7 +655,6 @@ pub enum Expr {
     SStr { l: Loc, s: String },
 
     // ========== Identifiers ==========
-
     /// Identifier reference
     #[serde(rename = "s-id")]
     SId { l: Loc, id: Name },
@@ -680,7 +668,6 @@ pub enum Expr {
     SIdLetrec { l: Loc, id: Name, safe: bool },
 
     // ========== Collections ==========
-
     /// Object literal
     #[serde(rename = "s-obj")]
     SObj { l: Loc, fields: Vec<Member> },
@@ -713,7 +700,6 @@ pub enum Expr {
     },
 
     // ========== Access & Update ==========
-
     /// Dot field access
     #[serde(rename = "s-dot")]
     SDot {
@@ -756,14 +742,9 @@ pub enum Expr {
 
     /// Assignment
     #[serde(rename = "s-assign")]
-    SAssign {
-        l: Loc,
-        id: Name,
-        value: Box<Expr>,
-    },
+    SAssign { l: Loc, id: Name, value: Box<Expr> },
 
     // ========== Application ==========
-
     /// Function application
     #[serde(rename = "s-app")]
     SApp {
@@ -795,7 +776,6 @@ pub enum Expr {
     },
 
     // ========== Blocks ==========
-
     /// Block expression
     #[serde(rename = "s-block")]
     SBlock { l: Loc, stmts: Vec<Box<Expr>> },
@@ -805,7 +785,6 @@ pub enum Expr {
     SUserBlock { l: Loc, body: Box<Expr> },
 
     // ========== Tables ==========
-
     /// Table literal
     #[serde(rename = "s-table")]
     STable {
@@ -874,7 +853,6 @@ pub enum Expr {
     },
 
     // ========== Iteration ==========
-
     /// For expression
     #[serde(rename = "s-for")]
     SFor {
@@ -887,7 +865,6 @@ pub enum Expr {
     },
 
     // ========== Testing ==========
-
     /// Check block
     #[serde(rename = "s-check")]
     SCheck {
@@ -922,13 +899,11 @@ pub enum Expr {
     },
 
     // ========== Reactors ==========
-
     /// Reactor definition
     #[serde(rename = "s-reactor")]
     SReactor { l: Loc, fields: Vec<Member> },
 
     // ========== Spy ==========
-
     /// Spy block
     #[serde(rename = "s-spy-block")]
     SSpyBlock {
@@ -938,7 +913,6 @@ pub enum Expr {
     },
 
     // ========== Misc ==========
-
     /// Parenthesized expression
     #[serde(rename = "s-paren")]
     SParen { l: Loc, expr: Box<Expr> },
@@ -1256,7 +1230,11 @@ pub enum ImportType {
     SConstImport { l: Loc, module: String },
 
     #[serde(rename = "s-special-import")]
-    SSpecialImport { l: Loc, kind: String, args: Vec<String> },
+    SSpecialImport {
+        l: Loc,
+        kind: String,
+        args: Vec<String>,
+    },
 }
 
 /// Include specification
@@ -1270,7 +1248,11 @@ pub enum IncludeSpec {
     SIncludeType { l: Loc, name: NameSpec },
 
     #[serde(rename = "s-include-data")]
-    SIncludeData { l: Loc, name: NameSpec, hidden: Vec<Name> },
+    SIncludeData {
+        l: Loc,
+        name: NameSpec,
+        hidden: Vec<Name>,
+    },
 
     #[serde(rename = "s-include-module")]
     SIncludeModule { l: Loc, name: NameSpec },

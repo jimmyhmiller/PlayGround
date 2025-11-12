@@ -1,5 +1,5 @@
+use crate::ast::{FileId, Loc};
 use std::fmt;
-use crate::ast::{Loc, FileId};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenType {
@@ -143,7 +143,7 @@ pub enum TokenType {
 
     // Literals
     Number,
-    RoughNumber,      // Rough (approximate) numbers like ~0.8 or ~42
+    RoughNumber, // Rough (approximate) numbers like ~0.8 or ~42
     RoughRational,
     Rational,
     String,
@@ -285,10 +285,30 @@ impl Tokenizer {
     fn is_whitespace(ch: char) -> bool {
         matches!(
             ch,
-            ' ' | '\t' | '\n' | '\r' | '\x0C' | '\x0B' | '\u{00A0}' | '\u{1680}' | '\u{2000}'
-                | '\u{2001}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
-                | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{2028}' | '\u{2029}'
-                | '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}'
+            ' ' | '\t'
+                | '\n'
+                | '\r'
+                | '\x0C'
+                | '\x0B'
+                | '\u{00A0}'
+                | '\u{1680}'
+                | '\u{2000}'
+                | '\u{2001}'
+                | '\u{2002}'
+                | '\u{2003}'
+                | '\u{2004}'
+                | '\u{2005}'
+                | '\u{2006}'
+                | '\u{2007}'
+                | '\u{2008}'
+                | '\u{2009}'
+                | '\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
         )
     }
 
@@ -625,7 +645,11 @@ impl Tokenizer {
                 let value: String = self.input[start_pos..self.pos].iter().collect();
                 self.paren_is_for_exp = false;
                 self.prior_whitespace = false;
-                let token_type = if rough { TokenType::RoughRational } else { TokenType::Rational };
+                let token_type = if rough {
+                    TokenType::RoughRational
+                } else {
+                    TokenType::Rational
+                };
                 return Some(Token::new(token_type, value, loc));
             } else {
                 self.pos = start_pos;
@@ -680,12 +704,24 @@ impl Tokenizer {
         let value: String = self.input[start_pos..self.pos].iter().collect();
         self.paren_is_for_exp = false;
         self.prior_whitespace = false;
-        let token_type = if rough { TokenType::RoughNumber } else { TokenType::Number };
+        let token_type = if rough {
+            TokenType::RoughNumber
+        } else {
+            TokenType::Number
+        };
         Some(Token::new(token_type, value, loc))
     }
 
     /// Helper: consume a string and return a token
-    fn consume_keyword(&mut self, keyword: &str, token_type: TokenType, start_line: usize, start_col: usize, start_pos: usize, set_paren_for_exp: bool) -> Option<Token> {
+    fn consume_keyword(
+        &mut self,
+        keyword: &str,
+        token_type: TokenType,
+        start_line: usize,
+        start_col: usize,
+        start_pos: usize,
+        set_paren_for_exp: bool,
+    ) -> Option<Token> {
         for _ in 0..keyword.len() {
             self.advance();
         }
@@ -699,7 +735,12 @@ impl Tokenizer {
 
     /// Try to match keyword-colon combinations (block:, check:, etc.)
     /// Returns Some(token) if matched, None otherwise
-    fn try_keyword_colon(&mut self, start_line: usize, start_col: usize, start_pos: usize) -> Option<Token> {
+    fn try_keyword_colon(
+        &mut self,
+        start_line: usize,
+        start_col: usize,
+        start_pos: usize,
+    ) -> Option<Token> {
         // Keyword-colon combinations with paren_is_for_exp = true
         const KEYWORDS_WITH_PAREN: &[(&str, TokenType)] = &[
             ("block:", TokenType::Block),
@@ -722,22 +763,42 @@ impl Tokenizer {
 
         // Special case: load-table: sets paren_is_for_exp but in different order
         if self.starts_with("load-table:") {
-            for _ in 0..11 { self.advance(); }
+            for _ in 0..11 {
+                self.advance();
+            }
             let loc = self.span_from(start_line, start_col, start_pos);
             self.prior_whitespace = false;
             self.paren_is_for_exp = true;
-            return Some(Token::new(TokenType::LoadTable, "load-table:".to_string(), loc));
+            return Some(Token::new(
+                TokenType::LoadTable,
+                "load-table:".to_string(),
+                loc,
+            ));
         }
 
         for &(kw, ref tt) in KEYWORDS_WITH_PAREN {
             if self.starts_with(kw) {
-                return self.consume_keyword(kw, tt.clone(), start_line, start_col, start_pos, true);
+                return self.consume_keyword(
+                    kw,
+                    tt.clone(),
+                    start_line,
+                    start_col,
+                    start_pos,
+                    true,
+                );
             }
         }
 
         for &(kw, ref tt) in KEYWORDS_WITHOUT_PAREN {
             if self.starts_with(kw) {
-                return self.consume_keyword(kw, tt.clone(), start_line, start_col, start_pos, false);
+                return self.consume_keyword(
+                    kw,
+                    tt.clone(),
+                    start_line,
+                    start_col,
+                    start_pos,
+                    false,
+                );
             }
         }
 
@@ -756,22 +817,64 @@ impl Tokenizer {
         // Check for special keywords with operators before scanning as identifier
         // These need to be checked first because '=' and '<' are not valid identifier chars
         if self.starts_with("is-not<=>") {
-            return self.consume_keyword("is-not<=>", TokenType::IsNotSpaceship, start_line, start_col, start_pos, true);
+            return self.consume_keyword(
+                "is-not<=>",
+                TokenType::IsNotSpaceship,
+                start_line,
+                start_col,
+                start_pos,
+                true,
+            );
         }
         if self.starts_with("is-not==") {
-            return self.consume_keyword("is-not==", TokenType::IsNotEqualEqual, start_line, start_col, start_pos, true);
+            return self.consume_keyword(
+                "is-not==",
+                TokenType::IsNotEqualEqual,
+                start_line,
+                start_col,
+                start_pos,
+                true,
+            );
         }
         if self.starts_with("is-not=~") {
-            return self.consume_keyword("is-not=~", TokenType::IsNotEqualTilde, start_line, start_col, start_pos, true);
+            return self.consume_keyword(
+                "is-not=~",
+                TokenType::IsNotEqualTilde,
+                start_line,
+                start_col,
+                start_pos,
+                true,
+            );
         }
         if self.starts_with("is<=>") {
-            return self.consume_keyword("is<=>", TokenType::IsSpaceship, start_line, start_col, start_pos, true);
+            return self.consume_keyword(
+                "is<=>",
+                TokenType::IsSpaceship,
+                start_line,
+                start_col,
+                start_pos,
+                true,
+            );
         }
         if self.starts_with("is==") {
-            return self.consume_keyword("is==", TokenType::IsEqualEqual, start_line, start_col, start_pos, true);
+            return self.consume_keyword(
+                "is==",
+                TokenType::IsEqualEqual,
+                start_line,
+                start_col,
+                start_pos,
+                true,
+            );
         }
         if self.starts_with("is=~") {
-            return self.consume_keyword("is=~", TokenType::IsEqualTilde, start_line, start_col, start_pos, true);
+            return self.consume_keyword(
+                "is=~",
+                TokenType::IsEqualTilde,
+                start_line,
+                start_col,
+                start_pos,
+                true,
+            );
         }
 
         // Check for keyword-colon combinations (shared with tokenize_symbol)
@@ -830,7 +933,8 @@ impl Tokenizer {
 
             if self.starts_with("if") {
                 // Check that it's not part of a longer identifier
-                if !matches!(self.peek_char(2), Some(ch) if Self::is_ident_continue(ch) || ch == '-') {
+                if !matches!(self.peek_char(2), Some(ch) if Self::is_ident_continue(ch) || ch == '-')
+                {
                     self.advance();
                     self.advance();
                     let loc = self.span_from(start_line, start_col, start_pos);
@@ -847,20 +951,38 @@ impl Tokenizer {
         }
 
         let token_type = match value.as_str() {
-            "and" => { self.paren_is_for_exp = true; TokenType::And },
+            "and" => {
+                self.paren_is_for_exp = true;
+                TokenType::And
+            }
             "as" => TokenType::As,
             "ascending" => TokenType::Ascending,
-            "ask" => { self.paren_is_for_exp = true; TokenType::Ask },
+            "ask" => {
+                self.paren_is_for_exp = true;
+                TokenType::Ask
+            }
             "by" => TokenType::By,
-            "cases" => { self.paren_is_for_exp = true; TokenType::Cases },
+            "cases" => {
+                self.paren_is_for_exp = true;
+                TokenType::Cases
+            }
             "check" => TokenType::Check,
             "data" => TokenType::Data,
             "descending" => TokenType::Descending,
             "do" => TokenType::Do,
-            "does-not-raise" => { self.paren_is_for_exp = true; TokenType::DoesNotRaise },
+            "does-not-raise" => {
+                self.paren_is_for_exp = true;
+                TokenType::DoesNotRaise
+            }
             "else" => TokenType::Else,
-            "end" => { self.paren_is_for_exp = false; TokenType::End },
-            "examples" => { self.paren_is_for_exp = true; TokenType::Examples },
+            "end" => {
+                self.paren_is_for_exp = false;
+                TokenType::End
+            }
+            "examples" => {
+                self.paren_is_for_exp = true;
+                TokenType::Examples
+            }
             "extend" => TokenType::TableExtend,
             "extract" => TokenType::TableExtract,
             "false" => TokenType::False,
@@ -871,17 +993,50 @@ impl Tokenizer {
             "if" => TokenType::If,
             "import" => TokenType::Import,
             "include" => TokenType::Include,
-            "is" => { self.paren_is_for_exp = true; TokenType::Is },
-            "is==" => { self.paren_is_for_exp = true; TokenType::IsEqualEqual },
-            "is=~" => { self.paren_is_for_exp = true; TokenType::IsEqualTilde },
-            "is-not" => { self.paren_is_for_exp = true; TokenType::IsNot },
-            "is-not==" => { self.paren_is_for_exp = true; TokenType::IsNotEqualEqual },
-            "is-not=~" => { self.paren_is_for_exp = true; TokenType::IsNotEqualTilde },
-            "is-not<=>" => { self.paren_is_for_exp = true; TokenType::IsNotSpaceship },
-            "is-roughly" => { self.paren_is_for_exp = true; TokenType::IsRoughly },
-            "is-not-roughly" => { self.paren_is_for_exp = true; TokenType::IsNotRoughly },
-            "is<=>" => { self.paren_is_for_exp = true; TokenType::IsSpaceship },
-            "because" => { self.paren_is_for_exp = true; TokenType::Because },
+            "is" => {
+                self.paren_is_for_exp = true;
+                TokenType::Is
+            }
+            "is==" => {
+                self.paren_is_for_exp = true;
+                TokenType::IsEqualEqual
+            }
+            "is=~" => {
+                self.paren_is_for_exp = true;
+                TokenType::IsEqualTilde
+            }
+            "is-not" => {
+                self.paren_is_for_exp = true;
+                TokenType::IsNot
+            }
+            "is-not==" => {
+                self.paren_is_for_exp = true;
+                TokenType::IsNotEqualEqual
+            }
+            "is-not=~" => {
+                self.paren_is_for_exp = true;
+                TokenType::IsNotEqualTilde
+            }
+            "is-not<=>" => {
+                self.paren_is_for_exp = true;
+                TokenType::IsNotSpaceship
+            }
+            "is-roughly" => {
+                self.paren_is_for_exp = true;
+                TokenType::IsRoughly
+            }
+            "is-not-roughly" => {
+                self.paren_is_for_exp = true;
+                TokenType::IsNotRoughly
+            }
+            "is<=>" => {
+                self.paren_is_for_exp = true;
+                TokenType::IsSpaceship
+            }
+            "because" => {
+                self.paren_is_for_exp = true;
+                TokenType::Because
+            }
             "lam" => TokenType::Lam,
             "lazy" => TokenType::Lazy,
             "let" => TokenType::Let,
@@ -891,18 +1046,36 @@ impl Tokenizer {
             "module" => TokenType::Module,
             "newtype" => TokenType::Newtype,
             "of" => TokenType::Of,
-            "or" => { self.paren_is_for_exp = true; TokenType::Or },
+            "or" => {
+                self.paren_is_for_exp = true;
+                TokenType::Or
+            }
             "provide" => TokenType::Provide,
             "provide-types" => TokenType::ProvideTypes,
-            "raises" => { self.paren_is_for_exp = true; TokenType::Raises },
-            "raises-other-than" => { self.paren_is_for_exp = true; TokenType::RaisesOtherThan },
-            "raises-satisfies" => { self.paren_is_for_exp = true; TokenType::RaisesSatisfies },
-            "raises-violates" => { self.paren_is_for_exp = true; TokenType::RaisesViolates },
+            "raises" => {
+                self.paren_is_for_exp = true;
+                TokenType::Raises
+            }
+            "raises-other-than" => {
+                self.paren_is_for_exp = true;
+                TokenType::RaisesOtherThan
+            }
+            "raises-satisfies" => {
+                self.paren_is_for_exp = true;
+                TokenType::RaisesSatisfies
+            }
+            "raises-violates" => {
+                self.paren_is_for_exp = true;
+                TokenType::RaisesViolates
+            }
             "reactor" => TokenType::Reactor,
             "rec" => TokenType::Rec,
             "ref" => TokenType::Ref,
             "sanitize" => TokenType::Sanitize,
-            "satisfies" => { self.paren_is_for_exp = true; TokenType::Satisfies },
+            "satisfies" => {
+                self.paren_is_for_exp = true;
+                TokenType::Satisfies
+            }
             "select" => TokenType::TableSelect,
             "shadow" => TokenType::Shadow,
             "sieve" => TokenType::TableFilter,
@@ -915,8 +1088,14 @@ impl Tokenizer {
             "using" => TokenType::Using,
             "use" => TokenType::Use,
             "var" => TokenType::Var,
-            "violates" => { self.paren_is_for_exp = true; TokenType::Violates },
-            "when" => { self.paren_is_for_exp = true; TokenType::When },
+            "violates" => {
+                self.paren_is_for_exp = true;
+                TokenType::Violates
+            }
+            "when" => {
+                self.paren_is_for_exp = true;
+                TokenType::When
+            }
             _ => {
                 // For Name tokens, set paren_is_for_exp to false so that f(x) gets ParenNoSpace
                 self.paren_is_for_exp = false;
@@ -942,12 +1121,26 @@ impl Tokenizer {
 
         // Special case: otherwise: (only appears in symbol context)
         if self.starts_with("otherwise:") {
-            return self.consume_keyword("otherwise:", TokenType::OtherwiseColon, start_line, start_col, start_pos, true);
+            return self.consume_keyword(
+                "otherwise:",
+                TokenType::OtherwiseColon,
+                start_line,
+                start_col,
+                start_pos,
+                true,
+            );
         }
 
         // Special case: then: (only appears in symbol context)
         if self.starts_with("then:") {
-            return self.consume_keyword("then:", TokenType::ThenColon, start_line, start_col, start_pos, true);
+            return self.consume_keyword(
+                "then:",
+                TokenType::ThenColon,
+                start_line,
+                start_col,
+                start_pos,
+                true,
+            );
         }
 
         // Check multi-character symbols
@@ -966,16 +1159,37 @@ impl Tokenizer {
 
         for &(op, ref tt) in OPERATORS_WITH_PAREN {
             if self.starts_with(op) {
-                return self.consume_keyword(op, tt.clone(), start_line, start_col, start_pos, true);
+                return self.consume_keyword(
+                    op,
+                    tt.clone(),
+                    start_line,
+                    start_col,
+                    start_pos,
+                    true,
+                );
             }
         }
 
         // Operators that don't set paren_is_for_exp
         if self.starts_with("...") {
-            return self.consume_keyword("...", TokenType::DotDotDot, start_line, start_col, start_pos, false);
+            return self.consume_keyword(
+                "...",
+                TokenType::DotDotDot,
+                start_line,
+                start_col,
+                start_pos,
+                false,
+            );
         }
         if self.starts_with("->") {
-            return self.consume_keyword("->", TokenType::ThinArrow, start_line, start_col, start_pos, false);
+            return self.consume_keyword(
+                "->",
+                TokenType::ThinArrow,
+                start_line,
+                start_col,
+                start_pos,
+                false,
+            );
         }
 
         // Single character symbols
@@ -1154,11 +1368,7 @@ impl Tokenizer {
         }
 
         if self.pos >= self.len {
-            return Some(Token::new(
-                TokenType::Eof,
-                String::new(),
-                self.loc(),
-            ));
+            return Some(Token::new(TokenType::Eof, String::new(), self.loc()));
         }
 
         // Try block comment
@@ -1197,11 +1407,7 @@ impl Tokenizer {
         let start_pos = self.pos;
         let ch = self.advance()?;
         let loc = self.span_from(start_line, start_col, start_pos);
-        Some(Token::new(
-            TokenType::BadOper,
-            ch.to_string(),
-            loc,
-        ))
+        Some(Token::new(TokenType::BadOper, ch.to_string(), loc))
     }
 
     pub fn tokenize(&mut self) -> Vec<Token> {
@@ -1211,7 +1417,8 @@ impl Tokenizer {
             // Skip whitespace and comment tokens
             if token.token_type != TokenType::Ws
                 && token.token_type != TokenType::Comment
-                && token.token_type != TokenType::BlockComment {
+                && token.token_type != TokenType::BlockComment
+            {
                 tokens.push(token);
             }
             if is_eof {
@@ -1290,9 +1497,15 @@ mod tests {
         let mut tokenizer = test_tokenizer("( ) [ ] { } , ;");
         let tokens = tokenizer.tokenize();
 
-        assert!(matches!(tokens[0].token_type, TokenType::ParenSpace | TokenType::ParenNoSpace));
+        assert!(matches!(
+            tokens[0].token_type,
+            TokenType::ParenSpace | TokenType::ParenNoSpace
+        ));
         assert_eq!(tokens[1].token_type, TokenType::RParen);
-        assert!(matches!(tokens[2].token_type, TokenType::BrackSpace | TokenType::BrackNoSpace));
+        assert!(matches!(
+            tokens[2].token_type,
+            TokenType::BrackSpace | TokenType::BrackNoSpace
+        ));
         assert_eq!(tokens[3].token_type, TokenType::RBrack);
         assert_eq!(tokens[4].token_type, TokenType::LBrace);
         assert_eq!(tokens[5].token_type, TokenType::RBrace);
@@ -1329,7 +1542,9 @@ end
         let tokens = tokenizer.tokenize();
 
         assert!(tokens.iter().any(|t| t.token_type == TokenType::Fun));
-        assert!(tokens.iter().any(|t| t.token_type == TokenType::Name && t.value == "add"));
+        assert!(tokens
+            .iter()
+            .any(|t| t.token_type == TokenType::Name && t.value == "add"));
         assert!(tokens.iter().any(|t| t.token_type == TokenType::End));
     }
 }

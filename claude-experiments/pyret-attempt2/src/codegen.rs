@@ -36,7 +36,9 @@ impl SchemeCompiler {
 
             Expr::SId { id, .. } => Ok(self.compile_name(id)),
 
-            Expr::SOp { op, left, right, .. } => {
+            Expr::SOp {
+                op, left, right, ..
+            } => {
                 // Convert Pyret BinOp to Scheme operator
                 let op_str = match op {
                     BinOp::Plus => "+",
@@ -73,9 +75,7 @@ impl SchemeCompiler {
             }
 
             Expr::SIfElse {
-                branches,
-                _else,
-                ..
+                branches, _else, ..
             } => {
                 // Handle simple if-else (Pyret's if has multiple branches)
                 // For simplicity, we'll handle the first branch only
@@ -91,16 +91,17 @@ impl SchemeCompiler {
                 let else_str = self.compile_expr(_else)?;
                 self.indent_level -= 1;
 
-                Ok(format!("(if {}\n{}  {}\n{}  {})",
+                Ok(format!(
+                    "(if {}\n{}  {}\n{}  {})",
                     cond_str,
-                    self.indent(), then_str,
-                    self.indent(), else_str))
+                    self.indent(),
+                    then_str,
+                    self.indent(),
+                    else_str
+                ))
             }
 
-            Expr::SIf {
-                branches,
-                ..
-            } => {
+            Expr::SIf { branches, .. } => {
                 // If without else - R4RS requires an else, so use #f
                 if branches.is_empty() {
                     return Err("If expression has no branches".to_string());
@@ -113,17 +114,17 @@ impl SchemeCompiler {
                 let then_str = self.compile_expr(&first_branch.body)?;
                 self.indent_level -= 1;
 
-                Ok(format!("(if {}\n{}  {}\n{}  #f)",
+                Ok(format!(
+                    "(if {}\n{}  {}\n{}  #f)",
                     cond_str,
-                    self.indent(), then_str,
-                    self.indent()))
+                    self.indent(),
+                    then_str,
+                    self.indent()
+                ))
             }
 
             Expr::SFun {
-                name,
-                args,
-                body,
-                ..
+                name, args, body, ..
             } => {
                 let params_str = args
                     .iter()
@@ -135,9 +136,13 @@ impl SchemeCompiler {
                 let body_str = self.compile_expr(body)?;
                 self.indent_level -= 1;
 
-                Ok(format!("(define ({} {})\n{}  {})",
-                    name, params_str,
-                    self.indent(), body_str))
+                Ok(format!(
+                    "(define ({} {})\n{}  {})",
+                    name,
+                    params_str,
+                    self.indent(),
+                    body_str
+                ))
             }
 
             Expr::SBlock { stmts, .. } => {
