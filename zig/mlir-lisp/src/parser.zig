@@ -1285,7 +1285,31 @@ pub const Parser = struct {
                     try operations.append(self.allocator, yield_op);
                     continue;
                 }
-                // If the inner value is a list (operation), it will be handled below
+                // If the inner value is a list (operation), unwrap it and process it below
+                // We'll fall through and use inner_value instead of op_value
+                if (inner_value.type == .list) {
+                    // Process the inner operation and let insertImplicitTerminator handle the yield
+                    const op_list = inner_value.data.list;
+                    if (!op_list.isEmpty()) {
+                        const op_first = op_list.at(0);
+                        if (op_first.type == .identifier) {
+                            const op_name = op_first.data.atom;
+                            const operation = if (std.mem.eql(u8, op_name, "operation"))
+                                try self.parseOperation(inner_value)
+                            else if (std.mem.eql(u8, op_name, "declare"))
+                                try self.parseDeclare(inner_value)
+                            else if (isTerseOperation(op_name))
+                                try self.parseTerseOperation(inner_value)
+                            else
+                                continue;
+
+                            try operations.append(self.allocator, operation);
+                            continue;
+                        }
+                    }
+                }
+                // Other has_type values we can't handle
+                continue;
             }
 
             if (op_value.type != .list) continue;
