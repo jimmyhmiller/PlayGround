@@ -1713,6 +1713,22 @@ end
 "#);
 }
 
+#[test]
+fn test_examples_with_name() {
+    // examples "name": ... end (with string label)
+    assert_matches_pyret(r#"
+examples "cube function":
+  cb(0) is 0
+  cb(3) is 27
+  cb(-5) is -125
+end
+
+fun cb(n):
+  n * n * n
+end
+"#);
+}
+
 // ----------------------------------------------------------------------------
 // 9. Include From with Type (from bulk test analysis)
 // ----------------------------------------------------------------------------

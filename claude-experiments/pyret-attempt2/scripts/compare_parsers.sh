@@ -32,6 +32,16 @@ if [ ! -f "$PYRET_JSON_TOOL" ]; then
     exit 1
 fi
 
+# Ensure npm dependencies are installed in pyret-json directory
+PYRET_JSON_DIR="$PROJECT_ROOT/pyret-json"
+if [ ! -d "$PYRET_JSON_DIR/node_modules" ]; then
+    echo "=== Installing npm dependencies in pyret-json... ==="
+    cd "$PYRET_JSON_DIR"
+    npm install
+    cd "$PROJECT_ROOT"
+    echo
+fi
+
 # Check if input is a file path or an expression
 if [ -f "$INPUT" ]; then
     # It's a file - convert to absolute path for use across directories
