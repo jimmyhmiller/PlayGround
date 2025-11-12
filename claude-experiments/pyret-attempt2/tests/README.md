@@ -13,7 +13,7 @@ Fast, focused tests for individual parsing features.
 ### `comparison_tests.rs` - Integration Tests
 Validates our parser against official Pyret parser.
 - **53 test functions** (80+ comparisons)
-- Calls `../compare_parsers.sh` script
+- Calls `../scripts/compare_parsers.sh` script
 - Tests all implemented syntax
 - Run: `cargo test --test comparison_tests`
 

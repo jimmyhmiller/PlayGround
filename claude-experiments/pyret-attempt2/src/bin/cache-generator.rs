@@ -54,6 +54,10 @@ fn main() {
     println!("Pyret AST Cache Generator");
     println!("=========================\n");
 
+    // Ensure cache directories exist
+    fs::create_dir_all("tests/pyret-cache/asts")
+        .expect("Failed to create cache directory");
+
     // Read comparison_tests.rs and extract test inputs
     let test_file = fs::read_to_string("tests/comparison_tests.rs")
         .expect("Failed to read comparison_tests.rs");

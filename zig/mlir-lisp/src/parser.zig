@@ -565,7 +565,7 @@ pub const Parser = struct {
             } else if (std.mem.eql(u8, name, "successors")) {
                 operation.successors = try self.parseSuccessors(section);
             } else if (std.mem.eql(u8, name, "regions")) {
-                operation.regions = try self.parseRegions(section);
+                operation.regions = try self.parseRegions(section, operation.name);
             } else if (std.mem.eql(u8, name, "location")) {
                 operation.location = try self.parseLocation(section);
             }
@@ -1063,7 +1063,7 @@ pub const Parser = struct {
         };
     }
 
-    fn parseRegions(self: *Parser, section: *Value) ParseError![]Region {
+    fn parseRegions(self: *Parser, section: *Value, parent_op_name: []const u8) ParseError![]Region {
         // (regions REGION*)
         const list = section.data.list;
 
@@ -1078,7 +1078,7 @@ pub const Parser = struct {
         var i: usize = 1;
         while (i < list.len()) : (i += 1) {
             const region_value = list.at(i);
-            const region = try self.parseRegion(region_value);
+            const region = try self.parseRegion(region_value, parent_op_name);
             try regions.append(self.allocator, region);
         }
 
@@ -1134,7 +1134,7 @@ pub const Parser = struct {
             return;
         }
 
-        const last_op = &operations.items[operations.items.len - 1];
+        var last_op = &operations.items[operations.items.len - 1];
 
         // If last operation is already a terminator, we're done
         if (isTerminator(last_op.name)) {
@@ -1145,6 +1145,7 @@ pub const Parser = struct {
         const terminator_name = getTerminatorForOp(parent_op_name);
 
         // Determine what to yield: if last operation has result bindings, yield those
+        // Otherwise, generate a binding for the last operation if it could produce a result
         const operands = if (last_op.result_bindings.len > 0) blk: {
             // Allocate and copy result bindings
             const ops = try self.allocator.alloc([]const u8, last_op.result_bindings.len);
@@ -1152,7 +1153,28 @@ pub const Parser = struct {
                 ops[i] = binding;
             }
             break :blk ops;
+        } else if (self.operationProducesResults(last_op.name)) blk: {
+            // Last operation could produce a result but has no binding
+            // Generate a binding for it
+            const gensym_counter = @intFromPtr(last_op); // Use pointer as unique counter
+            const binding = try std.fmt.allocPrint(
+                self.allocator,
+                "%implicit_result_{d}",
+                .{gensym_counter},
+            );
+
+            // Add the binding to the last operation
+            const bindings = try self.allocator.alloc([]const u8, 1);
+            bindings[0] = binding;
+            last_op.result_bindings = bindings;
+
+            // Yield the binding
+            const ops = try self.allocator.alloc([]const u8, 1);
+            ops[0] = binding;
+            break :blk ops;
         } else blk: {
+            // Last operation doesn't produce results (e.g., side-effecting ops)
+            // Create empty yield
             break :blk try self.allocator.alloc([]const u8, 0);
         };
 
@@ -1167,6 +1189,24 @@ pub const Parser = struct {
             .location = null,
         };
         try operations.append(self.allocator, terminator);
+    }
+
+    /// Check if an operation typically produces results
+    /// This is a heuristic - most operations produce results except terminators,
+    /// some side-effecting operations (memref.store), and control flow
+    fn operationProducesResults(self: *Parser, op_name: []const u8) bool {
+        _ = self;
+
+        // Terminators don't produce results
+        if (isTerminator(op_name)) return false;
+
+        // Known side-effecting operations that don't produce results
+        if (std.mem.eql(u8, op_name, "memref.store")) return false;
+        if (std.mem.eql(u8, op_name, "gpu.terminator")) return false;
+        if (std.mem.eql(u8, op_name, "gpu.launch")) return false;
+
+        // Most other operations produce results
+        return true;
     }
 
     /// Parse a region in terse syntax with parent operation name for implicit terminators
@@ -1259,7 +1299,7 @@ pub const Parser = struct {
         };
     }
 
-    fn parseRegion(self: *Parser, value: *Value) ParseError!Region {
+    fn parseRegion(self: *Parser, value: *Value, parent_op_name: []const u8) ParseError!Region {
         // (region BLOCK+) - verbose
         // OR
         // (region OPERATION*) - terse (implicit block with no args)
@@ -1292,51 +1332,8 @@ pub const Parser = struct {
         };
 
         if (is_terse) {
-            // Terse syntax: Create implicit block with operations
-            var operations = std.ArrayList(Operation){};
-            errdefer {
-                for (operations.items) |*op| {
-                    op.deinit(self.allocator);
-                }
-                operations.deinit(self.allocator);
-            }
-
-            var i: usize = 1;
-            while (i < list.len()) : (i += 1) {
-                const op_value = list.at(i);
-                if (op_value.type != .list) continue;
-
-                const op_list = op_value.data.list;
-                if (op_list.isEmpty()) continue;
-
-                const op_first = op_list.at(0);
-                if (op_first.type != .identifier) continue;
-
-                const op_name = op_first.data.atom;
-                const operation = if (std.mem.eql(u8, op_name, "operation"))
-                    try self.parseOperation(op_value)
-                else if (std.mem.eql(u8, op_name, "declare"))
-                    try self.parseDeclare(op_value)
-                else if (isTerseOperation(op_name))
-                    try self.parseTerseOperation(op_value)
-                else
-                    continue;
-
-                try operations.append(self.allocator, operation);
-            }
-
-            const block = Block{
-                .label = null,
-                .arguments = &[_]Argument{},
-                .operations = try operations.toOwnedSlice(self.allocator),
-            };
-
-            const blocks = try self.allocator.alloc(Block, 1);
-            blocks[0] = block;
-
-            return Region{
-                .blocks = blocks,
-            };
+            // Terse syntax: Use parseTerseRegionWithParent for proper implicit terminator handling
+            return try self.parseTerseRegionWithParent(value, parent_op_name);
         } else {
             // Verbose syntax: Parse explicit blocks
             var blocks = std.ArrayList(Block){};

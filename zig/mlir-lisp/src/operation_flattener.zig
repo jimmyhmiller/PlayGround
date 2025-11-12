@@ -230,20 +230,160 @@ pub const OperationFlattener = struct {
         operation: *Value,
     };
 
+    /// Flatten a declare form: (declare NAME VALUE)
+    /// The RHS (VALUE) is flattened, and nested operations are hoisted as new declare statements
+    /// Example: (declare x (arith.add (constant 2) (constant 3)))
+    /// Becomes: hoisted declares for constants, then (declare x (arith.add %tmp1 %tmp2))
+    fn flattenDeclare(self: *OperationFlattener, declare_value: *Value) anyerror!OperationFlattenResult {
+        const list = declare_value.data.list;
+
+        // Declare form should be: (declare NAME VALUE)
+        if (list.len() < 3) {
+            // Malformed declare, return as-is
+            return OperationFlattenResult{
+                .hoisted_operations = &[_]*Value{},
+                .operation = declare_value,
+            };
+        }
+
+        const declare_keyword = list.at(0); // "declare"
+        const var_name = list.at(1);        // variable name (identifier)
+        const rhs_expr = list.at(2);        // expression to flatten
+
+        // Check if RHS is a type annotation: (: expr type)
+        var actual_expr = rhs_expr;
+        var type_annotation: ?*Value = null;
+        if (rhs_expr.type == .has_type) {
+            actual_expr = rhs_expr.data.has_type.value;
+            type_annotation = rhs_expr.data.has_type.type_expr;
+        }
+
+        // If the RHS is not an operation (e.g., just a value_id), return as-is
+        if (actual_expr.type != .list) {
+            return OperationFlattenResult{
+                .hoisted_operations = &[_]*Value{},
+                .operation = declare_value,
+            };
+        }
+
+        // Flatten the operation (this will hoist nested operations and flatten operands)
+        const op_result = try self.flattenOperation(actual_expr);
+        defer self.allocator.free(op_result.hoisted_operations);
+
+        // Convert hoisted operations to declare statements
+        var hoisted_declares = std.ArrayList(*Value){};
+        for (op_result.hoisted_operations) |hoisted_op| {
+            const declare_for_hoisted = try self.operationToDeclare(hoisted_op);
+            try hoisted_declares.append(self.allocator, declare_for_hoisted);
+        }
+
+        // Build the new declare with the flattened operation as RHS
+        var new_rhs = op_result.operation;
+
+        // If there was a type annotation, re-wrap the operation
+        if (type_annotation) |type_expr| {
+            const has_type_value = try self.allocator.create(Value);
+            has_type_value.* = Value{
+                .type = .has_type,
+                .data = .{
+                    .has_type = .{
+                        .value = new_rhs,
+                        .type_expr = type_expr,
+                    },
+                },
+            };
+            new_rhs = has_type_value;
+        }
+
+        var new_declare_list = PersistentVector(*Value).init(self.allocator, null);
+        new_declare_list = try new_declare_list.push(declare_keyword);
+        new_declare_list = try new_declare_list.push(var_name);
+        new_declare_list = try new_declare_list.push(new_rhs);
+
+        const new_declare = try self.allocator.create(Value);
+        new_declare.* = Value{
+            .type = .list,
+            .data = .{ .list = new_declare_list },
+        };
+
+        return OperationFlattenResult{
+            .hoisted_operations = try hoisted_declares.toOwnedSlice(self.allocator),
+            .operation = new_declare,
+        };
+    }
+
+    /// Convert an operation with result-bindings to a declare form
+    /// Example: (operation (result-bindings [%tmp]) (name arith.constant) ...)
+    /// Becomes: (declare tmp (arith.constant ...))  <- Note: binding without %, operation unchanged
+    fn operationToDeclare(self: *OperationFlattener, op_value: *Value) !*Value {
+        const list = op_value.data.list;
+
+        // Find result-bindings section and extract binding
+        var binding: ?*Value = null;
+        for (list.slice()) |section| {
+            if (section.type == .list and section.data.list.len() > 0) {
+                const first = section.data.list.at(0);
+                if (first.type == .identifier and std.mem.eql(u8, first.data.atom, "result-bindings")) {
+                    const bindings_list = section.data.list;
+                    if (bindings_list.len() > 1) {
+                        const bindings_container = bindings_list.at(1);
+                        if (bindings_container.type == .vector) {
+                            const bindings_vec = bindings_container.data.vector;
+                            if (bindings_vec.len() > 0) {
+                                binding = bindings_vec.at(0);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (binding == null) {
+            // No binding found - this shouldn't happen if we've properly processed the operation
+            return op_value;
+        }
+
+        // Convert the binding from value_id to identifier for declare
+        // If binding is "%result_G0", we want "result_G0" as an identifier
+        const binding_name = binding.?.data.atom;
+        const name_without_percent = if (binding_name.len > 0 and binding_name[0] == '%')
+            binding_name[1..]
+        else
+            binding_name;
+
+        const binding_as_identifier = try self.allocator.create(Value);
+        binding_as_identifier.* = Value{
+            .type = .identifier,
+            .data = .{ .atom = name_without_percent },
+        };
+
+        // Create declare: (declare BINDING OPERATION)
+        // The operation stays in its verbose format
+        var declare_list = PersistentVector(*Value).init(self.allocator, null);
+        declare_list = try declare_list.push(try self.makeIdentifier("declare"));
+        declare_list = try declare_list.push(binding_as_identifier);
+        declare_list = try declare_list.push(op_value);
+
+        const declare_value = try self.allocator.create(Value);
+        declare_value.* = Value{
+            .type = .list,
+            .data = .{ .list = declare_list },
+        };
+
+        return declare_value;
+    }
+
     /// Flatten a single operation - handles nested operations in operands
     fn flattenOperation(self: *OperationFlattener, op_value: *Value) anyerror!OperationFlattenResult {
         const list = op_value.data.list;
 
         // Check if this is a declare form: (declare NAME VALUE)
-        // Declare should NOT be flattened - the parser handles it
+        // Declare RHS needs to be flattened, but we handle it specially
         if (list.len() > 0) {
             const first = list.at(0);
             if (first.type == .identifier and std.mem.eql(u8, first.data.atom, "declare")) {
-                // Return declare as-is, don't flatten
-                return OperationFlattenResult{
-                    .hoisted_operations = &[_]*Value{},
-                    .operation = op_value,
-                };
+                return try self.flattenDeclare(op_value);
             }
         }
 
@@ -515,9 +655,12 @@ pub const OperationFlattener = struct {
         };
         verbose_list = try verbose_list.push(name_section);
 
-        // Add operands section: (operands ...)
+        // Separate operands from regions
         var operands_list = PersistentVector(*Value).init(self.allocator, null);
         operands_list = try operands_list.push(try self.makeIdentifier("operands"));
+
+        var regions_list = PersistentVector(*Value).init(self.allocator, null);
+        var has_regions = false;
 
         // Process operands (skip attributes if present)
         var start_idx: usize = 1;
@@ -538,17 +681,42 @@ pub const OperationFlattener = struct {
             }
         }
 
-        // Add all operands
-        for (list.slice()[start_idx..]) |operand| {
-            operands_list = try operands_list.push(operand);
+        // Separate operands and regions
+        for (list.slice()[start_idx..]) |item| {
+            // Check if this is a region: (region ...)
+            if (item.type == .list and item.data.list.len() > 0) {
+                const item_first = item.data.list.at(0);
+                if (item_first.type == .identifier and std.mem.eql(u8, item_first.data.atom, "region")) {
+                    // This is a region
+                    if (!has_regions) {
+                        regions_list = try regions_list.push(try self.makeIdentifier("regions"));
+                        has_regions = true;
+                    }
+                    regions_list = try regions_list.push(item);
+                    continue;
+                }
+            }
+            // Not a region, must be an operand
+            operands_list = try operands_list.push(item);
         }
 
+        // Add operands section
         const operands_section = try self.allocator.create(Value);
         operands_section.* = Value{
             .type = .list,
             .data = .{ .list = operands_list },
         };
         verbose_list = try verbose_list.push(operands_section);
+
+        // Add regions section if we found any
+        if (has_regions) {
+            const regions_section = try self.allocator.create(Value);
+            regions_section.* = Value{
+                .type = .list,
+                .data = .{ .list = regions_list },
+            };
+            verbose_list = try verbose_list.push(regions_section);
+        }
 
         // Create verbose operation value
         const verbose_op = try self.allocator.create(Value);

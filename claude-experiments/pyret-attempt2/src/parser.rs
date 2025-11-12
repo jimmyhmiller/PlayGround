@@ -3657,7 +3657,7 @@ impl Parser {
             let pattern_start = self.peek().clone();
             let name_token = self.expect(TokenType::Name)?;
             let name = name_token.value.clone();
-            let pattern_loc = pattern_start.location.span(name_token.location);
+            let mut pattern_loc = pattern_start.location.span(name_token.location);
 
             // Check for arguments: name(args)
             // Track whether parentheses were present to distinguish:
@@ -3699,7 +3699,8 @@ impl Parser {
                     })?
                 };
 
-                self.expect(TokenType::RParen)?;
+                let rparen = self.expect(TokenType::RParen)?;
+                pattern_loc = pattern_start.location.span(rparen.location);
                 (true, args) // parens were present
             } else {
                 (false, Vec::new()) // no parens
@@ -4225,7 +4226,7 @@ impl Parser {
         let start = self.start_loc();
         let name_token = self.expect(TokenType::Name)?;
         let name = name_token.value.clone();
-        let constr_loc = name_token.location;
+        let constr_start = name_token.location;
 
         // Check if this is a constructor variant with arguments
         if self.matches(&TokenType::LParen)
@@ -4240,7 +4241,8 @@ impl Parser {
                 self.parse_comma_list(|p| p.parse_variant_member())?
             };
 
-            self.expect(TokenType::RParen)?;
+            let rparen = self.expect(TokenType::RParen)?;
+            let constr_loc = constr_start.span(rparen.location);
 
             // Parse optional with clause
             let with_members = if self.matches(&TokenType::With) {

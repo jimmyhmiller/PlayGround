@@ -167,64 +167,99 @@ pub const Builder = struct {
         }
     }
 
-    /// Try to infer result type from operation attributes (for terse syntax)
-    /// Currently handles:
-    /// - arith.constant: infer from :value attribute type
-    /// - arith.{addi,subi,muli,divi,...}: infer from first operand type
-    fn inferResultType(self: *Builder, operation: *const parser.Operation) !?mlir.MlirType {
-        // For arith.constant, try to extract type from :value attribute
-        if (std.mem.eql(u8, operation.name, "arith.constant")) {
-            for (operation.attributes) |*attr| {
-                if (std.mem.eql(u8, attr.key, "value")) {
-                    const value = attr.value.value;
-                    if (value.type == .has_type) {
-                        // Extract the type from (: value type)
-                        const type_value = value.data.has_type.type_expr;
-                        const type_expr = parser.TypeExpr{ .value = type_value };
-                        return try self.buildType(&type_expr);
-                    }
-                }
+    /// Callback context for collecting inferred types
+    const InferredTypesContext = struct {
+        types: std.ArrayList(mlir.MlirType),
+        allocator: std.mem.Allocator,
+    };
+
+    /// Callback function for mlirInferTypeOpInterfaceInferReturnTypes
+    fn typeInferenceCallback(n: isize, types: [*c]mlir.MlirType, user_data: ?*anyopaque) callconv(.c) void {
+        const ctx: *InferredTypesContext = @ptrCast(@alignCast(user_data.?));
+        var i: usize = 0;
+        while (i < @as(usize, @intCast(n))) : (i += 1) {
+            ctx.types.append(ctx.allocator, types[i]) catch return;
+        }
+    }
+
+    /// Try to infer result types using MLIR's InferTypeOpInterface with pre-built context
+    /// Takes already-built operands, attributes, and regions from buildOperation
+    fn inferResultTypeWithContext(
+        self: *Builder,
+        operation: *const parser.Operation,
+        operands: *std.ArrayList(mlir.MlirValue),
+        attributes: *std.ArrayList(mlir.c.MlirNamedAttribute),
+        _: *std.ArrayList(mlir.MlirRegion), // regions not passed to MLIR API to avoid ownership issues
+    ) !?mlir.MlirType {
+        // First, try using MLIR's InferTypeOpInterface
+        const op_name = mlir.c.mlirStringRefCreate(operation.name.ptr, operation.name.len);
+        const infer_type_id = mlir.c.mlirInferTypeOpInterfaceTypeID();
+
+        // Check if this operation implements InferTypeOpInterface
+        const implements_interface = mlir.c.mlirOperationImplementsInterfaceStatic(
+            op_name,
+            self.ctx.ctx,
+            infer_type_id
+        );
+
+        if (implements_interface) {
+            // Create attributes dictionary
+            const attrs_dict = if (attributes.items.len > 0)
+                mlir.c.mlirDictionaryAttrGet(
+                    self.ctx.ctx,
+                    @intCast(attributes.items.len),
+                    attributes.items.ptr
+                )
+            else
+                mlir.c.mlirAttributeGetNull();
+
+            // Set up callback context
+            var inferred_types = InferredTypesContext{
+                .types = std.ArrayList(mlir.MlirType){},
+                .allocator = self.allocator,
+            };
+            defer inferred_types.types.deinit(self.allocator);
+
+            // Call MLIR's type inference with pre-built context
+            // NOTE: We don't pass regions to avoid potential issues with region ownership
+            // Most operations (arith.*, etc.) don't need regions for type inference anyway
+            // For scf.if, we could enhance this later if needed
+            const result = mlir.c.mlirInferTypeOpInterfaceInferReturnTypes(
+                op_name,
+                self.ctx.ctx,
+                self.location,
+                @intCast(operands.items.len),
+                if (operands.items.len > 0) operands.items.ptr else null,
+                attrs_dict,
+                null, // properties
+                0, // nRegions - don't pass regions to avoid ownership issues
+                null, // regions
+                typeInferenceCallback,
+                &inferred_types
+            );
+
+            // Check if inference succeeded
+            const failure = result.value == 0; // mlirLogicalResultIsFailure implementation
+            if (!failure and inferred_types.types.items.len > 0) {
+                return inferred_types.types.items[0];
             }
         }
 
-        // For arithmetic binary operations, infer from first operand
-        if (std.mem.startsWith(u8, operation.name, "arith.")) {
-            const op_suffix = operation.name[6..]; // Skip "arith."
-            const is_binary_op = std.mem.eql(u8, op_suffix, "addi") or
-                std.mem.eql(u8, op_suffix, "subi") or
-                std.mem.eql(u8, op_suffix, "muli") or
-                std.mem.eql(u8, op_suffix, "divsi") or
-                std.mem.eql(u8, op_suffix, "divui") or
-                std.mem.eql(u8, op_suffix, "remsi") or
-                std.mem.eql(u8, op_suffix, "remui") or
-                std.mem.eql(u8, op_suffix, "andi") or
-                std.mem.eql(u8, op_suffix, "ori") or
-                std.mem.eql(u8, op_suffix, "xori");
-
-            if (is_binary_op and operation.operands.len >= 1) {
-                // Get the type of the first operand
-                const first_operand_id = operation.operands[0];
-                if (self.value_map.get(first_operand_id)) |mlir_value| {
-                    return mlir.c.mlirValueGetType(mlir_value);
-                }
-            }
-        }
-
-        // For scf.if, infer from yielded values in the first region
-        if (std.mem.eql(u8, operation.name, "scf.if")) {
-            if (operation.regions.len >= 1) {
-                const then_region = operation.regions[0];
-                if (then_region.blocks.len >= 1) {
-                    const then_block = then_region.blocks[0];
-                    // Find the scf.yield operation (should be last after implicit insertion)
-                    for (then_block.operations) |*block_op| {
-                        if (std.mem.eql(u8, block_op.name, "scf.yield")) {
-                            // Get type of yielded value
-                            if (block_op.operands.len >= 1) {
-                                const yielded_id = block_op.operands[0];
-                                if (self.value_map.get(yielded_id)) |mlir_value| {
-                                    return mlir.c.mlirValueGetType(mlir_value);
-                                }
+        // Special case fallback for scf.if: infer from yielded values
+        // This is needed because we don't pass regions to the MLIR API to avoid ownership issues
+        // We look at the AST to find what's being yielded
+        if (std.mem.eql(u8, operation.name, "scf.if") and operation.regions.len > 0) {
+            const then_region = &operation.regions[0];
+            if (then_region.blocks.len > 0) {
+                const then_block = &then_region.blocks[0];
+                // Find the scf.yield operation (should be last)
+                for (then_block.operations) |*block_op| {
+                    if (std.mem.eql(u8, block_op.name, "scf.yield")) {
+                        // Get type of yielded value
+                        if (block_op.operands.len >= 1) {
+                            const yielded_id = block_op.operands[0];
+                            if (self.value_map.get(yielded_id)) |mlir_value| {
+                                return mlir.c.mlirValueGetType(mlir_value);
                             }
                         }
                     }
@@ -235,10 +270,38 @@ pub const Builder = struct {
         return null;
     }
 
+
     /// Build a single operation
     fn buildOperation(self: *Builder, operation: *const parser.Operation) BuildError!mlir.MlirOperation {
 
-        // Parse result types
+        // Parse operands (look up SSA values) - needed before type inference
+        var operands = std.ArrayList(mlir.MlirValue){};
+        defer operands.deinit(self.allocator);
+
+        for (operation.operands) |operand_id| {
+            const value = self.value_map.get(operand_id) orelse return error.UnknownValue;
+            try operands.append(self.allocator, value);
+        }
+
+        // Parse attributes - needed before type inference
+        var attributes = std.ArrayList(mlir.c.MlirNamedAttribute){};
+        defer attributes.deinit(self.allocator);
+
+        for (operation.attributes) |*attr| {
+            const named_attr = try self.buildNamedAttribute(attr);
+            try attributes.append(self.allocator, named_attr);
+        }
+
+        // Parse regions - needed before type inference for operations like scf.if
+        var regions = std.ArrayList(mlir.MlirRegion){};
+        defer regions.deinit(self.allocator);
+
+        for (operation.regions) |*region| {
+            const mlir_region = try self.buildRegion(region);
+            try regions.append(self.allocator, mlir_region);
+        }
+
+        // Parse result types (this may need regions for type inference)
         var result_types = std.ArrayList(mlir.MlirType){};
         defer result_types.deinit(self.allocator);
 
@@ -250,38 +313,11 @@ pub const Builder = struct {
             }
         } else if (operation.result_bindings.len > 0) {
             // Terse syntax with result binding but no explicit types
-            // Try to infer the type
-            if (try self.inferResultType(operation)) |ty| {
+            // Try to infer the type (passing built regions, operands, attributes)
+            if (try self.inferResultTypeWithContext(operation, &operands, &attributes, &regions)) |ty| {
                 try result_types.append(self.allocator, ty);
             }
             // If we can't infer and there's a binding, we'll get a type error from MLIR
-        }
-
-        // Parse operands (look up SSA values)
-        var operands = std.ArrayList(mlir.MlirValue){};
-        defer operands.deinit(self.allocator);
-
-        for (operation.operands) |operand_id| {
-            const value = self.value_map.get(operand_id) orelse return error.UnknownValue;
-            try operands.append(self.allocator, value);
-        }
-
-        // Parse attributes
-        var attributes = std.ArrayList(mlir.c.MlirNamedAttribute){};
-        defer attributes.deinit(self.allocator);
-
-        for (operation.attributes) |*attr| {
-            const named_attr = try self.buildNamedAttribute(attr);
-            try attributes.append(self.allocator, named_attr);
-        }
-
-        // Parse regions
-        var regions = std.ArrayList(mlir.MlirRegion){};
-        defer regions.deinit(self.allocator);
-
-        for (operation.regions) |*region| {
-            const mlir_region = try self.buildRegion(region);
-            try regions.append(self.allocator, mlir_region);
         }
 
         // Parse successors

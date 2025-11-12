@@ -57,6 +57,7 @@ pub fn build(b: *std.Build) void {
 
             // MLIR C API libraries
             step.linkSystemLibrary("MLIRCAPIIR");
+            step.linkSystemLibrary("MLIRCAPIInterfaces");
             step.linkSystemLibrary("MLIRCAPIExecutionEngine");
             step.linkSystemLibrary("MLIRCAPIRegisterEverything");
             step.linkSystemLibrary("MLIRCAPIConversion");
