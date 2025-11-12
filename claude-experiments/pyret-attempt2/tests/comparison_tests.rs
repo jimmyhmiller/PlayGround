@@ -3184,3 +3184,65 @@ fn test_full_file_compiler_type_defaults() {
     let code = include_str!("pyret-files/full-files/compiler/type-defaults.arr");
     assert_matches_pyret(code);
 }
+
+// ============================================================================
+// Full File Tests - Module Tests from Pyret Test Suite
+// ============================================================================
+
+#[test]
+fn test_full_file_modules_provide_arrow_using_datatype() {
+    let code = include_str!("pyret-files/full-files/tests/modules/provide-arrow-using-datatype.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_modules_test_provide_data_with_provide_star() {
+    let code = include_str!("pyret-files/full-files/tests/modules/test-provide-data-with-provide-star.arr");
+    assert_matches_pyret(code);
+}
+
+// ============================================================================
+// Full File Tests - Pyret Test Suite (New Tests)
+// ============================================================================
+
+#[test]
+fn test_full_file_test_s_exp() {
+    let code = include_str!("pyret-files/full-files/tests/test-s-exp.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_format() {
+    let code = include_str!("pyret-files/full-files/tests/test-format.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_images() {
+    let code = include_str!("pyret-files/full-files/tests/test-images.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_pprint() {
+    let code = include_str!("pyret-files/full-files/tests/test-pprint.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_repl() {
+    let code = include_str!("pyret-files/full-files/tests/test-repl.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_test_module_syntax() {
+    let code = include_str!("pyret-files/full-files/tests/test-module-syntax.arr");
+    assert_matches_pyret(code);
+}
+
+#[test]
+fn test_full_file_regression_table_reduce() {
+    let code = include_str!("pyret-files/full-files/table-reduce.arr");
+    assert_matches_pyret(code);
+}

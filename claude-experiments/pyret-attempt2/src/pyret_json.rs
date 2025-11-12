@@ -859,6 +859,13 @@ pub fn expr_to_pyret_json(expr: &Expr, registry: &FileRegistry) -> Value {
                 "type": "s-template"
             })
         }
+        Expr::STableExtend { column_binds, extensions, .. } => {
+            json!({
+                "type": "s-table-extend",
+                "column-binds": column_binds_to_pyret_json(column_binds, registry),
+                "extensions": extensions.iter().map(|x| table_extend_field_to_pyret_json(x, registry)).collect::<Vec<_>>()
+            })
+        }
         _ => {
             json!({
                 "type": "UNSUPPORTED",
@@ -1434,6 +1441,37 @@ pub fn load_table_spec_to_pyret_json(spec: &crate::LoadTableSpec, registry: &Fil
             json!({
                 "type": "s-table-src",
                 "src": expr_to_pyret_json(src, registry)
+            })
+        }
+    }
+}
+
+pub fn column_binds_to_pyret_json(column_binds: &crate::ColumnBinds, registry: &FileRegistry) -> Value {
+    json!({
+        "type": "s-column-binds",
+        "binds": column_binds.binds.iter().map(|b| bind_to_pyret_json(b, registry)).collect::<Vec<_>>(),
+        "table": expr_to_pyret_json(&column_binds.table, registry)
+    })
+}
+
+pub fn table_extend_field_to_pyret_json(field: &crate::TableExtendField, registry: &FileRegistry) -> Value {
+    use crate::TableExtendField;
+    match field {
+        TableExtendField::STableExtendField { name, value, ann, .. } => {
+            json!({
+                "type": "s-table-extend-field",
+                "name": name,
+                "value": expr_to_pyret_json(value, registry),
+                "ann": ann_to_pyret_json(ann, registry)
+            })
+        }
+        TableExtendField::STableExtendReducer { name, reducer, col, ann, .. } => {
+            json!({
+                "type": "s-table-extend-reducer",
+                "name": name,
+                "reducer": expr_to_pyret_json(reducer, registry),
+                "col": name_to_pyret_json(col, registry),
+                "ann": ann_to_pyret_json(ann, registry)
             })
         }
     }

@@ -124,11 +124,86 @@ pub const OperationFlattener = struct {
             return try self.flattenBlock(value);
         }
 
+        // If this is a region, check if it contains a block or terse operations
+        if (std.mem.eql(u8, name, "region")) {
+            return try self.flattenRegion(value);
+        }
+
         // Otherwise, recursively flatten children
         var new_list = PersistentVector(*Value).init(self.allocator, null);
         for (list.slice()) |child| {
             const flattened = try self.flattenValue(child);
             new_list = try new_list.push(flattened);
+        }
+
+        const new_value = try self.allocator.create(Value);
+        new_value.* = Value{
+            .type = .list,
+            .data = .{ .list = new_list },
+        };
+        return new_value;
+    }
+
+    /// Flatten a region - handles both verbose regions (with block) and terse regions (direct operations)
+    fn flattenRegion(self: *OperationFlattener, region_value: *Value) anyerror!*Value {
+        const list = region_value.data.list;
+
+        // If region is empty or just (region), return as is
+        if (list.len() <= 1) return region_value;
+
+        // Check if the second element is a block
+        const second = list.at(1);
+        if (second.type == .list and second.data.list.len() > 0) {
+            const second_first = second.data.list.at(0);
+            if (second_first.type == .identifier and std.mem.eql(u8, second_first.data.atom, "block")) {
+                // This is a verbose region with a block - flatten the block
+                var new_list = PersistentVector(*Value).init(self.allocator, null);
+                new_list = try new_list.push(list.at(0)); // "region"
+
+                const flattened_block = try self.flattenBlock(second);
+                new_list = try new_list.push(flattened_block);
+
+                // Add any remaining elements (shouldn't be any normally)
+                for (list.slice()[2..]) |child| {
+                    const flattened = try self.flattenValue(child);
+                    new_list = try new_list.push(flattened);
+                }
+
+                const new_value = try self.allocator.create(Value);
+                new_value.* = Value{
+                    .type = .list,
+                    .data = .{ .list = new_list },
+                };
+                return new_value;
+            }
+        }
+
+        // This is a terse region - contents are operations without a block wrapper
+        // Treat it like a block and flatten the operations
+        var new_list = PersistentVector(*Value).init(self.allocator, null);
+        new_list = try new_list.push(list.at(0)); // "region"
+
+        // Collect operations (everything after "region")
+        var operations = std.ArrayList(*Value){};
+        defer operations.deinit(self.allocator);
+
+        for (list.slice()[1..]) |child| {
+            if (try self.isOperation(child)) {
+                try operations.append(self.allocator, child);
+            } else {
+                // Not an operation (could be a value ID, etc.) - keep as is
+                new_list = try new_list.push(child);
+            }
+        }
+
+        // Flatten operations
+        if (operations.items.len > 0) {
+            const flattened_ops = try self.flattenOperations(operations.items);
+            defer self.allocator.free(flattened_ops);
+
+            for (flattened_ops) |op| {
+                new_list = try new_list.push(op);
+            }
         }
 
         const new_value = try self.allocator.create(Value);

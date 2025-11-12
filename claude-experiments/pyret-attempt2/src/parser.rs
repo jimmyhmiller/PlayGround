@@ -1925,6 +1925,7 @@ impl Parser {
             TokenType::Spy => self.parse_spy_stmt(),
             TokenType::Method => self.parse_method_expr(),
             TokenType::Table => self.parse_table_expr(),
+            TokenType::TableExtend => self.parse_table_extend_expr(),
             TokenType::TableExtract => self.parse_extract_expr(),
             TokenType::LoadTable => self.parse_load_table_expr(),
             TokenType::Reactor => self.parse_reactor_expr(),
@@ -4402,6 +4403,122 @@ impl Parser {
             l: start.location.span(end.location),
             headers,
             rows,
+        })
+    }
+
+    /// table-extend: EXTEND expr [USING binding (COMMA binding)*] COLON table-extend-fields END
+    /// Parses table extend expressions like: extend t using x: sum: T.running-sum of x end
+    fn parse_table_extend_expr(&mut self) -> ParseResult<Expr> {
+        let start = self.expect(TokenType::TableExtend)?; // consume "extend"
+
+        // Parse the table expression
+        let table = Box::new(self.parse_binop_expr()?);
+
+        // Parse optional USING bindings
+        let mut binds = Vec::new();
+        if self.matches(&TokenType::Using) {
+            self.advance(); // consume "using"
+
+            // Parse comma-separated list of bindings
+            loop {
+                let bind = self.parse_bind()?;
+                binds.push(bind);
+
+                if self.matches(&TokenType::Comma) {
+                    self.advance(); // consume comma
+                } else {
+                    break;
+                }
+            }
+        }
+
+        self.expect(TokenType::Colon)?;
+
+        // Parse table-extend-fields
+        // table-extend-field: key [COLONCOLON ann] COLON binop-expr
+        //                   | key [COLONCOLON ann] COLON expr OF NAME
+        let mut extensions = Vec::new();
+
+        loop {
+            // Check for end of fields
+            if self.matches(&TokenType::End) {
+                break;
+            }
+
+            // Parse field name
+            let name_token = self.expect(TokenType::Name)?;
+            let name = name_token.value.clone();
+            let field_start = name_token.location;
+
+            // Parse optional type annotation
+            let ann = if self.matches(&TokenType::ColonColon) {
+                self.advance();
+                self.parse_ann()?
+            } else {
+                Ann::ABlank
+            };
+
+            self.expect(TokenType::Colon)?;
+
+            // Parse the value expression
+            let value_expr = self.parse_binop_expr()?;
+
+            // Check if this is a reducer (OF NAME) or regular field
+            if self.matches(&TokenType::Of) {
+                self.advance(); // consume "of"
+                let col = self.parse_name()?;
+
+                // Get end location from col Name
+                let col_loc = match &col {
+                    Name::SUnderscore { l } => l,
+                    Name::SName { l, .. } => l,
+                    Name::SGlobal { .. } | Name::SModuleGlobal { .. } | Name::SAtom { .. } | Name::STypeGlobal { .. } => {
+                        // These don't have locations, use field_start as fallback
+                        &field_start
+                    }
+                };
+
+                extensions.push(TableExtendField::STableExtendReducer {
+                    l: field_start.span(*col_loc),
+                    name,
+                    reducer: Box::new(value_expr),
+                    col,
+                    ann,
+                });
+            } else {
+                // Use value_expr's end location
+                let value_end = *value_expr.get_loc();
+                extensions.push(TableExtendField::STableExtendField {
+                    l: field_start.span(value_end),
+                    name,
+                    value: Box::new(value_expr),
+                    ann,
+                });
+            }
+
+            // Check for comma or end
+            if self.matches(&TokenType::Comma) {
+                self.advance(); // consume comma
+            } else if !self.matches(&TokenType::End) {
+                // If not comma and not end, there's a problem
+                break;
+            }
+        }
+
+        let end = self.expect(TokenType::End)?;
+
+        // Construct ColumnBinds
+        let column_binds = ColumnBinds {
+            node_type: "s-column-binds".to_string(),
+            l: start.location.span(end.location),
+            binds,
+            table,
+        };
+
+        Ok(Expr::STableExtend {
+            l: start.location.span(end.location),
+            column_binds,
+            extensions,
         })
     }
 
