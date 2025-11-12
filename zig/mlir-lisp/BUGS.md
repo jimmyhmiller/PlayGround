@@ -16,50 +16,6 @@ To add, close, or list bugs, use:
 
 This file tracks bugs discovered during development.
 
-## Terse syntax fails with multi-argument function calls [fat-bowed-hawk]
-
-**ID:** fat-bowed-hawk
-**Timestamp:** 2025-11-11 22:23:25
-**Severity:** high
-**Location:** src/parser.zig (parseOperands() at line 916)
-**Tags:** parser, terse-syntax, func.call
-
-### Description
-
-When using terse/inline syntax for func.call with multiple arguments (where arguments are nested operations), the parser fails with 'Expected value ID in operands'. Single-argument calls work fine, but two or more arguments cause parsing errors.
-
-### Minimal Reproducing Case
-
-See /tmp/multi_arg_repro.lisp - attempting to call a function that takes two i32 arguments using terse syntax fails
-
-### Code Snippet
-
-```
-(: (func.call {:callee @add_two}
-              (arith.constant {:value (: 5 i32)})
-              (arith.constant {:value (: 7 i32)}))
-   i32)
-```
-
----
-
-## paredit-like balance incorrectly moves type annotations inside function calls [radiant-frail-bobolink]
-
-**ID:** radiant-frail-bobolink
-**Timestamp:** 2025-11-11 22:24:51
-**Severity:** high
-**Tags:** paredit, type-annotations, tooling
-
-### Description
-
-When using paredit-like balance on files with type-annotated function calls like (: (func.call ...) type), the balancer moves the type annotation inside the func.call as an extra argument, creating invalid syntax that triggers the multi-argument function call bug
-
-### Minimal Reproducing Case
-
-Write (: (func.call {:callee @foo} arg) i32) and run paredit-like balance - it changes to (func.call {:callee @foo} arg i32) which is incorrect
-
----
-
 ## Segmentation fault during mlirOperationPrint with complex recursive program [flimsy-defiant-dingo]
 
 **ID:** flimsy-defiant-dingo
