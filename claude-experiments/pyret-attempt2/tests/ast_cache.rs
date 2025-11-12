@@ -103,8 +103,10 @@ pub fn load_or_generate_cached_ast(code: &str) -> Result<Value, String> {
     let input_path = temp_input.path();
     let output_path = temp_output.path();
 
+    let pyret_json_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("pyret-json");
+
     let output = Command::new("node")
-        .current_dir("/Users/jimmyhmiller/Documents/Code/open-source/pyret-lang")
+        .current_dir(&pyret_json_dir)
         .arg("ast-to-json.jarr")
         .arg(input_path)
         .arg(output_path)
