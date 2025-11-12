@@ -56,6 +56,72 @@ pub const OperationFlattener = struct {
         return value;
     }
 
+    /// Check if an operation needs yield terminators in its regions
+    /// Returns true for operations like scf.if, scf.while, scf.for, etc.
+    fn needsYieldTerminator(operation_name: []const u8) bool {
+        const ops_needing_yield = [_][]const u8{
+            "scf.if",
+            "scf.while",
+            "scf.for",
+            "scf.foreach_thread",
+            "scf.forall",
+            "scf.parallel",
+        };
+
+        for (ops_needing_yield) |op| {
+            if (std.mem.eql(u8, operation_name, op)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Create an scf.yield operation that yields a given value
+    /// Returns: (scf.yield OPERAND)
+    fn createYieldOperation(self: *OperationFlattener, operand: *Value) !*Value {
+        var yield_list = PersistentVector(*Value).init(self.allocator, null);
+        yield_list = try yield_list.push(try self.makeIdentifier("scf.yield"));
+        yield_list = try yield_list.push(operand);
+
+        const yield_op = try self.allocator.create(Value);
+        yield_op.* = Value{
+            .type = .list,
+            .data = .{ .list = yield_list },
+        };
+        return yield_op;
+    }
+
+    /// Check if an operation is a terminator (func.return, scf.yield, cf.br, etc.)
+    fn isTerminator(op_value: *Value) bool {
+        if (op_value.type != .list) return false;
+
+        const list = op_value.data.list;
+        if (list.len() == 0) return false;
+
+        const first = list.at(0);
+        if (first.type != .identifier) return false;
+
+        const name = first.data.atom;
+
+        // Check for known terminators
+        const terminators = [_][]const u8{
+            "func.return",
+            "scf.yield",
+            "cf.br",
+            "cf.cond_br",
+            "cf.switch",
+            "llvm.return",
+        };
+
+        for (terminators) |term| {
+            if (std.mem.eql(u8, name, term)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// Flatten a complete module - entry point
     pub fn flattenModule(self: *OperationFlattener, module_value: *Value) anyerror!*Value {
         // Module should be a list
@@ -109,6 +175,11 @@ pub const OperationFlattener = struct {
 
     /// Flatten any Value recursively, looking for blocks to process
     fn flattenValue(self: *OperationFlattener, value: *Value) anyerror!*Value {
+        return try self.flattenValueWithContext(value, null);
+    }
+
+    /// Flatten any Value recursively with parent operation context
+    fn flattenValueWithContext(self: *OperationFlattener, value: *Value, parent_op: ?[]const u8) anyerror!*Value {
         if (value.type != .list) return value;
 
         const list = value.data.list;
@@ -121,18 +192,18 @@ pub const OperationFlattener = struct {
 
         // If this is a block, flatten its operations
         if (std.mem.eql(u8, name, "block")) {
-            return try self.flattenBlock(value);
+            return try self.flattenBlockWithContext(value, parent_op);
         }
 
         // If this is a region, check if it contains a block or terse operations
         if (std.mem.eql(u8, name, "region")) {
-            return try self.flattenRegion(value);
+            return try self.flattenRegion(value, parent_op);
         }
 
         // Otherwise, recursively flatten children
         var new_list = PersistentVector(*Value).init(self.allocator, null);
         for (list.slice()) |child| {
-            const flattened = try self.flattenValue(child);
+            const flattened = try self.flattenValueWithContext(child, parent_op);
             new_list = try new_list.push(flattened);
         }
 
@@ -145,7 +216,8 @@ pub const OperationFlattener = struct {
     }
 
     /// Flatten a region - handles both verbose regions (with block) and terse regions (direct operations)
-    fn flattenRegion(self: *OperationFlattener, region_value: *Value) anyerror!*Value {
+    /// parent_op: name of the parent operation (e.g., "scf.if") to determine if yield terminators are needed
+    fn flattenRegion(self: *OperationFlattener, region_value: *Value, parent_op: ?[]const u8) anyerror!*Value {
         const list = region_value.data.list;
 
         // If region is empty or just (region), return as is
@@ -160,12 +232,12 @@ pub const OperationFlattener = struct {
                 var new_list = PersistentVector(*Value).init(self.allocator, null);
                 new_list = try new_list.push(list.at(0)); // "region"
 
-                const flattened_block = try self.flattenBlock(second);
+                const flattened_block = try self.flattenBlockWithContext(second, parent_op);
                 new_list = try new_list.push(flattened_block);
 
                 // Add any remaining elements (shouldn't be any normally)
                 for (list.slice()[2..]) |child| {
-                    const flattened = try self.flattenValue(child);
+                    const flattened = try self.flattenValueWithContext(child, parent_op);
                     new_list = try new_list.push(flattened);
                 }
 
@@ -179,32 +251,116 @@ pub const OperationFlattener = struct {
         }
 
         // This is a terse region - contents are operations without a block wrapper
-        // Treat it like a block and flatten the operations
-        var new_list = PersistentVector(*Value).init(self.allocator, null);
-        new_list = try new_list.push(list.at(0)); // "region"
+        // We need to:
+        // 1. Create an implicit block
+        // 2. Flatten the operations
+        // 3. Add scf.yield terminator if the parent operation needs it
 
-        // Collect operations (everything after "region")
+        // Collect all content (everything after "region")
+        var content_items = std.ArrayList(*Value){};
+        defer content_items.deinit(self.allocator);
+
+        for (list.slice()[1..]) |child| {
+            try content_items.append(self.allocator, child);
+        }
+
+        // If empty terse region, return as is
+        if (content_items.items.len == 0) {
+            return region_value;
+        }
+
+        // Check if parent operation needs yield terminators
+        const needs_yield = if (parent_op) |op_name| needsYieldTerminator(op_name) else false;
+
+        // For terse regions in operations needing yield:
+        // If there's a single expression that's not a terminator, wrap it in scf.yield
+        if (needs_yield and content_items.items.len == 1) {
+            const single_item = content_items.items[0];
+
+            // Check if it's already a terminator
+            if (!isTerminator(single_item)) {
+                // Wrap in scf.yield
+                const yield_op = try self.createYieldOperation(single_item);
+
+                // Create block with the yield operation
+                var block_list = PersistentVector(*Value).init(self.allocator, null);
+                block_list = try block_list.push(try self.makeIdentifier("block"));
+                block_list = try block_list.push(yield_op);
+
+                const block_value = try self.allocator.create(Value);
+                block_value.* = Value{
+                    .type = .list,
+                    .data = .{ .list = block_list },
+                };
+
+                // Wrap in region
+                var new_list = PersistentVector(*Value).init(self.allocator, null);
+                new_list = try new_list.push(list.at(0)); // "region"
+                new_list = try new_list.push(block_value);
+
+                const new_value = try self.allocator.create(Value);
+                new_value.* = Value{
+                    .type = .list,
+                    .data = .{ .list = new_list },
+                };
+
+                // Now flatten this properly structured region
+                return try self.flattenRegion(new_value, parent_op);
+            }
+        }
+
+        // For multiple operations or operations already with terminators,
+        // treat it like a block and flatten the operations
         var operations = std.ArrayList(*Value){};
         defer operations.deinit(self.allocator);
 
-        for (list.slice()[1..]) |child| {
+        for (content_items.items) |child| {
             if (try self.isOperation(child)) {
                 try operations.append(self.allocator, child);
-            } else {
-                // Not an operation (could be a value ID, etc.) - keep as is
-                new_list = try new_list.push(child);
             }
         }
 
         // Flatten operations
+        var flattened_ops_list = std.ArrayList(*Value){};
+        defer flattened_ops_list.deinit(self.allocator);
+
         if (operations.items.len > 0) {
             const flattened_ops = try self.flattenOperations(operations.items);
             defer self.allocator.free(flattened_ops);
 
             for (flattened_ops) |op| {
-                new_list = try new_list.push(op);
+                try flattened_ops_list.append(self.allocator, op);
             }
         }
+
+        // Check if we need to add a yield terminator
+        if (needs_yield and flattened_ops_list.items.len > 0) {
+            const last_op = flattened_ops_list.items[flattened_ops_list.items.len - 1];
+            if (!isTerminator(last_op)) {
+                // The last operation is not a terminator, but for terse regions
+                // this shouldn't happen if we properly handled the single-expression case above
+                // For multi-operation terse regions, user should add explicit terminators
+            }
+        }
+
+        // Create block with flattened operations
+        var block_list = PersistentVector(*Value).init(self.allocator, null);
+        block_list = try block_list.push(try self.makeIdentifier("block"));
+
+        for (flattened_ops_list.items) |op| {
+            block_list = try block_list.push(op);
+        }
+
+        const block_value = try self.allocator.create(Value);
+        block_value.* = Value{
+            .type = .list,
+            .data = .{ .list = block_list },
+        };
+
+        // Wrap in region
+        var new_list = PersistentVector(*Value).init(self.allocator, null);
+        new_list = try new_list.push(list.at(0)); // "region"
+        new_list = try new_list.push(block_value);
 
         const new_value = try self.allocator.create(Value);
         new_value.* = Value{
@@ -216,6 +372,33 @@ pub const OperationFlattener = struct {
 
     /// Flatten a block - this is where the main flattening logic happens
     fn flattenBlock(self: *OperationFlattener, block_value: *Value) anyerror!*Value {
+        return try self.flattenBlockWithContext(block_value, null);
+    }
+
+    /// Flatten a regions section: (regions (region ...) (region ...))
+    fn flattenRegionsSection(self: *OperationFlattener, regions_section: *Value, parent_op: ?[]const u8) anyerror!*Value {
+        const list = regions_section.data.list;
+        var new_list = PersistentVector(*Value).init(self.allocator, null);
+
+        // First element is "regions"
+        new_list = try new_list.push(list.at(0));
+
+        // Flatten each region
+        for (list.slice()[1..]) |region| {
+            const flattened = try self.flattenValueWithContext(region, parent_op);
+            new_list = try new_list.push(flattened);
+        }
+
+        const new_value = try self.allocator.create(Value);
+        new_value.* = Value{
+            .type = .list,
+            .data = .{ .list = new_list },
+        };
+        return new_value;
+    }
+
+    /// Flatten a block with parent operation context
+    fn flattenBlockWithContext(self: *OperationFlattener, block_value: *Value, parent_op: ?[]const u8) anyerror!*Value {
         const list = block_value.data.list;
         var new_list = PersistentVector(*Value).init(self.allocator, null);
 
@@ -243,6 +426,17 @@ pub const OperationFlattener = struct {
         // Add flattened operations to the new list
         for (flattened_ops) |op| {
             new_list = try new_list.push(op);
+        }
+
+        // Check if we need to add a yield terminator
+        const needs_yield = if (parent_op) |op_name| needsYieldTerminator(op_name) else false;
+        if (needs_yield and flattened_ops.len > 0) {
+            const last_op = flattened_ops[flattened_ops.len - 1];
+            if (!isTerminator(last_op)) {
+                // Last operation is not a terminator, but for properly structured blocks
+                // with explicit operations, the user should add the terminator
+                // We only auto-add for terse single-expression regions
+            }
         }
 
         const new_value = try self.allocator.create(Value);
@@ -522,6 +716,24 @@ pub const OperationFlattener = struct {
         var new_list = PersistentVector(*Value).init(self.allocator, null);
         var all_hoisted = std.ArrayList(*Value){};
 
+        // Extract operation name to pass to regions
+        var op_name: ?[]const u8 = null;
+        for (list.slice()) |section| {
+            if (section.type == .list and section.data.list.len() > 0) {
+                const first = section.data.list.at(0);
+                if (first.type == .identifier and std.mem.eql(u8, first.data.atom, "name")) {
+                    // Found name section: (name op.name)
+                    if (section.data.list.len() > 1) {
+                        const name_val = section.data.list.at(1);
+                        if (name_val.type == .identifier) {
+                            op_name = name_val.data.atom;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         for (list.slice()) |section| {
             if (section.type == .list and section.data.list.len() > 0) {
                 const first = section.data.list.at(0);
@@ -542,8 +754,8 @@ pub const OperationFlattener = struct {
                         new_list = try new_list.push(result.section);
                         continue;
                     } else if (std.mem.eql(u8, name, "regions")) {
-                        // Recursively flatten regions
-                        const flattened = try self.flattenValue(section);
+                        // Recursively flatten regions with parent operation name
+                        const flattened = try self.flattenRegionsSection(section, op_name);
                         new_list = try new_list.push(flattened);
                         continue;
                     }
