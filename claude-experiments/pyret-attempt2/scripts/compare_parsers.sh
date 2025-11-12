@@ -22,23 +22,13 @@ PYRET_JSON="/tmp/pyret_output.json"
 RUST_JSON="/tmp/rust_output.json"
 PYRET_EXPR="/tmp/pyret_expr.json"
 
-# Check if PYRET_REPO environment variable is set
-if [ -z "$PYRET_REPO" ]; then
-    echo "ERROR: PYRET_REPO environment variable is not set."
-    echo ""
-    echo "Usage: PYRET_REPO=/path/to/pyret-lang $0 '<expression>'"
-    echo "   OR: PYRET_REPO=/path/to/pyret-lang $0 '/path/to/file.arr'"
-    echo ""
-    echo "Or set it permanently in your shell profile:"
-    echo "  export PYRET_REPO=/path/to/pyret-lang"
-    echo ""
-    exit 1
-fi
+# Use local ast-to-json.jarr
+PYRET_JSON_TOOL="$PROJECT_ROOT/pyret-json/ast-to-json.jarr"
 
-# Validate that PYRET_REPO points to a valid pyret-lang repository
-if [ ! -f "$PYRET_REPO/ast-to-json.jarr" ]; then
-    echo "ERROR: $PYRET_REPO does not contain ast-to-json.jarr"
-    echo "Please ensure PYRET_REPO points to a valid pyret-lang repository."
+# Validate that the local ast-to-json.jarr exists
+if [ ! -f "$PYRET_JSON_TOOL" ]; then
+    echo "ERROR: $PYRET_JSON_TOOL does not exist"
+    echo "Please ensure pyret-json/ast-to-json.jarr is present in the project."
     exit 1
 fi
 
@@ -59,8 +49,8 @@ echo
 
 # Parse with Pyret's official parser
 echo "=== Parsing with Pyret's official parser... ==="
-cd "$PYRET_REPO"
-node ast-to-json.jarr "$TEMP_FILE" "$PYRET_JSON" 2>&1 | grep "JSON written" || true
+cd "$PROJECT_ROOT"
+node "$PYRET_JSON_TOOL" "$TEMP_FILE" "$PYRET_JSON" 2>&1 | grep "JSON written" || true
 
 # Copy the full program AST (no longer extracting just the first statement)
 cp "$PYRET_JSON" "$PYRET_EXPR"

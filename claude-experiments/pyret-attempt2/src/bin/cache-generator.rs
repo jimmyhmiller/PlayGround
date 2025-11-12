@@ -27,10 +27,17 @@ fn run_pyret_parser(code: &str) -> Result<String, String> {
     let input_path = "/tmp/pyret_cache_gen_input.arr";
     fs::write(input_path, code).map_err(|e| format!("Failed to write input: {}", e))?;
 
-    // Run Pyret parser
+    // Use local ast-to-json.jarr
+    let pyret_json_tool = "pyret-json/ast-to-json.jarr";
+
+    // Verify the file exists
+    if !fs::metadata(pyret_json_tool).is_ok() {
+        return Err(format!("Could not find {}", pyret_json_tool));
+    }
+
+    // Run Pyret parser from project root
     let output = Command::new("node")
-        .current_dir("/Users/jimmyhmiller/Documents/Code/open-source/pyret-lang")
-        .arg("ast-to-json.jarr")
+        .arg(pyret_json_tool)
         .arg(input_path)
         .arg("/tmp/pyret_cache_gen_output.json")
         .output()
