@@ -4,6 +4,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use tempfile::NamedTempFile;
+use std::io::Write;
 
 #[derive(Serialize, Deserialize)]
 struct CacheIndex {
@@ -86,17 +88,26 @@ pub fn load_or_generate_cached_ast(code: &str) -> Result<Value, String> {
     }
 
     // Otherwise, generate it by running Pyret parser
-    let temp_file = format!("/tmp/pyret_lazy_cache_input_{}.arr", hash);
-    let temp_output = format!("/tmp/pyret_lazy_cache_output_{}.json", hash);
+    // Use tempfile for automatic cleanup
+    let mut temp_input = NamedTempFile::with_suffix(".arr")
+        .map_err(|e| format!("Failed to create temp input file: {}", e))?;
 
-    fs::write(&temp_file, code)
-        .map_err(|e| format!("Failed to write temp file: {}", e))?;
+    let temp_output = NamedTempFile::with_suffix(".json")
+        .map_err(|e| format!("Failed to create temp output file: {}", e))?;
+
+    temp_input.write_all(code.as_bytes())
+        .map_err(|e| format!("Failed to write temp input file: {}", e))?;
+    temp_input.flush()
+        .map_err(|e| format!("Failed to flush temp input file: {}", e))?;
+
+    let input_path = temp_input.path();
+    let output_path = temp_output.path();
 
     let output = Command::new("node")
         .current_dir("/Users/jimmyhmiller/Documents/Code/open-source/pyret-lang")
         .arg("ast-to-json.jarr")
-        .arg(&temp_file)
-        .arg(&temp_output)
+        .arg(input_path)
+        .arg(output_path)
         .output()
         .map_err(|e| format!("Failed to run Pyret parser: {}", e))?;
 
@@ -108,7 +119,7 @@ pub fn load_or_generate_cached_ast(code: &str) -> Result<Value, String> {
     }
 
     // Read the generated JSON
-    let json_str = fs::read_to_string(&temp_output)
+    let json_str = fs::read_to_string(output_path)
         .map_err(|e| format!("Failed to read Pyret output: {}", e))?;
 
     let value: Value = serde_json::from_str(&json_str)
@@ -118,9 +129,7 @@ pub fn load_or_generate_cached_ast(code: &str) -> Result<Value, String> {
     fs::write(&cache_file, &json_str)
         .map_err(|e| format!("Failed to write cache file: {}", e))?;
 
-    // Clean up temp files
-    let _ = fs::remove_file(temp_file);
-    let _ = fs::remove_file(temp_output);
+    // NamedTempFile automatically cleans up when dropped
 
     Ok(value)
 }
@@ -158,18 +167,29 @@ pub fn compare_with_cached_pyret(code: &str) -> Result<bool, String> {
         eprintln!("\n=== AST MISMATCH DEBUG ===");
         eprintln!("Code: {}", code);
 
-        // Write normalized ASTs to temp files for comparison
-        if let Ok(pyret_str) = serde_json::to_string_pretty(&pyret_normalized) {
-            let _ = fs::write("/tmp/rust_test_pyret_normalized.json", pyret_str);
-        }
-        if let Ok(rust_str) = serde_json::to_string_pretty(&rust_normalized) {
-            let _ = fs::write("/tmp/rust_test_rust_normalized.json", rust_str);
-        }
+        // Write normalized ASTs to project debug directory for comparison
+        let debug_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-debug");
 
-        eprintln!("Wrote normalized ASTs to:");
-        eprintln!("  /tmp/rust_test_pyret_normalized.json");
-        eprintln!("  /tmp/rust_test_rust_normalized.json");
-        eprintln!("Run: diff /tmp/rust_test_pyret_normalized.json /tmp/rust_test_rust_normalized.json");
+        if let Err(e) = fs::create_dir_all(&debug_dir) {
+            eprintln!("Warning: Failed to create debug directory: {}", e);
+        } else {
+            let pyret_file = debug_dir.join("pyret_normalized.json");
+            let rust_file = debug_dir.join("rust_normalized.json");
+
+            if let Ok(pyret_str) = serde_json::to_string_pretty(&pyret_normalized) {
+                let _ = fs::write(&pyret_file, pyret_str);
+            }
+            if let Ok(rust_str) = serde_json::to_string_pretty(&rust_normalized) {
+                let _ = fs::write(&rust_file, rust_str);
+            }
+
+            eprintln!("Wrote normalized ASTs to:");
+            eprintln!("  {}", pyret_file.display());
+            eprintln!("  {}", rust_file.display());
+            eprintln!("Run: diff {} {}", pyret_file.display(), rust_file.display());
+        }
     }
 
     Ok(matches)
