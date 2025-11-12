@@ -255,6 +255,27 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    // Inliner tool - inlines all (declare var-name expr) forms
+    const inliner_exe = b.addExecutable(.{
+        .name = "mlir_lisp_inliner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/inliner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mlir_lisp", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(inliner_exe);
+
+    const run_inliner = b.addRunArtifact(inliner_exe);
+    const inliner_step = b.step("inline", "Run the inliner tool");
+    inliner_step.dependOn(&run_inliner.step);
+    if (b.args) |args| {
+        run_inliner.addArgs(args);
+    }
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.

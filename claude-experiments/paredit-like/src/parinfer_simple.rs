@@ -52,6 +52,7 @@ struct DelimInfo {
     delim_type: DelimType,
     line_idx: usize,
     line_indent: usize,
+    col_pos: usize, // Column position where the opening delimiter appears
 }
 
 pub struct Parinfer {
@@ -127,6 +128,7 @@ impl Parinfer {
                         delim_type,
                         line_idx,
                         line_indent,
+                        col_pos: char_idx,
                     });
                     new_line.push(ch);
                 } else if let Some(close_type) = DelimType::from_close(ch) {
@@ -149,7 +151,9 @@ impl Parinfer {
                                             lines.iter().skip(line_idx + 1).all(|l| l.trim().is_empty() || l.trim().starts_with(';'));
 
                                 let dedenting = next_indent < line_indent;
-                                let should_close = !dedenting || open_info.line_indent >= next_indent;
+                                // Use the greater of line_indent and col_pos as the effective nesting level
+                                let opener_indent = open_info.line_indent.max(open_info.col_pos);
+                                let should_close = !dedenting || opener_indent >= next_indent;
 
                                 if should_close || at_eof {
                                     delim_stack.pop();
@@ -175,15 +179,25 @@ impl Parinfer {
             if !in_string && !in_comment {
                 let next_indent = Self::find_next_indent(&lines, line_idx);
 
-                // Close delimiters that were opened at indentation > next_indent
+                // Check if next line starts with closing delimiters
+                let next_line_has_closers = lines.get(line_idx + 1)
+                    .and_then(|l| l.trim_start().chars().next())
+                    .map(|c| matches!(c, ')' | ']' | '}'))
+                    .unwrap_or(false);
+
+                // Close delimiters that were opened at effective indent > next_indent
+                // But only if the next line doesn't already have closing delimiters
                 // Add them to the end of the current line (Lisp convention)
-                while let Some(open_info) = delim_stack.last() {
-                    if next_indent < line_indent && open_info.line_indent > next_indent {
-                        let delim_type = open_info.delim_type;
-                        delim_stack.pop();
-                        new_line.push(delim_type.close_char());
-                    } else {
-                        break;
+                if !next_line_has_closers {
+                    while let Some(open_info) = delim_stack.last() {
+                        let opener_indent = open_info.line_indent.max(open_info.col_pos);
+                        if next_indent < line_indent && opener_indent > next_indent {
+                            let delim_type = open_info.delim_type;
+                            delim_stack.pop();
+                            new_line.push(delim_type.close_char());
+                        } else {
+                            break;
+                        }
                     }
                 }
             }
@@ -414,5 +428,25 @@ mod tests {
         let close_brackets = result.chars().filter(|&c| c == ']').count();
         assert_eq!(open_braces, close_braces);
         assert_eq!(open_brackets, close_brackets);
+    }
+
+    #[test]
+    fn test_type_annotation_with_nested_calls() {
+        // Test case for bug: type annotations should not be moved inside function calls
+        let source = "(: (func.call {:callee @add_two}\n              (arith.constant {:value (: 5 i32)})\n              (arith.constant {:value (: 7 i32)}))\n   i32)";
+        let parinfer = Parinfer::new(source);
+        let result = parinfer.balance().unwrap();
+        // The i32 should remain as a sibling to func.call, not moved inside it
+        assert_eq!(result, source);
+    }
+
+    #[test]
+    fn test_simple_type_annotation() {
+        // Simpler test case for nested function calls with type annotations
+        let source = "(: (func.call arg1\n              arg2)\n   i32)";
+        let parinfer = Parinfer::new(source);
+        let result = parinfer.balance().unwrap();
+        // The i32 should remain outside func.call
+        assert_eq!(result, source);
     }
 }
