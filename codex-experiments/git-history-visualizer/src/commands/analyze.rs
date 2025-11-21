@@ -6,8 +6,7 @@ use crate::{
 };
 
 pub fn run(args: cli::AnalyzeArgs) -> Result<()> {
-    ensure!(args.jobs > 0, "--jobs must be at least 1");
-
+    // jobs can be 0 (auto-detect) or >= 1
     let config = AnalyzeConfig {
         repo: args.repo,
         cohort_format: args.cohort_format,

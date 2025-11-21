@@ -1,0 +1,20 @@
+{
+  "name": "pdf-sync",
+  "version": "1.0.0",
+  "description": "Sync PDFs to S3 with hash-based naming and folder structure preservation",
+  "main": "index.js",
+  "type": "module",
+  "bin": {
+    "pdf-sync": "./cli.js"
+  },
+  "scripts": {
+    "start": "node cli.js"
+  },
+  "keywords": ["pdf", "s3", "sync", "aws"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0",
+    "commander": "^12.0.0"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "id": "grid",
+  "title": "GRID_RUNNER_V4",
+  "subtitle": "Low-Latency Infrastructure",
+  "icon": "<svg viewBox=\"0 0 60 60\"><path d=\"M10 5 L50 5 L55 15 L55 55 L15 55 L5 45 Z\" /><rect x=\"20\" y=\"20\" width=\"20\" height=\"20\" /></svg>",
+  "theme": {
+    "bgApp": "#030507",
+    "textHead": "\"Courier New\", monospace",
+    "textBody": "\"Courier New\", monospace",
+    "accent": "#00f3ff",
+    "textColor": "#ccffff",
+    "positive": "#00ff9d",
+    "negative": "#ff3366",
+    "widgetBg": "rgba(0, 243, 255, 0.05)",
+    "widgetBorder": "1px solid rgba(0, 243, 255, 0.3)",
+    "widgetRadius": "0px",
+    "chartRadius": "0",
+    "clipPath": "polygon(0 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%)",
+    "bgLayer": {
+      "opacity": 0.15,
+      "background": "linear-gradient(rgba(0, 243, 255, 0.3) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 243, 255, 0.3) 1px, transparent 1px)",
+      "backgroundSize": "40px 40px"
+    }
+  },
+  "layout": {
+    "columns": "auto auto 320px 1fr",
+    "rows": "100px auto auto 1fr",
+    "areas": "\"chart chart chat .\" \"stat diff chat .\" \". . chat .\" \". . chat .\""
+  },
+  "widgets": [
+    {
+      "id": "chart",
+      "type": "barChart",
+      "area": "chart",
+      "label": ["Packet Flow", "LIVE"]
+    },
+    {
+      "id": "chat",
+      "type": "chat",
+      "area": "chat",
+      "label": "Terminal",
+      "messages": [
+        { "from": "user", "text": "`deploy --force`" },
+        { "from": "assistant", "text": "```bash\n[OK] DEPLOYED TO 4096 NODES\n[OK] Latency: 1ms\n[OK] Status: RUNNING\n```" }
+      ]
+    },
+    {
+      "id": "stat",
+      "type": "stat",
+      "area": "stat",
+      "label": "Ping",
+      "value": "1ms"
+    },
+    {
+      "id": "diff",
+      "type": "diffList",
+      "area": "diff",
+      "label": "Deployments",
+      "items": [["MAIN.exe", 512, 89], ["NET.dll", 34, 201], ["BOOT.bat", 8, 15]]
+    }
+  ]
+}

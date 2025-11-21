@@ -1,0 +1,56 @@
+{
+  "id": "architect",
+  "title": "The Architect",
+  "subtitle": "System Design & Build",
+  "icon": "<svg viewBox=\"0 0 60 60\"><rect x=\"10\" y=\"15\" width=\"15\" height=\"15\" /><rect x=\"35\" y=\"15\" width=\"15\" height=\"15\" /><rect x=\"10\" y=\"35\" width=\"15\" height=\"15\" /><rect x=\"35\" y=\"35\" width=\"15\" height=\"15\" /><line x1=\"25\" y1=\"22\" x2=\"35\" y2=\"22\" /><line x1=\"25\" y1=\"42\" x2=\"35\" y2=\"42\" /></svg>",
+  "theme": {
+    "bgApp": "#161311",
+    "textHead": "\"Georgia\", serif",
+    "textBody": "\"Georgia\", serif",
+    "accent": "#d4af37",
+    "textColor": "#ebdcb2",
+    "positive": "#7cb342",
+    "negative": "#c2735a",
+    "widgetBg": "rgba(212, 175, 55, 0.04)",
+    "widgetBorder": "3px double #423821",
+    "widgetRadius": "16px",
+    "chartRadius": "4px 4px 0 0",
+    "bgLayer": {
+      "opacity": 0.08,
+      "background": "radial-gradient(#d4af37 1px, transparent 1px)",
+      "backgroundSize": "20px 20px"
+    }
+  },
+  "layout": {
+    "columns": "auto 320px 1fr",
+    "rows": "100px auto 1fr",
+    "areas": "\"chart chat .\" \"stat chat .\" \". chat .\""
+  },
+  "widgets": [
+    {
+      "id": "chart",
+      "type": "barChart",
+      "area": "chart",
+      "label": ["Response Time", "24H"]
+    },
+    {
+      "id": "stat",
+      "type": "stat",
+      "area": "stat",
+      "label": "Uptime",
+      "value": "99.9%"
+    },
+    {
+      "id": "chat",
+      "type": "chat",
+      "area": "chat",
+      "label": "Assistant",
+      "backend": "claude",
+      "messages": [],
+      "claudeOptions": {
+        "model": "claude-sonnet-4-5-20250929",
+        "permissionMode": "acceptEdits"
+      }
+    }
+  ]
+}

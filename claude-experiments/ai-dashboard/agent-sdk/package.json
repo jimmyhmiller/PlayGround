@@ -1,0 +1,21 @@
+{
+  "name": "@ai-dashboard/agent-sdk",
+  "version": "0.1.0",
+  "description": "SDK for building external agents for AI Dashboard",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": ["ai-dashboard", "agent", "sdk"],
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.3.3"
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "id": "claude-agent",
+  "title": "Claude Agent",
+  "subtitle": "Powered by Claude Agent SDK",
+  "icon": "console",
+  "theme": {
+    "bgApp": "#1a1a2e",
+    "textHead": "system-ui, sans-serif",
+    "textBody": "system-ui, sans-serif",
+    "accent": "#e94560",
+    "textColor": "#eaeaea",
+    "positive": "#00d9ff",
+    "negative": "#ff6b9d",
+    "widgetBg": "rgba(22, 27, 34, 0.9)",
+    "widgetBorder": "1px solid rgba(233, 69, 96, 0.3)",
+    "widgetRadius": "8px",
+    "chartRadius": "4px",
+    "bgLayer": {
+      "opacity": 0.05,
+      "background": "radial-gradient(circle at 20% 50%, rgba(233, 69, 96, 0.1), transparent 50%)"
+    }
+  },
+  "layout": {
+    "columns": "1fr",
+    "rows": "1fr",
+    "areas": "\"chat\""
+  },
+  "widgets": [
+    {
+      "id": "claude-chat",
+      "type": "chat",
+      "area": "chat",
+      "label": "Claude Agent",
+      "backend": "claude",
+      "messages": [],
+      "claudeOptions": {
+        "model": "claude-sonnet-4-5-20250929",
+        "permissionMode": "acceptEdits"
+      }
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "id": "conversation",
+  "title": "Session",
+  "subtitle": "AI Dashboard Development",
+  "icon": "<svg viewBox=\"0 0 60 60\"><rect x=\"5\" y=\"10\" width=\"50\" height=\"40\" rx=\"4\" /><path d=\"M15 25 L25 32 L15 39\" /><line x1=\"30\" y1=\"39\" x2=\"45\" y2=\"39\" /></svg>",
+  "theme": {
+    "bgApp": "#0d1117",
+    "textHead": "\"SF Mono\", \"Fira Code\", monospace",
+    "textBody": "\"SF Mono\", \"Fira Code\", monospace",
+    "accent": "#58a6ff",
+    "textColor": "#c9d1d9",
+    "positive": "#3fb950",
+    "negative": "#f85149",
+    "widgetBg": "rgba(22, 27, 34, 0.8)",
+    "widgetBorder": "1px solid rgba(48, 54, 61, 0.8)",
+    "widgetRadius": "6px",
+    "chartRadius": "2px",
+    "bgLayer": {
+      "opacity": 0.03,
+      "background": "linear-gradient(rgba(88, 166, 255, 0.1) 1px, transparent 1px)",
+      "backgroundSize": "100% 24px"
+    }
+  },
+  "layout": {
+    "columns": "320px 220px auto 1fr",
+    "rows": "auto auto auto 1fr",
+    "areas": "\"chat stats files .\" \"chat stats todos .\" \"chat . todos .\" \"chat . . .\""
+  },
+  "widgets": [
+    {
+      "id": "chat",
+      "type": "chat",
+      "area": "chat",
+      "label": "Conversation",
+      "backend": "claude",
+      "messages": [],
+      "claudeOptions": {
+        "model": "claude-sonnet-4-5-20250929",
+        "permissionMode": "acceptEdits"
+      }
+    },
+    {
+      "id": "stats",
+      "type": "keyValue",
+      "area": "stats",
+      "label": "Session",
+      "items": [
+        { "key": "Model", "value": "Sonnet 4.5" },
+        { "key": "Tokens", "value": "120k / 200k" },
+        { "key": "Duration", "value": "45 min" }
+      ]
+    },
+    {
+      "id": "files",
+      "type": "fileList",
+      "area": "files",
+      "label": "Files Changed",
+      "files": [
+        { "name": "src/App.jsx", "status": "modified" },
+        { "name": "src/dashboards.js", "status": "created" },
+        { "name": "src/themes.js", "status": "created" },
+        { "name": "src/styles.css", "status": "modified" },
+        { "name": "main.js", "status": "created" }
+      ]
+    },
+    {
+      "id": "todos",
+      "type": "todoList",
+      "area": "todos",
+      "label": "Tasks",
+      "items": [
+        { "text": "Set up Electron + React", "done": true },
+        { "text": "Create theme system", "done": true },
+        { "text": "Add chat with markdown", "done": true },
+        { "text": "Make layouts configurable", "done": true },
+        { "text": "Add new widget types", "done": false }
+      ]
+    }
+  ]
+}

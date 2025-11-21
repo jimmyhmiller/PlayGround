@@ -1,0 +1,37 @@
+MinimalLang {
+  Program = Statement* Expr
+
+  Statement = LetStmt
+
+  LetStmt = "let" ident TypeAnnotation? "=" Expr ";"
+
+  TypeAnnotation = ":" Type
+
+  Type = FunctionType | PrimaryType
+
+  FunctionType = "(" Type ")" "=>" Type
+
+  PrimaryType = "number" | "string"
+
+  Expr = LambdaExpr | CallExpr
+
+  LambdaExpr = "(" ident ":" Type ")" "=>" Expr
+
+  CallExpr = CallExpr "(" Expr ")"  -- call
+           | PrimaryExpr
+
+  PrimaryExpr = "(" Expr ")"  -- paren
+              | number
+              | stringLit
+              | ident
+
+  number = digit+ ("." digit+)?
+
+  stringLit = "\"" (~"\"" any)* "\""
+
+  ident = letter (alnum | "_")*
+
+  space += comment
+
+  comment = "//" (~"\n" any)* "\n"
+}

@@ -1,100 +1,7 @@
 // Maps TypeScript AST to minimal typechecker expression format
-import ts from 'typescript'
-
-type Type =
-  | { kind: 'number' }
-  | { kind: 'string' }
-  | { kind: 'function', from: Type, to: Type }
-
-type Expr =
-  | { kind: 'number', value: number }
-  | { kind: 'string', value: string }
-  | { kind: 'var', name: string }
-  | { kind: 'lambda', param: string, body: Expr }
-  | { kind: 'app', fn: Expr, arg: Expr }
-  | { kind: 'let', name: string, value: Expr, body: Expr }
-
-type Context = Map<string, Type>
-
-// Synthesis: expr ⇒ type
-function synth(ctx: Context, expr: Expr): Type {
-  switch (expr.kind) {
-    case 'number':
-      return { kind: 'number' }
-
-    case 'string':
-      return { kind: 'string' }
-
-    case 'var':
-      const type = ctx.get(expr.name)
-      if (!type) throw new Error(`Unbound variable: ${expr.name}`)
-      return type
-
-    case 'app':
-      const fnType = synth(ctx, expr.fn)
-      if (fnType.kind !== 'function') {
-        throw new Error('Cannot apply non-function')
-      }
-      check(ctx, expr.arg, fnType.from)
-      return fnType.to
-
-    case 'lambda':
-      throw new Error('Cannot synthesize type for lambda without annotation')
-
-    case 'let':
-      // Check if we have a pre-determined type for this binding (e.g., from function declaration)
-      const expectedType = ctx.get(expr.name)
-      let valueType: Type
-
-      if (expectedType && expr.value.kind === 'lambda') {
-        // Check lambda against expected type
-        check(ctx, expr.value, expectedType)
-        valueType = expectedType
-      } else {
-        valueType = synth(ctx, expr.value)
-      }
-
-      const newCtx = new Map(ctx)
-      newCtx.set(expr.name, valueType)
-      return synth(newCtx, expr.body)
-  }
-}
-
-// Checking: expr ⇐ type
-function check(ctx: Context, expr: Expr, expected: Type): void {
-  switch (expr.kind) {
-    case 'lambda':
-      if (expected.kind !== 'function') {
-        throw new Error('Lambda must have function type')
-      }
-      const newCtx = new Map(ctx)
-      newCtx.set(expr.param, expected.from)
-      check(newCtx, expr.body, expected.to)
-      break
-
-    default:
-      const actual = synth(ctx, expr)
-      if (!typesEqual(actual, expected)) {
-        throw new Error(`Type mismatch: expected ${typeToString(expected)}, got ${typeToString(actual)}`)
-      }
-  }
-}
-
-function typesEqual(a: Type, b: Type): boolean {
-  if (a.kind !== b.kind) return false
-  if (a.kind === 'function' && b.kind === 'function') {
-    return typesEqual(a.from, b.from) && typesEqual(a.to, b.to)
-  }
-  return true
-}
-
-function typeToString(type: Type): string {
-  switch (type.kind) {
-    case 'number': return 'number'
-    case 'string': return 'string'
-    case 'function': return `(${typeToString(type.from)} -> ${typeToString(type.to)})`
-  }
-}
+import * as ts from 'typescript'
+import { synth, check } from './minimal-typechecker'
+import type { Type, Expr, Context } from './minimal-typechecker'
 
 // Parse TypeScript type annotations to our Type format
 function parseTypeAnnotation(typeNode: ts.TypeNode): Type {
@@ -111,15 +18,38 @@ function parseTypeAnnotation(typeNode: ts.TypeNode): Type {
       const paramType = fnType.parameters[0].type!
       return {
         kind: 'function',
-        from: parseTypeAnnotation(paramType),
-        to: parseTypeAnnotation(fnType.type)
+        arg: parseTypeAnnotation(paramType),
+        returnType: parseTypeAnnotation(fnType.type)
       }
   }
   throw new Error(`Unsupported type annotation: ${ts.SyntaxKind[typeNode.kind]}`)
 }
 
+// Helper to create body expression from statements (with return)
+function createBodyExpr(statements: readonly ts.Statement[], ctx: Context): Expr {
+  const returnStmt = statements.find(ts.isReturnStatement)
+  if (!returnStmt || !returnStmt.expression) {
+    throw new Error('Function must have return statement')
+  }
+
+  // Get all non-return statements
+  const nonReturnStmts = statements.filter(s => !ts.isReturnStatement(s))
+
+  if (nonReturnStmts.length === 0) {
+    // Just a return statement, no need for block
+    return mapTsNodeToExpr(returnStmt.expression, ctx)
+  } else {
+    // Multiple statements - create a block
+    return {
+      kind: 'block',
+      statements: nonReturnStmts.map(s => mapTsNodeToExpr(s, ctx)),
+      return: mapTsNodeToExpr(returnStmt.expression, ctx)
+    }
+  }
+}
+
 // Map TypeScript AST nodes to minimal Expr format
-function mapTsNodeToExpr(node: ts.Node, ctx: Map<string, Type>): Expr {
+function mapTsNodeToExpr(node: ts.Node, ctx: Context): Expr {
   switch (node.kind) {
     case ts.SyntaxKind.NumericLiteral:
       const numLit = node as ts.NumericLiteral
@@ -131,12 +61,12 @@ function mapTsNodeToExpr(node: ts.Node, ctx: Map<string, Type>): Expr {
 
     case ts.SyntaxKind.Identifier:
       const ident = node as ts.Identifier
-      return { kind: 'var', name: ident.text }
+      return { kind: 'varLookup', name: ident.text }
 
     case ts.SyntaxKind.CallExpression:
       const call = node as ts.CallExpression
       return {
-        kind: 'app',
+        kind: 'call',
         fn: mapTsNodeToExpr(call.expression, ctx),
         arg: mapTsNodeToExpr(call.arguments[0], ctx)
       }
@@ -150,17 +80,13 @@ function mapTsNodeToExpr(node: ts.Node, ctx: Map<string, Type>): Expr {
       // Extract function body
       let bodyExpr: Expr
       if (ts.isBlock(func.body)) {
-        const returnStmt = func.body.statements.find(ts.isReturnStatement)
-        if (!returnStmt || !returnStmt.expression) {
-          throw new Error('Function must have return statement')
-        }
-        bodyExpr = mapTsNodeToExpr(returnStmt.expression, ctx)
+        bodyExpr = createBodyExpr(func.body.statements, ctx)
       } else {
         bodyExpr = mapTsNodeToExpr(func.body, ctx)
       }
 
       return {
-        kind: 'lambda',
+        kind: 'function',
         param: paramName,
         body: bodyExpr
       }
@@ -176,21 +102,23 @@ function mapTsNodeToExpr(node: ts.Node, ctx: Map<string, Type>): Expr {
         const param = init.parameters[0]
         const funcType: Type = {
           kind: 'function',
-          from: parseTypeAnnotation(param.type!),
-          to: parseTypeAnnotation(init.type)
+          arg: parseTypeAnnotation(param.type!),
+          returnType: parseTypeAnnotation(init.type)
         }
         ctx.set(varName, funcType)
       }
 
       const valueExpr = mapTsNodeToExpr(decl.initializer!, ctx)
 
-      // For variable statements, we need to wrap in a let expression
-      // But we need the "body" - this will be handled at the program level
+      // Parse type annotation if present
+      const typeAnnotation = decl.type ? parseTypeAnnotation(decl.type) : undefined
+
+      // Return a let statement (no body - will be used in a block)
       return {
         kind: 'let',
         name: varName,
         value: valueExpr,
-        body: { kind: 'var', name: varName } // placeholder
+        type: typeAnnotation
       }
 
     case ts.SyntaxKind.FunctionDeclaration:
@@ -199,30 +127,27 @@ function mapTsNodeToExpr(node: ts.Node, ctx: Map<string, Type>): Expr {
       const funcParam = funcDecl.parameters[0]
       const funcParamName = (funcParam.name as ts.Identifier).text
 
-      const returnStmt = (funcDecl.body as ts.Block).statements.find(ts.isReturnStatement)
-      if (!returnStmt || !returnStmt.expression) {
-        throw new Error('Function must have return statement')
-      }
+      const funcBody = funcDecl.body as ts.Block
+      const funcBodyExpr = createBodyExpr(funcBody.statements, ctx)
 
-      const lambdaExpr: Expr = {
-        kind: 'lambda',
+      const functionExpr: Expr = {
+        kind: 'function',
         param: funcParamName,
-        body: mapTsNodeToExpr(returnStmt.expression, ctx)
+        body: funcBodyExpr
       }
 
       // Store function type in context
       const funcType: Type = {
         kind: 'function',
-        from: parseTypeAnnotation(funcParam.type!),
-        to: parseTypeAnnotation(funcDecl.type!)
+        arg: parseTypeAnnotation(funcParam.type!),
+        returnType: parseTypeAnnotation(funcDecl.type!)
       }
       ctx.set(funcName, funcType)
 
       return {
         kind: 'let',
         name: funcName,
-        value: lambdaExpr,
-        body: { kind: 'var', name: funcName } // placeholder
+        value: functionExpr
       }
 
     case ts.SyntaxKind.ExpressionStatement:
@@ -233,29 +158,44 @@ function mapTsNodeToExpr(node: ts.Node, ctx: Map<string, Type>): Expr {
   throw new Error(`Unsupported node kind: ${ts.SyntaxKind[node.kind]}`)
 }
 
-// Convert a sequence of statements into nested let expressions
-function buildProgramExpr(statements: ts.Statement[], ctx: Map<string, Type>): Expr {
+// Convert a sequence of statements into a block expression
+function buildProgramExpr(statements: ts.Statement[], ctx: Context): Expr | null {
   if (statements.length === 0) {
-    throw new Error('Empty program')
+    return null
   }
 
   if (statements.length === 1) {
-    return mapTsNodeToExpr(statements[0], ctx)
+    const expr = mapTsNodeToExpr(statements[0], ctx)
+    // If it's a single let statement, wrap it in a block with varLookup return
+    if (expr.kind === 'let') {
+      return {
+        kind: 'block',
+        statements: [expr],
+        return: { kind: 'varLookup', name: expr.name }
+      }
+    }
+    return expr
   }
 
-  const [first, ...rest] = statements
-  const firstExpr = mapTsNodeToExpr(first, ctx)
+  // Multiple statements - separate let statements from the final expression
+  const allExprs = statements.map(s => mapTsNodeToExpr(s, ctx))
+  const letStmts = allExprs.slice(0, -1).filter(e => e.kind === 'let')
+  const lastExpr = allExprs[allExprs.length - 1]
 
-  if (firstExpr.kind === 'let') {
+  // If the last expression is a let, we need to add it to statements and return a varLookup
+  if (lastExpr.kind === 'let') {
     return {
-      kind: 'let',
-      name: firstExpr.name,
-      value: firstExpr.value,
-      body: buildProgramExpr(rest, ctx)
+      kind: 'block',
+      statements: [...letStmts, lastExpr],
+      return: { kind: 'varLookup', name: lastExpr.name }
     }
-  } else {
-    // For non-let expressions, we can just continue to the next
-    return buildProgramExpr(rest, ctx)
+  }
+
+  // Otherwise, use let statements with the last expression as the return
+  return {
+    kind: 'block',
+    statements: letStmts,
+    return: lastExpr
   }
 }
 
@@ -265,53 +205,96 @@ export function typecheckTypeScript(code: string): { expr: Expr, type: Type } {
   console.log(code)
 
   const sourceFile = ts.createSourceFile('test.ts', code, ts.ScriptTarget.Latest, true)
-  const ctx = new Map<string, Type>()
+  const ctx: Context = new Map()
+
+  // First pass: process function declarations and variable statements with function values
+  const otherStmts: ts.Statement[] = []
+
+  for (const stmt of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(stmt)) {
+      // Handle function declarations
+      const funcName = stmt.name!.text
+      const funcParam = stmt.parameters[0]
+      const funcParamName = (funcParam.name as ts.Identifier).text
+      const funcBody = stmt.body as ts.Block
+      const funcBodyExpr = createBodyExpr(funcBody.statements, ctx)
+
+      const functionExpr: Expr = {
+        kind: 'function',
+        param: funcParamName,
+        body: funcBodyExpr
+      }
+
+      const funcType: Type = {
+        kind: 'function',
+        arg: parseTypeAnnotation(funcParam.type!),
+        returnType: parseTypeAnnotation(stmt.type!)
+      }
+
+      // Check the function against its type
+      check(ctx, functionExpr, funcType)
+
+      // Add to context
+      ctx.set(funcName, funcType)
+    } else if (ts.isVariableStatement(stmt)) {
+      // Check if this is a variable with a function value
+      const decl = stmt.declarationList.declarations[0]
+      const init = decl.initializer
+
+      if (init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) && init.type) {
+        // Handle function variables
+        const varName = (decl.name as ts.Identifier).text
+        const param = init.parameters[0]
+        const paramName = (param.name as ts.Identifier).text
+
+        let bodyExpr: Expr
+        if (ts.isBlock(init.body)) {
+          bodyExpr = createBodyExpr(init.body.statements, ctx)
+        } else {
+          bodyExpr = mapTsNodeToExpr(init.body, ctx)
+        }
+
+        const functionExpr: Expr = {
+          kind: 'function',
+          param: paramName,
+          body: bodyExpr
+        }
+
+        const funcType: Type = {
+          kind: 'function',
+          arg: parseTypeAnnotation(param.type!),
+          returnType: parseTypeAnnotation(init.type)
+        }
+
+        // Check the function against its type
+        check(ctx, functionExpr, funcType)
+
+        // Add to context
+        ctx.set(varName, funcType)
+      } else {
+        // Non-function variable statement
+        otherStmts.push(stmt)
+      }
+    } else {
+      otherStmts.push(stmt)
+    }
+  }
 
   console.log(`\n=== Mapping to Minimal Expr ===`)
-  const expr = buildProgramExpr(Array.from(sourceFile.statements), ctx)
+  const expr = buildProgramExpr(otherStmts, ctx)
+
+  if (!expr) {
+    throw new Error('No expression to type check (only function declarations)')
+  }
+
   console.log(JSON.stringify(expr, null, 2))
 
   console.log(`\n=== Type Checking ===`)
   const type = synth(ctx, expr)
-  console.log(`Type: ${typeToString(type)}`)
+  console.log(`Type:`, type)
 
   return { expr, type }
 }
 
-// Demo
-console.log('=== TypeScript to Minimal Typechecker Mapper ===\n')
-
-// Example 1: Simple number
-typecheckTypeScript('42')
-
-// Example 2: Let binding
-typecheckTypeScript(`
-let x = 42
-x
-`.trim())
-
-// Example 3: Function application
-typecheckTypeScript(`
-function id(x: number): number { return x }
-id(5)
-`.trim())
-
-// Example 4: Multiple lets
-typecheckTypeScript(`
-let x = 10
-let y = 20
-y
-`.trim())
-
-// Example 5: Arrow function
-typecheckTypeScript(`
-const id = (x: number): number => x
-id(42)
-`.trim())
-
-// Example 6: Nested function calls
-typecheckTypeScript(`
-function double(x: number): number { return x }
-function add(x: number): number { return x }
-add(double(5))
-`.trim())
+// Demo - commented out, use demo.ts for examples
+// console.log('=== TypeScript to Minimal Typechecker Mapper ===\n')

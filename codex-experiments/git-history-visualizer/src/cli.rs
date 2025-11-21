@@ -64,8 +64,8 @@ pub struct AnalyzeArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub quiet: bool,
 
-    /// Number of parallel blame workers
-    #[arg(long, default_value_t = 2, value_name = "N")]
+    /// Number of parallel blame workers (0 = auto-detect CPU count)
+    #[arg(long, default_value_t = 0, value_name = "N")]
     pub jobs: usize,
 
     /// Enable git commit-graph optimization before analysis

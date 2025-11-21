@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test TS CDN</title>
+</head>
+<body>
+    <h1>Testing TypeScript CDN</h1>
+    <div id="output"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/typescript@5.0.0/lib/typescript.min.js"></script>
+    <script>
+        const output = document.getElementById('output');
+        output.innerHTML = `
+            <p>window.ts exists: ${typeof window.ts !== 'undefined'}</p>
+            <p>ts exists: ${typeof ts !== 'undefined'}</p>
+            <p>ts object: ${typeof ts === 'object' ? 'YES' : 'NO'}</p>
+            <p>ts.createSourceFile exists: ${typeof ts?.createSourceFile === 'function'}</p>
+        `;
+
+        if (typeof ts !== 'undefined' && ts.createSourceFile) {
+            const sourceFile = ts.createSourceFile('test.ts', 'const x = 42', ts.ScriptTarget.Latest, true);
+            output.innerHTML += `<p style="color: green;">✓ TypeScript loaded successfully!</p>`;
+            output.innerHTML += `<p>Source file created: ${sourceFile.statements.length} statements</p>`;
+        } else {
+            output.innerHTML += `<p style="color: red;">✗ TypeScript failed to load</p>`;
+        }
+    </script>
+</body>
+</html>

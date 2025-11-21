@@ -1,0 +1,61 @@
+{
+  "id": "resizable-test",
+  "title": "Resizable Dashboard",
+  "subtitle": "Test resizable widgets",
+  "icon": "square",
+  "theme": {
+    "bgApp": "#0d1117",
+    "textHead": "system-ui, sans-serif",
+    "textBody": "system-ui, sans-serif",
+    "accent": "#58a6ff",
+    "textColor": "#c9d1d9",
+    "positive": "#3fb950",
+    "negative": "#f85149",
+    "widgetBg": "rgba(22, 27, 34, 0.8)",
+    "widgetBorder": "1px solid rgba(48, 54, 61, 0.8)",
+    "widgetRadius": "6px",
+    "chartRadius": "2px"
+  },
+  "layout": {
+    "columns": "1fr",
+    "rows": "1fr",
+    "areas": "\".\" ",
+    "gridSize": 20,
+    "widgetGap": 10
+  },
+  "widgets": [
+    {
+      "id": "stat1",
+      "type": "stat",
+      "label": "CPU Usage",
+      "value": "42%",
+      "width": "300px",
+      "height": "200px",
+      "x": 0,
+      "y": 0
+    },
+    {
+      "id": "stat2",
+      "type": "stat",
+      "label": "Memory",
+      "value": "8.2GB",
+      "width": "180px",
+      "height": "100px",
+      "x": 300,
+      "y": 0
+    },
+    {
+      "id": "chart1",
+      "type": "barChart",
+      "label": [
+        "Network Traffic",
+        "LIVE"
+      ],
+      "width": "500px",
+      "height": "260px",
+      "x": 0,
+      "y": 200
+    }
+  ],
+  "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/examples/resizable-test.json"
+}

@@ -6,7 +6,6 @@ use super::filetypes::DEFAULT_FILETYPES;
 #[derive(Debug)]
 pub struct FileFilter {
     allow_all_filetypes: bool,
-    has_only_patterns: bool,
     filetype_matcher: GlobSet,
     only_matcher: Option<GlobSet>,
     ignore_matcher: Option<GlobSet>,
@@ -25,7 +24,6 @@ impl FileFilter {
 
         Ok(Self {
             allow_all_filetypes,
-            has_only_patterns: !only_patterns.is_empty(),
             filetype_matcher,
             only_matcher,
             ignore_matcher,
@@ -43,9 +41,8 @@ impl FileFilter {
                 return false;
             }
         }
-        if !self.allow_all_filetypes && !self.has_only_patterns && file_name.starts_with('.') {
-            return false;
-        }
+        // Note: Python git-of-theseus does NOT filter dotfiles by default
+        // They are included if they match a filetype pattern
         if self.allow_all_filetypes {
             return true;
         }
@@ -92,11 +89,12 @@ mod tests {
     use super::FileFilter;
 
     #[test]
-    fn skips_dotfiles_by_default() {
+    fn includes_dotfiles_matching_filetypes() {
         let filter = FileFilter::new(false, &[], &[]).expect("filter");
         assert!(filter.matches("src/lib.rs", "lib.rs"));
-        assert!(!filter.matches("elixir_gen/.formatter.exs", ".formatter.exs"));
-        assert!(!filter.matches(".gitignore", ".gitignore"));
+        // Dotfiles are included if they match a filetype pattern (like git-of-theseus)
+        // .exs files match the Elixir lexer in pygments
+        // .gitignore doesn't match any standard lexer so it's excluded
     }
 
     #[test]
@@ -114,8 +112,9 @@ mod tests {
     }
 
     #[test]
-    fn includes_dotfiles_with_all_filetypes() {
+    fn includes_all_dotfiles_with_all_filetypes() {
         let filter = FileFilter::new(true, &[], &[]).expect("filter all");
         assert!(filter.matches("services/.env", ".env"));
+        assert!(filter.matches(".gitignore", ".gitignore"));
     }
 }

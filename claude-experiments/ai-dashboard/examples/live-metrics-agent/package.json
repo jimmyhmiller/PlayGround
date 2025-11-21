@@ -1,0 +1,18 @@
+{
+  "name": "live-metrics-agent",
+  "version": "0.1.0",
+  "description": "Example external agent that provides live metrics",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc && node dist/index.js",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@ai-dashboard/agent-sdk": "file:../../agent-sdk"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  }
+}

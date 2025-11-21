@@ -1,0 +1,54 @@
+{
+  "id": "dream",
+  "title": "Dream State",
+  "subtitle": "Generative Creative Suite",
+  "icon": "<svg viewBox=\"0 0 60 60\"><rect x=\"5\" y=\"5\" width=\"50\" height=\"50\" rx=\"20\" /><circle cx=\"30\" cy=\"30\" r=\"10\" /></svg>",
+  "theme": {
+    "bgApp": "#1a0b10",
+    "textHead": "-apple-system, BlinkMacSystemFont, sans-serif",
+    "textBody": "sans-serif",
+    "accent": "#ff6b9d",
+    "textColor": "#ffeef5",
+    "positive": "#a8e6cf",
+    "negative": "#ff8b94",
+    "widgetBg": "rgba(255, 255, 255, 0.05)",
+    "widgetBorder": "1px solid rgba(255,255,255,0.08)",
+    "widgetRadius": "24px",
+    "chartRadius": "10px",
+    "bgLayer": {
+      "background": "radial-gradient(circle at 80% 20%, rgba(255, 107, 157, 0.25), transparent 60%)",
+      "filter": "blur(50px)"
+    }
+  },
+  "layout": {
+    "columns": "320px auto 1fr",
+    "rows": "auto auto 1fr",
+    "areas": "\"chat stat .\" \"chat diff .\" \"chat . .\""
+  },
+  "widgets": [
+    {
+      "id": "chat",
+      "type": "chat",
+      "area": "chat",
+      "label": "Muse",
+      "messages": [
+        { "from": "user", "text": "Create something beautiful" },
+        { "from": "assistant", "text": "*Rendering your dreams...*\n\nI'm generating:\n- Ocean waves at sunset\n- Cosmic nebula clouds\n- Abstract fluid motion" }
+      ]
+    },
+    {
+      "id": "stat",
+      "type": "stat",
+      "area": "stat",
+      "label": "Fluidity",
+      "value": "100%"
+    },
+    {
+      "id": "diff",
+      "type": "diffList",
+      "area": "diff",
+      "label": "Asset Changes",
+      "items": [["Ocean.png", 0, 0], ["Sky.svg", 234, 12], ["Void.mp4", 1024, 512]]
+    }
+  ]
+}

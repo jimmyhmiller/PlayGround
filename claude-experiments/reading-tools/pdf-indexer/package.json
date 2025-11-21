@@ -1,0 +1,19 @@
+{
+  "name": "pdf-indexer",
+  "version": "1.0.0",
+  "description": "Recursively scan directories for PDFs and build a searchable JSON index with metadata",
+  "main": "index.js",
+  "bin": {
+    "pdf-indexer": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": ["pdf", "indexer", "metadata", "hash", "search"],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "pdf-parse": "^2.4.5"
+  }
+}

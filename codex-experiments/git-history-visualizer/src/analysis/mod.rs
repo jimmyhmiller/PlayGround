@@ -3,14 +3,15 @@ use std::{
     fs::{self, File},
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{TimeZone, Utc};
 use git2::{
-    BlameOptions, Commit, Mailmap, ObjectType, Oid, Repository, Signature, Sort, TreeWalkMode,
-    TreeWalkResult,
+    Oid, Repository, TreeWalkMode, TreeWalkResult, ObjectType, BlameOptions,
+    Commit, Signature, Mailmap, Sort
 };
 use rayon::{ThreadPool, prelude::*};
 use serde_json::json;
@@ -19,6 +20,69 @@ mod filetypes;
 mod filter;
 
 use filter::FileFilter;
+
+/// Performance timing metrics
+#[derive(Debug, Default)]
+struct TimingStats {
+    tree_walk_time: Duration,
+    blame_time: Duration,
+    hunk_processing_time: Duration,
+    other_time: Duration,
+}
+
+impl TimingStats {
+    fn print_report(&self, total_time: Duration) {
+        let accounted = self.tree_walk_time + self.blame_time + self.hunk_processing_time;
+        let other = if total_time > accounted {
+            total_time - accounted
+        } else {
+            Duration::ZERO
+        };
+
+        eprintln!("\n=== PERFORMANCE BREAKDOWN ===");
+        eprintln!("Total time:           {:>8.2?}", total_time);
+        eprintln!("Tree walking:         {:>8.2?} ({:>5.1}%)",
+            self.tree_walk_time,
+            self.tree_walk_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+        eprintln!("Git blame calls:      {:>8.2?} ({:>5.1}%)",
+            self.blame_time,
+            self.blame_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+        eprintln!("Processing hunks:     {:>8.2?} ({:>5.1}%)",
+            self.hunk_processing_time,
+            self.hunk_processing_time.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+        eprintln!("Other operations:     {:>8.2?} ({:>5.1}%)",
+            other,
+            other.as_secs_f64() / total_time.as_secs_f64() * 100.0);
+        eprintln!("=============================\n");
+    }
+}
+
+/// Context for a worker thread containing pre-loaded git objects to avoid repeated allocations
+struct WorkerContext {
+    repo: Repository,
+    ignore_whitespace: bool,
+    use_mailmap: bool,
+    mailmap: Option<Mailmap>,
+    timing: Arc<Mutex<TimingStats>>,
+}
+
+impl WorkerContext {
+    /// Create BlameOptions configured with this context's settings
+    fn create_blame_options(&self, commit_id: Oid) -> BlameOptions {
+        let mut options = BlameOptions::new();
+        options.newest_commit(commit_id);
+        if self.ignore_whitespace {
+            options.ignore_whitespace(true);
+        }
+        if self.use_mailmap {
+            options.use_mailmap(true);
+        }
+        // Enable rename tracking (equivalent to git blame's -M and -C flags)
+        options.track_copies_same_commit_moves(true);
+        options.track_copies_same_commit_copies(true);
+        options
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AnalyzeConfig {
@@ -202,7 +266,10 @@ fn perform_analysis(config: AnalyzeConfig) -> Result<()> {
         );
     }
 
-    compute_curves(
+    let timing_stats = Arc::new(Mutex::new(TimingStats::default()));
+    let start_time = Instant::now();
+
+    let result = compute_curves(
         &repo,
         &config.repo,
         &commit_entries,
@@ -211,7 +278,13 @@ fn perform_analysis(config: AnalyzeConfig) -> Result<()> {
         &master_samples,
         use_mailmap,
         &config,
-    )
+        Arc::clone(&timing_stats),
+    );
+
+    let total_time = start_time.elapsed();
+    timing_stats.lock().unwrap().print_report(total_time);
+
+    result
 }
 
 fn resolve_branch(repo: &Repository, requested: &str, quiet: bool) -> Result<(String, String)> {
@@ -273,8 +346,18 @@ fn compute_curves(
     master_samples: &[MasterSample],
     use_mailmap: bool,
     config: &AnalyzeConfig,
+    timing: Arc<Mutex<TimingStats>>,
 ) -> Result<()> {
-    let jobs = usize::max(1, config.jobs);
+    // Auto-detect CPU count if jobs is 0, but cap at 4 to avoid excessive git contention
+    // Git operations (especially blame) don't scale well beyond 4-6 threads
+    let jobs = if config.jobs == 0 {
+        std::thread::available_parallelism()
+            .map(|n| usize::min(n.get(), 4))
+            .unwrap_or(2)
+    } else {
+        usize::max(1, config.jobs)
+    };
+
     let pool = if jobs > 1 {
         Some(
             rayon::ThreadPoolBuilder::new()
@@ -320,16 +403,20 @@ fn compute_curves(
             };
         }
 
-        let previous_paths: Vec<String> = last_file_hash.keys().cloned().collect();
-        for deleted_path in previous_paths {
-            if !cur_file_hash.contains_key(&deleted_path) {
-                if let Some(prev_map) = last_file_y.remove(&deleted_path) {
+        // Remove deleted files directly without collecting into Vec
+        last_file_hash.retain(|deleted_path, _| {
+            if cur_file_hash.contains_key(deleted_path) {
+                true // Keep this file
+            } else {
+                // File was deleted, subtract its counts
+                if let Some(prev_map) = last_file_y.remove(deleted_path) {
                     for (key, count) in prev_map {
                         *cur_y.entry(key).or_insert(0) -= count;
                     }
                 }
+                false // Remove this file
             }
-        }
+        });
 
         last_file_hash = cur_file_hash;
 
@@ -342,6 +429,7 @@ fn compute_curves(
             use_mailmap,
             jobs,
             pool.as_ref(),
+            Arc::clone(&timing),
         )?;
 
         for (path, file_histogram) in blame_results {
@@ -484,6 +572,7 @@ fn run_blame_for_entries(
     use_mailmap: bool,
     jobs: usize,
     pool: Option<&ThreadPool>,
+    timing: Arc<Mutex<TimingStats>>,
 ) -> Result<HashMap<String, HashMap<CurveKey, i64>>> {
     if entries.is_empty() {
         return Ok(HashMap::new());
@@ -494,16 +583,30 @@ fn run_blame_for_entries(
     let collected: Vec<Option<(String, HashMap<CurveKey, i64>)>> = if jobs <= 1 || pool.is_none() {
         let repo = Repository::open(repo_path)
             .with_context(|| format!("Opening repository at {}", repo_path.display()))?;
+
+        // Pre-load mailmap once (avoids repeated disk reads)
+        let mailmap = if use_mailmap {
+            repo.mailmap().ok()
+        } else {
+            None
+        };
+
+        let context = WorkerContext {
+            repo,
+            ignore_whitespace,
+            use_mailmap,
+            mailmap,
+            timing: Arc::clone(&timing),
+        };
+
         entries
             .iter()
             .map(|entry| {
                 blame_entry(
-                    &repo,
+                    &context,
                     commit_id,
                     entry,
                     &commit2cohort,
-                    ignore_whitespace,
-                    use_mailmap,
                 )
             })
             .collect::<Result<Vec<_>>>()?
@@ -514,21 +617,34 @@ fn run_blame_for_entries(
                 .par_iter()
                 .map_init(
                     || {
-                        Repository::open(&repo_path_buf).unwrap_or_else(|err| {
+                        let repo = Repository::open(&repo_path_buf).unwrap_or_else(|err| {
                             panic!(
                                 "Failed to open repository {}: {err}",
                                 repo_path_buf.display()
                             )
-                        })
-                    },
-                    |repo, entry| {
-                        blame_entry(
+                        });
+
+                        // Pre-load mailmap once per worker (avoids thousands of disk reads)
+                        let mailmap = if use_mailmap {
+                            repo.mailmap().ok()
+                        } else {
+                            None
+                        };
+
+                        WorkerContext {
                             repo,
+                            ignore_whitespace,
+                            use_mailmap,
+                            mailmap,
+                            timing: Arc::clone(&timing),
+                        }
+                    },
+                    |context, entry| {
+                        blame_entry(
+                            context,
                             commit_id,
                             entry,
                             &commit2cohort,
-                            ignore_whitespace,
-                            use_mailmap,
                         )
                     },
                 )
@@ -548,37 +664,30 @@ fn run_blame_for_entries(
 }
 
 fn blame_entry(
-    repo: &Repository,
+    context: &WorkerContext,
     commit_id: Oid,
     entry: &FileEntry,
     commit2cohort: &HashMap<Oid, String>,
-    ignore_whitespace: bool,
-    use_mailmap: bool,
 ) -> Result<Option<(String, HashMap<CurveKey, i64>)>> {
-    let mut options = BlameOptions::new();
-    options.newest_commit(commit_id);
-    if ignore_whitespace {
-        options.ignore_whitespace(true);
-    }
-    if use_mailmap {
-        options.use_mailmap(true);
-    }
+    // Create BlameOptions using pre-stored configuration (avoids repeated conditionals)
+    let mut options = context.create_blame_options(commit_id);
 
-    let blame = match repo.blame_file(Path::new(&entry.path), Some(&mut options)) {
+    // Time the blame operation
+    let blame_start = Instant::now();
+    let blame = match context.repo.blame_file(Path::new(&entry.path), Some(&mut options)) {
         Ok(blame) => blame,
-        Err(_) => return Ok(None),
+        // If blame fails, return empty histogram (same as git-of-theseus)
+        Err(_) => return Ok(Some((entry.path.clone(), HashMap::new()))),
     };
+    let blame_elapsed = blame_start.elapsed();
 
     let ext_key = CurveKey::extension(file_extension(&entry.path));
     let dir_key = CurveKey::directory(top_directory(&entry.path));
-    let mailmap = if use_mailmap {
-        repo.mailmap().ok()
-    } else {
-        None
-    };
 
     let mut histogram: HashMap<CurveKey, i64> = HashMap::new();
 
+    // Time hunk processing
+    let hunk_start = Instant::now();
     for hunk in blame.iter() {
         let lines = hunk.lines_in_hunk() as i64;
         let final_oid = hunk.final_commit_id();
@@ -591,7 +700,7 @@ fn blame_entry(
         accumulate(&mut histogram, ext_key.clone(), lines);
         accumulate(&mut histogram, dir_key.clone(), lines);
 
-        let (author, domain) = canonical_author(hunk.final_signature(), mailmap.as_ref());
+        let (author, domain) = canonical_author(hunk.final_signature(), context.mailmap.as_ref());
         accumulate(&mut histogram, CurveKey::author(author), lines);
         accumulate(&mut histogram, CurveKey::domain(domain), lines);
 
@@ -599,6 +708,13 @@ fn blame_entry(
             let sha_key = CurveKey::sha(final_oid.to_string());
             accumulate(&mut histogram, sha_key, lines);
         }
+    }
+    let hunk_elapsed = hunk_start.elapsed();
+
+    // Update timing stats
+    if let Ok(mut timing) = context.timing.lock() {
+        timing.blame_time += blame_elapsed;
+        timing.hunk_processing_time += hunk_elapsed;
     }
 
     Ok(Some((entry.path.clone(), histogram)))
