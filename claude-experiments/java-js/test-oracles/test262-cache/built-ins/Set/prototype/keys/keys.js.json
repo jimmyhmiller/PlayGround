@@ -1,0 +1,281 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 447,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 16,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 316,
+      "end": 446,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 316,
+        "end": 445,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 15,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 316,
+          "end": 332,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 0
+            },
+            "end": {
+              "line": 11,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 316,
+            "end": 322,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 0
+              },
+              "end": {
+                "line": 11,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 323,
+            "end": 332,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 7
+              },
+              "end": {
+                "line": 11,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 336,
+            "end": 354,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 2
+              },
+              "end": {
+                "line": 12,
+                "column": 20
+              }
+            },
+            "object": {
+              "type": "MemberExpression",
+              "start": 336,
+              "end": 349,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 2
+                },
+                "end": {
+                  "line": 12,
+                  "column": 15
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 336,
+                "end": 339,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 5
+                  }
+                },
+                "name": "Set"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 340,
+                "end": 349,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 6
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 15
+                  }
+                },
+                "name": "prototype"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 350,
+              "end": 354,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 16
+                },
+                "end": {
+                  "line": 12,
+                  "column": 20
+                }
+              },
+              "name": "keys"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 358,
+            "end": 378,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 2
+              },
+              "end": {
+                "line": 13,
+                "column": 22
+              }
+            },
+            "object": {
+              "type": "MemberExpression",
+              "start": 358,
+              "end": 371,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 2
+                },
+                "end": {
+                  "line": 13,
+                  "column": 15
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 358,
+                "end": 361,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 5
+                  }
+                },
+                "name": "Set"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 362,
+                "end": 371,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 6
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 15
+                  }
+                },
+                "name": "prototype"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 372,
+              "end": 378,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 16
+                },
+                "end": {
+                  "line": 13,
+                  "column": 22
+                }
+              },
+              "name": "values"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 382,
+            "end": 443,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 2
+              },
+              "end": {
+                "line": 14,
+                "column": 63
+              }
+            },
+            "value": "The value of `Set.prototype.keys` is `Set.prototype.values`",
+            "raw": "\"The value of `Set.prototype.keys` is `Set.prototype.values`\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

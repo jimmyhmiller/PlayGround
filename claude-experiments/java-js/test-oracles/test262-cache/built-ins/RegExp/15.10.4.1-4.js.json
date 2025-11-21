@@ -1,0 +1,134 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 282,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 10,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 240,
+      "end": 281,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 9,
+          "column": 41
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 244,
+          "end": 280,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 4
+            },
+            "end": {
+              "line": 9,
+              "column": 40
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 244,
+            "end": 253,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 4
+              },
+              "end": {
+                "line": 9,
+                "column": 13
+              }
+            },
+            "name": "regExpObj"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 256,
+            "end": 280,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 16
+              },
+              "end": {
+                "line": 9,
+                "column": 40
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 260,
+              "end": 266,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 20
+                },
+                "end": {
+                  "line": 9,
+                  "column": 26
+                }
+              },
+              "name": "RegExp"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 267,
+                "end": 272,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 32
+                  }
+                },
+                "value": "abc",
+                "raw": "'abc'"
+              },
+              {
+                "type": "Literal",
+                "start": 274,
+                "end": 279,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 34
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 39
+                  }
+                },
+                "value": "gim",
+                "raw": "'gim'"
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "var"
+    }
+  ],
+  "sourceType": "script"
+}

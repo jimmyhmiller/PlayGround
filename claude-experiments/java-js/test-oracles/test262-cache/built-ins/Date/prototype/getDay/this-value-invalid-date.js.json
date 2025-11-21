@@ -1,0 +1,215 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 354,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 12,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 307,
+      "end": 353,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 46
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 307,
+        "end": 352,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 11,
+            "column": 45
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 307,
+          "end": 323,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 0
+            },
+            "end": {
+              "line": 11,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 307,
+            "end": 313,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 0
+              },
+              "end": {
+                "line": 11,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 314,
+            "end": 323,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 7
+              },
+              "end": {
+                "line": 11,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 324,
+            "end": 346,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 17
+              },
+              "end": {
+                "line": 11,
+                "column": 39
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 324,
+              "end": 344,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 17
+                },
+                "end": {
+                  "line": 11,
+                  "column": 37
+                }
+              },
+              "object": {
+                "type": "NewExpression",
+                "start": 324,
+                "end": 337,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 30
+                  }
+                },
+                "callee": {
+                  "type": "Identifier",
+                  "start": 328,
+                  "end": 332,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 25
+                    }
+                  },
+                  "name": "Date"
+                },
+                "arguments": [
+                  {
+                    "type": "Identifier",
+                    "start": 333,
+                    "end": 336,
+                    "loc": {
+                      "start": {
+                        "line": 11,
+                        "column": 26
+                      },
+                      "end": {
+                        "line": 11,
+                        "column": 29
+                      }
+                    },
+                    "name": "NaN"
+                  }
+                ]
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 338,
+                "end": 344,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 37
+                  }
+                },
+                "name": "getDay"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [],
+            "optional": false
+          },
+          {
+            "type": "Identifier",
+            "start": 348,
+            "end": 351,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 41
+              },
+              "end": {
+                "line": 11,
+                "column": 44
+              }
+            },
+            "name": "NaN"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

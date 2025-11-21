@@ -1,0 +1,168 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 456,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 18,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 416,
+      "end": 455,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 39
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 416,
+        "end": 454,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 0
+          },
+          "end": {
+            "line": 17,
+            "column": 38
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 416,
+          "end": 432,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 0
+            },
+            "end": {
+              "line": 17,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 416,
+            "end": 422,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 0
+              },
+              "end": {
+                "line": 17,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 423,
+            "end": 432,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 7
+              },
+              "end": {
+                "line": 17,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 433,
+            "end": 450,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 17
+              },
+              "end": {
+                "line": 17,
+                "column": 34
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 433,
+              "end": 443,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 17
+                },
+                "end": {
+                  "line": 17,
+                  "column": 27
+                }
+              },
+              "name": "parseFloat"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 444,
+                "end": 449,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 28
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 33
+                  }
+                },
+                "value": "1_1",
+                "raw": "\"1_1\""
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 452,
+            "end": 453,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 36
+              },
+              "end": {
+                "line": 17,
+                "column": 37
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

@@ -1,0 +1,255 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 569,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 17,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 398,
+      "end": 495,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 97
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 402,
+          "end": 494,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 4
+            },
+            "end": {
+              "line": 14,
+              "column": 96
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 402,
+            "end": 412,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 4
+              },
+              "end": {
+                "line": 14,
+                "column": 14
+              }
+            },
+            "name": "__executed"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 415,
+            "end": 494,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 17
+              },
+              "end": {
+                "line": 14,
+                "column": 96
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 415,
+              "end": 435,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 17
+                },
+                "end": {
+                  "line": 14,
+                  "column": 37
+                }
+              },
+              "object": {
+                "type": "Literal",
+                "start": 415,
+                "end": 430,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 32
+                  }
+                },
+                "value": {},
+                "raw": "/java(script)?/",
+                "regex": {
+                  "pattern": "java(script)?",
+                  "flags": ""
+                }
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 431,
+                "end": 435,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 33
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 37
+                  }
+                },
+                "name": "test"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 436,
+                "end": 493,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 38
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 95
+                  }
+                },
+                "value": "state: both Java and JavaScript used in web development",
+                "raw": "\"state: both Java and JavaScript used in web development\""
+              }
+            ],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 497,
+      "end": 568,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 71
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 497,
+        "end": 567,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 0
+          },
+          "end": {
+            "line": 16,
+            "column": 70
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 497,
+          "end": 503,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 0
+            },
+            "end": {
+              "line": 16,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 504,
+            "end": 515,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 7
+              },
+              "end": {
+                "line": 16,
+                "column": 18
+              }
+            },
+            "operator": "!",
+            "prefix": true,
+            "argument": {
+              "type": "Identifier",
+              "start": 505,
+              "end": 515,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 8
+                },
+                "end": {
+                  "line": 16,
+                  "column": 18
+                }
+              },
+              "name": "__executed"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 517,
+            "end": 566,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 20
+              },
+              "end": {
+                "line": 16,
+                "column": 69
+              }
+            },
+            "value": "The value of !__executed is expected to be true",
+            "raw": "'The value of !__executed is expected to be true'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

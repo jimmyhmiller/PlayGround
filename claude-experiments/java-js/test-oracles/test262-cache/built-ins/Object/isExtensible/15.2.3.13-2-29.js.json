@@ -1,0 +1,166 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 312,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 10,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 239,
+      "end": 311,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 9,
+          "column": 72
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 239,
+        "end": 310,
+        "loc": {
+          "start": {
+            "line": 9,
+            "column": 0
+          },
+          "end": {
+            "line": 9,
+            "column": 71
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 239,
+          "end": 245,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 0
+            },
+            "end": {
+              "line": 9,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 246,
+            "end": 271,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 7
+              },
+              "end": {
+                "line": 9,
+                "column": 32
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 246,
+              "end": 265,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 7
+                },
+                "end": {
+                  "line": 9,
+                  "column": 26
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 246,
+                "end": 252,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 7
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 13
+                  }
+                },
+                "name": "Object"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 253,
+                "end": 265,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 14
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 26
+                  }
+                },
+                "name": "isExtensible"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "ThisExpression",
+                "start": 266,
+                "end": 270,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 31
+                  }
+                }
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 273,
+            "end": 309,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 34
+              },
+              "end": {
+                "line": 9,
+                "column": 70
+              }
+            },
+            "value": "Object.isExtensible(this) !== true",
+            "raw": "'Object.isExtensible(this) !== true'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

@@ -1,0 +1,134 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 588,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 27,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 543,
+      "end": 587,
+      "loc": {
+        "start": {
+          "line": 26,
+          "column": 0
+        },
+        "end": {
+          "line": 26,
+          "column": 44
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 543,
+        "end": 586,
+        "loc": {
+          "start": {
+            "line": 26,
+            "column": 0
+          },
+          "end": {
+            "line": 26,
+            "column": 43
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 543,
+          "end": 559,
+          "loc": {
+            "start": {
+              "line": 26,
+              "column": 0
+            },
+            "end": {
+              "line": 26,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 543,
+            "end": 549,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 0
+              },
+              "end": {
+                "line": 26,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 550,
+            "end": 559,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 7
+              },
+              "end": {
+                "line": 26,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Literal",
+            "start": 560,
+            "end": 572,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 17
+              },
+              "end": {
+                "line": 26,
+                "column": 29
+              }
+            },
+            "value": 10123456789,
+            "raw": "1_0123456789"
+          },
+          {
+            "type": "Literal",
+            "start": 574,
+            "end": 585,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 31
+              },
+              "end": {
+                "line": 26,
+                "column": 42
+              }
+            },
+            "value": 10123456789,
+            "raw": "10123456789"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

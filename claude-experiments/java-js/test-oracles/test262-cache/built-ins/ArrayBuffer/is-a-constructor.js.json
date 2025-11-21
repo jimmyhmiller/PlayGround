@@ -1,0 +1,231 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 849,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 25,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 728,
+      "end": 826,
+      "loc": {
+        "start": {
+          "line": 22,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 98
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 728,
+        "end": 825,
+        "loc": {
+          "start": {
+            "line": 22,
+            "column": 0
+          },
+          "end": {
+            "line": 22,
+            "column": 97
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 728,
+          "end": 744,
+          "loc": {
+            "start": {
+              "line": 22,
+              "column": 0
+            },
+            "end": {
+              "line": 22,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 728,
+            "end": 734,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 0
+              },
+              "end": {
+                "line": 22,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 735,
+            "end": 744,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 7
+              },
+              "end": {
+                "line": 22,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 745,
+            "end": 771,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 17
+              },
+              "end": {
+                "line": 22,
+                "column": 43
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 745,
+              "end": 758,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 17
+                },
+                "end": {
+                  "line": 22,
+                  "column": 30
+                }
+              },
+              "name": "isConstructor"
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 759,
+                "end": 770,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 42
+                  }
+                },
+                "name": "ArrayBuffer"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 773,
+            "end": 777,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 45
+              },
+              "end": {
+                "line": 22,
+                "column": 49
+              }
+            },
+            "value": true,
+            "raw": "true"
+          },
+          {
+            "type": "Literal",
+            "start": 779,
+            "end": 824,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 51
+              },
+              "end": {
+                "line": 22,
+                "column": 96
+              }
+            },
+            "value": "isConstructor(ArrayBuffer) must return true",
+            "raw": "'isConstructor(ArrayBuffer) must return true'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 827,
+      "end": 845,
+      "loc": {
+        "start": {
+          "line": 23,
+          "column": 0
+        },
+        "end": {
+          "line": 23,
+          "column": 18
+        }
+      },
+      "expression": {
+        "type": "NewExpression",
+        "start": 827,
+        "end": 844,
+        "loc": {
+          "start": {
+            "line": 23,
+            "column": 0
+          },
+          "end": {
+            "line": 23,
+            "column": 17
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 831,
+          "end": 842,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 4
+            },
+            "end": {
+              "line": 23,
+              "column": 15
+            }
+          },
+          "name": "ArrayBuffer"
+        },
+        "arguments": []
+      }
+    }
+  ],
+  "sourceType": "script"
+}

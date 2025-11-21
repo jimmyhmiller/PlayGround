@@ -1,0 +1,267 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 401,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 15,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 299,
+      "end": 356,
+      "loc": {
+        "start": {
+          "line": 12,
+          "column": 0
+        },
+        "end": {
+          "line": 12,
+          "column": 57
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 303,
+          "end": 355,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 4
+            },
+            "end": {
+              "line": 12,
+              "column": 56
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 303,
+            "end": 304,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 4
+              },
+              "end": {
+                "line": 12,
+                "column": 5
+              }
+            },
+            "name": "f"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 307,
+            "end": 355,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 8
+              },
+              "end": {
+                "line": 12,
+                "column": 56
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 307,
+              "end": 315,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 8
+                },
+                "end": {
+                  "line": 12,
+                  "column": 16
+                }
+              },
+              "name": "Function"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 316,
+                "end": 354,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 55
+                  }
+                },
+                "value": "\"use strict\";\nreturn typeof this;",
+                "raw": "\"\\\"use strict\\\";\\nreturn typeof this;\""
+              }
+            ],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 358,
+      "end": 400,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 42
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 358,
+        "end": 399,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 41
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 358,
+          "end": 374,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 0
+            },
+            "end": {
+              "line": 14,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 358,
+            "end": 364,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 0
+              },
+              "end": {
+                "line": 14,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 365,
+            "end": 374,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 7
+              },
+              "end": {
+                "line": 14,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 375,
+            "end": 378,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 17
+              },
+              "end": {
+                "line": 14,
+                "column": 20
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 375,
+              "end": 376,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 17
+                },
+                "end": {
+                  "line": 14,
+                  "column": 18
+                }
+              },
+              "name": "f"
+            },
+            "arguments": [],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 380,
+            "end": 391,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 22
+              },
+              "end": {
+                "line": 14,
+                "column": 33
+              }
+            },
+            "value": "undefined",
+            "raw": "\"undefined\""
+          },
+          {
+            "type": "Literal",
+            "start": 393,
+            "end": 398,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 35
+              },
+              "end": {
+                "line": 14,
+                "column": 40
+              }
+            },
+            "value": "f()",
+            "raw": "'f()'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

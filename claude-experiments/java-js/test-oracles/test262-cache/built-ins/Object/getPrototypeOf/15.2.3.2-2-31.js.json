@@ -1,0 +1,250 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 326,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 10,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 218,
+      "end": 325,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 9,
+          "column": 107
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 218,
+        "end": 324,
+        "loc": {
+          "start": {
+            "line": 9,
+            "column": 0
+          },
+          "end": {
+            "line": 9,
+            "column": 106
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 218,
+          "end": 234,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 0
+            },
+            "end": {
+              "line": 9,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 218,
+            "end": 224,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 0
+              },
+              "end": {
+                "line": 9,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 225,
+            "end": 234,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 7
+              },
+              "end": {
+                "line": 9,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 235,
+            "end": 274,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 17
+              },
+              "end": {
+                "line": 9,
+                "column": 56
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 235,
+              "end": 256,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 17
+                },
+                "end": {
+                  "line": 9,
+                  "column": 38
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 235,
+                "end": 241,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 23
+                  }
+                },
+                "name": "Object"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 242,
+                "end": 256,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 38
+                  }
+                },
+                "name": "getPrototypeOf"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "MemberExpression",
+                "start": 257,
+                "end": 273,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 39
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 55
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 257,
+                  "end": 263,
+                  "loc": {
+                    "start": {
+                      "line": 9,
+                      "column": 39
+                    },
+                    "end": {
+                      "line": 9,
+                      "column": 45
+                    }
+                  },
+                  "name": "Object"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 264,
+                  "end": 273,
+                  "loc": {
+                    "start": {
+                      "line": 9,
+                      "column": 46
+                    },
+                    "end": {
+                      "line": 9,
+                      "column": 55
+                    }
+                  },
+                  "name": "prototype"
+                },
+                "computed": false,
+                "optional": false
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 276,
+            "end": 280,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 58
+              },
+              "end": {
+                "line": 9,
+                "column": 62
+              }
+            },
+            "value": null,
+            "raw": "null"
+          },
+          {
+            "type": "Literal",
+            "start": 282,
+            "end": 323,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 64
+              },
+              "end": {
+                "line": 9,
+                "column": 105
+              }
+            },
+            "value": "Object.getPrototypeOf(Object.prototype)",
+            "raw": "'Object.getPrototypeOf(Object.prototype)'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

@@ -1,0 +1,685 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 2214,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 68,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "FunctionDeclaration",
+      "start": 2005,
+      "end": 2055,
+      "loc": {
+        "start": {
+          "line": 52,
+          "column": 0
+        },
+        "end": {
+          "line": 54,
+          "column": 1
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 2014,
+        "end": 2021,
+        "loc": {
+          "start": {
+            "line": 52,
+            "column": 9
+          },
+          "end": {
+            "line": 52,
+            "column": 16
+          }
+        },
+        "name": "thrower"
+      },
+      "expression": false,
+      "generator": false,
+      "async": false,
+      "params": [],
+      "body": {
+        "type": "BlockStatement",
+        "start": 2024,
+        "end": 2055,
+        "loc": {
+          "start": {
+            "line": 52,
+            "column": 19
+          },
+          "end": {
+            "line": 54,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 2028,
+            "end": 2053,
+            "loc": {
+              "start": {
+                "line": 53,
+                "column": 2
+              },
+              "end": {
+                "line": 53,
+                "column": 27
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 2034,
+              "end": 2052,
+              "loc": {
+                "start": {
+                  "line": 53,
+                  "column": 8
+                },
+                "end": {
+                  "line": 53,
+                  "column": 26
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 2038,
+                "end": 2050,
+                "loc": {
+                  "start": {
+                    "line": 53,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 53,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 2058,
+      "end": 2129,
+      "loc": {
+        "start": {
+          "line": 57,
+          "column": 0
+        },
+        "end": {
+          "line": 61,
+          "column": 2
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 2062,
+          "end": 2128,
+          "loc": {
+            "start": {
+              "line": 57,
+              "column": 4
+            },
+            "end": {
+              "line": 61,
+              "column": 1
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 2062,
+            "end": 2063,
+            "loc": {
+              "start": {
+                "line": 57,
+                "column": 4
+              },
+              "end": {
+                "line": 57,
+                "column": 5
+              }
+            },
+            "name": "C"
+          },
+          "init": {
+            "type": "ClassExpression",
+            "start": 2066,
+            "end": 2128,
+            "loc": {
+              "start": {
+                "line": 57,
+                "column": 8
+              },
+              "end": {
+                "line": 61,
+                "column": 1
+              }
+            },
+            "id": null,
+            "superClass": null,
+            "body": {
+              "type": "ClassBody",
+              "start": 2072,
+              "end": 2128,
+              "loc": {
+                "start": {
+                  "line": 57,
+                  "column": 14
+                },
+                "end": {
+                  "line": 61,
+                  "column": 1
+                }
+              },
+              "body": [
+                {
+                  "type": "MethodDefinition",
+                  "start": 2076,
+                  "end": 2126,
+                  "loc": {
+                    "start": {
+                      "line": 58,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 60,
+                      "column": 3
+                    }
+                  },
+                  "static": true,
+                  "computed": false,
+                  "key": {
+                    "type": "Identifier",
+                    "start": 2090,
+                    "end": 2096,
+                    "loc": {
+                      "start": {
+                        "line": 58,
+                        "column": 16
+                      },
+                      "end": {
+                        "line": 58,
+                        "column": 22
+                      }
+                    },
+                    "name": "method"
+                  },
+                  "kind": "method",
+                  "value": {
+                    "type": "FunctionExpression",
+                    "start": 2096,
+                    "end": 2126,
+                    "loc": {
+                      "start": {
+                        "line": 58,
+                        "column": 22
+                      },
+                      "end": {
+                        "line": 60,
+                        "column": 3
+                      }
+                    },
+                    "id": null,
+                    "expression": false,
+                    "generator": true,
+                    "async": true,
+                    "params": [
+                      {
+                        "type": "ObjectPattern",
+                        "start": 2097,
+                        "end": 2114,
+                        "loc": {
+                          "start": {
+                            "line": 58,
+                            "column": 23
+                          },
+                          "end": {
+                            "line": 58,
+                            "column": 40
+                          }
+                        },
+                        "properties": [
+                          {
+                            "type": "Property",
+                            "start": 2099,
+                            "end": 2112,
+                            "loc": {
+                              "start": {
+                                "line": 58,
+                                "column": 25
+                              },
+                              "end": {
+                                "line": 58,
+                                "column": 38
+                              }
+                            },
+                            "method": false,
+                            "shorthand": true,
+                            "computed": false,
+                            "key": {
+                              "type": "Identifier",
+                              "start": 2099,
+                              "end": 2100,
+                              "loc": {
+                                "start": {
+                                  "line": 58,
+                                  "column": 25
+                                },
+                                "end": {
+                                  "line": 58,
+                                  "column": 26
+                                }
+                              },
+                              "name": "x"
+                            },
+                            "value": {
+                              "type": "AssignmentPattern",
+                              "start": 2099,
+                              "end": 2112,
+                              "loc": {
+                                "start": {
+                                  "line": 58,
+                                  "column": 25
+                                },
+                                "end": {
+                                  "line": 58,
+                                  "column": 38
+                                }
+                              },
+                              "left": {
+                                "type": "Identifier",
+                                "start": 2099,
+                                "end": 2100,
+                                "loc": {
+                                  "start": {
+                                    "line": 58,
+                                    "column": 25
+                                  },
+                                  "end": {
+                                    "line": 58,
+                                    "column": 26
+                                  }
+                                },
+                                "name": "x"
+                              },
+                              "right": {
+                                "type": "CallExpression",
+                                "start": 2103,
+                                "end": 2112,
+                                "loc": {
+                                  "start": {
+                                    "line": 58,
+                                    "column": 29
+                                  },
+                                  "end": {
+                                    "line": 58,
+                                    "column": 38
+                                  }
+                                },
+                                "callee": {
+                                  "type": "Identifier",
+                                  "start": 2103,
+                                  "end": 2110,
+                                  "loc": {
+                                    "start": {
+                                      "line": 58,
+                                      "column": 29
+                                    },
+                                    "end": {
+                                      "line": 58,
+                                      "column": 36
+                                    }
+                                  },
+                                  "name": "thrower"
+                                },
+                                "arguments": [],
+                                "optional": false
+                              }
+                            },
+                            "kind": "init"
+                          }
+                        ]
+                      }
+                    ],
+                    "body": {
+                      "type": "BlockStatement",
+                      "start": 2116,
+                      "end": 2126,
+                      "loc": {
+                        "start": {
+                          "line": 58,
+                          "column": 42
+                        },
+                        "end": {
+                          "line": 60,
+                          "column": 3
+                        }
+                      },
+                      "body": []
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 2131,
+      "end": 2153,
+      "loc": {
+        "start": {
+          "line": 63,
+          "column": 0
+        },
+        "end": {
+          "line": 63,
+          "column": 22
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 2135,
+          "end": 2152,
+          "loc": {
+            "start": {
+              "line": 63,
+              "column": 4
+            },
+            "end": {
+              "line": 63,
+              "column": 21
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 2135,
+            "end": 2141,
+            "loc": {
+              "start": {
+                "line": 63,
+                "column": 4
+              },
+              "end": {
+                "line": 63,
+                "column": 10
+              }
+            },
+            "name": "method"
+          },
+          "init": {
+            "type": "MemberExpression",
+            "start": 2144,
+            "end": 2152,
+            "loc": {
+              "start": {
+                "line": 63,
+                "column": 13
+              },
+              "end": {
+                "line": 63,
+                "column": 21
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 2144,
+              "end": 2145,
+              "loc": {
+                "start": {
+                  "line": 63,
+                  "column": 13
+                },
+                "end": {
+                  "line": 63,
+                  "column": 14
+                }
+              },
+              "name": "C"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 2146,
+              "end": 2152,
+              "loc": {
+                "start": {
+                  "line": 63,
+                  "column": 15
+                },
+                "end": {
+                  "line": 63,
+                  "column": 21
+                }
+              },
+              "name": "method"
+            },
+            "computed": false,
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2155,
+      "end": 2213,
+      "loc": {
+        "start": {
+          "line": 65,
+          "column": 0
+        },
+        "end": {
+          "line": 67,
+          "column": 3
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2155,
+        "end": 2212,
+        "loc": {
+          "start": {
+            "line": 65,
+            "column": 0
+          },
+          "end": {
+            "line": 67,
+            "column": 2
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 2155,
+          "end": 2168,
+          "loc": {
+            "start": {
+              "line": 65,
+              "column": 0
+            },
+            "end": {
+              "line": 65,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 2155,
+            "end": 2161,
+            "loc": {
+              "start": {
+                "line": 65,
+                "column": 0
+              },
+              "end": {
+                "line": 65,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 2162,
+            "end": 2168,
+            "loc": {
+              "start": {
+                "line": 65,
+                "column": 7
+              },
+              "end": {
+                "line": 65,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 2169,
+            "end": 2181,
+            "loc": {
+              "start": {
+                "line": 65,
+                "column": 14
+              },
+              "end": {
+                "line": 65,
+                "column": 26
+              }
+            },
+            "name": "Test262Error"
+          },
+          {
+            "type": "FunctionExpression",
+            "start": 2183,
+            "end": 2211,
+            "loc": {
+              "start": {
+                "line": 65,
+                "column": 28
+              },
+              "end": {
+                "line": 67,
+                "column": 1
+              }
+            },
+            "id": null,
+            "expression": false,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "BlockStatement",
+              "start": 2194,
+              "end": 2211,
+              "loc": {
+                "start": {
+                  "line": 65,
+                  "column": 39
+                },
+                "end": {
+                  "line": 67,
+                  "column": 1
+                }
+              },
+              "body": [
+                {
+                  "type": "ExpressionStatement",
+                  "start": 2198,
+                  "end": 2209,
+                  "loc": {
+                    "start": {
+                      "line": 66,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 66,
+                      "column": 13
+                    }
+                  },
+                  "expression": {
+                    "type": "CallExpression",
+                    "start": 2198,
+                    "end": 2208,
+                    "loc": {
+                      "start": {
+                        "line": 66,
+                        "column": 2
+                      },
+                      "end": {
+                        "line": 66,
+                        "column": 12
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 2198,
+                      "end": 2204,
+                      "loc": {
+                        "start": {
+                          "line": 66,
+                          "column": 2
+                        },
+                        "end": {
+                          "line": 66,
+                          "column": 8
+                        }
+                      },
+                      "name": "method"
+                    },
+                    "arguments": [
+                      {
+                        "type": "ObjectExpression",
+                        "start": 2205,
+                        "end": 2207,
+                        "loc": {
+                          "start": {
+                            "line": 66,
+                            "column": 9
+                          },
+                          "end": {
+                            "line": 66,
+                            "column": 11
+                          }
+                        },
+                        "properties": []
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

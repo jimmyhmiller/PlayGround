@@ -1,0 +1,183 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 467,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 16,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 405,
+      "end": 445,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 40
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 405,
+        "end": 444,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 39
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 405,
+          "end": 422,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 0
+            },
+            "end": {
+              "line": 14,
+              "column": 17
+            }
+          },
+          "name": "taintDataProperty"
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 423,
+            "end": 427,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 18
+              },
+              "end": {
+                "line": 14,
+                "column": 22
+              }
+            },
+            "name": "Intl"
+          },
+          {
+            "type": "Literal",
+            "start": 429,
+            "end": 443,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 24
+              },
+              "end": {
+                "line": 14,
+                "column": 38
+              }
+            },
+            "value": "NumberFormat",
+            "raw": "\"NumberFormat\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 446,
+      "end": 466,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 20
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 446,
+        "end": 465,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 0
+          },
+          "end": {
+            "line": 15,
+            "column": 19
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 446,
+          "end": 463,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 0
+            },
+            "end": {
+              "line": 15,
+              "column": 17
+            }
+          },
+          "object": {
+            "type": "Literal",
+            "start": 446,
+            "end": 448,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 0
+              },
+              "end": {
+                "line": 15,
+                "column": 2
+              }
+            },
+            "value": null,
+            "raw": "0n",
+            "bigint": "0"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 449,
+            "end": 463,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 3
+              },
+              "end": {
+                "line": 15,
+                "column": 17
+              }
+            },
+            "name": "toLocaleString"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

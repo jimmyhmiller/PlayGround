@@ -1,0 +1,618 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1066,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 27,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 695,
+      "end": 869,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 20,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 695,
+        "end": 868,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 0
+          },
+          "end": {
+            "line": 20,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 695,
+          "end": 711,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 0
+            },
+            "end": {
+              "line": 16,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 695,
+            "end": 701,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 0
+              },
+              "end": {
+                "line": 16,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 702,
+            "end": 711,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 7
+              },
+              "end": {
+                "line": 16,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 715,
+            "end": 763,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 2
+              },
+              "end": {
+                "line": 17,
+                "column": 50
+              }
+            },
+            "left": {
+              "type": "BinaryExpression",
+              "start": 716,
+              "end": 756,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 3
+                },
+                "end": {
+                  "line": 17,
+                  "column": 43
+                }
+              },
+              "left": {
+                "type": "CallExpression",
+                "start": 716,
+                "end": 730,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 3
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 17
+                  }
+                },
+                "callee": {
+                  "type": "Identifier",
+                  "start": 716,
+                  "end": 722,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 3
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 9
+                    }
+                  },
+                  "name": "Number"
+                },
+                "arguments": [
+                  {
+                    "type": "Literal",
+                    "start": 723,
+                    "end": 729,
+                    "loc": {
+                      "start": {
+                        "line": 17,
+                        "column": 10
+                      },
+                      "end": {
+                        "line": 17,
+                        "column": 16
+                      }
+                    },
+                    "value": "1234",
+                    "raw": "\"1234\""
+                  }
+                ],
+                "optional": false
+              },
+              "operator": "+",
+              "right": {
+                "type": "BinaryExpression",
+                "start": 734,
+                "end": 755,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 21
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 42
+                  }
+                },
+                "left": {
+                  "type": "CallExpression",
+                  "start": 734,
+                  "end": 748,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 35
+                    }
+                  },
+                  "callee": {
+                    "type": "Identifier",
+                    "start": 734,
+                    "end": 740,
+                    "loc": {
+                      "start": {
+                        "line": 17,
+                        "column": 21
+                      },
+                      "end": {
+                        "line": 17,
+                        "column": 27
+                      }
+                    },
+                    "name": "Number"
+                  },
+                  "arguments": [
+                    {
+                      "type": "Literal",
+                      "start": 741,
+                      "end": 747,
+                      "loc": {
+                        "start": {
+                          "line": 17,
+                          "column": 28
+                        },
+                        "end": {
+                          "line": 17,
+                          "column": 34
+                        }
+                      },
+                      "value": "5678",
+                      "raw": "\"5678\""
+                    }
+                  ],
+                  "optional": false
+                },
+                "operator": "*",
+                "right": {
+                  "type": "Literal",
+                  "start": 751,
+                  "end": 755,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 38
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 42
+                    }
+                  },
+                  "value": 0.0001,
+                  "raw": "1e-4"
+                }
+              }
+            },
+            "operator": "*",
+            "right": {
+              "type": "Literal",
+              "start": 760,
+              "end": 763,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 47
+                },
+                "end": {
+                  "line": 17,
+                  "column": 50
+                }
+              },
+              "value": 1000000000,
+              "raw": "1e9"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 767,
+            "end": 778,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 2
+              },
+              "end": {
+                "line": 18,
+                "column": 13
+              }
+            },
+            "value": 1234567800000,
+            "raw": "1234.5678e9"
+          },
+          {
+            "type": "Literal",
+            "start": 782,
+            "end": 866,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 2
+              },
+              "end": {
+                "line": 19,
+                "column": 86
+              }
+            },
+            "value": "Number(\"1234.5678e9\") must return (Number(\"1234\") + (Number(\"5678\") * 1e-4)) * 1e9",
+            "raw": "'Number(\"1234.5678e9\") must return (Number(\"1234\") + (Number(\"5678\") * 1e-4)) * 1e9'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 871,
+      "end": 1065,
+      "loc": {
+        "start": {
+          "line": 22,
+          "column": 0
+        },
+        "end": {
+          "line": 26,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 871,
+        "end": 1064,
+        "loc": {
+          "start": {
+            "line": 22,
+            "column": 0
+          },
+          "end": {
+            "line": 26,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 871,
+          "end": 887,
+          "loc": {
+            "start": {
+              "line": 22,
+              "column": 0
+            },
+            "end": {
+              "line": 22,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 871,
+            "end": 877,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 0
+              },
+              "end": {
+                "line": 22,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 878,
+            "end": 887,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 7
+              },
+              "end": {
+                "line": 22,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 891,
+            "end": 940,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 2
+              },
+              "end": {
+                "line": 23,
+                "column": 51
+              }
+            },
+            "left": {
+              "type": "BinaryExpression",
+              "start": 892,
+              "end": 932,
+              "loc": {
+                "start": {
+                  "line": 23,
+                  "column": 3
+                },
+                "end": {
+                  "line": 23,
+                  "column": 43
+                }
+              },
+              "left": {
+                "type": "CallExpression",
+                "start": 892,
+                "end": 906,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 3
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 17
+                  }
+                },
+                "callee": {
+                  "type": "Identifier",
+                  "start": 892,
+                  "end": 898,
+                  "loc": {
+                    "start": {
+                      "line": 23,
+                      "column": 3
+                    },
+                    "end": {
+                      "line": 23,
+                      "column": 9
+                    }
+                  },
+                  "name": "Number"
+                },
+                "arguments": [
+                  {
+                    "type": "Literal",
+                    "start": 899,
+                    "end": 905,
+                    "loc": {
+                      "start": {
+                        "line": 23,
+                        "column": 10
+                      },
+                      "end": {
+                        "line": 23,
+                        "column": 16
+                      }
+                    },
+                    "value": "1234",
+                    "raw": "\"1234\""
+                  }
+                ],
+                "optional": false
+              },
+              "operator": "+",
+              "right": {
+                "type": "BinaryExpression",
+                "start": 910,
+                "end": 931,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 21
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 42
+                  }
+                },
+                "left": {
+                  "type": "CallExpression",
+                  "start": 910,
+                  "end": 924,
+                  "loc": {
+                    "start": {
+                      "line": 23,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 23,
+                      "column": 35
+                    }
+                  },
+                  "callee": {
+                    "type": "Identifier",
+                    "start": 910,
+                    "end": 916,
+                    "loc": {
+                      "start": {
+                        "line": 23,
+                        "column": 21
+                      },
+                      "end": {
+                        "line": 23,
+                        "column": 27
+                      }
+                    },
+                    "name": "Number"
+                  },
+                  "arguments": [
+                    {
+                      "type": "Literal",
+                      "start": 917,
+                      "end": 923,
+                      "loc": {
+                        "start": {
+                          "line": 23,
+                          "column": 28
+                        },
+                        "end": {
+                          "line": 23,
+                          "column": 34
+                        }
+                      },
+                      "value": "5678",
+                      "raw": "\"5678\""
+                    }
+                  ],
+                  "optional": false
+                },
+                "operator": "*",
+                "right": {
+                  "type": "Literal",
+                  "start": 927,
+                  "end": 931,
+                  "loc": {
+                    "start": {
+                      "line": 23,
+                      "column": 38
+                    },
+                    "end": {
+                      "line": 23,
+                      "column": 42
+                    }
+                  },
+                  "value": 0.0001,
+                  "raw": "1e-4"
+                }
+              }
+            },
+            "operator": "*",
+            "right": {
+              "type": "Literal",
+              "start": 936,
+              "end": 940,
+              "loc": {
+                "start": {
+                  "line": 23,
+                  "column": 47
+                },
+                "end": {
+                  "line": 23,
+                  "column": 51
+                }
+              },
+              "value": 1e-9,
+              "raw": "1e-9"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 944,
+            "end": 956,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 2
+              },
+              "end": {
+                "line": 24,
+                "column": 14
+              }
+            },
+            "value": 0.0000012345678,
+            "raw": "1234.5678e-9"
+          },
+          {
+            "type": "Literal",
+            "start": 960,
+            "end": 1062,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 2
+              },
+              "end": {
+                "line": 25,
+                "column": 104
+              }
+            },
+            "value": "The value of `+(\"1234.5678e-9\")` is expected to be (Number(\"1234\") + (Number(\"5678\") * 1e-4)) * 1e-9",
+            "raw": "'The value of `+(\"1234.5678e-9\")` is expected to be (Number(\"1234\") + (Number(\"5678\") * 1e-4)) * 1e-9'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

@@ -1,0 +1,364 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 525,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 20,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 281,
+      "end": 303,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 22
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 285,
+          "end": 302,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 4
+            },
+            "end": {
+              "line": 10,
+              "column": 21
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 285,
+            "end": 290,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 4
+              },
+              "end": {
+                "line": 10,
+                "column": 9
+              }
+            },
+            "name": "__map"
+          },
+          "init": {
+            "type": "ObjectExpression",
+            "start": 291,
+            "end": 302,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 10
+              },
+              "end": {
+                "line": 10,
+                "column": 21
+              }
+            },
+            "properties": [
+              {
+                "type": "Property",
+                "start": 292,
+                "end": 301,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 11
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 20
+                  }
+                },
+                "method": false,
+                "shorthand": false,
+                "computed": false,
+                "key": {
+                  "type": "Identifier",
+                  "start": 292,
+                  "end": 295,
+                  "loc": {
+                    "start": {
+                      "line": 10,
+                      "column": 11
+                    },
+                    "end": {
+                      "line": 10,
+                      "column": 14
+                    }
+                  },
+                  "name": "foo"
+                },
+                "value": {
+                  "type": "Literal",
+                  "start": 296,
+                  "end": 301,
+                  "loc": {
+                    "start": {
+                      "line": 10,
+                      "column": 15
+                    },
+                    "end": {
+                      "line": 10,
+                      "column": 20
+                    }
+                  },
+                  "value": "bar",
+                  "raw": "\"bar\""
+                },
+                "kind": "init"
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 395,
+      "end": 407,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 12
+        }
+      },
+      "expression": {
+        "type": "UpdateExpression",
+        "start": 395,
+        "end": 406,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 0
+          },
+          "end": {
+            "line": 15,
+            "column": 11
+          }
+        },
+        "operator": "++",
+        "prefix": false,
+        "argument": {
+          "type": "MemberExpression",
+          "start": 395,
+          "end": 404,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 0
+            },
+            "end": {
+              "line": 15,
+              "column": 9
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 395,
+            "end": 400,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 0
+              },
+              "end": {
+                "line": 15,
+                "column": 5
+              }
+            },
+            "name": "__map"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 401,
+            "end": 404,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 6
+              },
+              "end": {
+                "line": 15,
+                "column": 9
+              }
+            },
+            "name": "foo"
+          },
+          "computed": false,
+          "optional": false
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 408,
+      "end": 441,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 33
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 408,
+        "end": 440,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 0
+          },
+          "end": {
+            "line": 16,
+            "column": 32
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 408,
+          "end": 424,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 0
+            },
+            "end": {
+              "line": 16,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 408,
+            "end": 414,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 0
+              },
+              "end": {
+                "line": 16,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 415,
+            "end": 424,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 7
+              },
+              "end": {
+                "line": 16,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 425,
+            "end": 434,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 17
+              },
+              "end": {
+                "line": 16,
+                "column": 26
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 425,
+              "end": 430,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 17
+                },
+                "end": {
+                  "line": 16,
+                  "column": 22
+                }
+              },
+              "name": "__map"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 431,
+              "end": 434,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 23
+                },
+                "end": {
+                  "line": 16,
+                  "column": 26
+                }
+              },
+              "name": "foo"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Identifier",
+            "start": 436,
+            "end": 439,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 28
+              },
+              "end": {
+                "line": 16,
+                "column": 31
+              }
+            },
+            "name": "NaN"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

@@ -1,0 +1,370 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 995,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 19,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 616,
+      "end": 789,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 173
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 620,
+          "end": 788,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 4
+            },
+            "end": {
+              "line": 14,
+              "column": 172
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 620,
+            "end": 630,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 4
+              },
+              "end": {
+                "line": 14,
+                "column": 14
+              }
+            },
+            "name": "__replaced"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 633,
+            "end": 788,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 17
+              },
+              "end": {
+                "line": 14,
+                "column": 172
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 633,
+              "end": 699,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 17
+                },
+                "end": {
+                  "line": 14,
+                  "column": 83
+                }
+              },
+              "object": {
+                "type": "Literal",
+                "start": 633,
+                "end": 691,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 75
+                  }
+                },
+                "value": "To sign up click |here|https:www.xxxx.org/subscribe.htm|",
+                "raw": "\"To sign up click |here|https:www.xxxx.org/subscribe.htm|\""
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 692,
+                "end": 699,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 76
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 83
+                  }
+                },
+                "name": "replace"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 700,
+                "end": 764,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 84
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 148
+                  }
+                },
+                "value": {},
+                "raw": "/(\\|)([\\w\\x81-\\xff ]*)(\\|)([\\/a-z][\\w:\\/\\.]*\\.[a-z]{3,4})(\\|)/ig",
+                "regex": {
+                  "pattern": "(\\|)([\\w\\x81-\\xff ]*)(\\|)([\\/a-z][\\w:\\/\\.]*\\.[a-z]{3,4})(\\|)",
+                  "flags": "ig"
+                }
+              },
+              {
+                "type": "Literal",
+                "start": 766,
+                "end": 787,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 150
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 171
+                  }
+                },
+                "value": "<a href=\"$4\">$2</a>",
+                "raw": "'<a href=\"$4\">$2</a>'"
+              }
+            ],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 791,
+      "end": 879,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 88
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 795,
+          "end": 878,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 4
+            },
+            "end": {
+              "line": 16,
+              "column": 87
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 795,
+            "end": 805,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 4
+              },
+              "end": {
+                "line": 16,
+                "column": 14
+              }
+            },
+            "name": "__expected"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 808,
+            "end": 878,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 17
+              },
+              "end": {
+                "line": 16,
+                "column": 87
+              }
+            },
+            "value": "To sign up click <a href=\"https:www.xxxx.org/subscribe.htm\">here</a>",
+            "raw": "'To sign up click <a href=\"https:www.xxxx.org/subscribe.htm\">here</a>'"
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 881,
+      "end": 994,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 113
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 881,
+        "end": 993,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 0
+          },
+          "end": {
+            "line": 18,
+            "column": 112
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 881,
+          "end": 897,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 0
+            },
+            "end": {
+              "line": 18,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 881,
+            "end": 887,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 0
+              },
+              "end": {
+                "line": 18,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 888,
+            "end": 897,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 7
+              },
+              "end": {
+                "line": 18,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 898,
+            "end": 908,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 17
+              },
+              "end": {
+                "line": 18,
+                "column": 27
+              }
+            },
+            "name": "__replaced"
+          },
+          {
+            "type": "Identifier",
+            "start": 910,
+            "end": 920,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 29
+              },
+              "end": {
+                "line": 18,
+                "column": 39
+              }
+            },
+            "name": "__expected"
+          },
+          {
+            "type": "Literal",
+            "start": 922,
+            "end": 992,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 41
+              },
+              "end": {
+                "line": 18,
+                "column": 111
+              }
+            },
+            "value": "The value of __replaced is expected to equal the value of __expected",
+            "raw": "'The value of __replaced is expected to equal the value of __expected'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

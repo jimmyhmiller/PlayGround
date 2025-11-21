@@ -1,0 +1,718 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 892,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 22,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 454,
+      "end": 572,
+      "loc": {
+        "start": {
+          "line": 13,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 118
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 454,
+        "end": 571,
+        "loc": {
+          "start": {
+            "line": 13,
+            "column": 0
+          },
+          "end": {
+            "line": 13,
+            "column": 117
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 454,
+          "end": 470,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 0
+            },
+            "end": {
+              "line": 13,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 454,
+            "end": 460,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 0
+              },
+              "end": {
+                "line": 13,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 461,
+            "end": 470,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 7
+              },
+              "end": {
+                "line": 13,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 471,
+            "end": 489,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 17
+              },
+              "end": {
+                "line": 13,
+                "column": 35
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 471,
+              "end": 477,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 17
+                },
+                "end": {
+                  "line": 13,
+                  "column": 23
+                }
+              },
+              "name": "Number"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 478,
+                "end": 488,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 34
+                  }
+                },
+                "value": "Infinity",
+                "raw": "\"Infinity\""
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 491,
+            "end": 515,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 37
+              },
+              "end": {
+                "line": 13,
+                "column": 61
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 491,
+              "end": 497,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 37
+                },
+                "end": {
+                  "line": 13,
+                  "column": 43
+                }
+              },
+              "name": "Number"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 498,
+              "end": 515,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 44
+                },
+                "end": {
+                  "line": 13,
+                  "column": 61
+                }
+              },
+              "name": "POSITIVE_INFINITY"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 517,
+            "end": 570,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 63
+              },
+              "end": {
+                "line": 13,
+                "column": 116
+              }
+            },
+            "value": "Number(\"Infinity\") returns Number.POSITIVE_INFINITY",
+            "raw": "'Number(\"Infinity\") returns Number.POSITIVE_INFINITY'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 573,
+      "end": 663,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 90
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 573,
+        "end": 662,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 89
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 573,
+          "end": 589,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 0
+            },
+            "end": {
+              "line": 14,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 573,
+            "end": 579,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 0
+              },
+              "end": {
+                "line": 14,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 580,
+            "end": 589,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 7
+              },
+              "end": {
+                "line": 14,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 590,
+            "end": 608,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 17
+              },
+              "end": {
+                "line": 14,
+                "column": 35
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 590,
+              "end": 596,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 17
+                },
+                "end": {
+                  "line": 14,
+                  "column": 23
+                }
+              },
+              "name": "Number"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 597,
+                "end": 607,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 34
+                  }
+                },
+                "value": "Infinity",
+                "raw": "\"Infinity\""
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 610,
+            "end": 618,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 37
+              },
+              "end": {
+                "line": 14,
+                "column": 45
+              }
+            },
+            "value": null,
+            "raw": "10e10000"
+          },
+          {
+            "type": "Literal",
+            "start": 620,
+            "end": 661,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 47
+              },
+              "end": {
+                "line": 14,
+                "column": 88
+              }
+            },
+            "value": "Number(\"Infinity\") must return 10e10000",
+            "raw": "'Number(\"Infinity\") must return 10e10000'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 664,
+      "end": 754,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 90
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 664,
+        "end": 753,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 0
+          },
+          "end": {
+            "line": 15,
+            "column": 89
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 664,
+          "end": 680,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 0
+            },
+            "end": {
+              "line": 15,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 664,
+            "end": 670,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 0
+              },
+              "end": {
+                "line": 15,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 671,
+            "end": 680,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 7
+              },
+              "end": {
+                "line": 15,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 681,
+            "end": 699,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 17
+              },
+              "end": {
+                "line": 15,
+                "column": 35
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 681,
+              "end": 687,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 17
+                },
+                "end": {
+                  "line": 15,
+                  "column": 23
+                }
+              },
+              "name": "Number"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 688,
+                "end": 698,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 34
+                  }
+                },
+                "value": "Infinity",
+                "raw": "\"Infinity\""
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 701,
+            "end": 709,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 37
+              },
+              "end": {
+                "line": 15,
+                "column": 45
+              }
+            },
+            "value": null,
+            "raw": "10E10000"
+          },
+          {
+            "type": "Literal",
+            "start": 711,
+            "end": 752,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 47
+              },
+              "end": {
+                "line": 15,
+                "column": 88
+              }
+            },
+            "value": "Number(\"Infinity\") must return 10E10000",
+            "raw": "'Number(\"Infinity\") must return 10E10000'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 756,
+      "end": 891,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 21,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 756,
+        "end": 890,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 0
+          },
+          "end": {
+            "line": 21,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 756,
+          "end": 772,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 0
+            },
+            "end": {
+              "line": 17,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 756,
+            "end": 762,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 0
+              },
+              "end": {
+                "line": 17,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 763,
+            "end": 772,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 7
+              },
+              "end": {
+                "line": 17,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 776,
+            "end": 794,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 2
+              },
+              "end": {
+                "line": 18,
+                "column": 20
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 776,
+              "end": 782,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 2
+                },
+                "end": {
+                  "line": 18,
+                  "column": 8
+                }
+              },
+              "name": "Number"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 783,
+                "end": 793,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 19
+                  }
+                },
+                "value": "Infinity",
+                "raw": "\"Infinity\""
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 798,
+            "end": 806,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 2
+              },
+              "end": {
+                "line": 19,
+                "column": 10
+              }
+            },
+            "value": null,
+            "raw": "10e10000"
+          },
+          {
+            "type": "Literal",
+            "start": 810,
+            "end": 888,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 2
+              },
+              "end": {
+                "line": 20,
+                "column": 80
+              }
+            },
+            "value": "Number(\"Infinity\") must return the same value returned by Number(\"10e10000\")",
+            "raw": "'Number(\"Infinity\") must return the same value returned by Number(\"10e10000\")'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

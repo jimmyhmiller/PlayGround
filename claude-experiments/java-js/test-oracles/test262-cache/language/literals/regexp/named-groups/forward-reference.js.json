@@ -1,0 +1,156 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 288,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 11,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 254,
+      "end": 287,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 33
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 254,
+        "end": 286,
+        "loc": {
+          "start": {
+            "line": 10,
+            "column": 0
+          },
+          "end": {
+            "line": 10,
+            "column": 32
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 254,
+          "end": 260,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 0
+            },
+            "end": {
+              "line": 10,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 261,
+            "end": 285,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 7
+              },
+              "end": {
+                "line": 10,
+                "column": 31
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 261,
+              "end": 280,
+              "loc": {
+                "start": {
+                  "line": 10,
+                  "column": 7
+                },
+                "end": {
+                  "line": 10,
+                  "column": 26
+                }
+              },
+              "object": {
+                "type": "Literal",
+                "start": 261,
+                "end": 275,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 7
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 21
+                  }
+                },
+                "value": {},
+                "raw": "/\\k<a>(?<a>x)/",
+                "regex": {
+                  "pattern": "\\k<a>(?<a>x)",
+                  "flags": ""
+                }
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 276,
+                "end": 280,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 26
+                  }
+                },
+                "name": "test"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 281,
+                "end": 284,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 30
+                  }
+                },
+                "value": "x",
+                "raw": "\"x\""
+              }
+            ],
+            "optional": false
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

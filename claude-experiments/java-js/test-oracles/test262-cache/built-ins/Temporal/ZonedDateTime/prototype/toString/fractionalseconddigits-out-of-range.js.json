@@ -1,0 +1,1284 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1370,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 27,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 737,
+      "end": 816,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 79
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 743,
+          "end": 815,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 6
+            },
+            "end": {
+              "line": 17,
+              "column": 78
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 743,
+            "end": 751,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 6
+              },
+              "end": {
+                "line": 17,
+                "column": 14
+              }
+            },
+            "name": "datetime"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 754,
+            "end": 815,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 17
+              },
+              "end": {
+                "line": 17,
+                "column": 78
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 758,
+              "end": 780,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 21
+                },
+                "end": {
+                  "line": 17,
+                  "column": 43
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 758,
+                "end": 766,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 21
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 29
+                  }
+                },
+                "name": "Temporal"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 767,
+                "end": 780,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 30
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 43
+                  }
+                },
+                "name": "ZonedDateTime"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 781,
+                "end": 807,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 44
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 70
+                  }
+                },
+                "value": null,
+                "raw": "1_000_000_000_987_650_000n",
+                "bigint": "1000000000987650000"
+              },
+              {
+                "type": "Literal",
+                "start": 809,
+                "end": 814,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 72
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 77
+                  }
+                },
+                "value": "UTC",
+                "raw": "\"UTC\""
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 818,
+      "end": 959,
+      "loc": {
+        "start": {
+          "line": 19,
+          "column": 0
+        },
+        "end": {
+          "line": 20,
+          "column": 51
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 818,
+        "end": 958,
+        "loc": {
+          "start": {
+            "line": 19,
+            "column": 0
+          },
+          "end": {
+            "line": 20,
+            "column": 50
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 818,
+          "end": 831,
+          "loc": {
+            "start": {
+              "line": 19,
+              "column": 0
+            },
+            "end": {
+              "line": 19,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 818,
+            "end": 824,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 0
+              },
+              "end": {
+                "line": 19,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 825,
+            "end": 831,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 7
+              },
+              "end": {
+                "line": 19,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 832,
+            "end": 842,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 14
+              },
+              "end": {
+                "line": 19,
+                "column": 24
+              }
+            },
+            "name": "RangeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 844,
+            "end": 906,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 26
+              },
+              "end": {
+                "line": 19,
+                "column": 88
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "CallExpression",
+              "start": 850,
+              "end": 906,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 32
+                },
+                "end": {
+                  "line": 19,
+                  "column": 88
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 850,
+                "end": 867,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 49
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 850,
+                  "end": 858,
+                  "loc": {
+                    "start": {
+                      "line": 19,
+                      "column": 32
+                    },
+                    "end": {
+                      "line": 19,
+                      "column": 40
+                    }
+                  },
+                  "name": "datetime"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 859,
+                  "end": 867,
+                  "loc": {
+                    "start": {
+                      "line": 19,
+                      "column": 41
+                    },
+                    "end": {
+                      "line": 19,
+                      "column": 49
+                    }
+                  },
+                  "name": "toString"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "ObjectExpression",
+                  "start": 868,
+                  "end": 905,
+                  "loc": {
+                    "start": {
+                      "line": 19,
+                      "column": 50
+                    },
+                    "end": {
+                      "line": 19,
+                      "column": 87
+                    }
+                  },
+                  "properties": [
+                    {
+                      "type": "Property",
+                      "start": 870,
+                      "end": 903,
+                      "loc": {
+                        "start": {
+                          "line": 19,
+                          "column": 52
+                        },
+                        "end": {
+                          "line": 19,
+                          "column": 85
+                        }
+                      },
+                      "method": false,
+                      "shorthand": false,
+                      "computed": false,
+                      "key": {
+                        "type": "Identifier",
+                        "start": 870,
+                        "end": 892,
+                        "loc": {
+                          "start": {
+                            "line": 19,
+                            "column": 52
+                          },
+                          "end": {
+                            "line": 19,
+                            "column": 74
+                          }
+                        },
+                        "name": "fractionalSecondDigits"
+                      },
+                      "value": {
+                        "type": "UnaryExpression",
+                        "start": 894,
+                        "end": 903,
+                        "loc": {
+                          "start": {
+                            "line": 19,
+                            "column": 76
+                          },
+                          "end": {
+                            "line": 19,
+                            "column": 85
+                          }
+                        },
+                        "operator": "-",
+                        "prefix": true,
+                        "argument": {
+                          "type": "Identifier",
+                          "start": 895,
+                          "end": 903,
+                          "loc": {
+                            "start": {
+                              "line": 19,
+                              "column": 77
+                            },
+                            "end": {
+                              "line": 19,
+                              "column": 85
+                            }
+                          },
+                          "name": "Infinity"
+                        }
+                      },
+                      "kind": "init"
+                    }
+                  ]
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 910,
+            "end": 957,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 2
+              },
+              "end": {
+                "line": 20,
+                "column": 49
+              }
+            },
+            "value": "−∞ is out of range for fractionalSecondDigits",
+            "raw": "\"−∞ is out of range for fractionalSecondDigits\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 960,
+      "end": 1094,
+      "loc": {
+        "start": {
+          "line": 21,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 51
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 960,
+        "end": 1093,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 0
+          },
+          "end": {
+            "line": 22,
+            "column": 50
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 960,
+          "end": 973,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 0
+            },
+            "end": {
+              "line": 21,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 960,
+            "end": 966,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 0
+              },
+              "end": {
+                "line": 21,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 967,
+            "end": 973,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 7
+              },
+              "end": {
+                "line": 21,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 974,
+            "end": 984,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 14
+              },
+              "end": {
+                "line": 21,
+                "column": 24
+              }
+            },
+            "name": "RangeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 986,
+            "end": 1041,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 26
+              },
+              "end": {
+                "line": 21,
+                "column": 81
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "CallExpression",
+              "start": 992,
+              "end": 1041,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 32
+                },
+                "end": {
+                  "line": 21,
+                  "column": 81
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 992,
+                "end": 1009,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 49
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 992,
+                  "end": 1000,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 32
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 40
+                    }
+                  },
+                  "name": "datetime"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 1001,
+                  "end": 1009,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 41
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 49
+                    }
+                  },
+                  "name": "toString"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "ObjectExpression",
+                  "start": 1010,
+                  "end": 1040,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 50
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 80
+                    }
+                  },
+                  "properties": [
+                    {
+                      "type": "Property",
+                      "start": 1012,
+                      "end": 1038,
+                      "loc": {
+                        "start": {
+                          "line": 21,
+                          "column": 52
+                        },
+                        "end": {
+                          "line": 21,
+                          "column": 78
+                        }
+                      },
+                      "method": false,
+                      "shorthand": false,
+                      "computed": false,
+                      "key": {
+                        "type": "Identifier",
+                        "start": 1012,
+                        "end": 1034,
+                        "loc": {
+                          "start": {
+                            "line": 21,
+                            "column": 52
+                          },
+                          "end": {
+                            "line": 21,
+                            "column": 74
+                          }
+                        },
+                        "name": "fractionalSecondDigits"
+                      },
+                      "value": {
+                        "type": "UnaryExpression",
+                        "start": 1036,
+                        "end": 1038,
+                        "loc": {
+                          "start": {
+                            "line": 21,
+                            "column": 76
+                          },
+                          "end": {
+                            "line": 21,
+                            "column": 78
+                          }
+                        },
+                        "operator": "-",
+                        "prefix": true,
+                        "argument": {
+                          "type": "Literal",
+                          "start": 1037,
+                          "end": 1038,
+                          "loc": {
+                            "start": {
+                              "line": 21,
+                              "column": 77
+                            },
+                            "end": {
+                              "line": 21,
+                              "column": 78
+                            }
+                          },
+                          "value": 1,
+                          "raw": "1"
+                        }
+                      },
+                      "kind": "init"
+                    }
+                  ]
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 1045,
+            "end": 1092,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 2
+              },
+              "end": {
+                "line": 22,
+                "column": 49
+              }
+            },
+            "value": "−1 is out of range for fractionalSecondDigits",
+            "raw": "\"−1 is out of range for fractionalSecondDigits\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1095,
+      "end": 1229,
+      "loc": {
+        "start": {
+          "line": 23,
+          "column": 0
+        },
+        "end": {
+          "line": 24,
+          "column": 51
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1095,
+        "end": 1228,
+        "loc": {
+          "start": {
+            "line": 23,
+            "column": 0
+          },
+          "end": {
+            "line": 24,
+            "column": 50
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1095,
+          "end": 1108,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 0
+            },
+            "end": {
+              "line": 23,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1095,
+            "end": 1101,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 0
+              },
+              "end": {
+                "line": 23,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1102,
+            "end": 1108,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 7
+              },
+              "end": {
+                "line": 23,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 1109,
+            "end": 1119,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 14
+              },
+              "end": {
+                "line": 23,
+                "column": 24
+              }
+            },
+            "name": "RangeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 1121,
+            "end": 1176,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 26
+              },
+              "end": {
+                "line": 23,
+                "column": 81
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "CallExpression",
+              "start": 1127,
+              "end": 1176,
+              "loc": {
+                "start": {
+                  "line": 23,
+                  "column": 32
+                },
+                "end": {
+                  "line": 23,
+                  "column": 81
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 1127,
+                "end": 1144,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 49
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 1127,
+                  "end": 1135,
+                  "loc": {
+                    "start": {
+                      "line": 23,
+                      "column": 32
+                    },
+                    "end": {
+                      "line": 23,
+                      "column": 40
+                    }
+                  },
+                  "name": "datetime"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 1136,
+                  "end": 1144,
+                  "loc": {
+                    "start": {
+                      "line": 23,
+                      "column": 41
+                    },
+                    "end": {
+                      "line": 23,
+                      "column": 49
+                    }
+                  },
+                  "name": "toString"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "ObjectExpression",
+                  "start": 1145,
+                  "end": 1175,
+                  "loc": {
+                    "start": {
+                      "line": 23,
+                      "column": 50
+                    },
+                    "end": {
+                      "line": 23,
+                      "column": 80
+                    }
+                  },
+                  "properties": [
+                    {
+                      "type": "Property",
+                      "start": 1147,
+                      "end": 1173,
+                      "loc": {
+                        "start": {
+                          "line": 23,
+                          "column": 52
+                        },
+                        "end": {
+                          "line": 23,
+                          "column": 78
+                        }
+                      },
+                      "method": false,
+                      "shorthand": false,
+                      "computed": false,
+                      "key": {
+                        "type": "Identifier",
+                        "start": 1147,
+                        "end": 1169,
+                        "loc": {
+                          "start": {
+                            "line": 23,
+                            "column": 52
+                          },
+                          "end": {
+                            "line": 23,
+                            "column": 74
+                          }
+                        },
+                        "name": "fractionalSecondDigits"
+                      },
+                      "value": {
+                        "type": "Literal",
+                        "start": 1171,
+                        "end": 1173,
+                        "loc": {
+                          "start": {
+                            "line": 23,
+                            "column": 76
+                          },
+                          "end": {
+                            "line": 23,
+                            "column": 78
+                          }
+                        },
+                        "value": 10,
+                        "raw": "10"
+                      },
+                      "kind": "init"
+                    }
+                  ]
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 1180,
+            "end": 1227,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 2
+              },
+              "end": {
+                "line": 24,
+                "column": 49
+              }
+            },
+            "value": "10 is out of range for fractionalSecondDigits",
+            "raw": "\"10 is out of range for fractionalSecondDigits\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1230,
+      "end": 1369,
+      "loc": {
+        "start": {
+          "line": 25,
+          "column": 0
+        },
+        "end": {
+          "line": 26,
+          "column": 50
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1230,
+        "end": 1368,
+        "loc": {
+          "start": {
+            "line": 25,
+            "column": 0
+          },
+          "end": {
+            "line": 26,
+            "column": 49
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1230,
+          "end": 1243,
+          "loc": {
+            "start": {
+              "line": 25,
+              "column": 0
+            },
+            "end": {
+              "line": 25,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1230,
+            "end": 1236,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 0
+              },
+              "end": {
+                "line": 25,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1237,
+            "end": 1243,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 7
+              },
+              "end": {
+                "line": 25,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 1244,
+            "end": 1254,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 14
+              },
+              "end": {
+                "line": 25,
+                "column": 24
+              }
+            },
+            "name": "RangeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 1256,
+            "end": 1317,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 26
+              },
+              "end": {
+                "line": 25,
+                "column": 87
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "CallExpression",
+              "start": 1262,
+              "end": 1317,
+              "loc": {
+                "start": {
+                  "line": 25,
+                  "column": 32
+                },
+                "end": {
+                  "line": 25,
+                  "column": 87
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 1262,
+                "end": 1279,
+                "loc": {
+                  "start": {
+                    "line": 25,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 25,
+                    "column": 49
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 1262,
+                  "end": 1270,
+                  "loc": {
+                    "start": {
+                      "line": 25,
+                      "column": 32
+                    },
+                    "end": {
+                      "line": 25,
+                      "column": 40
+                    }
+                  },
+                  "name": "datetime"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 1271,
+                  "end": 1279,
+                  "loc": {
+                    "start": {
+                      "line": 25,
+                      "column": 41
+                    },
+                    "end": {
+                      "line": 25,
+                      "column": 49
+                    }
+                  },
+                  "name": "toString"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "ObjectExpression",
+                  "start": 1280,
+                  "end": 1316,
+                  "loc": {
+                    "start": {
+                      "line": 25,
+                      "column": 50
+                    },
+                    "end": {
+                      "line": 25,
+                      "column": 86
+                    }
+                  },
+                  "properties": [
+                    {
+                      "type": "Property",
+                      "start": 1282,
+                      "end": 1314,
+                      "loc": {
+                        "start": {
+                          "line": 25,
+                          "column": 52
+                        },
+                        "end": {
+                          "line": 25,
+                          "column": 84
+                        }
+                      },
+                      "method": false,
+                      "shorthand": false,
+                      "computed": false,
+                      "key": {
+                        "type": "Identifier",
+                        "start": 1282,
+                        "end": 1304,
+                        "loc": {
+                          "start": {
+                            "line": 25,
+                            "column": 52
+                          },
+                          "end": {
+                            "line": 25,
+                            "column": 74
+                          }
+                        },
+                        "name": "fractionalSecondDigits"
+                      },
+                      "value": {
+                        "type": "Identifier",
+                        "start": 1306,
+                        "end": 1314,
+                        "loc": {
+                          "start": {
+                            "line": 25,
+                            "column": 76
+                          },
+                          "end": {
+                            "line": 25,
+                            "column": 84
+                          }
+                        },
+                        "name": "Infinity"
+                      },
+                      "kind": "init"
+                    }
+                  ]
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 1321,
+            "end": 1367,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 2
+              },
+              "end": {
+                "line": 26,
+                "column": 48
+              }
+            },
+            "value": "∞ is out of range for fractionalSecondDigits",
+            "raw": "\"∞ is out of range for fractionalSecondDigits\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

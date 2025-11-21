@@ -1,0 +1,216 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 329,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 11,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 267,
+      "end": 328,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 61
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 267,
+        "end": 327,
+        "loc": {
+          "start": {
+            "line": 10,
+            "column": 0
+          },
+          "end": {
+            "line": 10,
+            "column": 60
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 267,
+          "end": 283,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 0
+            },
+            "end": {
+              "line": 10,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 267,
+            "end": 273,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 0
+              },
+              "end": {
+                "line": 10,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 274,
+            "end": 283,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 7
+              },
+              "end": {
+                "line": 10,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 284,
+            "end": 314,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 17
+              },
+              "end": {
+                "line": 10,
+                "column": 47
+              }
+            },
+            "operator": "typeof",
+            "prefix": true,
+            "argument": {
+              "type": "MemberExpression",
+              "start": 291,
+              "end": 314,
+              "loc": {
+                "start": {
+                  "line": 10,
+                  "column": 24
+                },
+                "end": {
+                  "line": 10,
+                  "column": 47
+                }
+              },
+              "object": {
+                "type": "MemberExpression",
+                "start": 291,
+                "end": 309,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 42
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 291,
+                  "end": 299,
+                  "loc": {
+                    "start": {
+                      "line": 10,
+                      "column": 24
+                    },
+                    "end": {
+                      "line": 10,
+                      "column": 32
+                    }
+                  },
+                  "name": "Iterator"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 300,
+                  "end": 309,
+                  "loc": {
+                    "start": {
+                      "line": 10,
+                      "column": 33
+                    },
+                    "end": {
+                      "line": 10,
+                      "column": 42
+                    }
+                  },
+                  "name": "prototype"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 310,
+                "end": 314,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 43
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 47
+                  }
+                },
+                "name": "some"
+              },
+              "computed": false,
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 316,
+            "end": 326,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 49
+              },
+              "end": {
+                "line": 10,
+                "column": 59
+              }
+            },
+            "value": "function",
+            "raw": "'function'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

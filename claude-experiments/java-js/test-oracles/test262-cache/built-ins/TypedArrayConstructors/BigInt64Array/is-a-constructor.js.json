@@ -1,0 +1,231 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 864,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 25,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 737,
+      "end": 839,
+      "loc": {
+        "start": {
+          "line": 22,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 102
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 737,
+        "end": 838,
+        "loc": {
+          "start": {
+            "line": 22,
+            "column": 0
+          },
+          "end": {
+            "line": 22,
+            "column": 101
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 737,
+          "end": 753,
+          "loc": {
+            "start": {
+              "line": 22,
+              "column": 0
+            },
+            "end": {
+              "line": 22,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 737,
+            "end": 743,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 0
+              },
+              "end": {
+                "line": 22,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 744,
+            "end": 753,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 7
+              },
+              "end": {
+                "line": 22,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 754,
+            "end": 782,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 17
+              },
+              "end": {
+                "line": 22,
+                "column": 45
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 754,
+              "end": 767,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 17
+                },
+                "end": {
+                  "line": 22,
+                  "column": 30
+                }
+              },
+              "name": "isConstructor"
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 768,
+                "end": 781,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 44
+                  }
+                },
+                "name": "BigInt64Array"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 784,
+            "end": 788,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 47
+              },
+              "end": {
+                "line": 22,
+                "column": 51
+              }
+            },
+            "value": true,
+            "raw": "true"
+          },
+          {
+            "type": "Literal",
+            "start": 790,
+            "end": 837,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 53
+              },
+              "end": {
+                "line": 22,
+                "column": 100
+              }
+            },
+            "value": "isConstructor(BigInt64Array) must return true",
+            "raw": "'isConstructor(BigInt64Array) must return true'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 840,
+      "end": 860,
+      "loc": {
+        "start": {
+          "line": 23,
+          "column": 0
+        },
+        "end": {
+          "line": 23,
+          "column": 20
+        }
+      },
+      "expression": {
+        "type": "NewExpression",
+        "start": 840,
+        "end": 859,
+        "loc": {
+          "start": {
+            "line": 23,
+            "column": 0
+          },
+          "end": {
+            "line": 23,
+            "column": 19
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 844,
+          "end": 857,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 4
+            },
+            "end": {
+              "line": 23,
+              "column": 17
+            }
+          },
+          "name": "BigInt64Array"
+        },
+        "arguments": []
+      }
+    }
+  ],
+  "sourceType": "script"
+}

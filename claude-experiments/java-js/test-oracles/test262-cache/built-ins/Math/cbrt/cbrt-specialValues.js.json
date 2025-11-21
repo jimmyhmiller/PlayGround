@@ -1,0 +1,1324 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 818,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 19,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 202,
+      "end": 296,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 49
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 202,
+        "end": 295,
+        "loc": {
+          "start": {
+            "line": 9,
+            "column": 0
+          },
+          "end": {
+            "line": 10,
+            "column": 48
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 202,
+          "end": 218,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 0
+            },
+            "end": {
+              "line": 9,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 202,
+            "end": 208,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 0
+              },
+              "end": {
+                "line": 9,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 209,
+            "end": 218,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 7
+              },
+              "end": {
+                "line": 9,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 219,
+            "end": 233,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 17
+              },
+              "end": {
+                "line": 9,
+                "column": 31
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 219,
+              "end": 228,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 17
+                },
+                "end": {
+                  "line": 9,
+                  "column": 26
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 219,
+                "end": 223,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 21
+                  }
+                },
+                "name": "Math"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 224,
+                "end": 228,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 26
+                  }
+                },
+                "name": "cbrt"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 229,
+                "end": 232,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 30
+                  }
+                },
+                "name": "NaN"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 235,
+            "end": 245,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 33
+              },
+              "end": {
+                "line": 9,
+                "column": 43
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 235,
+              "end": 241,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 33
+                },
+                "end": {
+                  "line": 9,
+                  "column": 39
+                }
+              },
+              "name": "Number"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 242,
+              "end": 245,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 40
+                },
+                "end": {
+                  "line": 9,
+                  "column": 43
+                }
+              },
+              "name": "NaN"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 249,
+            "end": 294,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 2
+              },
+              "end": {
+                "line": 10,
+                "column": 47
+              }
+            },
+            "value": "Math.cbrt produces incorrect output for NaN",
+            "raw": "\"Math.cbrt produces incorrect output for NaN\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 297,
+      "end": 454,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 12,
+          "column": 77
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 297,
+        "end": 453,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 12,
+            "column": 76
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 297,
+          "end": 313,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 0
+            },
+            "end": {
+              "line": 11,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 297,
+            "end": 303,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 0
+              },
+              "end": {
+                "line": 11,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 304,
+            "end": 313,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 7
+              },
+              "end": {
+                "line": 11,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 314,
+            "end": 349,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 17
+              },
+              "end": {
+                "line": 11,
+                "column": 52
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 314,
+              "end": 323,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 17
+                },
+                "end": {
+                  "line": 11,
+                  "column": 26
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 314,
+                "end": 318,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 21
+                  }
+                },
+                "name": "Math"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 319,
+                "end": 323,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 26
+                  }
+                },
+                "name": "cbrt"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "MemberExpression",
+                "start": 324,
+                "end": 348,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 51
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 324,
+                  "end": 330,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 27
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 33
+                    }
+                  },
+                  "name": "Number"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 331,
+                  "end": 348,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 34
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 51
+                    }
+                  },
+                  "name": "NEGATIVE_INFINITY"
+                },
+                "computed": false,
+                "optional": false
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 351,
+            "end": 375,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 54
+              },
+              "end": {
+                "line": 11,
+                "column": 78
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 351,
+              "end": 357,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 54
+                },
+                "end": {
+                  "line": 11,
+                  "column": 60
+                }
+              },
+              "name": "Number"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 358,
+              "end": 375,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 61
+                },
+                "end": {
+                  "line": 11,
+                  "column": 78
+                }
+              },
+              "name": "NEGATIVE_INFINITY"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 379,
+            "end": 452,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 2
+              },
+              "end": {
+                "line": 12,
+                "column": 75
+              }
+            },
+            "value": "Math.cbrt should produce negative infinity for Number.NEGATIVE_INFINITY",
+            "raw": "\"Math.cbrt should produce negative infinity for Number.NEGATIVE_INFINITY\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 455,
+      "end": 612,
+      "loc": {
+        "start": {
+          "line": 13,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 77
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 455,
+        "end": 611,
+        "loc": {
+          "start": {
+            "line": 13,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 76
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 455,
+          "end": 471,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 0
+            },
+            "end": {
+              "line": 13,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 455,
+            "end": 461,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 0
+              },
+              "end": {
+                "line": 13,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 462,
+            "end": 471,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 7
+              },
+              "end": {
+                "line": 13,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 472,
+            "end": 507,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 17
+              },
+              "end": {
+                "line": 13,
+                "column": 52
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 472,
+              "end": 481,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 17
+                },
+                "end": {
+                  "line": 13,
+                  "column": 26
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 472,
+                "end": 476,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 21
+                  }
+                },
+                "name": "Math"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 477,
+                "end": 481,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 26
+                  }
+                },
+                "name": "cbrt"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "MemberExpression",
+                "start": 482,
+                "end": 506,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 51
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 482,
+                  "end": 488,
+                  "loc": {
+                    "start": {
+                      "line": 13,
+                      "column": 27
+                    },
+                    "end": {
+                      "line": 13,
+                      "column": 33
+                    }
+                  },
+                  "name": "Number"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 489,
+                  "end": 506,
+                  "loc": {
+                    "start": {
+                      "line": 13,
+                      "column": 34
+                    },
+                    "end": {
+                      "line": 13,
+                      "column": 51
+                    }
+                  },
+                  "name": "POSITIVE_INFINITY"
+                },
+                "computed": false,
+                "optional": false
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 509,
+            "end": 533,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 54
+              },
+              "end": {
+                "line": 13,
+                "column": 78
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 509,
+              "end": 515,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 54
+                },
+                "end": {
+                  "line": 13,
+                  "column": 60
+                }
+              },
+              "name": "Number"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 516,
+              "end": 533,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 61
+                },
+                "end": {
+                  "line": 13,
+                  "column": 78
+                }
+              },
+              "name": "POSITIVE_INFINITY"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 537,
+            "end": 610,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 2
+              },
+              "end": {
+                "line": 14,
+                "column": 75
+              }
+            },
+            "value": "Math.cbrt should produce positive infinity for Number.POSITIVE_INFINITY",
+            "raw": "\"Math.cbrt should produce positive infinity for Number.POSITIVE_INFINITY\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 613,
+      "end": 715,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 40
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 613,
+        "end": 714,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 0
+          },
+          "end": {
+            "line": 16,
+            "column": 39
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 613,
+          "end": 629,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 0
+            },
+            "end": {
+              "line": 15,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 613,
+            "end": 619,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 0
+              },
+              "end": {
+                "line": 15,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 620,
+            "end": 629,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 7
+              },
+              "end": {
+                "line": 15,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 630,
+            "end": 647,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 17
+              },
+              "end": {
+                "line": 15,
+                "column": 34
+              }
+            },
+            "left": {
+              "type": "Literal",
+              "start": 630,
+              "end": 631,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 17
+                },
+                "end": {
+                  "line": 15,
+                  "column": 18
+                }
+              },
+              "value": 1,
+              "raw": "1"
+            },
+            "operator": "/",
+            "right": {
+              "type": "CallExpression",
+              "start": 634,
+              "end": 647,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 21
+                },
+                "end": {
+                  "line": 15,
+                  "column": 34
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 634,
+                "end": 643,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 21
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 30
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 634,
+                  "end": 638,
+                  "loc": {
+                    "start": {
+                      "line": 15,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 15,
+                      "column": 25
+                    }
+                  },
+                  "name": "Math"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 639,
+                  "end": 643,
+                  "loc": {
+                    "start": {
+                      "line": 15,
+                      "column": 26
+                    },
+                    "end": {
+                      "line": 15,
+                      "column": 30
+                    }
+                  },
+                  "name": "cbrt"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "UnaryExpression",
+                  "start": 644,
+                  "end": 646,
+                  "loc": {
+                    "start": {
+                      "line": 15,
+                      "column": 31
+                    },
+                    "end": {
+                      "line": 15,
+                      "column": 33
+                    }
+                  },
+                  "operator": "-",
+                  "prefix": true,
+                  "argument": {
+                    "type": "Literal",
+                    "start": 645,
+                    "end": 646,
+                    "loc": {
+                      "start": {
+                        "line": 15,
+                        "column": 32
+                      },
+                      "end": {
+                        "line": 15,
+                        "column": 33
+                      }
+                    },
+                    "value": 0,
+                    "raw": "0"
+                  }
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "MemberExpression",
+            "start": 649,
+            "end": 673,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 36
+              },
+              "end": {
+                "line": 15,
+                "column": 60
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 649,
+              "end": 655,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 36
+                },
+                "end": {
+                  "line": 15,
+                  "column": 42
+                }
+              },
+              "name": "Number"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 656,
+              "end": 673,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 43
+                },
+                "end": {
+                  "line": 15,
+                  "column": 60
+                }
+              },
+              "name": "NEGATIVE_INFINITY"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 677,
+            "end": 713,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 2
+              },
+              "end": {
+                "line": 16,
+                "column": 38
+              }
+            },
+            "value": "Math.cbrt should produce -0 for -0",
+            "raw": "\"Math.cbrt should produce -0 for -0\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 716,
+      "end": 817,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 40
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 716,
+        "end": 816,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 0
+          },
+          "end": {
+            "line": 18,
+            "column": 39
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 716,
+          "end": 732,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 0
+            },
+            "end": {
+              "line": 17,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 716,
+            "end": 722,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 0
+              },
+              "end": {
+                "line": 17,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 723,
+            "end": 732,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 7
+              },
+              "end": {
+                "line": 17,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 733,
+            "end": 749,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 17
+              },
+              "end": {
+                "line": 17,
+                "column": 33
+              }
+            },
+            "left": {
+              "type": "Literal",
+              "start": 733,
+              "end": 734,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 17
+                },
+                "end": {
+                  "line": 17,
+                  "column": 18
+                }
+              },
+              "value": 1,
+              "raw": "1"
+            },
+            "operator": "/",
+            "right": {
+              "type": "CallExpression",
+              "start": 737,
+              "end": 749,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 21
+                },
+                "end": {
+                  "line": 17,
+                  "column": 33
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 737,
+                "end": 746,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 21
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 30
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 737,
+                  "end": 741,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 25
+                    }
+                  },
+                  "name": "Math"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 742,
+                  "end": 746,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 26
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 30
+                    }
+                  },
+                  "name": "cbrt"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 747,
+                  "end": 748,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 31
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 32
+                    }
+                  },
+                  "value": 0,
+                  "raw": "0"
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "MemberExpression",
+            "start": 751,
+            "end": 775,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 35
+              },
+              "end": {
+                "line": 17,
+                "column": 59
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 751,
+              "end": 757,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 35
+                },
+                "end": {
+                  "line": 17,
+                  "column": 41
+                }
+              },
+              "name": "Number"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 758,
+              "end": 775,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 42
+                },
+                "end": {
+                  "line": 17,
+                  "column": 59
+                }
+              },
+              "name": "POSITIVE_INFINITY"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 779,
+            "end": 815,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 2
+              },
+              "end": {
+                "line": 18,
+                "column": 38
+              }
+            },
+            "value": "Math.cbrt should produce +0 for +0",
+            "raw": "\"Math.cbrt should produce +0 for +0\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

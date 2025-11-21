@@ -1,0 +1,168 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 367,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 10,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 280,
+      "end": 366,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 9,
+          "column": 86
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 280,
+        "end": 365,
+        "loc": {
+          "start": {
+            "line": 9,
+            "column": 0
+          },
+          "end": {
+            "line": 9,
+            "column": 85
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 280,
+          "end": 286,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 0
+            },
+            "end": {
+              "line": 9,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 287,
+            "end": 315,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 7
+              },
+              "end": {
+                "line": 9,
+                "column": 35
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 287,
+              "end": 306,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 7
+                },
+                "end": {
+                  "line": 9,
+                  "column": 26
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 287,
+                "end": 291,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 7
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 11
+                  }
+                },
+                "name": "Date"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 292,
+                "end": 306,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 26
+                  }
+                },
+                "name": "hasOwnProperty"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 307,
+                "end": 314,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 34
+                  }
+                },
+                "value": "parse",
+                "raw": "\"parse\""
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 317,
+            "end": 364,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 37
+              },
+              "end": {
+                "line": 9,
+                "column": 84
+              }
+            },
+            "value": "Date.hasOwnProperty(\"parse\") must return true",
+            "raw": "'Date.hasOwnProperty(\"parse\") must return true'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

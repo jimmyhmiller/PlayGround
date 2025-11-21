@@ -1,0 +1,364 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 399,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 14,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "FunctionDeclaration",
+      "start": 258,
+      "end": 320,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 1
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 267,
+        "end": 277,
+        "loc": {
+          "start": {
+            "line": 9,
+            "column": 9
+          },
+          "end": {
+            "line": 9,
+            "column": 19
+          }
+        },
+        "name": "callbackfn"
+      },
+      "expression": false,
+      "generator": false,
+      "async": false,
+      "params": [
+        {
+          "type": "Identifier",
+          "start": 278,
+          "end": 281,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 20
+            },
+            "end": {
+              "line": 9,
+              "column": 23
+            }
+          },
+          "name": "val"
+        },
+        {
+          "type": "Identifier",
+          "start": 283,
+          "end": 286,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 25
+            },
+            "end": {
+              "line": 9,
+              "column": 28
+            }
+          },
+          "name": "idx"
+        },
+        {
+          "type": "Identifier",
+          "start": 288,
+          "end": 291,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 30
+            },
+            "end": {
+              "line": 9,
+              "column": 33
+            }
+          },
+          "name": "obj"
+        }
+      ],
+      "body": {
+        "type": "BlockStatement",
+        "start": 293,
+        "end": 320,
+        "loc": {
+          "start": {
+            "line": 9,
+            "column": 35
+          },
+          "end": {
+            "line": 11,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ReturnStatement",
+            "start": 297,
+            "end": 318,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 2
+              },
+              "end": {
+                "line": 10,
+                "column": 23
+              }
+            },
+            "argument": {
+              "type": "BinaryExpression",
+              "start": 304,
+              "end": 317,
+              "loc": {
+                "start": {
+                  "line": 10,
+                  "column": 9
+                },
+                "end": {
+                  "line": 10,
+                  "column": 22
+                }
+              },
+              "left": {
+                "type": "ThisExpression",
+                "start": 304,
+                "end": 308,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 13
+                  }
+                }
+              },
+              "operator": "===",
+              "right": {
+                "type": "Identifier",
+                "start": 313,
+                "end": 317,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 18
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 22
+                  }
+                },
+                "name": "eval"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 322,
+      "end": 398,
+      "loc": {
+        "start": {
+          "line": 13,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 76
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 322,
+        "end": 397,
+        "loc": {
+          "start": {
+            "line": 13,
+            "column": 0
+          },
+          "end": {
+            "line": 13,
+            "column": 75
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 322,
+          "end": 328,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 0
+            },
+            "end": {
+              "line": 13,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 329,
+            "end": 356,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 7
+              },
+              "end": {
+                "line": 13,
+                "column": 34
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 329,
+              "end": 338,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 7
+                },
+                "end": {
+                  "line": 13,
+                  "column": 16
+                }
+              },
+              "object": {
+                "type": "ArrayExpression",
+                "start": 329,
+                "end": 333,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 7
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 11
+                  }
+                },
+                "elements": [
+                  {
+                    "type": "Literal",
+                    "start": 330,
+                    "end": 332,
+                    "loc": {
+                      "start": {
+                        "line": 13,
+                        "column": 8
+                      },
+                      "end": {
+                        "line": 13,
+                        "column": 10
+                      }
+                    },
+                    "value": 11,
+                    "raw": "11"
+                  }
+                ]
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 334,
+                "end": 338,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 16
+                  }
+                },
+                "name": "some"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 339,
+                "end": 349,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 27
+                  }
+                },
+                "name": "callbackfn"
+              },
+              {
+                "type": "Identifier",
+                "start": 351,
+                "end": 355,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 29
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 33
+                  }
+                },
+                "name": "eval"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 358,
+            "end": 396,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 36
+              },
+              "end": {
+                "line": 13,
+                "column": 74
+              }
+            },
+            "value": "[11].some(callbackfn, eval) !== true",
+            "raw": "'[11].some(callbackfn, eval) !== true'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

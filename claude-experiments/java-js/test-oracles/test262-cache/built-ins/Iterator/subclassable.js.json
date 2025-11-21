@@ -1,0 +1,441 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 741,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 28,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ClassDeclaration",
+      "start": 420,
+      "end": 457,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 37
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 426,
+        "end": 437,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 6
+          },
+          "end": {
+            "line": 16,
+            "column": 17
+          }
+        },
+        "name": "SubIterator"
+      },
+      "superClass": {
+        "type": "Identifier",
+        "start": 446,
+        "end": 454,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 26
+          },
+          "end": {
+            "line": 16,
+            "column": 34
+          }
+        },
+        "name": "Iterator"
+      },
+      "body": {
+        "type": "ClassBody",
+        "start": 455,
+        "end": 457,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 35
+          },
+          "end": {
+            "line": 16,
+            "column": 37
+          }
+        },
+        "body": []
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 459,
+      "end": 602,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 459,
+        "end": 601,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 0
+          },
+          "end": {
+            "line": 22,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 459,
+          "end": 475,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 0
+            },
+            "end": {
+              "line": 18,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 459,
+            "end": 465,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 0
+              },
+              "end": {
+                "line": 18,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 466,
+            "end": 475,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 7
+              },
+              "end": {
+                "line": 18,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 479,
+            "end": 519,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 2
+              },
+              "end": {
+                "line": 19,
+                "column": 42
+              }
+            },
+            "left": {
+              "type": "NewExpression",
+              "start": 479,
+              "end": 496,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 2
+                },
+                "end": {
+                  "line": 19,
+                  "column": 19
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 483,
+                "end": 494,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 6
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 17
+                  }
+                },
+                "name": "SubIterator"
+              },
+              "arguments": []
+            },
+            "operator": "instanceof",
+            "right": {
+              "type": "Identifier",
+              "start": 508,
+              "end": 519,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 31
+                },
+                "end": {
+                  "line": 19,
+                  "column": 42
+                }
+              },
+              "name": "SubIterator"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 523,
+            "end": 527,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 2
+              },
+              "end": {
+                "line": 20,
+                "column": 6
+              }
+            },
+            "value": true,
+            "raw": "true"
+          },
+          {
+            "type": "Literal",
+            "start": 531,
+            "end": 599,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 2
+              },
+              "end": {
+                "line": 21,
+                "column": 70
+              }
+            },
+            "value": "The result of `(new SubIterator() instanceof SubIterator)` is true",
+            "raw": "'The result of `(new SubIterator() instanceof SubIterator)` is true'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 603,
+      "end": 740,
+      "loc": {
+        "start": {
+          "line": 23,
+          "column": 0
+        },
+        "end": {
+          "line": 27,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 603,
+        "end": 739,
+        "loc": {
+          "start": {
+            "line": 23,
+            "column": 0
+          },
+          "end": {
+            "line": 27,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 603,
+          "end": 619,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 0
+            },
+            "end": {
+              "line": 23,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 603,
+            "end": 609,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 0
+              },
+              "end": {
+                "line": 23,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 610,
+            "end": 619,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 7
+              },
+              "end": {
+                "line": 23,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 623,
+            "end": 660,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 2
+              },
+              "end": {
+                "line": 24,
+                "column": 39
+              }
+            },
+            "left": {
+              "type": "NewExpression",
+              "start": 623,
+              "end": 640,
+              "loc": {
+                "start": {
+                  "line": 24,
+                  "column": 2
+                },
+                "end": {
+                  "line": 24,
+                  "column": 19
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 627,
+                "end": 638,
+                "loc": {
+                  "start": {
+                    "line": 24,
+                    "column": 6
+                  },
+                  "end": {
+                    "line": 24,
+                    "column": 17
+                  }
+                },
+                "name": "SubIterator"
+              },
+              "arguments": []
+            },
+            "operator": "instanceof",
+            "right": {
+              "type": "Identifier",
+              "start": 652,
+              "end": 660,
+              "loc": {
+                "start": {
+                  "line": 24,
+                  "column": 31
+                },
+                "end": {
+                  "line": 24,
+                  "column": 39
+                }
+              },
+              "name": "Iterator"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 664,
+            "end": 668,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 2
+              },
+              "end": {
+                "line": 25,
+                "column": 6
+              }
+            },
+            "value": true,
+            "raw": "true"
+          },
+          {
+            "type": "Literal",
+            "start": 672,
+            "end": 737,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 2
+              },
+              "end": {
+                "line": 26,
+                "column": 67
+              }
+            },
+            "value": "The result of `(new SubIterator() instanceof Iterator)` is true",
+            "raw": "'The result of `(new SubIterator() instanceof Iterator)` is true'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

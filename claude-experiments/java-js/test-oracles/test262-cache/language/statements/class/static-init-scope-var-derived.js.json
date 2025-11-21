@@ -1,0 +1,378 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 760,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 25,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 630,
+      "end": 658,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 28
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 634,
+          "end": 657,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 4
+            },
+            "end": {
+              "line": 15,
+              "column": 27
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 634,
+            "end": 641,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 4
+              },
+              "end": {
+                "line": 15,
+                "column": 11
+              }
+            },
+            "name": "test262"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 644,
+            "end": 657,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 14
+              },
+              "end": {
+                "line": 15,
+                "column": 27
+              }
+            },
+            "value": "outer scope",
+            "raw": "'outer scope'"
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 659,
+      "end": 669,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 10
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 663,
+          "end": 668,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 4
+            },
+            "end": {
+              "line": 16,
+              "column": 9
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 663,
+            "end": 668,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 4
+              },
+              "end": {
+                "line": 16,
+                "column": 9
+              }
+            },
+            "name": "probe"
+          },
+          "init": null
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ClassDeclaration",
+      "start": 671,
+      "end": 718,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 1
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 677,
+        "end": 678,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 6
+          },
+          "end": {
+            "line": 18,
+            "column": 7
+          }
+        },
+        "name": "C"
+      },
+      "superClass": null,
+      "body": {
+        "type": "ClassBody",
+        "start": 679,
+        "end": 718,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 8
+          },
+          "end": {
+            "line": 22,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "StaticBlock",
+            "start": 683,
+            "end": 716,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 2
+              },
+              "end": {
+                "line": 21,
+                "column": 3
+              }
+            },
+            "body": [
+              {
+                "type": "ExpressionStatement",
+                "start": 696,
+                "end": 712,
+                "loc": {
+                  "start": {
+                    "line": 20,
+                    "column": 4
+                  },
+                  "end": {
+                    "line": 20,
+                    "column": 20
+                  }
+                },
+                "expression": {
+                  "type": "AssignmentExpression",
+                  "start": 696,
+                  "end": 711,
+                  "loc": {
+                    "start": {
+                      "line": 20,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 20,
+                      "column": 19
+                    }
+                  },
+                  "operator": "=",
+                  "left": {
+                    "type": "Identifier",
+                    "start": 696,
+                    "end": 701,
+                    "loc": {
+                      "start": {
+                        "line": 20,
+                        "column": 4
+                      },
+                      "end": {
+                        "line": 20,
+                        "column": 9
+                      }
+                    },
+                    "name": "probe"
+                  },
+                  "right": {
+                    "type": "Identifier",
+                    "start": 704,
+                    "end": 711,
+                    "loc": {
+                      "start": {
+                        "line": 20,
+                        "column": 12
+                      },
+                      "end": {
+                        "line": 20,
+                        "column": 19
+                      }
+                    },
+                    "name": "test262"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 720,
+      "end": 759,
+      "loc": {
+        "start": {
+          "line": 24,
+          "column": 0
+        },
+        "end": {
+          "line": 24,
+          "column": 39
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 720,
+        "end": 758,
+        "loc": {
+          "start": {
+            "line": 24,
+            "column": 0
+          },
+          "end": {
+            "line": 24,
+            "column": 38
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 720,
+          "end": 736,
+          "loc": {
+            "start": {
+              "line": 24,
+              "column": 0
+            },
+            "end": {
+              "line": 24,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 720,
+            "end": 726,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 0
+              },
+              "end": {
+                "line": 24,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 727,
+            "end": 736,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 7
+              },
+              "end": {
+                "line": 24,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 737,
+            "end": 742,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 17
+              },
+              "end": {
+                "line": 24,
+                "column": 22
+              }
+            },
+            "name": "probe"
+          },
+          {
+            "type": "Literal",
+            "start": 744,
+            "end": 757,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 24
+              },
+              "end": {
+                "line": 24,
+                "column": 37
+              }
+            },
+            "value": "outer scope",
+            "raw": "'outer scope'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

@@ -1,0 +1,152 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 320,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 10,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "SwitchStatement",
+      "start": 278,
+      "end": 319,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 9,
+          "column": 41
+        }
+      },
+      "discriminant": {
+        "type": "Literal",
+        "start": 286,
+        "end": 290,
+        "loc": {
+          "start": {
+            "line": 9,
+            "column": 8
+          },
+          "end": {
+            "line": 9,
+            "column": 12
+          }
+        },
+        "value": true,
+        "raw": "true"
+      },
+      "cases": [
+        {
+          "type": "SwitchCase",
+          "start": 294,
+          "end": 317,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 16
+            },
+            "end": {
+              "line": 9,
+              "column": 39
+            }
+          },
+          "consequent": [
+            {
+              "type": "VariableDeclaration",
+              "start": 305,
+              "end": 317,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 27
+                },
+                "end": {
+                  "line": 9,
+                  "column": 39
+                }
+              },
+              "declarations": [
+                {
+                  "type": "VariableDeclarator",
+                  "start": 311,
+                  "end": 316,
+                  "loc": {
+                    "start": {
+                      "line": 9,
+                      "column": 33
+                    },
+                    "end": {
+                      "line": 9,
+                      "column": 38
+                    }
+                  },
+                  "id": {
+                    "type": "Identifier",
+                    "start": 311,
+                    "end": 312,
+                    "loc": {
+                      "start": {
+                        "line": 9,
+                        "column": 33
+                      },
+                      "end": {
+                        "line": 9,
+                        "column": 34
+                      }
+                    },
+                    "name": "x"
+                  },
+                  "init": {
+                    "type": "Literal",
+                    "start": 315,
+                    "end": 316,
+                    "loc": {
+                      "start": {
+                        "line": 9,
+                        "column": 37
+                      },
+                      "end": {
+                        "line": 9,
+                        "column": 38
+                      }
+                    },
+                    "value": 1,
+                    "raw": "1"
+                  }
+                }
+              ],
+              "kind": "const"
+            }
+          ],
+          "test": {
+            "type": "Literal",
+            "start": 299,
+            "end": 303,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 21
+              },
+              "end": {
+                "line": 9,
+                "column": 25
+              }
+            },
+            "value": true,
+            "raw": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "sourceType": "script"
+}

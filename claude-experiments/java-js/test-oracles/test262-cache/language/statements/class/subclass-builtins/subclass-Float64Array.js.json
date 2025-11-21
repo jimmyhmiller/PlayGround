@@ -1,0 +1,356 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 465,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 16,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ClassDeclaration",
+      "start": 327,
+      "end": 365,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 38
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 333,
+        "end": 341,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 6
+          },
+          "end": {
+            "line": 11,
+            "column": 14
+          }
+        },
+        "name": "Subclass"
+      },
+      "superClass": {
+        "type": "Identifier",
+        "start": 350,
+        "end": 362,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 23
+          },
+          "end": {
+            "line": 11,
+            "column": 35
+          }
+        },
+        "name": "Float64Array"
+      },
+      "body": {
+        "type": "ClassBody",
+        "start": 363,
+        "end": 365,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 36
+          },
+          "end": {
+            "line": 11,
+            "column": 38
+          }
+        },
+        "body": []
+      }
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 367,
+      "end": 394,
+      "loc": {
+        "start": {
+          "line": 13,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 27
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 373,
+          "end": 393,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 6
+            },
+            "end": {
+              "line": 13,
+              "column": 26
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 373,
+            "end": 376,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 6
+              },
+              "end": {
+                "line": 13,
+                "column": 9
+              }
+            },
+            "name": "sub"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 379,
+            "end": 393,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 12
+              },
+              "end": {
+                "line": 13,
+                "column": 26
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 383,
+              "end": 391,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 16
+                },
+                "end": {
+                  "line": 13,
+                  "column": 24
+                }
+              },
+              "name": "Subclass"
+            },
+            "arguments": []
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 395,
+      "end": 427,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 32
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 395,
+        "end": 426,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 31
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 395,
+          "end": 401,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 0
+            },
+            "end": {
+              "line": 14,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 402,
+            "end": 425,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 7
+              },
+              "end": {
+                "line": 14,
+                "column": 30
+              }
+            },
+            "left": {
+              "type": "Identifier",
+              "start": 402,
+              "end": 405,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 7
+                },
+                "end": {
+                  "line": 14,
+                  "column": 10
+                }
+              },
+              "name": "sub"
+            },
+            "operator": "instanceof",
+            "right": {
+              "type": "Identifier",
+              "start": 417,
+              "end": 425,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 22
+                },
+                "end": {
+                  "line": 14,
+                  "column": 30
+                }
+              },
+              "name": "Subclass"
+            }
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 428,
+      "end": 464,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 36
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 428,
+        "end": 463,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 0
+          },
+          "end": {
+            "line": 15,
+            "column": 35
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 428,
+          "end": 434,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 0
+            },
+            "end": {
+              "line": 15,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 435,
+            "end": 462,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 7
+              },
+              "end": {
+                "line": 15,
+                "column": 34
+              }
+            },
+            "left": {
+              "type": "Identifier",
+              "start": 435,
+              "end": 438,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 7
+                },
+                "end": {
+                  "line": 15,
+                  "column": 10
+                }
+              },
+              "name": "sub"
+            },
+            "operator": "instanceof",
+            "right": {
+              "type": "Identifier",
+              "start": 450,
+              "end": 462,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 22
+                },
+                "end": {
+                  "line": 15,
+                  "column": 34
+                }
+              },
+              "name": "Float64Array"
+            }
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

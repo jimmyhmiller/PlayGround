@@ -1,0 +1,412 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 779,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 22,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 557,
+      "end": 609,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 52
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 557,
+        "end": 608,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 0
+          },
+          "end": {
+            "line": 17,
+            "column": 51
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 557,
+          "end": 573,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 0
+            },
+            "end": {
+              "line": 17,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 557,
+            "end": 563,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 0
+              },
+              "end": {
+                "line": 17,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 564,
+            "end": 573,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 7
+              },
+              "end": {
+                "line": 17,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 574,
+            "end": 604,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 17
+              },
+              "end": {
+                "line": 17,
+                "column": 47
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 574,
+              "end": 586,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 17
+                },
+                "end": {
+                  "line": 17,
+                  "column": 29
+                }
+              },
+              "name": "Float64Array"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 587,
+              "end": 604,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 30
+                },
+                "end": {
+                  "line": 17,
+                  "column": 47
+                }
+              },
+              "name": "BYTES_PER_ELEMENT"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 606,
+            "end": 607,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 49
+              },
+              "end": {
+                "line": 17,
+                "column": 50
+              }
+            },
+            "value": 8,
+            "raw": "8"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 611,
+      "end": 666,
+      "loc": {
+        "start": {
+          "line": 19,
+          "column": 0
+        },
+        "end": {
+          "line": 19,
+          "column": 55
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 611,
+        "end": 665,
+        "loc": {
+          "start": {
+            "line": 19,
+            "column": 0
+          },
+          "end": {
+            "line": 19,
+            "column": 54
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 611,
+          "end": 630,
+          "loc": {
+            "start": {
+              "line": 19,
+              "column": 0
+            },
+            "end": {
+              "line": 19,
+              "column": 19
+            }
+          },
+          "name": "verifyNotEnumerable"
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 631,
+            "end": 643,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 20
+              },
+              "end": {
+                "line": 19,
+                "column": 32
+              }
+            },
+            "name": "Float64Array"
+          },
+          {
+            "type": "Literal",
+            "start": 645,
+            "end": 664,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 34
+              },
+              "end": {
+                "line": 19,
+                "column": 53
+              }
+            },
+            "value": "BYTES_PER_ELEMENT",
+            "raw": "\"BYTES_PER_ELEMENT\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 667,
+      "end": 720,
+      "loc": {
+        "start": {
+          "line": 20,
+          "column": 0
+        },
+        "end": {
+          "line": 20,
+          "column": 53
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 667,
+        "end": 719,
+        "loc": {
+          "start": {
+            "line": 20,
+            "column": 0
+          },
+          "end": {
+            "line": 20,
+            "column": 52
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 667,
+          "end": 684,
+          "loc": {
+            "start": {
+              "line": 20,
+              "column": 0
+            },
+            "end": {
+              "line": 20,
+              "column": 17
+            }
+          },
+          "name": "verifyNotWritable"
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 685,
+            "end": 697,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 18
+              },
+              "end": {
+                "line": 20,
+                "column": 30
+              }
+            },
+            "name": "Float64Array"
+          },
+          {
+            "type": "Literal",
+            "start": 699,
+            "end": 718,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 32
+              },
+              "end": {
+                "line": 20,
+                "column": 51
+              }
+            },
+            "value": "BYTES_PER_ELEMENT",
+            "raw": "\"BYTES_PER_ELEMENT\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 721,
+      "end": 778,
+      "loc": {
+        "start": {
+          "line": 21,
+          "column": 0
+        },
+        "end": {
+          "line": 21,
+          "column": 57
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 721,
+        "end": 777,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 0
+          },
+          "end": {
+            "line": 21,
+            "column": 56
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 721,
+          "end": 742,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 0
+            },
+            "end": {
+              "line": 21,
+              "column": 21
+            }
+          },
+          "name": "verifyNotConfigurable"
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 743,
+            "end": 755,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 22
+              },
+              "end": {
+                "line": 21,
+                "column": 34
+              }
+            },
+            "name": "Float64Array"
+          },
+          {
+            "type": "Literal",
+            "start": 757,
+            "end": 776,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 36
+              },
+              "end": {
+                "line": 21,
+                "column": 55
+              }
+            },
+            "value": "BYTES_PER_ELEMENT",
+            "raw": "\"BYTES_PER_ELEMENT\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

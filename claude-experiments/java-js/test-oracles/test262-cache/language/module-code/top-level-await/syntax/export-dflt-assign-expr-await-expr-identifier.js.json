@@ -1,0 +1,130 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 2092,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 66,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 2051,
+      "end": 2063,
+      "loc": {
+        "start": {
+          "line": 62,
+          "column": 0
+        },
+        "end": {
+          "line": 62,
+          "column": 12
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 2055,
+          "end": 2062,
+          "loc": {
+            "start": {
+              "line": 62,
+              "column": 4
+            },
+            "end": {
+              "line": 62,
+              "column": 11
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 2055,
+            "end": 2058,
+            "loc": {
+              "start": {
+                "line": 62,
+                "column": 4
+              },
+              "end": {
+                "line": 62,
+                "column": 7
+              }
+            },
+            "name": "foo"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 2061,
+            "end": 2062,
+            "loc": {
+              "start": {
+                "line": 62,
+                "column": 10
+              },
+              "end": {
+                "line": 62,
+                "column": 11
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExportDefaultDeclaration",
+      "start": 2066,
+      "end": 2091,
+      "loc": {
+        "start": {
+          "line": 65,
+          "column": 0
+        },
+        "end": {
+          "line": 65,
+          "column": 25
+        }
+      },
+      "declaration": {
+        "type": "AwaitExpression",
+        "start": 2081,
+        "end": 2090,
+        "loc": {
+          "start": {
+            "line": 65,
+            "column": 15
+          },
+          "end": {
+            "line": 65,
+            "column": 24
+          }
+        },
+        "argument": {
+          "type": "Identifier",
+          "start": 2087,
+          "end": 2090,
+          "loc": {
+            "start": {
+              "line": 65,
+              "column": 21
+            },
+            "end": {
+              "line": 65,
+              "column": 24
+            }
+          },
+          "name": "foo"
+        }
+      }
+    }
+  ],
+  "sourceType": "module"
+}

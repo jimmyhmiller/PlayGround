@@ -1,0 +1,328 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 628,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 18,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 369,
+      "end": 393,
+      "loc": {
+        "start": {
+          "line": 12,
+          "column": 0
+        },
+        "end": {
+          "line": 12,
+          "column": 24
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 373,
+          "end": 392,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 4
+            },
+            "end": {
+              "line": 12,
+              "column": 23
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 373,
+            "end": 376,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 4
+              },
+              "end": {
+                "line": 12,
+                "column": 7
+              }
+            },
+            "name": "str"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 379,
+            "end": 392,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 10
+              },
+              "end": {
+                "line": 12,
+                "column": 23
+              }
+            },
+            "value": "rock'n'roll",
+            "raw": "\"rock'n'roll\""
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "IfStatement",
+      "start": 394,
+      "end": 545,
+      "loc": {
+        "start": {
+          "line": 13,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 398,
+        "end": 424,
+        "loc": {
+          "start": {
+            "line": 13,
+            "column": 4
+          },
+          "end": {
+            "line": 13,
+            "column": 30
+          }
+        },
+        "left": {
+          "type": "MemberExpression",
+          "start": 398,
+          "end": 413,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 4
+            },
+            "end": {
+              "line": 13,
+              "column": 19
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 398,
+            "end": 401,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 4
+              },
+              "end": {
+                "line": 13,
+                "column": 7
+              }
+            },
+            "name": "str"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 402,
+            "end": 413,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 8
+              },
+              "end": {
+                "line": 13,
+                "column": 19
+              }
+            },
+            "name": "constructor"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "operator": "!==",
+        "right": {
+          "type": "Identifier",
+          "start": 418,
+          "end": 424,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 24
+            },
+            "end": {
+              "line": 13,
+              "column": 30
+            }
+          },
+          "name": "String"
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 425,
+        "end": 545,
+        "loc": {
+          "start": {
+            "line": 13,
+            "column": 31
+          },
+          "end": {
+            "line": 15,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 429,
+            "end": 543,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 2
+              },
+              "end": {
+                "line": 14,
+                "column": 116
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 435,
+              "end": 542,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 8
+                },
+                "end": {
+                  "line": 14,
+                  "column": 115
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 439,
+                "end": 451,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "BinaryExpression",
+                  "start": 452,
+                  "end": 541,
+                  "loc": {
+                    "start": {
+                      "line": 14,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 14,
+                      "column": 114
+                    }
+                  },
+                  "left": {
+                    "type": "Literal",
+                    "start": 452,
+                    "end": 521,
+                    "loc": {
+                      "start": {
+                        "line": 14,
+                        "column": 25
+                      },
+                      "end": {
+                        "line": 14,
+                        "column": 94
+                      }
+                    },
+                    "value": "#1: var str = \"rock'n'roll\"; str.constructor === String. Actual: ",
+                    "raw": "'#1: var str = \"rock\\'n\\'roll\"; str.constructor === String. Actual: '"
+                  },
+                  "operator": "+",
+                  "right": {
+                    "type": "MemberExpression",
+                    "start": 525,
+                    "end": 540,
+                    "loc": {
+                      "start": {
+                        "line": 14,
+                        "column": 98
+                      },
+                      "end": {
+                        "line": 14,
+                        "column": 113
+                      }
+                    },
+                    "object": {
+                      "type": "Identifier",
+                      "start": 525,
+                      "end": 528,
+                      "loc": {
+                        "start": {
+                          "line": 14,
+                          "column": 98
+                        },
+                        "end": {
+                          "line": 14,
+                          "column": 101
+                        }
+                      },
+                      "name": "str"
+                    },
+                    "property": {
+                      "type": "Identifier",
+                      "start": 529,
+                      "end": 540,
+                      "loc": {
+                        "start": {
+                          "line": 14,
+                          "column": 102
+                        },
+                        "end": {
+                          "line": 14,
+                          "column": 113
+                        }
+                      },
+                      "name": "constructor"
+                    },
+                    "computed": false,
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    }
+  ],
+  "sourceType": "script"
+}

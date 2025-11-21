@@ -1,0 +1,694 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 911,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 36,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ClassDeclaration",
+      "start": 682,
+      "end": 730,
+      "loc": {
+        "start": {
+          "line": 20,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 1
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 688,
+        "end": 690,
+        "loc": {
+          "start": {
+            "line": 20,
+            "column": 6
+          },
+          "end": {
+            "line": 20,
+            "column": 8
+          }
+        },
+        "name": "Fn"
+      },
+      "superClass": {
+        "type": "Identifier",
+        "start": 699,
+        "end": 707,
+        "loc": {
+          "start": {
+            "line": 20,
+            "column": 17
+          },
+          "end": {
+            "line": 20,
+            "column": 25
+          }
+        },
+        "name": "Function"
+      },
+      "body": {
+        "type": "ClassBody",
+        "start": 708,
+        "end": 730,
+        "loc": {
+          "start": {
+            "line": 20,
+            "column": 26
+          },
+          "end": {
+            "line": 22,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "MethodDefinition",
+            "start": 712,
+            "end": 728,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 2
+              },
+              "end": {
+                "line": 21,
+                "column": 18
+              }
+            },
+            "static": false,
+            "computed": false,
+            "key": {
+              "type": "Identifier",
+              "start": 712,
+              "end": 723,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 2
+                },
+                "end": {
+                  "line": 21,
+                  "column": 13
+                }
+              },
+              "name": "constructor"
+            },
+            "kind": "constructor",
+            "value": {
+              "type": "FunctionExpression",
+              "start": 723,
+              "end": 728,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 13
+                },
+                "end": {
+                  "line": 21,
+                  "column": 18
+                }
+              },
+              "id": null,
+              "expression": false,
+              "generator": false,
+              "async": false,
+              "params": [],
+              "body": {
+                "type": "BlockStatement",
+                "start": 726,
+                "end": 728,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 16
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 18
+                  }
+                },
+                "body": []
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 732,
+      "end": 790,
+      "loc": {
+        "start": {
+          "line": 24,
+          "column": 0
+        },
+        "end": {
+          "line": 26,
+          "column": 3
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 732,
+        "end": 789,
+        "loc": {
+          "start": {
+            "line": 24,
+            "column": 0
+          },
+          "end": {
+            "line": 26,
+            "column": 2
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 732,
+          "end": 745,
+          "loc": {
+            "start": {
+              "line": 24,
+              "column": 0
+            },
+            "end": {
+              "line": 24,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 732,
+            "end": 738,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 0
+              },
+              "end": {
+                "line": 24,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 739,
+            "end": 745,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 7
+              },
+              "end": {
+                "line": 24,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 746,
+            "end": 760,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 14
+              },
+              "end": {
+                "line": 24,
+                "column": 28
+              }
+            },
+            "name": "ReferenceError"
+          },
+          {
+            "type": "FunctionExpression",
+            "start": 762,
+            "end": 788,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 30
+              },
+              "end": {
+                "line": 26,
+                "column": 1
+              }
+            },
+            "id": null,
+            "expression": false,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "BlockStatement",
+              "start": 773,
+              "end": 788,
+              "loc": {
+                "start": {
+                  "line": 24,
+                  "column": 41
+                },
+                "end": {
+                  "line": 26,
+                  "column": 1
+                }
+              },
+              "body": [
+                {
+                  "type": "ExpressionStatement",
+                  "start": 777,
+                  "end": 786,
+                  "loc": {
+                    "start": {
+                      "line": 25,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 25,
+                      "column": 11
+                    }
+                  },
+                  "expression": {
+                    "type": "NewExpression",
+                    "start": 777,
+                    "end": 785,
+                    "loc": {
+                      "start": {
+                        "line": 25,
+                        "column": 2
+                      },
+                      "end": {
+                        "line": 25,
+                        "column": 10
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 781,
+                      "end": 783,
+                      "loc": {
+                        "start": {
+                          "line": 25,
+                          "column": 6
+                        },
+                        "end": {
+                          "line": 25,
+                          "column": 8
+                        }
+                      },
+                      "name": "Fn"
+                    },
+                    "arguments": []
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ClassDeclaration",
+      "start": 792,
+      "end": 857,
+      "loc": {
+        "start": {
+          "line": 28,
+          "column": 0
+        },
+        "end": {
+          "line": 32,
+          "column": 1
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 798,
+        "end": 801,
+        "loc": {
+          "start": {
+            "line": 28,
+            "column": 6
+          },
+          "end": {
+            "line": 28,
+            "column": 9
+          }
+        },
+        "name": "Fn2"
+      },
+      "superClass": {
+        "type": "Identifier",
+        "start": 810,
+        "end": 818,
+        "loc": {
+          "start": {
+            "line": 28,
+            "column": 18
+          },
+          "end": {
+            "line": 28,
+            "column": 26
+          }
+        },
+        "name": "Function"
+      },
+      "body": {
+        "type": "ClassBody",
+        "start": 819,
+        "end": 857,
+        "loc": {
+          "start": {
+            "line": 28,
+            "column": 27
+          },
+          "end": {
+            "line": 32,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "MethodDefinition",
+            "start": 823,
+            "end": 855,
+            "loc": {
+              "start": {
+                "line": 29,
+                "column": 2
+              },
+              "end": {
+                "line": 31,
+                "column": 3
+              }
+            },
+            "static": false,
+            "computed": false,
+            "key": {
+              "type": "Identifier",
+              "start": 823,
+              "end": 834,
+              "loc": {
+                "start": {
+                  "line": 29,
+                  "column": 2
+                },
+                "end": {
+                  "line": 29,
+                  "column": 13
+                }
+              },
+              "name": "constructor"
+            },
+            "kind": "constructor",
+            "value": {
+              "type": "FunctionExpression",
+              "start": 834,
+              "end": 855,
+              "loc": {
+                "start": {
+                  "line": 29,
+                  "column": 13
+                },
+                "end": {
+                  "line": 31,
+                  "column": 3
+                }
+              },
+              "id": null,
+              "expression": false,
+              "generator": false,
+              "async": false,
+              "params": [],
+              "body": {
+                "type": "BlockStatement",
+                "start": 837,
+                "end": 855,
+                "loc": {
+                  "start": {
+                    "line": 29,
+                    "column": 16
+                  },
+                  "end": {
+                    "line": 31,
+                    "column": 3
+                  }
+                },
+                "body": [
+                  {
+                    "type": "ExpressionStatement",
+                    "start": 843,
+                    "end": 851,
+                    "loc": {
+                      "start": {
+                        "line": 30,
+                        "column": 4
+                      },
+                      "end": {
+                        "line": 30,
+                        "column": 12
+                      }
+                    },
+                    "expression": {
+                      "type": "CallExpression",
+                      "start": 843,
+                      "end": 850,
+                      "loc": {
+                        "start": {
+                          "line": 30,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 30,
+                          "column": 11
+                        }
+                      },
+                      "callee": {
+                        "type": "Super",
+                        "start": 843,
+                        "end": 848,
+                        "loc": {
+                          "start": {
+                            "line": 30,
+                            "column": 4
+                          },
+                          "end": {
+                            "line": 30,
+                            "column": 9
+                          }
+                        }
+                      },
+                      "arguments": [],
+                      "optional": false
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 859,
+      "end": 878,
+      "loc": {
+        "start": {
+          "line": 34,
+          "column": 0
+        },
+        "end": {
+          "line": 34,
+          "column": 19
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 863,
+          "end": 877,
+          "loc": {
+            "start": {
+              "line": 34,
+              "column": 4
+            },
+            "end": {
+              "line": 34,
+              "column": 18
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 863,
+            "end": 865,
+            "loc": {
+              "start": {
+                "line": 34,
+                "column": 4
+              },
+              "end": {
+                "line": 34,
+                "column": 6
+              }
+            },
+            "name": "fn"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 868,
+            "end": 877,
+            "loc": {
+              "start": {
+                "line": 34,
+                "column": 9
+              },
+              "end": {
+                "line": 34,
+                "column": 18
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 872,
+              "end": 875,
+              "loc": {
+                "start": {
+                  "line": 34,
+                  "column": 13
+                },
+                "end": {
+                  "line": 34,
+                  "column": 16
+                }
+              },
+              "name": "Fn2"
+            },
+            "arguments": []
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 879,
+      "end": 910,
+      "loc": {
+        "start": {
+          "line": 35,
+          "column": 0
+        },
+        "end": {
+          "line": 35,
+          "column": 31
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 879,
+        "end": 909,
+        "loc": {
+          "start": {
+            "line": 35,
+            "column": 0
+          },
+          "end": {
+            "line": 35,
+            "column": 30
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 879,
+          "end": 885,
+          "loc": {
+            "start": {
+              "line": 35,
+              "column": 0
+            },
+            "end": {
+              "line": 35,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 886,
+            "end": 908,
+            "loc": {
+              "start": {
+                "line": 35,
+                "column": 7
+              },
+              "end": {
+                "line": 35,
+                "column": 29
+              }
+            },
+            "left": {
+              "type": "Identifier",
+              "start": 886,
+              "end": 888,
+              "loc": {
+                "start": {
+                  "line": 35,
+                  "column": 7
+                },
+                "end": {
+                  "line": 35,
+                  "column": 9
+                }
+              },
+              "name": "fn"
+            },
+            "operator": "instanceof",
+            "right": {
+              "type": "Identifier",
+              "start": 900,
+              "end": 908,
+              "loc": {
+                "start": {
+                  "line": 35,
+                  "column": 21
+                },
+                "end": {
+                  "line": 35,
+                  "column": 29
+                }
+              },
+              "name": "Function"
+            }
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

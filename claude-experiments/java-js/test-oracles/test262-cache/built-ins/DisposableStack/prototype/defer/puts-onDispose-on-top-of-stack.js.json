@@ -1,0 +1,1219 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1500,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 40,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 1054,
+      "end": 1088,
+      "loc": {
+        "start": {
+          "line": 30,
+          "column": 0
+        },
+        "end": {
+          "line": 30,
+          "column": 34
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 1058,
+          "end": 1087,
+          "loc": {
+            "start": {
+              "line": 30,
+              "column": 4
+            },
+            "end": {
+              "line": 30,
+              "column": 33
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 1058,
+            "end": 1063,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 4
+              },
+              "end": {
+                "line": 30,
+                "column": 9
+              }
+            },
+            "name": "stack"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 1066,
+            "end": 1087,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 12
+              },
+              "end": {
+                "line": 30,
+                "column": 33
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 1070,
+              "end": 1085,
+              "loc": {
+                "start": {
+                  "line": 30,
+                  "column": 16
+                },
+                "end": {
+                  "line": 30,
+                  "column": 31
+                }
+              },
+              "name": "DisposableStack"
+            },
+            "arguments": []
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 1089,
+      "end": 1107,
+      "loc": {
+        "start": {
+          "line": 31,
+          "column": 0
+        },
+        "end": {
+          "line": 31,
+          "column": 18
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 1093,
+          "end": 1106,
+          "loc": {
+            "start": {
+              "line": 31,
+              "column": 4
+            },
+            "end": {
+              "line": 31,
+              "column": 17
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 1093,
+            "end": 1101,
+            "loc": {
+              "start": {
+                "line": 31,
+                "column": 4
+              },
+              "end": {
+                "line": 31,
+                "column": 12
+              }
+            },
+            "name": "disposed"
+          },
+          "init": {
+            "type": "ArrayExpression",
+            "start": 1104,
+            "end": 1106,
+            "loc": {
+              "start": {
+                "line": 31,
+                "column": 15
+              },
+              "end": {
+                "line": 31,
+                "column": 17
+              }
+            },
+            "elements": []
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "FunctionDeclaration",
+      "start": 1108,
+      "end": 1156,
+      "loc": {
+        "start": {
+          "line": 32,
+          "column": 0
+        },
+        "end": {
+          "line": 32,
+          "column": 48
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 1117,
+        "end": 1125,
+        "loc": {
+          "start": {
+            "line": 32,
+            "column": 9
+          },
+          "end": {
+            "line": 32,
+            "column": 17
+          }
+        },
+        "name": "dispose1"
+      },
+      "expression": false,
+      "generator": false,
+      "async": false,
+      "params": [],
+      "body": {
+        "type": "BlockStatement",
+        "start": 1128,
+        "end": 1156,
+        "loc": {
+          "start": {
+            "line": 32,
+            "column": 20
+          },
+          "end": {
+            "line": 32,
+            "column": 48
+          }
+        },
+        "body": [
+          {
+            "type": "ExpressionStatement",
+            "start": 1130,
+            "end": 1154,
+            "loc": {
+              "start": {
+                "line": 32,
+                "column": 22
+              },
+              "end": {
+                "line": 32,
+                "column": 46
+              }
+            },
+            "expression": {
+              "type": "CallExpression",
+              "start": 1130,
+              "end": 1153,
+              "loc": {
+                "start": {
+                  "line": 32,
+                  "column": 22
+                },
+                "end": {
+                  "line": 32,
+                  "column": 45
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 1130,
+                "end": 1143,
+                "loc": {
+                  "start": {
+                    "line": 32,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 32,
+                    "column": 35
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 1130,
+                  "end": 1138,
+                  "loc": {
+                    "start": {
+                      "line": 32,
+                      "column": 22
+                    },
+                    "end": {
+                      "line": 32,
+                      "column": 30
+                    }
+                  },
+                  "name": "disposed"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 1139,
+                  "end": 1143,
+                  "loc": {
+                    "start": {
+                      "line": 32,
+                      "column": 31
+                    },
+                    "end": {
+                      "line": 32,
+                      "column": 35
+                    }
+                  },
+                  "name": "push"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "Identifier",
+                  "start": 1144,
+                  "end": 1152,
+                  "loc": {
+                    "start": {
+                      "line": 32,
+                      "column": 36
+                    },
+                    "end": {
+                      "line": 32,
+                      "column": 44
+                    }
+                  },
+                  "name": "dispose1"
+                }
+              ],
+              "optional": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "FunctionDeclaration",
+      "start": 1157,
+      "end": 1205,
+      "loc": {
+        "start": {
+          "line": 33,
+          "column": 0
+        },
+        "end": {
+          "line": 33,
+          "column": 48
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 1166,
+        "end": 1174,
+        "loc": {
+          "start": {
+            "line": 33,
+            "column": 9
+          },
+          "end": {
+            "line": 33,
+            "column": 17
+          }
+        },
+        "name": "dispose2"
+      },
+      "expression": false,
+      "generator": false,
+      "async": false,
+      "params": [],
+      "body": {
+        "type": "BlockStatement",
+        "start": 1177,
+        "end": 1205,
+        "loc": {
+          "start": {
+            "line": 33,
+            "column": 20
+          },
+          "end": {
+            "line": 33,
+            "column": 48
+          }
+        },
+        "body": [
+          {
+            "type": "ExpressionStatement",
+            "start": 1179,
+            "end": 1203,
+            "loc": {
+              "start": {
+                "line": 33,
+                "column": 22
+              },
+              "end": {
+                "line": 33,
+                "column": 46
+              }
+            },
+            "expression": {
+              "type": "CallExpression",
+              "start": 1179,
+              "end": 1202,
+              "loc": {
+                "start": {
+                  "line": 33,
+                  "column": 22
+                },
+                "end": {
+                  "line": 33,
+                  "column": 45
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 1179,
+                "end": 1192,
+                "loc": {
+                  "start": {
+                    "line": 33,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 33,
+                    "column": 35
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 1179,
+                  "end": 1187,
+                  "loc": {
+                    "start": {
+                      "line": 33,
+                      "column": 22
+                    },
+                    "end": {
+                      "line": 33,
+                      "column": 30
+                    }
+                  },
+                  "name": "disposed"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 1188,
+                  "end": 1192,
+                  "loc": {
+                    "start": {
+                      "line": 33,
+                      "column": 31
+                    },
+                    "end": {
+                      "line": 33,
+                      "column": 35
+                    }
+                  },
+                  "name": "push"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "Identifier",
+                  "start": 1193,
+                  "end": 1201,
+                  "loc": {
+                    "start": {
+                      "line": 33,
+                      "column": 36
+                    },
+                    "end": {
+                      "line": 33,
+                      "column": 44
+                    }
+                  },
+                  "name": "dispose2"
+                }
+              ],
+              "optional": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1206,
+      "end": 1228,
+      "loc": {
+        "start": {
+          "line": 34,
+          "column": 0
+        },
+        "end": {
+          "line": 34,
+          "column": 22
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1206,
+        "end": 1227,
+        "loc": {
+          "start": {
+            "line": 34,
+            "column": 0
+          },
+          "end": {
+            "line": 34,
+            "column": 21
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1206,
+          "end": 1217,
+          "loc": {
+            "start": {
+              "line": 34,
+              "column": 0
+            },
+            "end": {
+              "line": 34,
+              "column": 11
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1206,
+            "end": 1211,
+            "loc": {
+              "start": {
+                "line": 34,
+                "column": 0
+              },
+              "end": {
+                "line": 34,
+                "column": 5
+              }
+            },
+            "name": "stack"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1212,
+            "end": 1217,
+            "loc": {
+              "start": {
+                "line": 34,
+                "column": 6
+              },
+              "end": {
+                "line": 34,
+                "column": 11
+              }
+            },
+            "name": "defer"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 1218,
+            "end": 1226,
+            "loc": {
+              "start": {
+                "line": 34,
+                "column": 12
+              },
+              "end": {
+                "line": 34,
+                "column": 20
+              }
+            },
+            "name": "dispose1"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1229,
+      "end": 1251,
+      "loc": {
+        "start": {
+          "line": 35,
+          "column": 0
+        },
+        "end": {
+          "line": 35,
+          "column": 22
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1229,
+        "end": 1250,
+        "loc": {
+          "start": {
+            "line": 35,
+            "column": 0
+          },
+          "end": {
+            "line": 35,
+            "column": 21
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1229,
+          "end": 1240,
+          "loc": {
+            "start": {
+              "line": 35,
+              "column": 0
+            },
+            "end": {
+              "line": 35,
+              "column": 11
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1229,
+            "end": 1234,
+            "loc": {
+              "start": {
+                "line": 35,
+                "column": 0
+              },
+              "end": {
+                "line": 35,
+                "column": 5
+              }
+            },
+            "name": "stack"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1235,
+            "end": 1240,
+            "loc": {
+              "start": {
+                "line": 35,
+                "column": 6
+              },
+              "end": {
+                "line": 35,
+                "column": 11
+              }
+            },
+            "name": "defer"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 1241,
+            "end": 1249,
+            "loc": {
+              "start": {
+                "line": 35,
+                "column": 12
+              },
+              "end": {
+                "line": 35,
+                "column": 20
+              }
+            },
+            "name": "dispose2"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1252,
+      "end": 1268,
+      "loc": {
+        "start": {
+          "line": 36,
+          "column": 0
+        },
+        "end": {
+          "line": 36,
+          "column": 16
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1252,
+        "end": 1267,
+        "loc": {
+          "start": {
+            "line": 36,
+            "column": 0
+          },
+          "end": {
+            "line": 36,
+            "column": 15
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1252,
+          "end": 1265,
+          "loc": {
+            "start": {
+              "line": 36,
+              "column": 0
+            },
+            "end": {
+              "line": 36,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1252,
+            "end": 1257,
+            "loc": {
+              "start": {
+                "line": 36,
+                "column": 0
+              },
+              "end": {
+                "line": 36,
+                "column": 5
+              }
+            },
+            "name": "stack"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1258,
+            "end": 1265,
+            "loc": {
+              "start": {
+                "line": 36,
+                "column": 6
+              },
+              "end": {
+                "line": 36,
+                "column": 13
+              }
+            },
+            "name": "dispose"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1269,
+      "end": 1306,
+      "loc": {
+        "start": {
+          "line": 37,
+          "column": 0
+        },
+        "end": {
+          "line": 37,
+          "column": 37
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1269,
+        "end": 1305,
+        "loc": {
+          "start": {
+            "line": 37,
+            "column": 0
+          },
+          "end": {
+            "line": 37,
+            "column": 36
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1269,
+          "end": 1285,
+          "loc": {
+            "start": {
+              "line": 37,
+              "column": 0
+            },
+            "end": {
+              "line": 37,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1269,
+            "end": 1275,
+            "loc": {
+              "start": {
+                "line": 37,
+                "column": 0
+              },
+              "end": {
+                "line": 37,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1276,
+            "end": 1285,
+            "loc": {
+              "start": {
+                "line": 37,
+                "column": 7
+              },
+              "end": {
+                "line": 37,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Literal",
+            "start": 1286,
+            "end": 1287,
+            "loc": {
+              "start": {
+                "line": 37,
+                "column": 17
+              },
+              "end": {
+                "line": 37,
+                "column": 18
+              }
+            },
+            "value": 2,
+            "raw": "2"
+          },
+          {
+            "type": "MemberExpression",
+            "start": 1289,
+            "end": 1304,
+            "loc": {
+              "start": {
+                "line": 37,
+                "column": 20
+              },
+              "end": {
+                "line": 37,
+                "column": 35
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 1289,
+              "end": 1297,
+              "loc": {
+                "start": {
+                  "line": 37,
+                  "column": 20
+                },
+                "end": {
+                  "line": 37,
+                  "column": 28
+                }
+              },
+              "name": "disposed"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 1298,
+              "end": 1304,
+              "loc": {
+                "start": {
+                  "line": 37,
+                  "column": 29
+                },
+                "end": {
+                  "line": 37,
+                  "column": 35
+                }
+              },
+              "name": "length"
+            },
+            "computed": false,
+            "optional": false
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1307,
+      "end": 1402,
+      "loc": {
+        "start": {
+          "line": 38,
+          "column": 0
+        },
+        "end": {
+          "line": 38,
+          "column": 95
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1307,
+        "end": 1401,
+        "loc": {
+          "start": {
+            "line": 38,
+            "column": 0
+          },
+          "end": {
+            "line": 38,
+            "column": 94
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1307,
+          "end": 1323,
+          "loc": {
+            "start": {
+              "line": 38,
+              "column": 0
+            },
+            "end": {
+              "line": 38,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1307,
+            "end": 1313,
+            "loc": {
+              "start": {
+                "line": 38,
+                "column": 0
+              },
+              "end": {
+                "line": 38,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1314,
+            "end": 1323,
+            "loc": {
+              "start": {
+                "line": 38,
+                "column": 7
+              },
+              "end": {
+                "line": 38,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 1324,
+            "end": 1335,
+            "loc": {
+              "start": {
+                "line": 38,
+                "column": 17
+              },
+              "end": {
+                "line": 38,
+                "column": 28
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 1324,
+              "end": 1332,
+              "loc": {
+                "start": {
+                  "line": 38,
+                  "column": 17
+                },
+                "end": {
+                  "line": 38,
+                  "column": 25
+                }
+              },
+              "name": "disposed"
+            },
+            "property": {
+              "type": "Literal",
+              "start": 1333,
+              "end": 1334,
+              "loc": {
+                "start": {
+                  "line": 38,
+                  "column": 26
+                },
+                "end": {
+                  "line": 38,
+                  "column": 27
+                }
+              },
+              "value": 0,
+              "raw": "0"
+            },
+            "computed": true,
+            "optional": false
+          },
+          {
+            "type": "Identifier",
+            "start": 1337,
+            "end": 1345,
+            "loc": {
+              "start": {
+                "line": 38,
+                "column": 30
+              },
+              "end": {
+                "line": 38,
+                "column": 38
+              }
+            },
+            "name": "dispose2"
+          },
+          {
+            "type": "Literal",
+            "start": 1347,
+            "end": 1400,
+            "loc": {
+              "start": {
+                "line": 38,
+                "column": 40
+              },
+              "end": {
+                "line": 38,
+                "column": 93
+              }
+            },
+            "value": "Expected dispose2 to be the first onDispose invoked",
+            "raw": "'Expected dispose2 to be the first onDispose invoked'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1403,
+      "end": 1499,
+      "loc": {
+        "start": {
+          "line": 39,
+          "column": 0
+        },
+        "end": {
+          "line": 39,
+          "column": 96
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1403,
+        "end": 1498,
+        "loc": {
+          "start": {
+            "line": 39,
+            "column": 0
+          },
+          "end": {
+            "line": 39,
+            "column": 95
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1403,
+          "end": 1419,
+          "loc": {
+            "start": {
+              "line": 39,
+              "column": 0
+            },
+            "end": {
+              "line": 39,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1403,
+            "end": 1409,
+            "loc": {
+              "start": {
+                "line": 39,
+                "column": 0
+              },
+              "end": {
+                "line": 39,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1410,
+            "end": 1419,
+            "loc": {
+              "start": {
+                "line": 39,
+                "column": 7
+              },
+              "end": {
+                "line": 39,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 1420,
+            "end": 1431,
+            "loc": {
+              "start": {
+                "line": 39,
+                "column": 17
+              },
+              "end": {
+                "line": 39,
+                "column": 28
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 1420,
+              "end": 1428,
+              "loc": {
+                "start": {
+                  "line": 39,
+                  "column": 17
+                },
+                "end": {
+                  "line": 39,
+                  "column": 25
+                }
+              },
+              "name": "disposed"
+            },
+            "property": {
+              "type": "Literal",
+              "start": 1429,
+              "end": 1430,
+              "loc": {
+                "start": {
+                  "line": 39,
+                  "column": 26
+                },
+                "end": {
+                  "line": 39,
+                  "column": 27
+                }
+              },
+              "value": 1,
+              "raw": "1"
+            },
+            "computed": true,
+            "optional": false
+          },
+          {
+            "type": "Identifier",
+            "start": 1433,
+            "end": 1441,
+            "loc": {
+              "start": {
+                "line": 39,
+                "column": 30
+              },
+              "end": {
+                "line": 39,
+                "column": 38
+              }
+            },
+            "name": "dispose1"
+          },
+          {
+            "type": "Literal",
+            "start": 1443,
+            "end": 1497,
+            "loc": {
+              "start": {
+                "line": 39,
+                "column": 40
+              },
+              "end": {
+                "line": 39,
+                "column": 94
+              }
+            },
+            "value": "Expected dispose1 to be the second onDispose invoked",
+            "raw": "'Expected dispose1 to be the second onDispose invoked'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

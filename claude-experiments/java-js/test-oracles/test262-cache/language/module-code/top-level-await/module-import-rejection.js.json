@@ -1,0 +1,165 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 2758,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 77,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ImportDeclaration",
+      "start": 2638,
+      "end": 2702,
+      "loc": {
+        "start": {
+          "line": 74,
+          "column": 0
+        },
+        "end": {
+          "line": 74,
+          "column": 64
+        }
+      },
+      "specifiers": [
+        {
+          "type": "ImportSpecifier",
+          "start": 2647,
+          "end": 2655,
+          "loc": {
+            "start": {
+              "line": 74,
+              "column": 9
+            },
+            "end": {
+              "line": 74,
+              "column": 17
+            }
+          },
+          "imported": {
+            "type": "Identifier",
+            "start": 2647,
+            "end": 2655,
+            "loc": {
+              "start": {
+                "line": 74,
+                "column": 9
+              },
+              "end": {
+                "line": 74,
+                "column": 17
+              }
+            },
+            "name": "resolved"
+          },
+          "local": {
+            "type": "Identifier",
+            "start": 2647,
+            "end": 2655,
+            "loc": {
+              "start": {
+                "line": 74,
+                "column": 9
+              },
+              "end": {
+                "line": 74,
+                "column": 17
+              }
+            },
+            "name": "resolved"
+          }
+        }
+      ],
+      "source": {
+        "type": "Literal",
+        "start": 2663,
+        "end": 2701,
+        "loc": {
+          "start": {
+            "line": 74,
+            "column": 25
+          },
+          "end": {
+            "line": 74,
+            "column": 63
+          }
+        },
+        "value": "./module-import-rejection_FIXTURE.js",
+        "raw": "'./module-import-rejection_FIXTURE.js'"
+      },
+      "attributes": []
+    },
+    {
+      "type": "ThrowStatement",
+      "start": 2704,
+      "end": 2757,
+      "loc": {
+        "start": {
+          "line": 76,
+          "column": 0
+        },
+        "end": {
+          "line": 76,
+          "column": 53
+        }
+      },
+      "argument": {
+        "type": "NewExpression",
+        "start": 2710,
+        "end": 2756,
+        "loc": {
+          "start": {
+            "line": 76,
+            "column": 6
+          },
+          "end": {
+            "line": 76,
+            "column": 52
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 2714,
+          "end": 2726,
+          "loc": {
+            "start": {
+              "line": 76,
+              "column": 10
+            },
+            "end": {
+              "line": 76,
+              "column": 22
+            }
+          },
+          "name": "Test262Error"
+        },
+        "arguments": [
+          {
+            "type": "Literal",
+            "start": 2727,
+            "end": 2755,
+            "loc": {
+              "start": {
+                "line": 76,
+                "column": 23
+              },
+              "end": {
+                "line": 76,
+                "column": 51
+              }
+            },
+            "value": "this should be unreachable",
+            "raw": "'this should be unreachable'"
+          }
+        ]
+      }
+    }
+  ],
+  "sourceType": "module"
+}

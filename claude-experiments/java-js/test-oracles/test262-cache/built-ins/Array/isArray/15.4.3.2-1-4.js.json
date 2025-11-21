@@ -1,0 +1,268 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 352,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 11,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 245,
+      "end": 351,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 106
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 245,
+        "end": 350,
+        "loc": {
+          "start": {
+            "line": 10,
+            "column": 0
+          },
+          "end": {
+            "line": 10,
+            "column": 105
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 245,
+          "end": 261,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 0
+            },
+            "end": {
+              "line": 10,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 245,
+            "end": 251,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 0
+              },
+              "end": {
+                "line": 10,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 252,
+            "end": 261,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 7
+              },
+              "end": {
+                "line": 10,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 262,
+            "end": 291,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 17
+              },
+              "end": {
+                "line": 10,
+                "column": 46
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 262,
+              "end": 275,
+              "loc": {
+                "start": {
+                  "line": 10,
+                  "column": 17
+                },
+                "end": {
+                  "line": 10,
+                  "column": 30
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 262,
+                "end": 267,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 22
+                  }
+                },
+                "name": "Array"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 268,
+                "end": 275,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 23
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 30
+                  }
+                },
+                "name": "isArray"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "NewExpression",
+                "start": 276,
+                "end": 290,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 45
+                  }
+                },
+                "callee": {
+                  "type": "Identifier",
+                  "start": 280,
+                  "end": 286,
+                  "loc": {
+                    "start": {
+                      "line": 10,
+                      "column": 35
+                    },
+                    "end": {
+                      "line": 10,
+                      "column": 41
+                    }
+                  },
+                  "name": "Number"
+                },
+                "arguments": [
+                  {
+                    "type": "UnaryExpression",
+                    "start": 287,
+                    "end": 289,
+                    "loc": {
+                      "start": {
+                        "line": 10,
+                        "column": 42
+                      },
+                      "end": {
+                        "line": 10,
+                        "column": 44
+                      }
+                    },
+                    "operator": "-",
+                    "prefix": true,
+                    "argument": {
+                      "type": "Literal",
+                      "start": 288,
+                      "end": 289,
+                      "loc": {
+                        "start": {
+                          "line": 10,
+                          "column": 43
+                        },
+                        "end": {
+                          "line": 10,
+                          "column": 44
+                        }
+                      },
+                      "value": 3,
+                      "raw": "3"
+                    }
+                  }
+                ]
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 293,
+            "end": 298,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 48
+              },
+              "end": {
+                "line": 10,
+                "column": 53
+              }
+            },
+            "value": false,
+            "raw": "false"
+          },
+          {
+            "type": "Literal",
+            "start": 300,
+            "end": 349,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 55
+              },
+              "end": {
+                "line": 10,
+                "column": 104
+              }
+            },
+            "value": "Array.isArray(new Number(-3)) must return false",
+            "raw": "'Array.isArray(new Number(-3)) must return false'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

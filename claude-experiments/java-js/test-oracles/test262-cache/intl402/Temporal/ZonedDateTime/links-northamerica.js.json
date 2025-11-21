@@ -1,0 +1,870 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 2248,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 40,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 291,
+      "end": 2116,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 34,
+          "column": 2
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 297,
+          "end": 2115,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 6
+            },
+            "end": {
+              "line": 34,
+              "column": 1
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 297,
+            "end": 306,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 6
+              },
+              "end": {
+                "line": 10,
+                "column": 15
+              }
+            },
+            "name": "testCases"
+          },
+          "init": {
+            "type": "ArrayExpression",
+            "start": 309,
+            "end": 2115,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 18
+              },
+              "end": {
+                "line": 34,
+                "column": 1
+              }
+            },
+            "elements": [
+              {
+                "type": "Literal",
+                "start": 313,
+                "end": 330,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 19
+                  }
+                },
+                "value": "America/Creston",
+                "raw": "\"America/Creston\""
+              },
+              {
+                "type": "Literal",
+                "start": 375,
+                "end": 391,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 18
+                  }
+                },
+                "value": "America/Nassau",
+                "raw": "\"America/Nassau\""
+              },
+              {
+                "type": "Literal",
+                "start": 435,
+                "end": 453,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 20
+                  }
+                },
+                "value": "America/Atikokan",
+                "raw": "\"America/Atikokan\""
+              },
+              {
+                "type": "Literal",
+                "start": 498,
+                "end": 514,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 18
+                  }
+                },
+                "value": "America/Cayman",
+                "raw": "\"America/Cayman\""
+              },
+              {
+                "type": "Literal",
+                "start": 557,
+                "end": 575,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 20
+                  }
+                },
+                "value": "America/Anguilla",
+                "raw": "\"America/Anguilla\""
+              },
+              {
+                "type": "Literal",
+                "start": 625,
+                "end": 642,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 19
+                  }
+                },
+                "value": "America/Antigua",
+                "raw": "\"America/Antigua\""
+              },
+              {
+                "type": "Literal",
+                "start": 691,
+                "end": 706,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 17
+                  }
+                },
+                "value": "America/Aruba",
+                "raw": "\"America/Aruba\""
+              },
+              {
+                "type": "Literal",
+                "start": 753,
+                "end": 770,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 19
+                  }
+                },
+                "value": "America/Curacao",
+                "raw": "\"America/Curacao\""
+              },
+              {
+                "type": "Literal",
+                "start": 819,
+                "end": 841,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 24
+                  }
+                },
+                "value": "America/Blanc-Sablon",
+                "raw": "\"America/Blanc-Sablon\""
+              },
+              {
+                "type": "Literal",
+                "start": 926,
+                "end": 944,
+                "loc": {
+                  "start": {
+                    "line": 20,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 20,
+                    "column": 20
+                  }
+                },
+                "value": "America/Dominica",
+                "raw": "\"America/Dominica\""
+              },
+              {
+                "type": "Literal",
+                "start": 994,
+                "end": 1011,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 19
+                  }
+                },
+                "value": "America/Grenada",
+                "raw": "\"America/Grenada\""
+              },
+              {
+                "type": "Literal",
+                "start": 1060,
+                "end": 1080,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 22
+                  }
+                },
+                "value": "America/Guadeloupe",
+                "raw": "\"America/Guadeloupe\""
+              },
+              {
+                "type": "Literal",
+                "start": 1132,
+                "end": 1152,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 22
+                  }
+                },
+                "value": "America/Kralendijk",
+                "raw": "\"America/Kralendijk\""
+              },
+              {
+                "type": "Literal",
+                "start": 1232,
+                "end": 1255,
+                "loc": {
+                  "start": {
+                    "line": 24,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 24,
+                    "column": 25
+                  }
+                },
+                "value": "America/Lower_Princes",
+                "raw": "\"America/Lower_Princes\""
+              },
+              {
+                "type": "Literal",
+                "start": 1326,
+                "end": 1343,
+                "loc": {
+                  "start": {
+                    "line": 25,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 25,
+                    "column": 19
+                  }
+                },
+                "value": "America/Marigot",
+                "raw": "\"America/Marigot\""
+              },
+              {
+                "type": "Literal",
+                "start": 1425,
+                "end": 1445,
+                "loc": {
+                  "start": {
+                    "line": 26,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 26,
+                    "column": 22
+                  }
+                },
+                "value": "America/Montserrat",
+                "raw": "\"America/Montserrat\""
+              },
+              {
+                "type": "Literal",
+                "start": 1497,
+                "end": 1520,
+                "loc": {
+                  "start": {
+                    "line": 27,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 27,
+                    "column": 25
+                  }
+                },
+                "value": "America/Port_of_Spain",
+                "raw": "\"America/Port_of_Spain\""
+              },
+              {
+                "type": "Literal",
+                "start": 1596,
+                "end": 1619,
+                "loc": {
+                  "start": {
+                    "line": 28,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 28,
+                    "column": 25
+                  }
+                },
+                "value": "America/St_Barthelemy",
+                "raw": "\"America/St_Barthelemy\""
+              },
+              {
+                "type": "Literal",
+                "start": 1691,
+                "end": 1709,
+                "loc": {
+                  "start": {
+                    "line": 29,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 29,
+                    "column": 20
+                  }
+                },
+                "value": "America/St_Kitts",
+                "raw": "\"America/St_Kitts\""
+              },
+              {
+                "type": "Literal",
+                "start": 1784,
+                "end": 1802,
+                "loc": {
+                  "start": {
+                    "line": 30,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 30,
+                    "column": 20
+                  }
+                },
+                "value": "America/St_Lucia",
+                "raw": "\"America/St_Lucia\""
+              },
+              {
+                "type": "Literal",
+                "start": 1852,
+                "end": 1871,
+                "loc": {
+                  "start": {
+                    "line": 31,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 31,
+                    "column": 21
+                  }
+                },
+                "value": "America/St_Thomas",
+                "raw": "\"America/St_Thomas\""
+              },
+              {
+                "type": "Literal",
+                "start": 1949,
+                "end": 1969,
+                "loc": {
+                  "start": {
+                    "line": 32,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 32,
+                    "column": 22
+                  }
+                },
+                "value": "America/St_Vincent",
+                "raw": "\"America/St_Vincent\""
+              },
+              {
+                "type": "Literal",
+                "start": 2021,
+                "end": 2038,
+                "loc": {
+                  "start": {
+                    "line": 33,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 33,
+                    "column": 19
+                  }
+                },
+                "value": "America/Tortola",
+                "raw": "\"America/Tortola\""
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ForOfStatement",
+      "start": 2118,
+      "end": 2247,
+      "loc": {
+        "start": {
+          "line": 36,
+          "column": 0
+        },
+        "end": {
+          "line": 39,
+          "column": 1
+        }
+      },
+      "await": false,
+      "left": {
+        "type": "VariableDeclaration",
+        "start": 2123,
+        "end": 2129,
+        "loc": {
+          "start": {
+            "line": 36,
+            "column": 5
+          },
+          "end": {
+            "line": 36,
+            "column": 11
+          }
+        },
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "start": 2127,
+            "end": 2129,
+            "loc": {
+              "start": {
+                "line": 36,
+                "column": 9
+              },
+              "end": {
+                "line": 36,
+                "column": 11
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 2127,
+              "end": 2129,
+              "loc": {
+                "start": {
+                  "line": 36,
+                  "column": 9
+                },
+                "end": {
+                  "line": 36,
+                  "column": 11
+                }
+              },
+              "name": "id"
+            },
+            "init": null
+          }
+        ],
+        "kind": "let"
+      },
+      "right": {
+        "type": "Identifier",
+        "start": 2133,
+        "end": 2142,
+        "loc": {
+          "start": {
+            "line": 36,
+            "column": 15
+          },
+          "end": {
+            "line": 36,
+            "column": 24
+          }
+        },
+        "name": "testCases"
+      },
+      "body": {
+        "type": "BlockStatement",
+        "start": 2144,
+        "end": 2247,
+        "loc": {
+          "start": {
+            "line": 36,
+            "column": 26
+          },
+          "end": {
+            "line": 39,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "VariableDeclaration",
+            "start": 2148,
+            "end": 2200,
+            "loc": {
+              "start": {
+                "line": 37,
+                "column": 2
+              },
+              "end": {
+                "line": 37,
+                "column": 54
+              }
+            },
+            "declarations": [
+              {
+                "type": "VariableDeclarator",
+                "start": 2154,
+                "end": 2199,
+                "loc": {
+                  "start": {
+                    "line": 37,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 37,
+                    "column": 53
+                  }
+                },
+                "id": {
+                  "type": "Identifier",
+                  "start": 2154,
+                  "end": 2162,
+                  "loc": {
+                    "start": {
+                      "line": 37,
+                      "column": 8
+                    },
+                    "end": {
+                      "line": 37,
+                      "column": 16
+                    }
+                  },
+                  "name": "instance"
+                },
+                "init": {
+                  "type": "NewExpression",
+                  "start": 2165,
+                  "end": 2199,
+                  "loc": {
+                    "start": {
+                      "line": 37,
+                      "column": 19
+                    },
+                    "end": {
+                      "line": 37,
+                      "column": 53
+                    }
+                  },
+                  "callee": {
+                    "type": "MemberExpression",
+                    "start": 2169,
+                    "end": 2191,
+                    "loc": {
+                      "start": {
+                        "line": 37,
+                        "column": 23
+                      },
+                      "end": {
+                        "line": 37,
+                        "column": 45
+                      }
+                    },
+                    "object": {
+                      "type": "Identifier",
+                      "start": 2169,
+                      "end": 2177,
+                      "loc": {
+                        "start": {
+                          "line": 37,
+                          "column": 23
+                        },
+                        "end": {
+                          "line": 37,
+                          "column": 31
+                        }
+                      },
+                      "name": "Temporal"
+                    },
+                    "property": {
+                      "type": "Identifier",
+                      "start": 2178,
+                      "end": 2191,
+                      "loc": {
+                        "start": {
+                          "line": 37,
+                          "column": 32
+                        },
+                        "end": {
+                          "line": 37,
+                          "column": 45
+                        }
+                      },
+                      "name": "ZonedDateTime"
+                    },
+                    "computed": false,
+                    "optional": false
+                  },
+                  "arguments": [
+                    {
+                      "type": "Literal",
+                      "start": 2192,
+                      "end": 2194,
+                      "loc": {
+                        "start": {
+                          "line": 37,
+                          "column": 46
+                        },
+                        "end": {
+                          "line": 37,
+                          "column": 48
+                        }
+                      },
+                      "value": null,
+                      "raw": "0n",
+                      "bigint": "0"
+                    },
+                    {
+                      "type": "Identifier",
+                      "start": 2196,
+                      "end": 2198,
+                      "loc": {
+                        "start": {
+                          "line": 37,
+                          "column": 50
+                        },
+                        "end": {
+                          "line": 37,
+                          "column": 52
+                        }
+                      },
+                      "name": "id"
+                    }
+                  ]
+                }
+              }
+            ],
+            "kind": "const"
+          },
+          {
+            "type": "ExpressionStatement",
+            "start": 2203,
+            "end": 2245,
+            "loc": {
+              "start": {
+                "line": 38,
+                "column": 2
+              },
+              "end": {
+                "line": 38,
+                "column": 44
+              }
+            },
+            "expression": {
+              "type": "CallExpression",
+              "start": 2203,
+              "end": 2244,
+              "loc": {
+                "start": {
+                  "line": 38,
+                  "column": 2
+                },
+                "end": {
+                  "line": 38,
+                  "column": 43
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 2203,
+                "end": 2219,
+                "loc": {
+                  "start": {
+                    "line": 38,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 38,
+                    "column": 18
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 2203,
+                  "end": 2209,
+                  "loc": {
+                    "start": {
+                      "line": 38,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 38,
+                      "column": 8
+                    }
+                  },
+                  "name": "assert"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 2210,
+                  "end": 2219,
+                  "loc": {
+                    "start": {
+                      "line": 38,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 38,
+                      "column": 18
+                    }
+                  },
+                  "name": "sameValue"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "MemberExpression",
+                  "start": 2220,
+                  "end": 2239,
+                  "loc": {
+                    "start": {
+                      "line": 38,
+                      "column": 19
+                    },
+                    "end": {
+                      "line": 38,
+                      "column": 38
+                    }
+                  },
+                  "object": {
+                    "type": "Identifier",
+                    "start": 2220,
+                    "end": 2228,
+                    "loc": {
+                      "start": {
+                        "line": 38,
+                        "column": 19
+                      },
+                      "end": {
+                        "line": 38,
+                        "column": 27
+                      }
+                    },
+                    "name": "instance"
+                  },
+                  "property": {
+                    "type": "Identifier",
+                    "start": 2229,
+                    "end": 2239,
+                    "loc": {
+                      "start": {
+                        "line": 38,
+                        "column": 28
+                      },
+                      "end": {
+                        "line": 38,
+                        "column": 38
+                      }
+                    },
+                    "name": "timeZoneId"
+                  },
+                  "computed": false,
+                  "optional": false
+                },
+                {
+                  "type": "Identifier",
+                  "start": 2241,
+                  "end": 2243,
+                  "loc": {
+                    "start": {
+                      "line": 38,
+                      "column": 40
+                    },
+                    "end": {
+                      "line": 38,
+                      "column": 42
+                    }
+                  },
+                  "name": "id"
+                }
+              ],
+              "optional": false
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "sourceType": "script"
+}

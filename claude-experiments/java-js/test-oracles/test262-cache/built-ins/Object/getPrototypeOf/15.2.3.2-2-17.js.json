@@ -1,0 +1,216 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 362,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 12,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 269,
+      "end": 361,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 92
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 269,
+        "end": 360,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 11,
+            "column": 91
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 269,
+          "end": 285,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 0
+            },
+            "end": {
+              "line": 11,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 269,
+            "end": 275,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 0
+              },
+              "end": {
+                "line": 11,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 276,
+            "end": 285,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 7
+              },
+              "end": {
+                "line": 11,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 286,
+            "end": 317,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 17
+              },
+              "end": {
+                "line": 11,
+                "column": 48
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 286,
+              "end": 307,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 17
+                },
+                "end": {
+                  "line": 11,
+                  "column": 38
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 286,
+                "end": 292,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 23
+                  }
+                },
+                "name": "Object"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 293,
+                "end": 307,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 38
+                  }
+                },
+                "name": "getPrototypeOf"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 308,
+                "end": 316,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 39
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 47
+                  }
+                },
+                "name": "URIError"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Identifier",
+            "start": 319,
+            "end": 324,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 50
+              },
+              "end": {
+                "line": 11,
+                "column": 55
+              }
+            },
+            "name": "Error"
+          },
+          {
+            "type": "Literal",
+            "start": 326,
+            "end": 359,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 57
+              },
+              "end": {
+                "line": 11,
+                "column": 90
+              }
+            },
+            "value": "Object.getPrototypeOf(URIError)",
+            "raw": "'Object.getPrototypeOf(URIError)'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

@@ -1,0 +1,894 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1696,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 50,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 1233,
+      "end": 1305,
+      "loc": {
+        "start": {
+          "line": 32,
+          "column": 0
+        },
+        "end": {
+          "line": 32,
+          "column": 72
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1233,
+        "end": 1304,
+        "loc": {
+          "start": {
+            "line": 32,
+            "column": 0
+          },
+          "end": {
+            "line": 32,
+            "column": 71
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 1233,
+          "end": 1239,
+          "loc": {
+            "start": {
+              "line": 32,
+              "column": 0
+            },
+            "end": {
+              "line": 32,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 1240,
+            "end": 1273,
+            "loc": {
+              "start": {
+                "line": 32,
+                "column": 7
+              },
+              "end": {
+                "line": 32,
+                "column": 40
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 1240,
+              "end": 1259,
+              "loc": {
+                "start": {
+                  "line": 32,
+                  "column": 7
+                },
+                "end": {
+                  "line": 32,
+                  "column": 26
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 1240,
+                "end": 1246,
+                "loc": {
+                  "start": {
+                    "line": 32,
+                    "column": 7
+                  },
+                  "end": {
+                    "line": 32,
+                    "column": 13
+                  }
+                },
+                "name": "Object"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 1247,
+                "end": 1259,
+                "loc": {
+                  "start": {
+                    "line": 32,
+                    "column": 14
+                  },
+                  "end": {
+                    "line": 32,
+                    "column": 26
+                  }
+                },
+                "name": "isExtensible"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "MemberExpression",
+                "start": 1260,
+                "end": 1272,
+                "loc": {
+                  "start": {
+                    "line": 32,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 32,
+                    "column": 39
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 1260,
+                  "end": 1264,
+                  "loc": {
+                    "start": {
+                      "line": 32,
+                      "column": 27
+                    },
+                    "end": {
+                      "line": 32,
+                      "column": 31
+                    }
+                  },
+                  "name": "JSON"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 1265,
+                  "end": 1272,
+                  "loc": {
+                    "start": {
+                      "line": 32,
+                      "column": 32
+                    },
+                    "end": {
+                      "line": 32,
+                      "column": 39
+                    }
+                  },
+                  "name": "rawJSON"
+                },
+                "computed": false,
+                "optional": false
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 1275,
+            "end": 1303,
+            "loc": {
+              "start": {
+                "line": 32,
+                "column": 42
+              },
+              "end": {
+                "line": 32,
+                "column": 70
+              }
+            },
+            "value": "JSON.rawJSON is extensible",
+            "raw": "\"JSON.rawJSON is extensible\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1306,
+      "end": 1416,
+      "loc": {
+        "start": {
+          "line": 33,
+          "column": 0
+        },
+        "end": {
+          "line": 37,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1306,
+        "end": 1415,
+        "loc": {
+          "start": {
+            "line": 33,
+            "column": 0
+          },
+          "end": {
+            "line": 37,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1306,
+          "end": 1322,
+          "loc": {
+            "start": {
+              "line": 33,
+              "column": 0
+            },
+            "end": {
+              "line": 33,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1306,
+            "end": 1312,
+            "loc": {
+              "start": {
+                "line": 33,
+                "column": 0
+              },
+              "end": {
+                "line": 33,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1313,
+            "end": 1322,
+            "loc": {
+              "start": {
+                "line": 33,
+                "column": 7
+              },
+              "end": {
+                "line": 33,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 1326,
+            "end": 1345,
+            "loc": {
+              "start": {
+                "line": 34,
+                "column": 2
+              },
+              "end": {
+                "line": 34,
+                "column": 21
+              }
+            },
+            "operator": "typeof",
+            "prefix": true,
+            "argument": {
+              "type": "MemberExpression",
+              "start": 1333,
+              "end": 1345,
+              "loc": {
+                "start": {
+                  "line": 34,
+                  "column": 9
+                },
+                "end": {
+                  "line": 34,
+                  "column": 21
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 1333,
+                "end": 1337,
+                "loc": {
+                  "start": {
+                    "line": 34,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 34,
+                    "column": 13
+                  }
+                },
+                "name": "JSON"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 1338,
+                "end": 1345,
+                "loc": {
+                  "start": {
+                    "line": 34,
+                    "column": 14
+                  },
+                  "end": {
+                    "line": 34,
+                    "column": 21
+                  }
+                },
+                "name": "rawJSON"
+              },
+              "computed": false,
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 1349,
+            "end": 1359,
+            "loc": {
+              "start": {
+                "line": 35,
+                "column": 2
+              },
+              "end": {
+                "line": 35,
+                "column": 12
+              }
+            },
+            "value": "function",
+            "raw": "'function'"
+          },
+          {
+            "type": "Literal",
+            "start": 1363,
+            "end": 1413,
+            "loc": {
+              "start": {
+                "line": 36,
+                "column": 2
+              },
+              "end": {
+                "line": 36,
+                "column": 52
+              }
+            },
+            "value": "The value of `typeof JSON.rawJSON` is \"function\"",
+            "raw": "'The value of `typeof JSON.rawJSON` is \"function\"'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1418,
+      "end": 1551,
+      "loc": {
+        "start": {
+          "line": 39,
+          "column": 0
+        },
+        "end": {
+          "line": 43,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1418,
+        "end": 1550,
+        "loc": {
+          "start": {
+            "line": 39,
+            "column": 0
+          },
+          "end": {
+            "line": 43,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1418,
+          "end": 1434,
+          "loc": {
+            "start": {
+              "line": 39,
+              "column": 0
+            },
+            "end": {
+              "line": 39,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1418,
+            "end": 1424,
+            "loc": {
+              "start": {
+                "line": 39,
+                "column": 0
+              },
+              "end": {
+                "line": 39,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1425,
+            "end": 1434,
+            "loc": {
+              "start": {
+                "line": 39,
+                "column": 7
+              },
+              "end": {
+                "line": 39,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 1438,
+            "end": 1473,
+            "loc": {
+              "start": {
+                "line": 40,
+                "column": 2
+              },
+              "end": {
+                "line": 40,
+                "column": 37
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 1438,
+              "end": 1459,
+              "loc": {
+                "start": {
+                  "line": 40,
+                  "column": 2
+                },
+                "end": {
+                  "line": 40,
+                  "column": 23
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 1438,
+                "end": 1444,
+                "loc": {
+                  "start": {
+                    "line": 40,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 40,
+                    "column": 8
+                  }
+                },
+                "name": "Object"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 1445,
+                "end": 1459,
+                "loc": {
+                  "start": {
+                    "line": 40,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 40,
+                    "column": 23
+                  }
+                },
+                "name": "getPrototypeOf"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "MemberExpression",
+                "start": 1460,
+                "end": 1472,
+                "loc": {
+                  "start": {
+                    "line": 40,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 40,
+                    "column": 36
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 1460,
+                  "end": 1464,
+                  "loc": {
+                    "start": {
+                      "line": 40,
+                      "column": 24
+                    },
+                    "end": {
+                      "line": 40,
+                      "column": 28
+                    }
+                  },
+                  "name": "JSON"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 1465,
+                  "end": 1472,
+                  "loc": {
+                    "start": {
+                      "line": 40,
+                      "column": 29
+                    },
+                    "end": {
+                      "line": 40,
+                      "column": 36
+                    }
+                  },
+                  "name": "rawJSON"
+                },
+                "computed": false,
+                "optional": false
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 1477,
+            "end": 1495,
+            "loc": {
+              "start": {
+                "line": 41,
+                "column": 2
+              },
+              "end": {
+                "line": 41,
+                "column": 20
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 1477,
+              "end": 1485,
+              "loc": {
+                "start": {
+                  "line": 41,
+                  "column": 2
+                },
+                "end": {
+                  "line": 41,
+                  "column": 10
+                }
+              },
+              "name": "Function"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 1486,
+              "end": 1495,
+              "loc": {
+                "start": {
+                  "line": 41,
+                  "column": 11
+                },
+                "end": {
+                  "line": 41,
+                  "column": 20
+                }
+              },
+              "name": "prototype"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 1499,
+            "end": 1548,
+            "loc": {
+              "start": {
+                "line": 42,
+                "column": 2
+              },
+              "end": {
+                "line": 42,
+                "column": 51
+              }
+            },
+            "value": "Prototype of JSON.rawJSON is Function.prototype",
+            "raw": "\"Prototype of JSON.rawJSON is Function.prototype\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1553,
+      "end": 1695,
+      "loc": {
+        "start": {
+          "line": 45,
+          "column": 0
+        },
+        "end": {
+          "line": 49,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1553,
+        "end": 1694,
+        "loc": {
+          "start": {
+            "line": 45,
+            "column": 0
+          },
+          "end": {
+            "line": 49,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1553,
+          "end": 1569,
+          "loc": {
+            "start": {
+              "line": 45,
+              "column": 0
+            },
+            "end": {
+              "line": 45,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1553,
+            "end": 1559,
+            "loc": {
+              "start": {
+                "line": 45,
+                "column": 0
+              },
+              "end": {
+                "line": 45,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1560,
+            "end": 1569,
+            "loc": {
+              "start": {
+                "line": 45,
+                "column": 7
+              },
+              "end": {
+                "line": 45,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 1573,
+            "end": 1631,
+            "loc": {
+              "start": {
+                "line": 46,
+                "column": 2
+              },
+              "end": {
+                "line": 46,
+                "column": 60
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 1573,
+              "end": 1604,
+              "loc": {
+                "start": {
+                  "line": 46,
+                  "column": 2
+                },
+                "end": {
+                  "line": 46,
+                  "column": 33
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 1573,
+                "end": 1579,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 8
+                  }
+                },
+                "name": "Object"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 1580,
+                "end": 1604,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 33
+                  }
+                },
+                "name": "getOwnPropertyDescriptor"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "MemberExpression",
+                "start": 1605,
+                "end": 1617,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 34
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 46
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 1605,
+                  "end": 1609,
+                  "loc": {
+                    "start": {
+                      "line": 46,
+                      "column": 34
+                    },
+                    "end": {
+                      "line": 46,
+                      "column": 38
+                    }
+                  },
+                  "name": "JSON"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 1610,
+                  "end": 1617,
+                  "loc": {
+                    "start": {
+                      "line": 46,
+                      "column": 39
+                    },
+                    "end": {
+                      "line": 46,
+                      "column": 46
+                    }
+                  },
+                  "name": "rawJSON"
+                },
+                "computed": false,
+                "optional": false
+              },
+              {
+                "type": "Literal",
+                "start": 1619,
+                "end": 1630,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 48
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 59
+                  }
+                },
+                "value": "prototype",
+                "raw": "\"prototype\""
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Identifier",
+            "start": 1635,
+            "end": 1644,
+            "loc": {
+              "start": {
+                "line": 47,
+                "column": 2
+              },
+              "end": {
+                "line": 47,
+                "column": 11
+              }
+            },
+            "name": "undefined"
+          },
+          {
+            "type": "Literal",
+            "start": 1648,
+            "end": 1692,
+            "loc": {
+              "start": {
+                "line": 48,
+                "column": 2
+              },
+              "end": {
+                "line": 48,
+                "column": 46
+              }
+            },
+            "value": "JSON.rawJSON has no own prototype property",
+            "raw": "\"JSON.rawJSON has no own prototype property\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

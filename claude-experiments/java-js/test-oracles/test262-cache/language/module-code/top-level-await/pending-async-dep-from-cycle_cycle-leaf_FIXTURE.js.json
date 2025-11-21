@@ -1,0 +1,363 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 283,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 9,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ImportDeclaration",
+      "start": 128,
+      "end": 190,
+      "loc": {
+        "start": {
+          "line": 4,
+          "column": 0
+        },
+        "end": {
+          "line": 4,
+          "column": 62
+        }
+      },
+      "specifiers": [],
+      "source": {
+        "type": "Literal",
+        "start": 135,
+        "end": 189,
+        "loc": {
+          "start": {
+            "line": 4,
+            "column": 7
+          },
+          "end": {
+            "line": 4,
+            "column": 61
+          }
+        },
+        "value": "./pending-async-dep-from-cycle_cycle-root_FIXTURE.js",
+        "raw": "\"./pending-async-dep-from-cycle_cycle-root_FIXTURE.js\""
+      },
+      "attributes": []
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 192,
+      "end": 233,
+      "loc": {
+        "start": {
+          "line": 6,
+          "column": 0
+        },
+        "end": {
+          "line": 6,
+          "column": 41
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 192,
+        "end": 232,
+        "loc": {
+          "start": {
+            "line": 6,
+            "column": 0
+          },
+          "end": {
+            "line": 6,
+            "column": 40
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 192,
+          "end": 212,
+          "loc": {
+            "start": {
+              "line": 6,
+              "column": 0
+            },
+            "end": {
+              "line": 6,
+              "column": 20
+            }
+          },
+          "object": {
+            "type": "MemberExpression",
+            "start": 192,
+            "end": 207,
+            "loc": {
+              "start": {
+                "line": 6,
+                "column": 0
+              },
+              "end": {
+                "line": 6,
+                "column": 15
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 192,
+              "end": 202,
+              "loc": {
+                "start": {
+                  "line": 6,
+                  "column": 0
+                },
+                "end": {
+                  "line": 6,
+                  "column": 10
+                }
+              },
+              "name": "globalThis"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 203,
+              "end": 207,
+              "loc": {
+                "start": {
+                  "line": 6,
+                  "column": 11
+                },
+                "end": {
+                  "line": 6,
+                  "column": 15
+                }
+              },
+              "name": "logs"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 208,
+            "end": 212,
+            "loc": {
+              "start": {
+                "line": 6,
+                "column": 16
+              },
+              "end": {
+                "line": 6,
+                "column": 20
+              }
+            },
+            "name": "push"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Literal",
+            "start": 213,
+            "end": 231,
+            "loc": {
+              "start": {
+                "line": 6,
+                "column": 21
+              },
+              "end": {
+                "line": 6,
+                "column": 39
+              }
+            },
+            "value": "cycle leaf start",
+            "raw": "\"cycle leaf start\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 234,
+      "end": 242,
+      "loc": {
+        "start": {
+          "line": 7,
+          "column": 0
+        },
+        "end": {
+          "line": 7,
+          "column": 8
+        }
+      },
+      "expression": {
+        "type": "AwaitExpression",
+        "start": 234,
+        "end": 241,
+        "loc": {
+          "start": {
+            "line": 7,
+            "column": 0
+          },
+          "end": {
+            "line": 7,
+            "column": 7
+          }
+        },
+        "argument": {
+          "type": "Literal",
+          "start": 240,
+          "end": 241,
+          "loc": {
+            "start": {
+              "line": 7,
+              "column": 6
+            },
+            "end": {
+              "line": 7,
+              "column": 7
+            }
+          },
+          "value": 1,
+          "raw": "1"
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 243,
+      "end": 282,
+      "loc": {
+        "start": {
+          "line": 8,
+          "column": 0
+        },
+        "end": {
+          "line": 8,
+          "column": 39
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 243,
+        "end": 281,
+        "loc": {
+          "start": {
+            "line": 8,
+            "column": 0
+          },
+          "end": {
+            "line": 8,
+            "column": 38
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 243,
+          "end": 263,
+          "loc": {
+            "start": {
+              "line": 8,
+              "column": 0
+            },
+            "end": {
+              "line": 8,
+              "column": 20
+            }
+          },
+          "object": {
+            "type": "MemberExpression",
+            "start": 243,
+            "end": 258,
+            "loc": {
+              "start": {
+                "line": 8,
+                "column": 0
+              },
+              "end": {
+                "line": 8,
+                "column": 15
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 243,
+              "end": 253,
+              "loc": {
+                "start": {
+                  "line": 8,
+                  "column": 0
+                },
+                "end": {
+                  "line": 8,
+                  "column": 10
+                }
+              },
+              "name": "globalThis"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 254,
+              "end": 258,
+              "loc": {
+                "start": {
+                  "line": 8,
+                  "column": 11
+                },
+                "end": {
+                  "line": 8,
+                  "column": 15
+                }
+              },
+              "name": "logs"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 259,
+            "end": 263,
+            "loc": {
+              "start": {
+                "line": 8,
+                "column": 16
+              },
+              "end": {
+                "line": 8,
+                "column": 20
+              }
+            },
+            "name": "push"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Literal",
+            "start": 264,
+            "end": 280,
+            "loc": {
+              "start": {
+                "line": 8,
+                "column": 21
+              },
+              "end": {
+                "line": 8,
+                "column": 37
+              }
+            },
+            "value": "cycle leaf end",
+            "raw": "\"cycle leaf end\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "module"
+}

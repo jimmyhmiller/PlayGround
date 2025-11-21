@@ -1,0 +1,552 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 714,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 24,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 523,
+      "end": 590,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 67
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 523,
+        "end": 589,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 0
+          },
+          "end": {
+            "line": 17,
+            "column": 66
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 523,
+          "end": 539,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 0
+            },
+            "end": {
+              "line": 17,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 523,
+            "end": 529,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 0
+              },
+              "end": {
+                "line": 17,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 530,
+            "end": 539,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 7
+              },
+              "end": {
+                "line": 17,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 540,
+            "end": 577,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 17
+              },
+              "end": {
+                "line": 17,
+                "column": 54
+              }
+            },
+            "object": {
+              "type": "MemberExpression",
+              "start": 540,
+              "end": 557,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 17
+                },
+                "end": {
+                  "line": 17,
+                  "column": 34
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 540,
+                "end": 547,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 24
+                  }
+                },
+                "name": "WeakSet"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 548,
+                "end": 557,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 25
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 34
+                  }
+                },
+                "name": "prototype"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "property": {
+              "type": "MemberExpression",
+              "start": 558,
+              "end": 576,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 35
+                },
+                "end": {
+                  "line": 17,
+                  "column": 53
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 558,
+                "end": 564,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 35
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 41
+                  }
+                },
+                "name": "Symbol"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 565,
+                "end": 576,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 42
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 53
+                  }
+                },
+                "name": "toStringTag"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "computed": true,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 579,
+            "end": 588,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 56
+              },
+              "end": {
+                "line": 17,
+                "column": 65
+              }
+            },
+            "value": "WeakSet",
+            "raw": "'WeakSet'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 592,
+      "end": 713,
+      "loc": {
+        "start": {
+          "line": 19,
+          "column": 0
+        },
+        "end": {
+          "line": 23,
+          "column": 3
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 592,
+        "end": 712,
+        "loc": {
+          "start": {
+            "line": 19,
+            "column": 0
+          },
+          "end": {
+            "line": 23,
+            "column": 2
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 592,
+          "end": 606,
+          "loc": {
+            "start": {
+              "line": 19,
+              "column": 0
+            },
+            "end": {
+              "line": 19,
+              "column": 14
+            }
+          },
+          "name": "verifyProperty"
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 607,
+            "end": 624,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 15
+              },
+              "end": {
+                "line": 19,
+                "column": 32
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 607,
+              "end": 614,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 15
+                },
+                "end": {
+                  "line": 19,
+                  "column": 22
+                }
+              },
+              "name": "WeakSet"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 615,
+              "end": 624,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 23
+                },
+                "end": {
+                  "line": 19,
+                  "column": 32
+                }
+              },
+              "name": "prototype"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 626,
+            "end": 644,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 34
+              },
+              "end": {
+                "line": 19,
+                "column": 52
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 626,
+              "end": 632,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 34
+                },
+                "end": {
+                  "line": 19,
+                  "column": 40
+                }
+              },
+              "name": "Symbol"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 633,
+              "end": 644,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 41
+                },
+                "end": {
+                  "line": 19,
+                  "column": 52
+                }
+              },
+              "name": "toStringTag"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "ObjectExpression",
+            "start": 646,
+            "end": 711,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 54
+              },
+              "end": {
+                "line": 23,
+                "column": 1
+              }
+            },
+            "properties": [
+              {
+                "type": "Property",
+                "start": 650,
+                "end": 665,
+                "loc": {
+                  "start": {
+                    "line": 20,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 20,
+                    "column": 17
+                  }
+                },
+                "method": false,
+                "shorthand": false,
+                "computed": false,
+                "key": {
+                  "type": "Identifier",
+                  "start": 650,
+                  "end": 658,
+                  "loc": {
+                    "start": {
+                      "line": 20,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 20,
+                      "column": 10
+                    }
+                  },
+                  "name": "writable"
+                },
+                "value": {
+                  "type": "Literal",
+                  "start": 660,
+                  "end": 665,
+                  "loc": {
+                    "start": {
+                      "line": 20,
+                      "column": 12
+                    },
+                    "end": {
+                      "line": 20,
+                      "column": 17
+                    }
+                  },
+                  "value": false,
+                  "raw": "false"
+                },
+                "kind": "init"
+              },
+              {
+                "type": "Property",
+                "start": 669,
+                "end": 686,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 19
+                  }
+                },
+                "method": false,
+                "shorthand": false,
+                "computed": false,
+                "key": {
+                  "type": "Identifier",
+                  "start": 669,
+                  "end": 679,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 12
+                    }
+                  },
+                  "name": "enumerable"
+                },
+                "value": {
+                  "type": "Literal",
+                  "start": 681,
+                  "end": 686,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 14
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 19
+                    }
+                  },
+                  "value": false,
+                  "raw": "false"
+                },
+                "kind": "init"
+              },
+              {
+                "type": "Property",
+                "start": 690,
+                "end": 708,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 20
+                  }
+                },
+                "method": false,
+                "shorthand": false,
+                "computed": false,
+                "key": {
+                  "type": "Identifier",
+                  "start": 690,
+                  "end": 702,
+                  "loc": {
+                    "start": {
+                      "line": 22,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 22,
+                      "column": 14
+                    }
+                  },
+                  "name": "configurable"
+                },
+                "value": {
+                  "type": "Literal",
+                  "start": 704,
+                  "end": 708,
+                  "loc": {
+                    "start": {
+                      "line": 22,
+                      "column": 16
+                    },
+                    "end": {
+                      "line": 22,
+                      "column": 20
+                    }
+                  },
+                  "value": true,
+                  "raw": "true"
+                },
+                "kind": "init"
+              }
+            ]
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

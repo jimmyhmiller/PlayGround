@@ -1,0 +1,252 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 585,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 26,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 515,
+      "end": 529,
+      "loc": {
+        "start": {
+          "line": 19,
+          "column": 0
+        },
+        "end": {
+          "line": 19,
+          "column": 14
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 519,
+          "end": 528,
+          "loc": {
+            "start": {
+              "line": 19,
+              "column": 4
+            },
+            "end": {
+              "line": 19,
+              "column": 13
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 519,
+            "end": 524,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 4
+              },
+              "end": {
+                "line": 19,
+                "column": 9
+              }
+            },
+            "name": "await"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 527,
+            "end": 528,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 12
+              },
+              "end": {
+                "line": 19,
+                "column": 13
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 530,
+      "end": 584,
+      "loc": {
+        "start": {
+          "line": 20,
+          "column": 0
+        },
+        "end": {
+          "line": 25,
+          "column": 3
+        }
+      },
+      "expression": {
+        "type": "FunctionExpression",
+        "start": 531,
+        "end": 582,
+        "loc": {
+          "start": {
+            "line": 20,
+            "column": 1
+          },
+          "end": {
+            "line": 25,
+            "column": 1
+          }
+        },
+        "id": null,
+        "expression": false,
+        "generator": false,
+        "async": false,
+        "params": [],
+        "body": {
+          "type": "BlockStatement",
+          "start": 542,
+          "end": 582,
+          "loc": {
+            "start": {
+              "line": 20,
+              "column": 12
+            },
+            "end": {
+              "line": 25,
+              "column": 1
+            }
+          },
+          "body": [
+            {
+              "type": "ExpressionStatement",
+              "start": 546,
+              "end": 559,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 2
+                },
+                "end": {
+                  "line": 21,
+                  "column": 15
+                }
+              },
+              "expression": {
+                "type": "Literal",
+                "start": 546,
+                "end": 558,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 14
+                  }
+                },
+                "value": "use strict",
+                "raw": "\"use strict\""
+              },
+              "directive": "use strict"
+            },
+            {
+              "type": "ExpressionStatement",
+              "start": 562,
+              "end": 580,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 2
+                },
+                "end": {
+                  "line": 24,
+                  "column": 5
+                }
+              },
+              "expression": {
+                "type": "ObjectExpression",
+                "start": 563,
+                "end": 578,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 3
+                  },
+                  "end": {
+                    "line": 24,
+                    "column": 3
+                  }
+                },
+                "properties": [
+                  {
+                    "type": "Property",
+                    "start": 569,
+                    "end": 574,
+                    "loc": {
+                      "start": {
+                        "line": 23,
+                        "column": 4
+                      },
+                      "end": {
+                        "line": 23,
+                        "column": 9
+                      }
+                    },
+                    "method": false,
+                    "shorthand": true,
+                    "computed": false,
+                    "key": {
+                      "type": "Identifier",
+                      "start": 569,
+                      "end": 574,
+                      "loc": {
+                        "start": {
+                          "line": 23,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 23,
+                          "column": 9
+                        }
+                      },
+                      "name": "await"
+                    },
+                    "value": {
+                      "type": "Identifier",
+                      "start": 569,
+                      "end": 574,
+                      "loc": {
+                        "start": {
+                          "line": 23,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 23,
+                          "column": 9
+                        }
+                      },
+                      "name": "await"
+                    },
+                    "kind": "init"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "sourceType": "script"
+}

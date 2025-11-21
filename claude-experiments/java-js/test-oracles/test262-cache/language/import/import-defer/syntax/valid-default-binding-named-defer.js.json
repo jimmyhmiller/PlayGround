@@ -1,0 +1,216 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 686,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 31,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ImportDeclaration",
+      "start": 578,
+      "end": 615,
+      "loc": {
+        "start": {
+          "line": 28,
+          "column": 0
+        },
+        "end": {
+          "line": 28,
+          "column": 37
+        }
+      },
+      "specifiers": [
+        {
+          "type": "ImportDefaultSpecifier",
+          "start": 585,
+          "end": 590,
+          "loc": {
+            "start": {
+              "line": 28,
+              "column": 7
+            },
+            "end": {
+              "line": 28,
+              "column": 12
+            }
+          },
+          "local": {
+            "type": "Identifier",
+            "start": 585,
+            "end": 590,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 7
+              },
+              "end": {
+                "line": 28,
+                "column": 12
+              }
+            },
+            "name": "defer"
+          }
+        }
+      ],
+      "source": {
+        "type": "Literal",
+        "start": 596,
+        "end": 614,
+        "loc": {
+          "start": {
+            "line": 28,
+            "column": 18
+          },
+          "end": {
+            "line": 28,
+            "column": 36
+          }
+        },
+        "value": "./dep_FIXTURE.js",
+        "raw": "\"./dep_FIXTURE.js\""
+      },
+      "attributes": []
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 617,
+      "end": 685,
+      "loc": {
+        "start": {
+          "line": 30,
+          "column": 0
+        },
+        "end": {
+          "line": 30,
+          "column": 68
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 617,
+        "end": 684,
+        "loc": {
+          "start": {
+            "line": 30,
+            "column": 0
+          },
+          "end": {
+            "line": 30,
+            "column": 67
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 617,
+          "end": 633,
+          "loc": {
+            "start": {
+              "line": 30,
+              "column": 0
+            },
+            "end": {
+              "line": 30,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 617,
+            "end": 623,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 0
+              },
+              "end": {
+                "line": 30,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 624,
+            "end": 633,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 7
+              },
+              "end": {
+                "line": 30,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 634,
+            "end": 639,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 17
+              },
+              "end": {
+                "line": 30,
+                "column": 22
+              }
+            },
+            "name": "defer"
+          },
+          {
+            "type": "Literal",
+            "start": 641,
+            "end": 642,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 24
+              },
+              "end": {
+                "line": 30,
+                "column": 25
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          },
+          {
+            "type": "Literal",
+            "start": 644,
+            "end": 683,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 27
+              },
+              "end": {
+                "line": 30,
+                "column": 66
+              }
+            },
+            "value": "`defer` is the default export binding",
+            "raw": "\"`defer` is the default export binding\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "module"
+}

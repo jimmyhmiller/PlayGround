@@ -1,0 +1,218 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 229,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 8,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ImportDeclaration",
+      "start": 128,
+      "end": 158,
+      "loc": {
+        "start": {
+          "line": 4,
+          "column": 0
+        },
+        "end": {
+          "line": 4,
+          "column": 30
+        }
+      },
+      "specifiers": [],
+      "source": {
+        "type": "Literal",
+        "start": 135,
+        "end": 157,
+        "loc": {
+          "start": {
+            "line": 4,
+            "column": 7
+          },
+          "end": {
+            "line": 4,
+            "column": 29
+          }
+        },
+        "value": "./dep-2.1_FIXTURE.js",
+        "raw": "\"./dep-2.1_FIXTURE.js\""
+      },
+      "attributes": []
+    },
+    {
+      "type": "ImportDeclaration",
+      "start": 159,
+      "end": 193,
+      "loc": {
+        "start": {
+          "line": 5,
+          "column": 0
+        },
+        "end": {
+          "line": 5,
+          "column": 34
+        }
+      },
+      "specifiers": [],
+      "source": {
+        "type": "Literal",
+        "start": 166,
+        "end": 192,
+        "loc": {
+          "start": {
+            "line": 5,
+            "column": 7
+          },
+          "end": {
+            "line": 5,
+            "column": 33
+          }
+        },
+        "value": "./dep-2.2-tla_FIXTURE.js",
+        "raw": "\"./dep-2.2-tla_FIXTURE.js\""
+      },
+      "attributes": []
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 195,
+      "end": 228,
+      "loc": {
+        "start": {
+          "line": 7,
+          "column": 0
+        },
+        "end": {
+          "line": 7,
+          "column": 33
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 195,
+        "end": 227,
+        "loc": {
+          "start": {
+            "line": 7,
+            "column": 0
+          },
+          "end": {
+            "line": 7,
+            "column": 32
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 195,
+          "end": 222,
+          "loc": {
+            "start": {
+              "line": 7,
+              "column": 0
+            },
+            "end": {
+              "line": 7,
+              "column": 27
+            }
+          },
+          "object": {
+            "type": "MemberExpression",
+            "start": 195,
+            "end": 217,
+            "loc": {
+              "start": {
+                "line": 7,
+                "column": 0
+              },
+              "end": {
+                "line": 7,
+                "column": 22
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 195,
+              "end": 205,
+              "loc": {
+                "start": {
+                  "line": 7,
+                  "column": 0
+                },
+                "end": {
+                  "line": 7,
+                  "column": 10
+                }
+              },
+              "name": "globalThis"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 206,
+              "end": 217,
+              "loc": {
+                "start": {
+                  "line": 7,
+                  "column": 11
+                },
+                "end": {
+                  "line": 7,
+                  "column": 22
+                }
+              },
+              "name": "evaluations"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 218,
+            "end": 222,
+            "loc": {
+              "start": {
+                "line": 7,
+                "column": 23
+              },
+              "end": {
+                "line": 7,
+                "column": 27
+              }
+            },
+            "name": "push"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Literal",
+            "start": 223,
+            "end": 226,
+            "loc": {
+              "start": {
+                "line": 7,
+                "column": 28
+              },
+              "end": {
+                "line": 7,
+                "column": 31
+              }
+            },
+            "value": "2",
+            "raw": "\"2\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "module"
+}

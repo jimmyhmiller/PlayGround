@@ -1,0 +1,184 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 706,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 28,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 647,
+      "end": 705,
+      "loc": {
+        "start": {
+          "line": 27,
+          "column": 0
+        },
+        "end": {
+          "line": 27,
+          "column": 58
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 647,
+        "end": 704,
+        "loc": {
+          "start": {
+            "line": 27,
+            "column": 0
+          },
+          "end": {
+            "line": 27,
+            "column": 57
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 647,
+          "end": 663,
+          "loc": {
+            "start": {
+              "line": 27,
+              "column": 0
+            },
+            "end": {
+              "line": 27,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 647,
+            "end": 653,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 0
+              },
+              "end": {
+                "line": 27,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 654,
+            "end": 663,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 7
+              },
+              "end": {
+                "line": 27,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 664,
+            "end": 684,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 17
+              },
+              "end": {
+                "line": 27,
+                "column": 37
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 664,
+              "end": 670,
+              "loc": {
+                "start": {
+                  "line": 27,
+                  "column": 17
+                },
+                "end": {
+                  "line": 27,
+                  "column": 23
+                }
+              },
+              "name": "Number"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 671,
+                "end": 683,
+                "loc": {
+                  "start": {
+                    "line": 27,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 27,
+                    "column": 36
+                  }
+                },
+                "value": "10.00_01e2",
+                "raw": "\"10.00_01e2\""
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Identifier",
+            "start": 686,
+            "end": 689,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 39
+              },
+              "end": {
+                "line": 27,
+                "column": 42
+              }
+            },
+            "name": "NaN"
+          },
+          {
+            "type": "Literal",
+            "start": 691,
+            "end": 703,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 44
+              },
+              "end": {
+                "line": 27,
+                "column": 56
+              }
+            },
+            "value": "10.00_01e2",
+            "raw": "\"10.00_01e2\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

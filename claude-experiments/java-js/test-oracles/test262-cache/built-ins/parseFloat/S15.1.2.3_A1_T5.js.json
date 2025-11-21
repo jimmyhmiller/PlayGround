@@ -1,0 +1,1478 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1066,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 29,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "IfStatement",
+      "start": 252,
+      "end": 440,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 256,
+        "end": 307,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 4
+          },
+          "end": {
+            "line": 11,
+            "column": 55
+          }
+        },
+        "left": {
+          "type": "CallExpression",
+          "start": 256,
+          "end": 284,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 4
+            },
+            "end": {
+              "line": 11,
+              "column": 32
+            }
+          },
+          "callee": {
+            "type": "Identifier",
+            "start": 256,
+            "end": 266,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 4
+              },
+              "end": {
+                "line": 11,
+                "column": 14
+              }
+            },
+            "name": "parseFloat"
+          },
+          "arguments": [
+            {
+              "type": "NewExpression",
+              "start": 267,
+              "end": 283,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 15
+                },
+                "end": {
+                  "line": 11,
+                  "column": 31
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 271,
+                "end": 277,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 19
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 25
+                  }
+                },
+                "name": "Number"
+              },
+              "arguments": [
+                {
+                  "type": "UnaryExpression",
+                  "start": 278,
+                  "end": 282,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 26
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 30
+                    }
+                  },
+                  "operator": "-",
+                  "prefix": true,
+                  "argument": {
+                    "type": "Literal",
+                    "start": 279,
+                    "end": 282,
+                    "loc": {
+                      "start": {
+                        "line": 11,
+                        "column": 27
+                      },
+                      "end": {
+                        "line": 11,
+                        "column": 30
+                      }
+                    },
+                    "value": 1.1,
+                    "raw": "1.1"
+                  }
+                }
+              ]
+            }
+          ],
+          "optional": false
+        },
+        "operator": "!==",
+        "right": {
+          "type": "CallExpression",
+          "start": 289,
+          "end": 307,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 37
+            },
+            "end": {
+              "line": 11,
+              "column": 55
+            }
+          },
+          "callee": {
+            "type": "Identifier",
+            "start": 289,
+            "end": 299,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 37
+              },
+              "end": {
+                "line": 11,
+                "column": 47
+              }
+            },
+            "name": "parseFloat"
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 300,
+              "end": 306,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 48
+                },
+                "end": {
+                  "line": 11,
+                  "column": 54
+                }
+              },
+              "value": "-1.1",
+              "raw": "\"-1.1\""
+            }
+          ],
+          "optional": false
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 309,
+        "end": 440,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 57
+          },
+          "end": {
+            "line": 13,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 313,
+            "end": 438,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 2
+              },
+              "end": {
+                "line": 12,
+                "column": 127
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 319,
+              "end": 437,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 8
+                },
+                "end": {
+                  "line": 12,
+                  "column": 126
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 323,
+                "end": 335,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "BinaryExpression",
+                  "start": 336,
+                  "end": 436,
+                  "loc": {
+                    "start": {
+                      "line": 12,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 12,
+                      "column": 125
+                    }
+                  },
+                  "left": {
+                    "type": "Literal",
+                    "start": 336,
+                    "end": 403,
+                    "loc": {
+                      "start": {
+                        "line": 12,
+                        "column": 25
+                      },
+                      "end": {
+                        "line": 12,
+                        "column": 92
+                      }
+                    },
+                    "value": "#1: parseFloat(new Number(-1.1)) === parseFloat(\"-1.1\"). Actual: ",
+                    "raw": "'#1: parseFloat(new Number(-1.1)) === parseFloat(\"-1.1\"). Actual: '"
+                  },
+                  "operator": "+",
+                  "right": {
+                    "type": "CallExpression",
+                    "start": 407,
+                    "end": 435,
+                    "loc": {
+                      "start": {
+                        "line": 12,
+                        "column": 96
+                      },
+                      "end": {
+                        "line": 12,
+                        "column": 124
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 407,
+                      "end": 417,
+                      "loc": {
+                        "start": {
+                          "line": 12,
+                          "column": 96
+                        },
+                        "end": {
+                          "line": 12,
+                          "column": 106
+                        }
+                      },
+                      "name": "parseFloat"
+                    },
+                    "arguments": [
+                      {
+                        "type": "NewExpression",
+                        "start": 418,
+                        "end": 434,
+                        "loc": {
+                          "start": {
+                            "line": 12,
+                            "column": 107
+                          },
+                          "end": {
+                            "line": 12,
+                            "column": 123
+                          }
+                        },
+                        "callee": {
+                          "type": "Identifier",
+                          "start": 422,
+                          "end": 428,
+                          "loc": {
+                            "start": {
+                              "line": 12,
+                              "column": 111
+                            },
+                            "end": {
+                              "line": 12,
+                              "column": 117
+                            }
+                          },
+                          "name": "Number"
+                        },
+                        "arguments": [
+                          {
+                            "type": "UnaryExpression",
+                            "start": 429,
+                            "end": 433,
+                            "loc": {
+                              "start": {
+                                "line": 12,
+                                "column": 118
+                              },
+                              "end": {
+                                "line": 12,
+                                "column": 122
+                              }
+                            },
+                            "operator": "-",
+                            "prefix": true,
+                            "argument": {
+                              "type": "Literal",
+                              "start": 430,
+                              "end": 433,
+                              "loc": {
+                                "start": {
+                                  "line": 12,
+                                  "column": 119
+                                },
+                                "end": {
+                                  "line": 12,
+                                  "column": 122
+                                }
+                              },
+                              "value": 1.1,
+                              "raw": "1.1"
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 452,
+      "end": 660,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 456,
+        "end": 515,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 4
+          },
+          "end": {
+            "line": 16,
+            "column": 63
+          }
+        },
+        "left": {
+          "type": "CallExpression",
+          "start": 456,
+          "end": 488,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 4
+            },
+            "end": {
+              "line": 16,
+              "column": 36
+            }
+          },
+          "callee": {
+            "type": "Identifier",
+            "start": 456,
+            "end": 466,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 4
+              },
+              "end": {
+                "line": 16,
+                "column": 14
+              }
+            },
+            "name": "parseFloat"
+          },
+          "arguments": [
+            {
+              "type": "NewExpression",
+              "start": 467,
+              "end": 487,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 15
+                },
+                "end": {
+                  "line": 16,
+                  "column": 35
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 471,
+                "end": 477,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 19
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 25
+                  }
+                },
+                "name": "Number"
+              },
+              "arguments": [
+                {
+                  "type": "Identifier",
+                  "start": 478,
+                  "end": 486,
+                  "loc": {
+                    "start": {
+                      "line": 16,
+                      "column": 26
+                    },
+                    "end": {
+                      "line": 16,
+                      "column": 34
+                    }
+                  },
+                  "name": "Infinity"
+                }
+              ]
+            }
+          ],
+          "optional": false
+        },
+        "operator": "!==",
+        "right": {
+          "type": "CallExpression",
+          "start": 493,
+          "end": 515,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 41
+            },
+            "end": {
+              "line": 16,
+              "column": 63
+            }
+          },
+          "callee": {
+            "type": "Identifier",
+            "start": 493,
+            "end": 503,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 41
+              },
+              "end": {
+                "line": 16,
+                "column": 51
+              }
+            },
+            "name": "parseFloat"
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 504,
+              "end": 514,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 52
+                },
+                "end": {
+                  "line": 16,
+                  "column": 62
+                }
+              },
+              "value": "Infinity",
+              "raw": "\"Infinity\""
+            }
+          ],
+          "optional": false
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 517,
+        "end": 660,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 65
+          },
+          "end": {
+            "line": 18,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 521,
+            "end": 658,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 2
+              },
+              "end": {
+                "line": 17,
+                "column": 139
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 527,
+              "end": 657,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 8
+                },
+                "end": {
+                  "line": 17,
+                  "column": 138
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 531,
+                "end": 543,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "BinaryExpression",
+                  "start": 544,
+                  "end": 656,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 137
+                    }
+                  },
+                  "left": {
+                    "type": "Literal",
+                    "start": 544,
+                    "end": 619,
+                    "loc": {
+                      "start": {
+                        "line": 17,
+                        "column": 25
+                      },
+                      "end": {
+                        "line": 17,
+                        "column": 100
+                      }
+                    },
+                    "value": "#2: parseFloat(new Number(Infinity)) === parseFloat(\"Infinity\"). Actual: ",
+                    "raw": "'#2: parseFloat(new Number(Infinity)) === parseFloat(\"Infinity\"). Actual: '"
+                  },
+                  "operator": "+",
+                  "right": {
+                    "type": "CallExpression",
+                    "start": 623,
+                    "end": 655,
+                    "loc": {
+                      "start": {
+                        "line": 17,
+                        "column": 104
+                      },
+                      "end": {
+                        "line": 17,
+                        "column": 136
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 623,
+                      "end": 633,
+                      "loc": {
+                        "start": {
+                          "line": 17,
+                          "column": 104
+                        },
+                        "end": {
+                          "line": 17,
+                          "column": 114
+                        }
+                      },
+                      "name": "parseFloat"
+                    },
+                    "arguments": [
+                      {
+                        "type": "NewExpression",
+                        "start": 634,
+                        "end": 654,
+                        "loc": {
+                          "start": {
+                            "line": 17,
+                            "column": 115
+                          },
+                          "end": {
+                            "line": 17,
+                            "column": 135
+                          }
+                        },
+                        "callee": {
+                          "type": "Identifier",
+                          "start": 638,
+                          "end": 644,
+                          "loc": {
+                            "start": {
+                              "line": 17,
+                              "column": 119
+                            },
+                            "end": {
+                              "line": 17,
+                              "column": 125
+                            }
+                          },
+                          "name": "Number"
+                        },
+                        "arguments": [
+                          {
+                            "type": "Identifier",
+                            "start": 645,
+                            "end": 653,
+                            "loc": {
+                              "start": {
+                                "line": 17,
+                                "column": 126
+                              },
+                              "end": {
+                                "line": 17,
+                                "column": 134
+                              }
+                            },
+                            "name": "Infinity"
+                          }
+                        ]
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 672,
+      "end": 855,
+      "loc": {
+        "start": {
+          "line": 21,
+          "column": 0
+        },
+        "end": {
+          "line": 23,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 676,
+        "end": 721,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 4
+          },
+          "end": {
+            "line": 21,
+            "column": 49
+          }
+        },
+        "left": {
+          "type": "CallExpression",
+          "start": 676,
+          "end": 711,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 4
+            },
+            "end": {
+              "line": 21,
+              "column": 39
+            }
+          },
+          "callee": {
+            "type": "Identifier",
+            "start": 676,
+            "end": 682,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 4
+              },
+              "end": {
+                "line": 21,
+                "column": 10
+              }
+            },
+            "name": "String"
+          },
+          "arguments": [
+            {
+              "type": "CallExpression",
+              "start": 683,
+              "end": 710,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 11
+                },
+                "end": {
+                  "line": 21,
+                  "column": 38
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 683,
+                "end": 693,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 11
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 21
+                  }
+                },
+                "name": "parseFloat"
+              },
+              "arguments": [
+                {
+                  "type": "NewExpression",
+                  "start": 694,
+                  "end": 709,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 22
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 37
+                    }
+                  },
+                  "callee": {
+                    "type": "Identifier",
+                    "start": 698,
+                    "end": 704,
+                    "loc": {
+                      "start": {
+                        "line": 21,
+                        "column": 26
+                      },
+                      "end": {
+                        "line": 21,
+                        "column": 32
+                      }
+                    },
+                    "name": "Number"
+                  },
+                  "arguments": [
+                    {
+                      "type": "Identifier",
+                      "start": 705,
+                      "end": 708,
+                      "loc": {
+                        "start": {
+                          "line": 21,
+                          "column": 33
+                        },
+                        "end": {
+                          "line": 21,
+                          "column": 36
+                        }
+                      },
+                      "name": "NaN"
+                    }
+                  ]
+                }
+              ],
+              "optional": false
+            }
+          ],
+          "optional": false
+        },
+        "operator": "!==",
+        "right": {
+          "type": "Literal",
+          "start": 716,
+          "end": 721,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 44
+            },
+            "end": {
+              "line": 21,
+              "column": 49
+            }
+          },
+          "value": "NaN",
+          "raw": "\"NaN\""
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 723,
+        "end": 855,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 51
+          },
+          "end": {
+            "line": 23,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 727,
+            "end": 853,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 2
+              },
+              "end": {
+                "line": 22,
+                "column": 128
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 733,
+              "end": 852,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 8
+                },
+                "end": {
+                  "line": 22,
+                  "column": 127
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 737,
+                "end": 749,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "BinaryExpression",
+                  "start": 750,
+                  "end": 851,
+                  "loc": {
+                    "start": {
+                      "line": 22,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 22,
+                      "column": 126
+                    }
+                  },
+                  "left": {
+                    "type": "Literal",
+                    "start": 750,
+                    "end": 811,
+                    "loc": {
+                      "start": {
+                        "line": 22,
+                        "column": 25
+                      },
+                      "end": {
+                        "line": 22,
+                        "column": 86
+                      }
+                    },
+                    "value": "#3: String(parseFloat(new Number(NaN))) === \"NaN\". Actual: ",
+                    "raw": "'#3: String(parseFloat(new Number(NaN))) === \"NaN\". Actual: '"
+                  },
+                  "operator": "+",
+                  "right": {
+                    "type": "CallExpression",
+                    "start": 815,
+                    "end": 850,
+                    "loc": {
+                      "start": {
+                        "line": 22,
+                        "column": 90
+                      },
+                      "end": {
+                        "line": 22,
+                        "column": 125
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 815,
+                      "end": 821,
+                      "loc": {
+                        "start": {
+                          "line": 22,
+                          "column": 90
+                        },
+                        "end": {
+                          "line": 22,
+                          "column": 96
+                        }
+                      },
+                      "name": "String"
+                    },
+                    "arguments": [
+                      {
+                        "type": "CallExpression",
+                        "start": 822,
+                        "end": 849,
+                        "loc": {
+                          "start": {
+                            "line": 22,
+                            "column": 97
+                          },
+                          "end": {
+                            "line": 22,
+                            "column": 124
+                          }
+                        },
+                        "callee": {
+                          "type": "Identifier",
+                          "start": 822,
+                          "end": 832,
+                          "loc": {
+                            "start": {
+                              "line": 22,
+                              "column": 97
+                            },
+                            "end": {
+                              "line": 22,
+                              "column": 107
+                            }
+                          },
+                          "name": "parseFloat"
+                        },
+                        "arguments": [
+                          {
+                            "type": "NewExpression",
+                            "start": 833,
+                            "end": 848,
+                            "loc": {
+                              "start": {
+                                "line": 22,
+                                "column": 108
+                              },
+                              "end": {
+                                "line": 22,
+                                "column": 123
+                              }
+                            },
+                            "callee": {
+                              "type": "Identifier",
+                              "start": 837,
+                              "end": 843,
+                              "loc": {
+                                "start": {
+                                  "line": 22,
+                                  "column": 112
+                                },
+                                "end": {
+                                  "line": 22,
+                                  "column": 118
+                                }
+                              },
+                              "name": "Number"
+                            },
+                            "arguments": [
+                              {
+                                "type": "Identifier",
+                                "start": 844,
+                                "end": 847,
+                                "loc": {
+                                  "start": {
+                                    "line": 22,
+                                    "column": 119
+                                  },
+                                  "end": {
+                                    "line": 22,
+                                    "column": 122
+                                  }
+                                },
+                                "name": "NaN"
+                              }
+                            ]
+                          }
+                        ],
+                        "optional": false
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 867,
+      "end": 1065,
+      "loc": {
+        "start": {
+          "line": 26,
+          "column": 0
+        },
+        "end": {
+          "line": 28,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 871,
+        "end": 926,
+        "loc": {
+          "start": {
+            "line": 26,
+            "column": 4
+          },
+          "end": {
+            "line": 26,
+            "column": 59
+          }
+        },
+        "left": {
+          "type": "CallExpression",
+          "start": 871,
+          "end": 901,
+          "loc": {
+            "start": {
+              "line": 26,
+              "column": 4
+            },
+            "end": {
+              "line": 26,
+              "column": 34
+            }
+          },
+          "callee": {
+            "type": "Identifier",
+            "start": 871,
+            "end": 881,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 4
+              },
+              "end": {
+                "line": 26,
+                "column": 14
+              }
+            },
+            "name": "parseFloat"
+          },
+          "arguments": [
+            {
+              "type": "NewExpression",
+              "start": 882,
+              "end": 900,
+              "loc": {
+                "start": {
+                  "line": 26,
+                  "column": 15
+                },
+                "end": {
+                  "line": 26,
+                  "column": 33
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 886,
+                "end": 892,
+                "loc": {
+                  "start": {
+                    "line": 26,
+                    "column": 19
+                  },
+                  "end": {
+                    "line": 26,
+                    "column": 25
+                  }
+                },
+                "name": "Number"
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 893,
+                  "end": 899,
+                  "loc": {
+                    "start": {
+                      "line": 26,
+                      "column": 26
+                    },
+                    "end": {
+                      "line": 26,
+                      "column": 32
+                    }
+                  },
+                  "value": 1,
+                  "raw": ".01e+2"
+                }
+              ]
+            }
+          ],
+          "optional": false
+        },
+        "operator": "!==",
+        "right": {
+          "type": "CallExpression",
+          "start": 906,
+          "end": 926,
+          "loc": {
+            "start": {
+              "line": 26,
+              "column": 39
+            },
+            "end": {
+              "line": 26,
+              "column": 59
+            }
+          },
+          "callee": {
+            "type": "Identifier",
+            "start": 906,
+            "end": 916,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 39
+              },
+              "end": {
+                "line": 26,
+                "column": 49
+              }
+            },
+            "name": "parseFloat"
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 917,
+              "end": 925,
+              "loc": {
+                "start": {
+                  "line": 26,
+                  "column": 50
+                },
+                "end": {
+                  "line": 26,
+                  "column": 58
+                }
+              },
+              "value": ".01e+2",
+              "raw": "\".01e+2\""
+            }
+          ],
+          "optional": false
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 928,
+        "end": 1065,
+        "loc": {
+          "start": {
+            "line": 26,
+            "column": 61
+          },
+          "end": {
+            "line": 28,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 932,
+            "end": 1063,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 2
+              },
+              "end": {
+                "line": 27,
+                "column": 133
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 938,
+              "end": 1062,
+              "loc": {
+                "start": {
+                  "line": 27,
+                  "column": 8
+                },
+                "end": {
+                  "line": 27,
+                  "column": 132
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 942,
+                "end": 954,
+                "loc": {
+                  "start": {
+                    "line": 27,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 27,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "BinaryExpression",
+                  "start": 955,
+                  "end": 1061,
+                  "loc": {
+                    "start": {
+                      "line": 27,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 27,
+                      "column": 131
+                    }
+                  },
+                  "left": {
+                    "type": "Literal",
+                    "start": 955,
+                    "end": 1026,
+                    "loc": {
+                      "start": {
+                        "line": 27,
+                        "column": 25
+                      },
+                      "end": {
+                        "line": 27,
+                        "column": 96
+                      }
+                    },
+                    "value": "#4: parseFloat(new Number(.01e+2)) === parseFloat(\".01e+2\"). Actual: ",
+                    "raw": "'#4: parseFloat(new Number(.01e+2)) === parseFloat(\".01e+2\"). Actual: '"
+                  },
+                  "operator": "+",
+                  "right": {
+                    "type": "CallExpression",
+                    "start": 1030,
+                    "end": 1060,
+                    "loc": {
+                      "start": {
+                        "line": 27,
+                        "column": 100
+                      },
+                      "end": {
+                        "line": 27,
+                        "column": 130
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 1030,
+                      "end": 1040,
+                      "loc": {
+                        "start": {
+                          "line": 27,
+                          "column": 100
+                        },
+                        "end": {
+                          "line": 27,
+                          "column": 110
+                        }
+                      },
+                      "name": "parseFloat"
+                    },
+                    "arguments": [
+                      {
+                        "type": "NewExpression",
+                        "start": 1041,
+                        "end": 1059,
+                        "loc": {
+                          "start": {
+                            "line": 27,
+                            "column": 111
+                          },
+                          "end": {
+                            "line": 27,
+                            "column": 129
+                          }
+                        },
+                        "callee": {
+                          "type": "Identifier",
+                          "start": 1045,
+                          "end": 1051,
+                          "loc": {
+                            "start": {
+                              "line": 27,
+                              "column": 115
+                            },
+                            "end": {
+                              "line": 27,
+                              "column": 121
+                            }
+                          },
+                          "name": "Number"
+                        },
+                        "arguments": [
+                          {
+                            "type": "Literal",
+                            "start": 1052,
+                            "end": 1058,
+                            "loc": {
+                              "start": {
+                                "line": 27,
+                                "column": 122
+                              },
+                              "end": {
+                                "line": 27,
+                                "column": 128
+                              }
+                            },
+                            "value": 1,
+                            "raw": ".01e+2"
+                          }
+                        ]
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    }
+  ],
+  "sourceType": "script"
+}

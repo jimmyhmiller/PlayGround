@@ -1,0 +1,391 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 477,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 17,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 339,
+      "end": 381,
+      "loc": {
+        "start": {
+          "line": 13,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 42
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 339,
+        "end": 380,
+        "loc": {
+          "start": {
+            "line": 13,
+            "column": 0
+          },
+          "end": {
+            "line": 13,
+            "column": 41
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 339,
+          "end": 356,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 0
+            },
+            "end": {
+              "line": 13,
+              "column": 17
+            }
+          },
+          "name": "taintDataProperty"
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 357,
+            "end": 361,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 18
+              },
+              "end": {
+                "line": 13,
+                "column": 22
+              }
+            },
+            "name": "Intl"
+          },
+          {
+            "type": "Literal",
+            "start": 363,
+            "end": 379,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 24
+              },
+              "end": {
+                "line": 13,
+                "column": 40
+              }
+            },
+            "value": "DateTimeFormat",
+            "raw": "\"DateTimeFormat\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 382,
+      "end": 410,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 28
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 382,
+        "end": 409,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 27
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 382,
+          "end": 407,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 0
+            },
+            "end": {
+              "line": 14,
+              "column": 25
+            }
+          },
+          "object": {
+            "type": "NewExpression",
+            "start": 382,
+            "end": 392,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 0
+              },
+              "end": {
+                "line": 14,
+                "column": 10
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 386,
+              "end": 390,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 4
+                },
+                "end": {
+                  "line": 14,
+                  "column": 8
+                }
+              },
+              "name": "Date"
+            },
+            "arguments": []
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 393,
+            "end": 407,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 11
+              },
+              "end": {
+                "line": 14,
+                "column": 25
+              }
+            },
+            "name": "toLocaleString"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 411,
+      "end": 443,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 32
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 411,
+        "end": 442,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 0
+          },
+          "end": {
+            "line": 15,
+            "column": 31
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 411,
+          "end": 440,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 0
+            },
+            "end": {
+              "line": 15,
+              "column": 29
+            }
+          },
+          "object": {
+            "type": "NewExpression",
+            "start": 411,
+            "end": 421,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 0
+              },
+              "end": {
+                "line": 15,
+                "column": 10
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 415,
+              "end": 419,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 4
+                },
+                "end": {
+                  "line": 15,
+                  "column": 8
+                }
+              },
+              "name": "Date"
+            },
+            "arguments": []
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 422,
+            "end": 440,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 11
+              },
+              "end": {
+                "line": 15,
+                "column": 29
+              }
+            },
+            "name": "toLocaleDateString"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 444,
+      "end": 476,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 32
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 444,
+        "end": 475,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 0
+          },
+          "end": {
+            "line": 16,
+            "column": 31
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 444,
+          "end": 473,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 0
+            },
+            "end": {
+              "line": 16,
+              "column": 29
+            }
+          },
+          "object": {
+            "type": "NewExpression",
+            "start": 444,
+            "end": 454,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 0
+              },
+              "end": {
+                "line": 16,
+                "column": 10
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 448,
+              "end": 452,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 4
+                },
+                "end": {
+                  "line": 16,
+                  "column": 8
+                }
+              },
+              "name": "Date"
+            },
+            "arguments": []
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 455,
+            "end": 473,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 11
+              },
+              "end": {
+                "line": 16,
+                "column": 29
+              }
+            },
+            "name": "toLocaleTimeString"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

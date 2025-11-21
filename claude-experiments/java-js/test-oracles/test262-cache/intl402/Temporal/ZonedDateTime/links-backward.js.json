@@ -1,0 +1,2570 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 8804,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 140,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 291,
+      "end": 8672,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 134,
+          "column": 2
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 297,
+          "end": 8671,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 6
+            },
+            "end": {
+              "line": 134,
+              "column": 1
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 297,
+            "end": 306,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 6
+              },
+              "end": {
+                "line": 10,
+                "column": 15
+              }
+            },
+            "name": "testCases"
+          },
+          "init": {
+            "type": "ArrayExpression",
+            "start": 309,
+            "end": 8671,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 18
+              },
+              "end": {
+                "line": 134,
+                "column": 1
+              }
+            },
+            "elements": [
+              {
+                "type": "Literal",
+                "start": 313,
+                "end": 328,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 17
+                  }
+                },
+                "value": "Africa/Asmera",
+                "raw": "\"Africa/Asmera\""
+              },
+              {
+                "type": "Literal",
+                "start": 382,
+                "end": 399,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 19
+                  }
+                },
+                "value": "Africa/Timbuktu",
+                "raw": "\"Africa/Timbuktu\""
+              },
+              {
+                "type": "Literal",
+                "start": 455,
+                "end": 489,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 36
+                  }
+                },
+                "value": "America/Argentina/ComodRivadavia",
+                "raw": "\"America/Argentina/ComodRivadavia\""
+              },
+              {
+                "type": "Literal",
+                "start": 570,
+                "end": 584,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 16
+                  }
+                },
+                "value": "America/Atka",
+                "raw": "\"America/Atka\""
+              },
+              {
+                "type": "Literal",
+                "start": 637,
+                "end": 659,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 24
+                  }
+                },
+                "value": "America/Buenos_Aires",
+                "raw": "\"America/Buenos_Aires\""
+              },
+              {
+                "type": "Literal",
+                "start": 728,
+                "end": 747,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 21
+                  }
+                },
+                "value": "America/Catamarca",
+                "raw": "\"America/Catamarca\""
+              },
+              {
+                "type": "Literal",
+                "start": 813,
+                "end": 836,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 25
+                  }
+                },
+                "value": "America/Coral_Harbour",
+                "raw": "\"America/Coral_Harbour\""
+              },
+              {
+                "type": "Literal",
+                "start": 898,
+                "end": 915,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 19
+                  }
+                },
+                "value": "America/Cordoba",
+                "raw": "\"America/Cordoba\""
+              },
+              {
+                "type": "Literal",
+                "start": 979,
+                "end": 997,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 20
+                  }
+                },
+                "value": "America/Ensenada",
+                "raw": "\"America/Ensenada\""
+              },
+              {
+                "type": "Literal",
+                "start": 1054,
+                "end": 1074,
+                "loc": {
+                  "start": {
+                    "line": 20,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 20,
+                    "column": 22
+                  }
+                },
+                "value": "America/Fort_Wayne",
+                "raw": "\"America/Fort_Wayne\""
+              },
+              {
+                "type": "Literal",
+                "start": 1141,
+                "end": 1158,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 19
+                  }
+                },
+                "value": "America/Godthab",
+                "raw": "\"America/Godthab\""
+              },
+              {
+                "type": "Literal",
+                "start": 1214,
+                "end": 1236,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 24
+                  }
+                },
+                "value": "America/Indianapolis",
+                "raw": "\"America/Indianapolis\""
+              },
+              {
+                "type": "Literal",
+                "start": 1305,
+                "end": 1320,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 17
+                  }
+                },
+                "value": "America/Jujuy",
+                "raw": "\"America/Jujuy\""
+              },
+              {
+                "type": "Literal",
+                "start": 1374,
+                "end": 1391,
+                "loc": {
+                  "start": {
+                    "line": 24,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 24,
+                    "column": 19
+                  }
+                },
+                "value": "America/Knox_IN",
+                "raw": "\"America/Knox_IN\""
+              },
+              {
+                "type": "Literal",
+                "start": 1447,
+                "end": 1467,
+                "loc": {
+                  "start": {
+                    "line": 25,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 25,
+                    "column": 22
+                  }
+                },
+                "value": "America/Louisville",
+                "raw": "\"America/Louisville\""
+              },
+              {
+                "type": "Literal",
+                "start": 1534,
+                "end": 1551,
+                "loc": {
+                  "start": {
+                    "line": 26,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 26,
+                    "column": 19
+                  }
+                },
+                "value": "America/Mendoza",
+                "raw": "\"America/Mendoza\""
+              },
+              {
+                "type": "Literal",
+                "start": 1615,
+                "end": 1633,
+                "loc": {
+                  "start": {
+                    "line": 27,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 27,
+                    "column": 20
+                  }
+                },
+                "value": "America/Montreal",
+                "raw": "\"America/Montreal\""
+              },
+              {
+                "type": "Literal",
+                "start": 1690,
+                "end": 1710,
+                "loc": {
+                  "start": {
+                    "line": 28,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 28,
+                    "column": 22
+                  }
+                },
+                "value": "America/Porto_Acre",
+                "raw": "\"America/Porto_Acre\""
+              },
+              {
+                "type": "Literal",
+                "start": 1769,
+                "end": 1786,
+                "loc": {
+                  "start": {
+                    "line": 29,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 29,
+                    "column": 19
+                  }
+                },
+                "value": "America/Rosario",
+                "raw": "\"America/Rosario\""
+              },
+              {
+                "type": "Literal",
+                "start": 1850,
+                "end": 1872,
+                "loc": {
+                  "start": {
+                    "line": 30,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 30,
+                    "column": 24
+                  }
+                },
+                "value": "America/Santa_Isabel",
+                "raw": "\"America/Santa_Isabel\""
+              },
+              {
+                "type": "Literal",
+                "start": 1933,
+                "end": 1951,
+                "loc": {
+                  "start": {
+                    "line": 31,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 31,
+                    "column": 20
+                  }
+                },
+                "value": "America/Shiprock",
+                "raw": "\"America/Shiprock\""
+              },
+              {
+                "type": "Literal",
+                "start": 2008,
+                "end": 2024,
+                "loc": {
+                  "start": {
+                    "line": 32,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 32,
+                    "column": 18
+                  }
+                },
+                "value": "America/Virgin",
+                "raw": "\"America/Virgin\""
+              },
+              {
+                "type": "Literal",
+                "start": 2079,
+                "end": 2102,
+                "loc": {
+                  "start": {
+                    "line": 33,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 33,
+                    "column": 25
+                  }
+                },
+                "value": "Antarctica/South_Pole",
+                "raw": "\"Antarctica/South_Pole\""
+              },
+              {
+                "type": "Literal",
+                "start": 2164,
+                "end": 2180,
+                "loc": {
+                  "start": {
+                    "line": 34,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 34,
+                    "column": 18
+                  }
+                },
+                "value": "Asia/Ashkhabad",
+                "raw": "\"Asia/Ashkhabad\""
+              },
+              {
+                "type": "Literal",
+                "start": 2235,
+                "end": 2250,
+                "loc": {
+                  "start": {
+                    "line": 35,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 35,
+                    "column": 17
+                  }
+                },
+                "value": "Asia/Calcutta",
+                "raw": "\"Asia/Calcutta\""
+              },
+              {
+                "type": "Literal",
+                "start": 2304,
+                "end": 2320,
+                "loc": {
+                  "start": {
+                    "line": 36,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 36,
+                    "column": 18
+                  }
+                },
+                "value": "Asia/Chongqing",
+                "raw": "\"Asia/Chongqing\""
+              },
+              {
+                "type": "Literal",
+                "start": 2375,
+                "end": 2391,
+                "loc": {
+                  "start": {
+                    "line": 37,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 37,
+                    "column": 18
+                  }
+                },
+                "value": "Asia/Chungking",
+                "raw": "\"Asia/Chungking\""
+              },
+              {
+                "type": "Literal",
+                "start": 2446,
+                "end": 2458,
+                "loc": {
+                  "start": {
+                    "line": 38,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 38,
+                    "column": 14
+                  }
+                },
+                "value": "Asia/Dacca",
+                "raw": "\"Asia/Dacca\""
+              },
+              {
+                "type": "Literal",
+                "start": 2509,
+                "end": 2522,
+                "loc": {
+                  "start": {
+                    "line": 39,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 39,
+                    "column": 15
+                  }
+                },
+                "value": "Asia/Harbin",
+                "raw": "\"Asia/Harbin\""
+              },
+              {
+                "type": "Literal",
+                "start": 2574,
+                "end": 2588,
+                "loc": {
+                  "start": {
+                    "line": 40,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 40,
+                    "column": 16
+                  }
+                },
+                "value": "Asia/Kashgar",
+                "raw": "\"Asia/Kashgar\""
+              },
+              {
+                "type": "Literal",
+                "start": 2641,
+                "end": 2656,
+                "loc": {
+                  "start": {
+                    "line": 41,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 41,
+                    "column": 17
+                  }
+                },
+                "value": "Asia/Katmandu",
+                "raw": "\"Asia/Katmandu\""
+              },
+              {
+                "type": "Literal",
+                "start": 2710,
+                "end": 2722,
+                "loc": {
+                  "start": {
+                    "line": 42,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 42,
+                    "column": 14
+                  }
+                },
+                "value": "Asia/Macao",
+                "raw": "\"Asia/Macao\""
+              },
+              {
+                "type": "Literal",
+                "start": 2773,
+                "end": 2787,
+                "loc": {
+                  "start": {
+                    "line": 43,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 43,
+                    "column": 16
+                  }
+                },
+                "value": "Asia/Rangoon",
+                "raw": "\"Asia/Rangoon\""
+              },
+              {
+                "type": "Literal",
+                "start": 2840,
+                "end": 2853,
+                "loc": {
+                  "start": {
+                    "line": 44,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 44,
+                    "column": 15
+                  }
+                },
+                "value": "Asia/Saigon",
+                "raw": "\"Asia/Saigon\""
+              },
+              {
+                "type": "Literal",
+                "start": 2905,
+                "end": 2920,
+                "loc": {
+                  "start": {
+                    "line": 45,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 45,
+                    "column": 17
+                  }
+                },
+                "value": "Asia/Tel_Aviv",
+                "raw": "\"Asia/Tel_Aviv\""
+              },
+              {
+                "type": "Literal",
+                "start": 2974,
+                "end": 2987,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 15
+                  }
+                },
+                "value": "Asia/Thimbu",
+                "raw": "\"Asia/Thimbu\""
+              },
+              {
+                "type": "Literal",
+                "start": 3039,
+                "end": 3059,
+                "loc": {
+                  "start": {
+                    "line": 47,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 47,
+                    "column": 22
+                  }
+                },
+                "value": "Asia/Ujung_Pandang",
+                "raw": "\"Asia/Ujung_Pandang\""
+              },
+              {
+                "type": "Literal",
+                "start": 3118,
+                "end": 3135,
+                "loc": {
+                  "start": {
+                    "line": 48,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 48,
+                    "column": 19
+                  }
+                },
+                "value": "Asia/Ulan_Bator",
+                "raw": "\"Asia/Ulan_Bator\""
+              },
+              {
+                "type": "Literal",
+                "start": 3191,
+                "end": 3208,
+                "loc": {
+                  "start": {
+                    "line": 49,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 49,
+                    "column": 19
+                  }
+                },
+                "value": "Atlantic/Faeroe",
+                "raw": "\"Atlantic/Faeroe\""
+              },
+              {
+                "type": "Literal",
+                "start": 3264,
+                "end": 3284,
+                "loc": {
+                  "start": {
+                    "line": 50,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 50,
+                    "column": 22
+                  }
+                },
+                "value": "Atlantic/Jan_Mayen",
+                "raw": "\"Atlantic/Jan_Mayen\""
+              },
+              {
+                "type": "Literal",
+                "start": 3343,
+                "end": 3358,
+                "loc": {
+                  "start": {
+                    "line": 51,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 51,
+                    "column": 17
+                  }
+                },
+                "value": "Australia/ACT",
+                "raw": "\"Australia/ACT\""
+              },
+              {
+                "type": "Literal",
+                "start": 3412,
+                "end": 3432,
+                "loc": {
+                  "start": {
+                    "line": 52,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 52,
+                    "column": 22
+                  }
+                },
+                "value": "Australia/Canberra",
+                "raw": "\"Australia/Canberra\""
+              },
+              {
+                "type": "Literal",
+                "start": 3491,
+                "end": 3509,
+                "loc": {
+                  "start": {
+                    "line": 53,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 53,
+                    "column": 20
+                  }
+                },
+                "value": "Australia/Currie",
+                "raw": "\"Australia/Currie\""
+              },
+              {
+                "type": "Literal",
+                "start": 3566,
+                "end": 3581,
+                "loc": {
+                  "start": {
+                    "line": 54,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 54,
+                    "column": 17
+                  }
+                },
+                "value": "Australia/LHI",
+                "raw": "\"Australia/LHI\""
+              },
+              {
+                "type": "Literal",
+                "start": 3635,
+                "end": 3650,
+                "loc": {
+                  "start": {
+                    "line": 55,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 55,
+                    "column": 17
+                  }
+                },
+                "value": "Australia/NSW",
+                "raw": "\"Australia/NSW\""
+              },
+              {
+                "type": "Literal",
+                "start": 3704,
+                "end": 3721,
+                "loc": {
+                  "start": {
+                    "line": 56,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 56,
+                    "column": 19
+                  }
+                },
+                "value": "Australia/North",
+                "raw": "\"Australia/North\""
+              },
+              {
+                "type": "Literal",
+                "start": 3777,
+                "end": 3799,
+                "loc": {
+                  "start": {
+                    "line": 57,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 57,
+                    "column": 24
+                  }
+                },
+                "value": "Australia/Queensland",
+                "raw": "\"Australia/Queensland\""
+              },
+              {
+                "type": "Literal",
+                "start": 3860,
+                "end": 3877,
+                "loc": {
+                  "start": {
+                    "line": 58,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 58,
+                    "column": 19
+                  }
+                },
+                "value": "Australia/South",
+                "raw": "\"Australia/South\""
+              },
+              {
+                "type": "Literal",
+                "start": 3933,
+                "end": 3953,
+                "loc": {
+                  "start": {
+                    "line": 59,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 59,
+                    "column": 22
+                  }
+                },
+                "value": "Australia/Tasmania",
+                "raw": "\"Australia/Tasmania\""
+              },
+              {
+                "type": "Literal",
+                "start": 4012,
+                "end": 4032,
+                "loc": {
+                  "start": {
+                    "line": 60,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 60,
+                    "column": 22
+                  }
+                },
+                "value": "Australia/Victoria",
+                "raw": "\"Australia/Victoria\""
+              },
+              {
+                "type": "Literal",
+                "start": 4091,
+                "end": 4107,
+                "loc": {
+                  "start": {
+                    "line": 61,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 61,
+                    "column": 18
+                  }
+                },
+                "value": "Australia/West",
+                "raw": "\"Australia/West\""
+              },
+              {
+                "type": "Literal",
+                "start": 4162,
+                "end": 4184,
+                "loc": {
+                  "start": {
+                    "line": 62,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 62,
+                    "column": 24
+                  }
+                },
+                "value": "Australia/Yancowinna",
+                "raw": "\"Australia/Yancowinna\""
+              },
+              {
+                "type": "Literal",
+                "start": 4245,
+                "end": 4258,
+                "loc": {
+                  "start": {
+                    "line": 63,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 63,
+                    "column": 15
+                  }
+                },
+                "value": "Brazil/Acre",
+                "raw": "\"Brazil/Acre\""
+              },
+              {
+                "type": "Literal",
+                "start": 4310,
+                "end": 4328,
+                "loc": {
+                  "start": {
+                    "line": 64,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 64,
+                    "column": 20
+                  }
+                },
+                "value": "Brazil/DeNoronha",
+                "raw": "\"Brazil/DeNoronha\""
+              },
+              {
+                "type": "Literal",
+                "start": 4385,
+                "end": 4398,
+                "loc": {
+                  "start": {
+                    "line": 65,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 65,
+                    "column": 15
+                  }
+                },
+                "value": "Brazil/East",
+                "raw": "\"Brazil/East\""
+              },
+              {
+                "type": "Literal",
+                "start": 4450,
+                "end": 4463,
+                "loc": {
+                  "start": {
+                    "line": 66,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 66,
+                    "column": 15
+                  }
+                },
+                "value": "Brazil/West",
+                "raw": "\"Brazil/West\""
+              },
+              {
+                "type": "Literal",
+                "start": 4515,
+                "end": 4532,
+                "loc": {
+                  "start": {
+                    "line": 67,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 67,
+                    "column": 19
+                  }
+                },
+                "value": "Canada/Atlantic",
+                "raw": "\"Canada/Atlantic\""
+              },
+              {
+                "type": "Literal",
+                "start": 4588,
+                "end": 4604,
+                "loc": {
+                  "start": {
+                    "line": 68,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 68,
+                    "column": 18
+                  }
+                },
+                "value": "Canada/Central",
+                "raw": "\"Canada/Central\""
+              },
+              {
+                "type": "Literal",
+                "start": 4659,
+                "end": 4675,
+                "loc": {
+                  "start": {
+                    "line": 69,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 69,
+                    "column": 18
+                  }
+                },
+                "value": "Canada/Eastern",
+                "raw": "\"Canada/Eastern\""
+              },
+              {
+                "type": "Literal",
+                "start": 4730,
+                "end": 4747,
+                "loc": {
+                  "start": {
+                    "line": 70,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 70,
+                    "column": 19
+                  }
+                },
+                "value": "Canada/Mountain",
+                "raw": "\"Canada/Mountain\""
+              },
+              {
+                "type": "Literal",
+                "start": 4803,
+                "end": 4824,
+                "loc": {
+                  "start": {
+                    "line": 71,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 71,
+                    "column": 23
+                  }
+                },
+                "value": "Canada/Newfoundland",
+                "raw": "\"Canada/Newfoundland\""
+              },
+              {
+                "type": "Literal",
+                "start": 4884,
+                "end": 4900,
+                "loc": {
+                  "start": {
+                    "line": 72,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 72,
+                    "column": 18
+                  }
+                },
+                "value": "Canada/Pacific",
+                "raw": "\"Canada/Pacific\""
+              },
+              {
+                "type": "Literal",
+                "start": 4955,
+                "end": 4976,
+                "loc": {
+                  "start": {
+                    "line": 73,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 73,
+                    "column": 23
+                  }
+                },
+                "value": "Canada/Saskatchewan",
+                "raw": "\"Canada/Saskatchewan\""
+              },
+              {
+                "type": "Literal",
+                "start": 5036,
+                "end": 5050,
+                "loc": {
+                  "start": {
+                    "line": 74,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 74,
+                    "column": 16
+                  }
+                },
+                "value": "Canada/Yukon",
+                "raw": "\"Canada/Yukon\""
+              },
+              {
+                "type": "Literal",
+                "start": 5103,
+                "end": 5122,
+                "loc": {
+                  "start": {
+                    "line": 75,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 75,
+                    "column": 21
+                  }
+                },
+                "value": "Chile/Continental",
+                "raw": "\"Chile/Continental\""
+              },
+              {
+                "type": "Literal",
+                "start": 5180,
+                "end": 5200,
+                "loc": {
+                  "start": {
+                    "line": 76,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 76,
+                    "column": 22
+                  }
+                },
+                "value": "Chile/EasterIsland",
+                "raw": "\"Chile/EasterIsland\""
+              },
+              {
+                "type": "Literal",
+                "start": 5259,
+                "end": 5265,
+                "loc": {
+                  "start": {
+                    "line": 77,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 77,
+                    "column": 8
+                  }
+                },
+                "value": "Cuba",
+                "raw": "\"Cuba\""
+              },
+              {
+                "type": "Literal",
+                "start": 5310,
+                "end": 5317,
+                "loc": {
+                  "start": {
+                    "line": 78,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 78,
+                    "column": 9
+                  }
+                },
+                "value": "Egypt",
+                "raw": "\"Egypt\""
+              },
+              {
+                "type": "Literal",
+                "start": 5363,
+                "end": 5369,
+                "loc": {
+                  "start": {
+                    "line": 79,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 79,
+                    "column": 8
+                  }
+                },
+                "value": "Eire",
+                "raw": "\"Eire\""
+              },
+              {
+                "type": "Literal",
+                "start": 5414,
+                "end": 5423,
+                "loc": {
+                  "start": {
+                    "line": 80,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 80,
+                    "column": 11
+                  }
+                },
+                "value": "Etc/UCT",
+                "raw": "\"Etc/UCT\""
+              },
+              {
+                "type": "Literal",
+                "start": 5471,
+                "end": 5487,
+                "loc": {
+                  "start": {
+                    "line": 81,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 81,
+                    "column": 18
+                  }
+                },
+                "value": "Europe/Belfast",
+                "raw": "\"Europe/Belfast\""
+              },
+              {
+                "type": "Literal",
+                "start": 5542,
+                "end": 5555,
+                "loc": {
+                  "start": {
+                    "line": 82,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 82,
+                    "column": 15
+                  }
+                },
+                "value": "Europe/Kiev",
+                "raw": "\"Europe/Kiev\""
+              },
+              {
+                "type": "Literal",
+                "start": 5607,
+                "end": 5624,
+                "loc": {
+                  "start": {
+                    "line": 83,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 83,
+                    "column": 19
+                  }
+                },
+                "value": "Europe/Tiraspol",
+                "raw": "\"Europe/Tiraspol\""
+              },
+              {
+                "type": "Literal",
+                "start": 5680,
+                "end": 5684,
+                "loc": {
+                  "start": {
+                    "line": 84,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 84,
+                    "column": 6
+                  }
+                },
+                "value": "GB",
+                "raw": "\"GB\""
+              },
+              {
+                "type": "Literal",
+                "start": 5727,
+                "end": 5736,
+                "loc": {
+                  "start": {
+                    "line": 85,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 85,
+                    "column": 11
+                  }
+                },
+                "value": "GB-Eire",
+                "raw": "\"GB-Eire\""
+              },
+              {
+                "type": "Literal",
+                "start": 5784,
+                "end": 5791,
+                "loc": {
+                  "start": {
+                    "line": 86,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 86,
+                    "column": 9
+                  }
+                },
+                "value": "GMT+0",
+                "raw": "\"GMT+0\""
+              },
+              {
+                "type": "Literal",
+                "start": 5837,
+                "end": 5844,
+                "loc": {
+                  "start": {
+                    "line": 87,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 87,
+                    "column": 9
+                  }
+                },
+                "value": "GMT-0",
+                "raw": "\"GMT-0\""
+              },
+              {
+                "type": "Literal",
+                "start": 5890,
+                "end": 5896,
+                "loc": {
+                  "start": {
+                    "line": 88,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 88,
+                    "column": 8
+                  }
+                },
+                "value": "GMT0",
+                "raw": "\"GMT0\""
+              },
+              {
+                "type": "Literal",
+                "start": 5941,
+                "end": 5952,
+                "loc": {
+                  "start": {
+                    "line": 89,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 89,
+                    "column": 13
+                  }
+                },
+                "value": "Greenwich",
+                "raw": "\"Greenwich\""
+              },
+              {
+                "type": "Literal",
+                "start": 6002,
+                "end": 6012,
+                "loc": {
+                  "start": {
+                    "line": 90,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 90,
+                    "column": 12
+                  }
+                },
+                "value": "Hongkong",
+                "raw": "\"Hongkong\""
+              },
+              {
+                "type": "Literal",
+                "start": 6061,
+                "end": 6070,
+                "loc": {
+                  "start": {
+                    "line": 91,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 91,
+                    "column": 11
+                  }
+                },
+                "value": "Iceland",
+                "raw": "\"Iceland\""
+              },
+              {
+                "type": "Literal",
+                "start": 6118,
+                "end": 6124,
+                "loc": {
+                  "start": {
+                    "line": 92,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 92,
+                    "column": 8
+                  }
+                },
+                "value": "Iran",
+                "raw": "\"Iran\""
+              },
+              {
+                "type": "Literal",
+                "start": 6169,
+                "end": 6177,
+                "loc": {
+                  "start": {
+                    "line": 93,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 93,
+                    "column": 10
+                  }
+                },
+                "value": "Israel",
+                "raw": "\"Israel\""
+              },
+              {
+                "type": "Literal",
+                "start": 6224,
+                "end": 6233,
+                "loc": {
+                  "start": {
+                    "line": 94,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 94,
+                    "column": 11
+                  }
+                },
+                "value": "Jamaica",
+                "raw": "\"Jamaica\""
+              },
+              {
+                "type": "Literal",
+                "start": 6281,
+                "end": 6288,
+                "loc": {
+                  "start": {
+                    "line": 95,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 95,
+                    "column": 9
+                  }
+                },
+                "value": "Japan",
+                "raw": "\"Japan\""
+              },
+              {
+                "type": "Literal",
+                "start": 6334,
+                "end": 6345,
+                "loc": {
+                  "start": {
+                    "line": 96,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 96,
+                    "column": 13
+                  }
+                },
+                "value": "Kwajalein",
+                "raw": "\"Kwajalein\""
+              },
+              {
+                "type": "Literal",
+                "start": 6395,
+                "end": 6402,
+                "loc": {
+                  "start": {
+                    "line": 97,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 97,
+                    "column": 9
+                  }
+                },
+                "value": "Libya",
+                "raw": "\"Libya\""
+              },
+              {
+                "type": "Literal",
+                "start": 6448,
+                "end": 6466,
+                "loc": {
+                  "start": {
+                    "line": 98,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 98,
+                    "column": 20
+                  }
+                },
+                "value": "Mexico/BajaNorte",
+                "raw": "\"Mexico/BajaNorte\""
+              },
+              {
+                "type": "Literal",
+                "start": 6523,
+                "end": 6539,
+                "loc": {
+                  "start": {
+                    "line": 99,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 99,
+                    "column": 18
+                  }
+                },
+                "value": "Mexico/BajaSur",
+                "raw": "\"Mexico/BajaSur\""
+              },
+              {
+                "type": "Literal",
+                "start": 6594,
+                "end": 6610,
+                "loc": {
+                  "start": {
+                    "line": 100,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 100,
+                    "column": 18
+                  }
+                },
+                "value": "Mexico/General",
+                "raw": "\"Mexico/General\""
+              },
+              {
+                "type": "Literal",
+                "start": 6665,
+                "end": 6669,
+                "loc": {
+                  "start": {
+                    "line": 101,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 101,
+                    "column": 6
+                  }
+                },
+                "value": "NZ",
+                "raw": "\"NZ\""
+              },
+              {
+                "type": "Literal",
+                "start": 6712,
+                "end": 6721,
+                "loc": {
+                  "start": {
+                    "line": 102,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 102,
+                    "column": 11
+                  }
+                },
+                "value": "NZ-CHAT",
+                "raw": "\"NZ-CHAT\""
+              },
+              {
+                "type": "Literal",
+                "start": 6769,
+                "end": 6777,
+                "loc": {
+                  "start": {
+                    "line": 103,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 103,
+                    "column": 10
+                  }
+                },
+                "value": "Navajo",
+                "raw": "\"Navajo\""
+              },
+              {
+                "type": "Literal",
+                "start": 6824,
+                "end": 6829,
+                "loc": {
+                  "start": {
+                    "line": 104,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 104,
+                    "column": 7
+                  }
+                },
+                "value": "PRC",
+                "raw": "\"PRC\""
+              },
+              {
+                "type": "Literal",
+                "start": 6873,
+                "end": 6892,
+                "loc": {
+                  "start": {
+                    "line": 105,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 105,
+                    "column": 21
+                  }
+                },
+                "value": "Pacific/Enderbury",
+                "raw": "\"Pacific/Enderbury\""
+              },
+              {
+                "type": "Literal",
+                "start": 6950,
+                "end": 6968,
+                "loc": {
+                  "start": {
+                    "line": 106,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 106,
+                    "column": 20
+                  }
+                },
+                "value": "Pacific/Johnston",
+                "raw": "\"Pacific/Johnston\""
+              },
+              {
+                "type": "Literal",
+                "start": 7025,
+                "end": 7041,
+                "loc": {
+                  "start": {
+                    "line": 107,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 107,
+                    "column": 18
+                  }
+                },
+                "value": "Pacific/Ponape",
+                "raw": "\"Pacific/Ponape\""
+              },
+              {
+                "type": "Literal",
+                "start": 7096,
+                "end": 7111,
+                "loc": {
+                  "start": {
+                    "line": 108,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 108,
+                    "column": 17
+                  }
+                },
+                "value": "Pacific/Samoa",
+                "raw": "\"Pacific/Samoa\""
+              },
+              {
+                "type": "Literal",
+                "start": 7165,
+                "end": 7179,
+                "loc": {
+                  "start": {
+                    "line": 109,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 109,
+                    "column": 16
+                  }
+                },
+                "value": "Pacific/Truk",
+                "raw": "\"Pacific/Truk\""
+              },
+              {
+                "type": "Literal",
+                "start": 7232,
+                "end": 7245,
+                "loc": {
+                  "start": {
+                    "line": 110,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 110,
+                    "column": 15
+                  }
+                },
+                "value": "Pacific/Yap",
+                "raw": "\"Pacific/Yap\""
+              },
+              {
+                "type": "Literal",
+                "start": 7297,
+                "end": 7305,
+                "loc": {
+                  "start": {
+                    "line": 111,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 111,
+                    "column": 10
+                  }
+                },
+                "value": "Poland",
+                "raw": "\"Poland\""
+              },
+              {
+                "type": "Literal",
+                "start": 7352,
+                "end": 7362,
+                "loc": {
+                  "start": {
+                    "line": 112,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 112,
+                    "column": 12
+                  }
+                },
+                "value": "Portugal",
+                "raw": "\"Portugal\""
+              },
+              {
+                "type": "Literal",
+                "start": 7411,
+                "end": 7416,
+                "loc": {
+                  "start": {
+                    "line": 113,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 113,
+                    "column": 7
+                  }
+                },
+                "value": "ROC",
+                "raw": "\"ROC\""
+              },
+              {
+                "type": "Literal",
+                "start": 7460,
+                "end": 7465,
+                "loc": {
+                  "start": {
+                    "line": 114,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 114,
+                    "column": 7
+                  }
+                },
+                "value": "ROK",
+                "raw": "\"ROK\""
+              },
+              {
+                "type": "Literal",
+                "start": 7509,
+                "end": 7520,
+                "loc": {
+                  "start": {
+                    "line": 115,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 115,
+                    "column": 13
+                  }
+                },
+                "value": "Singapore",
+                "raw": "\"Singapore\""
+              },
+              {
+                "type": "Literal",
+                "start": 7570,
+                "end": 7578,
+                "loc": {
+                  "start": {
+                    "line": 116,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 116,
+                    "column": 10
+                  }
+                },
+                "value": "Turkey",
+                "raw": "\"Turkey\""
+              },
+              {
+                "type": "Literal",
+                "start": 7625,
+                "end": 7630,
+                "loc": {
+                  "start": {
+                    "line": 117,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 117,
+                    "column": 7
+                  }
+                },
+                "value": "UCT",
+                "raw": "\"UCT\""
+              },
+              {
+                "type": "Literal",
+                "start": 7674,
+                "end": 7685,
+                "loc": {
+                  "start": {
+                    "line": 118,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 118,
+                    "column": 13
+                  }
+                },
+                "value": "US/Alaska",
+                "raw": "\"US/Alaska\""
+              },
+              {
+                "type": "Literal",
+                "start": 7735,
+                "end": 7748,
+                "loc": {
+                  "start": {
+                    "line": 119,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 119,
+                    "column": 15
+                  }
+                },
+                "value": "US/Aleutian",
+                "raw": "\"US/Aleutian\""
+              },
+              {
+                "type": "Literal",
+                "start": 7800,
+                "end": 7812,
+                "loc": {
+                  "start": {
+                    "line": 120,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 120,
+                    "column": 14
+                  }
+                },
+                "value": "US/Arizona",
+                "raw": "\"US/Arizona\""
+              },
+              {
+                "type": "Literal",
+                "start": 7863,
+                "end": 7875,
+                "loc": {
+                  "start": {
+                    "line": 121,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 121,
+                    "column": 14
+                  }
+                },
+                "value": "US/Central",
+                "raw": "\"US/Central\""
+              },
+              {
+                "type": "Literal",
+                "start": 7926,
+                "end": 7943,
+                "loc": {
+                  "start": {
+                    "line": 122,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 122,
+                    "column": 19
+                  }
+                },
+                "value": "US/East-Indiana",
+                "raw": "\"US/East-Indiana\""
+              },
+              {
+                "type": "Literal",
+                "start": 8007,
+                "end": 8019,
+                "loc": {
+                  "start": {
+                    "line": 123,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 123,
+                    "column": 14
+                  }
+                },
+                "value": "US/Eastern",
+                "raw": "\"US/Eastern\""
+              },
+              {
+                "type": "Literal",
+                "start": 8070,
+                "end": 8081,
+                "loc": {
+                  "start": {
+                    "line": 124,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 124,
+                    "column": 13
+                  }
+                },
+                "value": "US/Hawaii",
+                "raw": "\"US/Hawaii\""
+              },
+              {
+                "type": "Literal",
+                "start": 8131,
+                "end": 8150,
+                "loc": {
+                  "start": {
+                    "line": 125,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 125,
+                    "column": 21
+                  }
+                },
+                "value": "US/Indiana-Starke",
+                "raw": "\"US/Indiana-Starke\""
+              },
+              {
+                "type": "Literal",
+                "start": 8208,
+                "end": 8221,
+                "loc": {
+                  "start": {
+                    "line": 126,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 126,
+                    "column": 15
+                  }
+                },
+                "value": "US/Michigan",
+                "raw": "\"US/Michigan\""
+              },
+              {
+                "type": "Literal",
+                "start": 8273,
+                "end": 8286,
+                "loc": {
+                  "start": {
+                    "line": 127,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 127,
+                    "column": 15
+                  }
+                },
+                "value": "US/Mountain",
+                "raw": "\"US/Mountain\""
+              },
+              {
+                "type": "Literal",
+                "start": 8338,
+                "end": 8350,
+                "loc": {
+                  "start": {
+                    "line": 128,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 128,
+                    "column": 14
+                  }
+                },
+                "value": "US/Pacific",
+                "raw": "\"US/Pacific\""
+              },
+              {
+                "type": "Literal",
+                "start": 8401,
+                "end": 8411,
+                "loc": {
+                  "start": {
+                    "line": 129,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 129,
+                    "column": 12
+                  }
+                },
+                "value": "US/Samoa",
+                "raw": "\"US/Samoa\""
+              },
+              {
+                "type": "Literal",
+                "start": 8460,
+                "end": 8465,
+                "loc": {
+                  "start": {
+                    "line": 130,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 130,
+                    "column": 7
+                  }
+                },
+                "value": "UTC",
+                "raw": "\"UTC\""
+              },
+              {
+                "type": "Literal",
+                "start": 8509,
+                "end": 8520,
+                "loc": {
+                  "start": {
+                    "line": 131,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 131,
+                    "column": 13
+                  }
+                },
+                "value": "Universal",
+                "raw": "\"Universal\""
+              },
+              {
+                "type": "Literal",
+                "start": 8570,
+                "end": 8576,
+                "loc": {
+                  "start": {
+                    "line": 132,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 132,
+                    "column": 8
+                  }
+                },
+                "value": "W-SU",
+                "raw": "\"W-SU\""
+              },
+              {
+                "type": "Literal",
+                "start": 8621,
+                "end": 8627,
+                "loc": {
+                  "start": {
+                    "line": 133,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 133,
+                    "column": 8
+                  }
+                },
+                "value": "Zulu",
+                "raw": "\"Zulu\""
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ForOfStatement",
+      "start": 8674,
+      "end": 8803,
+      "loc": {
+        "start": {
+          "line": 136,
+          "column": 0
+        },
+        "end": {
+          "line": 139,
+          "column": 1
+        }
+      },
+      "await": false,
+      "left": {
+        "type": "VariableDeclaration",
+        "start": 8679,
+        "end": 8685,
+        "loc": {
+          "start": {
+            "line": 136,
+            "column": 5
+          },
+          "end": {
+            "line": 136,
+            "column": 11
+          }
+        },
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "start": 8683,
+            "end": 8685,
+            "loc": {
+              "start": {
+                "line": 136,
+                "column": 9
+              },
+              "end": {
+                "line": 136,
+                "column": 11
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 8683,
+              "end": 8685,
+              "loc": {
+                "start": {
+                  "line": 136,
+                  "column": 9
+                },
+                "end": {
+                  "line": 136,
+                  "column": 11
+                }
+              },
+              "name": "id"
+            },
+            "init": null
+          }
+        ],
+        "kind": "let"
+      },
+      "right": {
+        "type": "Identifier",
+        "start": 8689,
+        "end": 8698,
+        "loc": {
+          "start": {
+            "line": 136,
+            "column": 15
+          },
+          "end": {
+            "line": 136,
+            "column": 24
+          }
+        },
+        "name": "testCases"
+      },
+      "body": {
+        "type": "BlockStatement",
+        "start": 8700,
+        "end": 8803,
+        "loc": {
+          "start": {
+            "line": 136,
+            "column": 26
+          },
+          "end": {
+            "line": 139,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "VariableDeclaration",
+            "start": 8704,
+            "end": 8756,
+            "loc": {
+              "start": {
+                "line": 137,
+                "column": 2
+              },
+              "end": {
+                "line": 137,
+                "column": 54
+              }
+            },
+            "declarations": [
+              {
+                "type": "VariableDeclarator",
+                "start": 8710,
+                "end": 8755,
+                "loc": {
+                  "start": {
+                    "line": 137,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 137,
+                    "column": 53
+                  }
+                },
+                "id": {
+                  "type": "Identifier",
+                  "start": 8710,
+                  "end": 8718,
+                  "loc": {
+                    "start": {
+                      "line": 137,
+                      "column": 8
+                    },
+                    "end": {
+                      "line": 137,
+                      "column": 16
+                    }
+                  },
+                  "name": "instance"
+                },
+                "init": {
+                  "type": "NewExpression",
+                  "start": 8721,
+                  "end": 8755,
+                  "loc": {
+                    "start": {
+                      "line": 137,
+                      "column": 19
+                    },
+                    "end": {
+                      "line": 137,
+                      "column": 53
+                    }
+                  },
+                  "callee": {
+                    "type": "MemberExpression",
+                    "start": 8725,
+                    "end": 8747,
+                    "loc": {
+                      "start": {
+                        "line": 137,
+                        "column": 23
+                      },
+                      "end": {
+                        "line": 137,
+                        "column": 45
+                      }
+                    },
+                    "object": {
+                      "type": "Identifier",
+                      "start": 8725,
+                      "end": 8733,
+                      "loc": {
+                        "start": {
+                          "line": 137,
+                          "column": 23
+                        },
+                        "end": {
+                          "line": 137,
+                          "column": 31
+                        }
+                      },
+                      "name": "Temporal"
+                    },
+                    "property": {
+                      "type": "Identifier",
+                      "start": 8734,
+                      "end": 8747,
+                      "loc": {
+                        "start": {
+                          "line": 137,
+                          "column": 32
+                        },
+                        "end": {
+                          "line": 137,
+                          "column": 45
+                        }
+                      },
+                      "name": "ZonedDateTime"
+                    },
+                    "computed": false,
+                    "optional": false
+                  },
+                  "arguments": [
+                    {
+                      "type": "Literal",
+                      "start": 8748,
+                      "end": 8750,
+                      "loc": {
+                        "start": {
+                          "line": 137,
+                          "column": 46
+                        },
+                        "end": {
+                          "line": 137,
+                          "column": 48
+                        }
+                      },
+                      "value": null,
+                      "raw": "0n",
+                      "bigint": "0"
+                    },
+                    {
+                      "type": "Identifier",
+                      "start": 8752,
+                      "end": 8754,
+                      "loc": {
+                        "start": {
+                          "line": 137,
+                          "column": 50
+                        },
+                        "end": {
+                          "line": 137,
+                          "column": 52
+                        }
+                      },
+                      "name": "id"
+                    }
+                  ]
+                }
+              }
+            ],
+            "kind": "const"
+          },
+          {
+            "type": "ExpressionStatement",
+            "start": 8759,
+            "end": 8801,
+            "loc": {
+              "start": {
+                "line": 138,
+                "column": 2
+              },
+              "end": {
+                "line": 138,
+                "column": 44
+              }
+            },
+            "expression": {
+              "type": "CallExpression",
+              "start": 8759,
+              "end": 8800,
+              "loc": {
+                "start": {
+                  "line": 138,
+                  "column": 2
+                },
+                "end": {
+                  "line": 138,
+                  "column": 43
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 8759,
+                "end": 8775,
+                "loc": {
+                  "start": {
+                    "line": 138,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 138,
+                    "column": 18
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 8759,
+                  "end": 8765,
+                  "loc": {
+                    "start": {
+                      "line": 138,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 138,
+                      "column": 8
+                    }
+                  },
+                  "name": "assert"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 8766,
+                  "end": 8775,
+                  "loc": {
+                    "start": {
+                      "line": 138,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 138,
+                      "column": 18
+                    }
+                  },
+                  "name": "sameValue"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "MemberExpression",
+                  "start": 8776,
+                  "end": 8795,
+                  "loc": {
+                    "start": {
+                      "line": 138,
+                      "column": 19
+                    },
+                    "end": {
+                      "line": 138,
+                      "column": 38
+                    }
+                  },
+                  "object": {
+                    "type": "Identifier",
+                    "start": 8776,
+                    "end": 8784,
+                    "loc": {
+                      "start": {
+                        "line": 138,
+                        "column": 19
+                      },
+                      "end": {
+                        "line": 138,
+                        "column": 27
+                      }
+                    },
+                    "name": "instance"
+                  },
+                  "property": {
+                    "type": "Identifier",
+                    "start": 8785,
+                    "end": 8795,
+                    "loc": {
+                      "start": {
+                        "line": 138,
+                        "column": 28
+                      },
+                      "end": {
+                        "line": 138,
+                        "column": 38
+                      }
+                    },
+                    "name": "timeZoneId"
+                  },
+                  "computed": false,
+                  "optional": false
+                },
+                {
+                  "type": "Identifier",
+                  "start": 8797,
+                  "end": 8799,
+                  "loc": {
+                    "start": {
+                      "line": 138,
+                      "column": 40
+                    },
+                    "end": {
+                      "line": 138,
+                      "column": 42
+                    }
+                  },
+                  "name": "id"
+                }
+              ],
+              "optional": false
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "sourceType": "script"
+}

@@ -1,0 +1,32 @@
+package com.jsparser.ast;
+
+public sealed interface Expression extends Node permits
+    Identifier,
+    PrivateIdentifier,
+    Literal,
+    BinaryExpression,
+    AssignmentExpression,
+    MemberExpression,
+    CallExpression,
+    ChainExpression,
+    ArrayExpression,
+    ObjectExpression,
+    NewExpression,
+    UnaryExpression,
+    LogicalExpression,
+    UpdateExpression,
+    ConditionalExpression,
+    FunctionExpression,
+    ArrowFunctionExpression,
+    TemplateLiteral,
+    TaggedTemplateExpression,
+    ThisExpression,
+    YieldExpression,
+    AwaitExpression,
+    ClassExpression,
+    Super,
+    MetaProperty,
+    ImportExpression,
+    SequenceExpression,
+    SpreadElement {
+}

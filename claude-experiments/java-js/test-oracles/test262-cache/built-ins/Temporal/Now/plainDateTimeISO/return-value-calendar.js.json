@@ -1,0 +1,331 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 393,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 12,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 260,
+      "end": 307,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 47
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 266,
+          "end": 306,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 6
+            },
+            "end": {
+              "line": 10,
+              "column": 46
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 266,
+            "end": 272,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 6
+              },
+              "end": {
+                "line": 10,
+                "column": 12
+              }
+            },
+            "name": "result"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 275,
+            "end": 306,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 15
+              },
+              "end": {
+                "line": 10,
+                "column": 46
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 275,
+              "end": 304,
+              "loc": {
+                "start": {
+                  "line": 10,
+                  "column": 15
+                },
+                "end": {
+                  "line": 10,
+                  "column": 44
+                }
+              },
+              "object": {
+                "type": "MemberExpression",
+                "start": 275,
+                "end": 287,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 15
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 27
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 275,
+                  "end": 283,
+                  "loc": {
+                    "start": {
+                      "line": 10,
+                      "column": 15
+                    },
+                    "end": {
+                      "line": 10,
+                      "column": 23
+                    }
+                  },
+                  "name": "Temporal"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 284,
+                  "end": 287,
+                  "loc": {
+                    "start": {
+                      "line": 10,
+                      "column": 24
+                    },
+                    "end": {
+                      "line": 10,
+                      "column": 27
+                    }
+                  },
+                  "name": "Now"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 288,
+                "end": 304,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 28
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 44
+                  }
+                },
+                "name": "plainDateTimeISO"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 308,
+      "end": 392,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 84
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 308,
+        "end": 391,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 11,
+            "column": 83
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 308,
+          "end": 324,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 0
+            },
+            "end": {
+              "line": 11,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 308,
+            "end": 314,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 0
+              },
+              "end": {
+                "line": 11,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 315,
+            "end": 324,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 7
+              },
+              "end": {
+                "line": 11,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 325,
+            "end": 342,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 17
+              },
+              "end": {
+                "line": 11,
+                "column": 34
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 325,
+              "end": 331,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 17
+                },
+                "end": {
+                  "line": 11,
+                  "column": 23
+                }
+              },
+              "name": "result"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 332,
+              "end": 342,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 24
+                },
+                "end": {
+                  "line": 11,
+                  "column": 34
+                }
+              },
+              "name": "calendarId"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 344,
+            "end": 353,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 36
+              },
+              "end": {
+                "line": 11,
+                "column": 45
+              }
+            },
+            "value": "iso8601",
+            "raw": "\"iso8601\""
+          },
+          {
+            "type": "Literal",
+            "start": 355,
+            "end": 390,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 47
+              },
+              "end": {
+                "line": 11,
+                "column": 82
+              }
+            },
+            "value": "calendar string should be iso8601",
+            "raw": "\"calendar string should be iso8601\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

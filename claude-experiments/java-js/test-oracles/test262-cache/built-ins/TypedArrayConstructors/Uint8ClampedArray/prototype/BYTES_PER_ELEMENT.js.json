@@ -1,0 +1,544 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 878,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 22,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 596,
+      "end": 663,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 67
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 596,
+        "end": 662,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 0
+          },
+          "end": {
+            "line": 17,
+            "column": 66
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 596,
+          "end": 612,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 0
+            },
+            "end": {
+              "line": 17,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 596,
+            "end": 602,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 0
+              },
+              "end": {
+                "line": 17,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 603,
+            "end": 612,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 7
+              },
+              "end": {
+                "line": 17,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 613,
+            "end": 658,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 17
+              },
+              "end": {
+                "line": 17,
+                "column": 62
+              }
+            },
+            "object": {
+              "type": "MemberExpression",
+              "start": 613,
+              "end": 640,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 17
+                },
+                "end": {
+                  "line": 17,
+                  "column": 44
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 613,
+                "end": 630,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 34
+                  }
+                },
+                "name": "Uint8ClampedArray"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 631,
+                "end": 640,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 35
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 44
+                  }
+                },
+                "name": "prototype"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 641,
+              "end": 658,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 45
+                },
+                "end": {
+                  "line": 17,
+                  "column": 62
+                }
+              },
+              "name": "BYTES_PER_ELEMENT"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 660,
+            "end": 661,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 64
+              },
+              "end": {
+                "line": 17,
+                "column": 65
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 665,
+      "end": 735,
+      "loc": {
+        "start": {
+          "line": 19,
+          "column": 0
+        },
+        "end": {
+          "line": 19,
+          "column": 70
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 665,
+        "end": 734,
+        "loc": {
+          "start": {
+            "line": 19,
+            "column": 0
+          },
+          "end": {
+            "line": 19,
+            "column": 69
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 665,
+          "end": 684,
+          "loc": {
+            "start": {
+              "line": 19,
+              "column": 0
+            },
+            "end": {
+              "line": 19,
+              "column": 19
+            }
+          },
+          "name": "verifyNotEnumerable"
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 685,
+            "end": 712,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 20
+              },
+              "end": {
+                "line": 19,
+                "column": 47
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 685,
+              "end": 702,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 20
+                },
+                "end": {
+                  "line": 19,
+                  "column": 37
+                }
+              },
+              "name": "Uint8ClampedArray"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 703,
+              "end": 712,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 38
+                },
+                "end": {
+                  "line": 19,
+                  "column": 47
+                }
+              },
+              "name": "prototype"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 714,
+            "end": 733,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 49
+              },
+              "end": {
+                "line": 19,
+                "column": 68
+              }
+            },
+            "value": "BYTES_PER_ELEMENT",
+            "raw": "\"BYTES_PER_ELEMENT\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 736,
+      "end": 804,
+      "loc": {
+        "start": {
+          "line": 20,
+          "column": 0
+        },
+        "end": {
+          "line": 20,
+          "column": 68
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 736,
+        "end": 803,
+        "loc": {
+          "start": {
+            "line": 20,
+            "column": 0
+          },
+          "end": {
+            "line": 20,
+            "column": 67
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 736,
+          "end": 753,
+          "loc": {
+            "start": {
+              "line": 20,
+              "column": 0
+            },
+            "end": {
+              "line": 20,
+              "column": 17
+            }
+          },
+          "name": "verifyNotWritable"
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 754,
+            "end": 781,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 18
+              },
+              "end": {
+                "line": 20,
+                "column": 45
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 754,
+              "end": 771,
+              "loc": {
+                "start": {
+                  "line": 20,
+                  "column": 18
+                },
+                "end": {
+                  "line": 20,
+                  "column": 35
+                }
+              },
+              "name": "Uint8ClampedArray"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 772,
+              "end": 781,
+              "loc": {
+                "start": {
+                  "line": 20,
+                  "column": 36
+                },
+                "end": {
+                  "line": 20,
+                  "column": 45
+                }
+              },
+              "name": "prototype"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 783,
+            "end": 802,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 47
+              },
+              "end": {
+                "line": 20,
+                "column": 66
+              }
+            },
+            "value": "BYTES_PER_ELEMENT",
+            "raw": "\"BYTES_PER_ELEMENT\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 805,
+      "end": 877,
+      "loc": {
+        "start": {
+          "line": 21,
+          "column": 0
+        },
+        "end": {
+          "line": 21,
+          "column": 72
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 805,
+        "end": 876,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 0
+          },
+          "end": {
+            "line": 21,
+            "column": 71
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 805,
+          "end": 826,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 0
+            },
+            "end": {
+              "line": 21,
+              "column": 21
+            }
+          },
+          "name": "verifyNotConfigurable"
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 827,
+            "end": 854,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 22
+              },
+              "end": {
+                "line": 21,
+                "column": 49
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 827,
+              "end": 844,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 22
+                },
+                "end": {
+                  "line": 21,
+                  "column": 39
+                }
+              },
+              "name": "Uint8ClampedArray"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 845,
+              "end": 854,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 40
+                },
+                "end": {
+                  "line": 21,
+                  "column": 49
+                }
+              },
+              "name": "prototype"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 856,
+            "end": 875,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 51
+              },
+              "end": {
+                "line": 21,
+                "column": 70
+              }
+            },
+            "value": "BYTES_PER_ELEMENT",
+            "raw": "\"BYTES_PER_ELEMENT\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

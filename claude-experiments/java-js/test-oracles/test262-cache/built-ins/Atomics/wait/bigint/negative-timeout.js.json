@@ -1,0 +1,483 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 542,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 21,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 322,
+      "end": 417,
+      "loc": {
+        "start": {
+          "line": 12,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 2
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 328,
+          "end": 416,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 6
+            },
+            "end": {
+              "line": 14,
+              "column": 1
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 328,
+            "end": 332,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 6
+              },
+              "end": {
+                "line": 12,
+                "column": 10
+              }
+            },
+            "name": "i64a"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 335,
+            "end": 416,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 13
+              },
+              "end": {
+                "line": 14,
+                "column": 1
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 339,
+              "end": 352,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 17
+                },
+                "end": {
+                  "line": 12,
+                  "column": 30
+                }
+              },
+              "name": "BigInt64Array"
+            },
+            "arguments": [
+              {
+                "type": "NewExpression",
+                "start": 356,
+                "end": 414,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 60
+                  }
+                },
+                "callee": {
+                  "type": "Identifier",
+                  "start": 360,
+                  "end": 377,
+                  "loc": {
+                    "start": {
+                      "line": 13,
+                      "column": 6
+                    },
+                    "end": {
+                      "line": 13,
+                      "column": 23
+                    }
+                  },
+                  "name": "SharedArrayBuffer"
+                },
+                "arguments": [
+                  {
+                    "type": "BinaryExpression",
+                    "start": 378,
+                    "end": 413,
+                    "loc": {
+                      "start": {
+                        "line": 13,
+                        "column": 24
+                      },
+                      "end": {
+                        "line": 13,
+                        "column": 59
+                      }
+                    },
+                    "left": {
+                      "type": "MemberExpression",
+                      "start": 378,
+                      "end": 409,
+                      "loc": {
+                        "start": {
+                          "line": 13,
+                          "column": 24
+                        },
+                        "end": {
+                          "line": 13,
+                          "column": 55
+                        }
+                      },
+                      "object": {
+                        "type": "Identifier",
+                        "start": 378,
+                        "end": 391,
+                        "loc": {
+                          "start": {
+                            "line": 13,
+                            "column": 24
+                          },
+                          "end": {
+                            "line": 13,
+                            "column": 37
+                          }
+                        },
+                        "name": "BigInt64Array"
+                      },
+                      "property": {
+                        "type": "Identifier",
+                        "start": 392,
+                        "end": 409,
+                        "loc": {
+                          "start": {
+                            "line": 13,
+                            "column": 38
+                          },
+                          "end": {
+                            "line": 13,
+                            "column": 55
+                          }
+                        },
+                        "name": "BYTES_PER_ELEMENT"
+                      },
+                      "computed": false,
+                      "optional": false
+                    },
+                    "operator": "*",
+                    "right": {
+                      "type": "Literal",
+                      "start": 412,
+                      "end": 413,
+                      "loc": {
+                        "start": {
+                          "line": 13,
+                          "column": 58
+                        },
+                        "end": {
+                          "line": 13,
+                          "column": 59
+                        }
+                      },
+                      "value": 4,
+                      "raw": "4"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 419,
+      "end": 541,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 20,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 419,
+        "end": 540,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 0
+          },
+          "end": {
+            "line": 20,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 419,
+          "end": 435,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 0
+            },
+            "end": {
+              "line": 16,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 419,
+            "end": 425,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 0
+              },
+              "end": {
+                "line": 16,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 426,
+            "end": 435,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 7
+              },
+              "end": {
+                "line": 16,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 439,
+            "end": 468,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 2
+              },
+              "end": {
+                "line": 17,
+                "column": 31
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 439,
+              "end": 451,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 2
+                },
+                "end": {
+                  "line": 17,
+                  "column": 14
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 439,
+                "end": 446,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 9
+                  }
+                },
+                "name": "Atomics"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 447,
+                "end": 451,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 10
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 14
+                  }
+                },
+                "name": "wait"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 452,
+                "end": 456,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 15
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 19
+                  }
+                },
+                "name": "i64a"
+              },
+              {
+                "type": "Literal",
+                "start": 458,
+                "end": 459,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 21
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 22
+                  }
+                },
+                "value": 0,
+                "raw": "0"
+              },
+              {
+                "type": "Literal",
+                "start": 461,
+                "end": 463,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 26
+                  }
+                },
+                "value": null,
+                "raw": "0n",
+                "bigint": "0"
+              },
+              {
+                "type": "UnaryExpression",
+                "start": 465,
+                "end": 467,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 28
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 30
+                  }
+                },
+                "operator": "-",
+                "prefix": true,
+                "argument": {
+                  "type": "Literal",
+                  "start": 466,
+                  "end": 467,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 29
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 30
+                    }
+                  },
+                  "value": 1,
+                  "raw": "1"
+                }
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 472,
+            "end": 483,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 2
+              },
+              "end": {
+                "line": 18,
+                "column": 13
+              }
+            },
+            "value": "timed-out",
+            "raw": "\"timed-out\""
+          },
+          {
+            "type": "Literal",
+            "start": 487,
+            "end": 538,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 2
+              },
+              "end": {
+                "line": 19,
+                "column": 53
+              }
+            },
+            "value": "Atomics.wait(i64a, 0, 0n, -1) returns \"timed-out\"",
+            "raw": "'Atomics.wait(i64a, 0, 0n, -1) returns \"timed-out\"'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

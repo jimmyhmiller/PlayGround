@@ -1,0 +1,184 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 362,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 12,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 293,
+      "end": 361,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 68
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 293,
+        "end": 360,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 11,
+            "column": 67
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 293,
+          "end": 309,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 0
+            },
+            "end": {
+              "line": 11,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 293,
+            "end": 299,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 0
+              },
+              "end": {
+                "line": 11,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 300,
+            "end": 309,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 7
+              },
+              "end": {
+                "line": 11,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 310,
+            "end": 322,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 17
+              },
+              "end": {
+                "line": 11,
+                "column": 29
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 310,
+              "end": 318,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 17
+                },
+                "end": {
+                  "line": 11,
+                  "column": 25
+                }
+              },
+              "name": "parseInt"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 319,
+                "end": 321,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 26
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 28
+                  }
+                },
+                "value": "",
+                "raw": "\"\""
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Identifier",
+            "start": 324,
+            "end": 327,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 31
+              },
+              "end": {
+                "line": 11,
+                "column": 34
+              }
+            },
+            "name": "NaN"
+          },
+          {
+            "type": "Literal",
+            "start": 329,
+            "end": 359,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 36
+              },
+              "end": {
+                "line": 11,
+                "column": 66
+              }
+            },
+            "value": "parseInt(\"\") must return NaN",
+            "raw": "'parseInt(\"\") must return NaN'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

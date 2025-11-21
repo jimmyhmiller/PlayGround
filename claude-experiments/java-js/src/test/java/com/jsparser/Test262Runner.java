@@ -1,0 +1,335 @@
+package com.jsparser;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jsparser.ast.Program;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.DisplayName;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
+
+public class Test262Runner {
+
+    private static final ObjectMapper mapper = new ObjectMapper();
+
+    @Test
+    @DisplayName("Parse all test262 files and compare against esprima oracle")
+    void parseAllTest262Files() throws IOException {
+        Path test262Dir = Paths.get("test-oracles/test262/test");
+        Path cacheDir = Paths.get("test-oracles/test262-cache");
+
+        if (!Files.exists(test262Dir)) {
+            System.out.println("test262 directory not found at: " + test262Dir.toAbsolutePath());
+            return;
+        }
+
+        if (!Files.exists(cacheDir)) {
+            System.out.println("ERROR: Cache directory not found at: " + cacheDir.toAbsolutePath());
+            System.out.println("Please run: node scripts/generate-test262-cache.js");
+            return;
+        }
+
+        AtomicInteger total = new AtomicInteger(0);
+        AtomicInteger matched = new AtomicInteger(0);
+        AtomicInteger mismatched = new AtomicInteger(0);
+        AtomicInteger failed = new AtomicInteger(0);
+        AtomicInteger noCache = new AtomicInteger(0);
+        Map<String, Integer> errorTypes = new HashMap<>();
+        Map<String, Integer> errorMessages = new HashMap<>();
+        List<String> mismatchedFiles = new ArrayList<>();
+        Map<String, List<String>> errorToFiles = new HashMap<>();
+        List<String> allFailures = new ArrayList<>();
+        List<Map<String, Object>> allFailuresJson = new ArrayList<>();
+
+        System.out.println("Starting test262 oracle comparison test...");
+        System.out.println("Test262 dir: " + test262Dir.toAbsolutePath());
+        System.out.println("Cache dir: " + cacheDir.toAbsolutePath());
+
+        try (Stream<Path> paths = Files.walk(test262Dir)) {
+            paths.filter(Files::isRegularFile)
+                 .filter(p -> p.toString().endsWith(".js"))
+                 .forEach(path -> {
+                     total.incrementAndGet();
+
+                     if (total.get() % 1000 == 0) {
+                         System.out.printf("Progress: %d files, %d matched, %d mismatched, %d failed%n",
+                             total.get(), matched.get(), mismatched.get(), failed.get());
+                     }
+
+                     try {
+                         String source = Files.readString(path);
+
+                         // Skip files with obvious syntax we don't support yet
+                         if (shouldSkip(source, path)) {
+                             return;
+                         }
+
+                         // Get corresponding cache file
+                         Path relativePath = test262Dir.relativize(path);
+                         Path cacheFile = cacheDir.resolve(relativePath.toString() + ".json");
+
+                         // If no cache, skip (esprima couldn't parse it either)
+                         if (!Files.exists(cacheFile)) {
+                             noCache.incrementAndGet();
+                             return;
+                         }
+
+                         // Load expected AST from cache
+                         String expectedJson = Files.readString(cacheFile);
+
+                         // Check if file has module flag in Test262 frontmatter
+                         // Also treat _FIXTURE.js files as modules (they are module fixtures)
+                         boolean isModule = Parser.hasModuleFlag(source) ||
+                             path.toString().endsWith("_FIXTURE.js");
+
+                         // Parse with our parser using correct sourceType
+                         Program actualProgram = Parser.parse(source, isModule);
+                         String actualJson = mapper.writeValueAsString(actualProgram);
+
+                         // Parse both JSONs for structural comparison
+                         Object expectedObj = mapper.readValue(expectedJson, Object.class);
+                         Object actualObj = mapper.readValue(actualJson, Object.class);
+
+                         // Normalize regex value differences (null vs {} when JS can't compile regex)
+                         normalizeRegexValues(expectedObj, actualObj);
+
+                         // Compare structurally using equals (Jackson's Maps and Lists implement equals)
+                         if (Objects.deepEquals(expectedObj, actualObj)) {
+                             matched.incrementAndGet();
+                         } else {
+                             mismatched.incrementAndGet();
+                             if (mismatchedFiles.size() < 20) {
+                                 mismatchedFiles.add(path.toString());
+                             }
+                         }
+                     } catch (ParseException e) {
+                         failed.incrementAndGet();
+
+                         String errorType = e.getClass().getSimpleName();
+                         errorTypes.merge(errorType, 1, Integer::sum);
+
+                         String errorMsg = e.getMessage();
+
+                         Map<String, Object> errorJson = new HashMap<>(e.toJson());
+                         errorJson.put("file", path.toString());
+                         allFailuresJson.add(errorJson);
+
+                         // Record full failure details
+                         if (errorMsg != null) {
+                             allFailures.add(path.toString() + ": " + errorMsg);
+                         } else {
+                             allFailures.add(path.toString() + ": " + errorType);
+                         }
+
+                         // For "Unexpected character:" errors, include character code
+                         if (errorMsg != null && errorMsg.startsWith("Unexpected character:")) {
+                             String shortMsg = errorMsg;
+                             if (errorMsg.length() > 25) {
+                                 // Extract the character after "Unexpected character: "
+                                 String charPart = errorMsg.substring(22);
+                                 if (charPart.length() > 0) {
+                                     char ch = charPart.charAt(0);
+                                     shortMsg = String.format("Unexpected character: %c (U+%04X)", ch, (int)ch);
+                                 }
+                             }
+                             errorMessages.merge(shortMsg, 1, Integer::sum);
+                             errorToFiles.computeIfAbsent(shortMsg, k -> new ArrayList<>()).add(path.toString());
+                         } else {
+                             if (errorMsg != null && errorMsg.length() > 100) {
+                                 errorMsg = errorMsg.substring(0, 100);
+                             }
+                             if (errorMsg != null) {
+                                 errorMessages.merge(errorMsg, 1, Integer::sum);
+                                 errorToFiles.computeIfAbsent(errorMsg, k -> new ArrayList<>()).add(path.toString());
+                             }
+                         }
+                     } catch (Exception e) {
+                         failed.incrementAndGet();
+
+                         String errorType = e.getClass().getSimpleName();
+                         errorTypes.merge(errorType, 1, Integer::sum);
+
+                         String errorMsg = e.getMessage();
+
+                         Map<String, Object> errorJson = new HashMap<>();
+                         errorJson.put("file", path.toString());
+                         errorJson.put("errorType", errorType);
+                         errorJson.put("message", errorMsg);
+                         allFailuresJson.add(errorJson);
+
+                         // Record full failure details
+                         if (errorMsg != null) {
+                             allFailures.add(path.toString() + ": " + errorMsg);
+                         } else {
+                             allFailures.add(path.toString() + ": " + errorType);
+                         }
+
+                         // For "Unexpected character:" errors, include character code
+                         if (errorMsg != null && errorMsg.startsWith("Unexpected character:")) {
+                             String shortMsg = errorMsg;
+                             if (errorMsg.length() > 25) {
+                                 // Extract the character after "Unexpected character: "
+                                 String charPart = errorMsg.substring(22);
+                                 if (charPart.length() > 0) {
+                                     char ch = charPart.charAt(0);
+                                     shortMsg = String.format("Unexpected character: %c (U+%04X)", ch, (int)ch);
+                                 }
+                             }
+                             errorMessages.merge(shortMsg, 1, Integer::sum);
+                             errorToFiles.computeIfAbsent(shortMsg, k -> new ArrayList<>()).add(path.toString());
+                         } else {
+                             if (errorMsg != null && errorMsg.length() > 100) {
+                                 errorMsg = errorMsg.substring(0, 100);
+                             }
+                             if (errorMsg != null) {
+                                 errorMessages.merge(errorMsg, 1, Integer::sum);
+                                 errorToFiles.computeIfAbsent(errorMsg, k -> new ArrayList<>()).add(path.toString());
+                             }
+                         }
+                     }
+                 });
+        }
+
+        int totalWithCache = matched.get() + mismatched.get() + failed.get();
+
+        System.out.println("\n=== Test262 Oracle Comparison Results ===");
+        System.out.printf("Total files scanned: %d%n", total.get());
+        System.out.printf("Files skipped (no cache): %d%n", noCache.get());
+        System.out.printf("Files with cache: %d%n", totalWithCache);
+        System.out.printf("  ✓ Exact matches: %d (%.2f%%)%n",
+            matched.get(), totalWithCache > 0 ? (matched.get() * 100.0 / totalWithCache) : 0);
+        System.out.printf("  ✗ AST mismatches: %d (%.2f%%)%n",
+            mismatched.get(), totalWithCache > 0 ? (mismatched.get() * 100.0 / totalWithCache) : 0);
+        System.out.printf("  ⚠ Parse failures: %d (%.2f%%)%n",
+            failed.get(), totalWithCache > 0 ? (failed.get() * 100.0 / totalWithCache) : 0);
+
+        if (!errorTypes.isEmpty()) {
+            System.out.println("\nError types:");
+            errorTypes.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .forEach(e -> System.out.printf("  %s: %d%n", e.getKey(), e.getValue()));
+        }
+
+        if (!errorMessages.isEmpty()) {
+            System.out.println("\nALL error messages:");
+            errorMessages.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .forEach(e -> System.out.printf("  [%d] %s%n", e.getValue(), e.getKey()));
+        }
+
+        if (!mismatchedFiles.isEmpty()) {
+            System.out.println("\nFirst 20 mismatched files:");
+            mismatchedFiles.forEach(f -> System.out.println("  " + f));
+        }
+
+        // Print files with unterminated template literal error
+        List<String> templateLiteralFiles = errorToFiles.get("Unterminated template literal");
+        if (templateLiteralFiles != null && !templateLiteralFiles.isEmpty()) {
+            System.out.println("\nFiles with 'Unterminated template literal' error:");
+            templateLiteralFiles.stream().limit(5).forEach(f -> System.out.println("  " + f));
+        }
+
+        // Print files with class body error
+        List<String> classBodyFiles = errorToFiles.get("Expected property name in class body");
+        if (classBodyFiles != null && !classBodyFiles.isEmpty()) {
+            System.out.println("\nFiles with 'Expected property name in class body' error:");
+            classBodyFiles.stream().limit(10).forEach(f -> System.out.println("  " + f));
+        }
+
+        // Print files with "Expected property name" error (object destructuring)
+        List<String> propertyNameFiles = errorToFiles.get("Expected property name");
+        if (propertyNameFiles != null && !propertyNameFiles.isEmpty()) {
+            System.out.println("\nFiles with 'Expected property name' error:");
+            propertyNameFiles.stream().limit(10).forEach(f -> System.out.println("  " + f));
+        }
+
+        // Print files with invalid unicode escape sequence error
+        List<String> unicodeEscapeFiles = errorToFiles.get("Invalid unicode escape sequence");
+        if (unicodeEscapeFiles != null && !unicodeEscapeFiles.isEmpty()) {
+            System.out.println("\nFiles with 'Invalid unicode escape sequence' error:");
+            unicodeEscapeFiles.forEach(f -> System.out.println("  " + f));
+        }
+
+        // Print files with "Unexpected character:" errors
+        System.out.println("\nFiles with 'Unexpected character:' errors:");
+        errorToFiles.entrySet().stream()
+            .filter(entry -> entry.getKey().startsWith("Unexpected character:"))
+            .sorted((e1, e2) -> Integer.compare(e2.getValue().size(), e1.getValue().size()))
+            .forEach(entry -> {
+                String errorMsg = entry.getKey();
+                List<String> files = entry.getValue();
+                System.out.printf("\n  [%d] %s%n", files.size(), errorMsg);
+                System.out.println("  Example files:");
+                files.stream().limit(3).forEach(f -> System.out.println("    " + f));
+            });
+
+        // Write all failures to file
+        try {
+            Path failuresFile = Paths.get("/tmp/all_test262_failures.txt");
+            Files.write(failuresFile, allFailures);
+            System.out.println("\n✓ Wrote all " + allFailures.size() + " failures to: " + failuresFile);
+        } catch (IOException e) {
+            System.err.println("Failed to write failures file: " + e.getMessage());
+        }
+
+        // Write JSON failures to file
+        try {
+            Path jsonFile = Paths.get("/tmp/all_test262_failures.json");
+            String jsonOutput = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(allFailuresJson);
+            Files.writeString(jsonFile, jsonOutput);
+            System.out.println("✓ Wrote " + allFailuresJson.size() + " JSON failures to: " + jsonFile);
+        } catch (IOException e) {
+            System.err.println("Failed to write JSON failures file: " + e.getMessage());
+        }
+    }
+
+    private boolean shouldSkip(String source, Path path) {
+        // The cache generation script does all filtering
+        // We simply run whatever has a cache file
+        // No filtering needed here
+        return false;
+    }
+
+    /**
+     * Normalize regex literal value differences between expected and actual ASTs.
+     * Acorn sets value to null when JS can't compile the regex (e.g., unknown unicode property).
+     * We always set value to {}. When expected has null and actual has {} for a regex literal,
+     * copy null to actual so comparison passes.
+     */
+    @SuppressWarnings("unchecked")
+    private void normalizeRegexValues(Object expected, Object actual) {
+        if (expected instanceof Map && actual instanceof Map) {
+            Map<String, Object> expMap = (Map<String, Object>) expected;
+            Map<String, Object> actMap = (Map<String, Object>) actual;
+
+            // Check if this is a Literal node with regex
+            if ("Literal".equals(expMap.get("type")) && expMap.containsKey("regex")) {
+                // If expected value is null and actual is empty map, normalize
+                if (expMap.get("value") == null && actMap.get("value") instanceof Map) {
+                    Map<?, ?> actValue = (Map<?, ?>) actMap.get("value");
+                    if (actValue.isEmpty()) {
+                        actMap.put("value", null);
+                    }
+                }
+            }
+
+            // Recurse into all fields
+            for (String key : expMap.keySet()) {
+                if (actMap.containsKey(key)) {
+                    normalizeRegexValues(expMap.get(key), actMap.get(key));
+                }
+            }
+        } else if (expected instanceof List && actual instanceof List) {
+            List<Object> expList = (List<Object>) expected;
+            List<Object> actList = (List<Object>) actual;
+            for (int i = 0; i < Math.min(expList.size(), actList.size()); i++) {
+                normalizeRegexValues(expList.get(i), actList.get(i));
+            }
+        }
+    }
+}

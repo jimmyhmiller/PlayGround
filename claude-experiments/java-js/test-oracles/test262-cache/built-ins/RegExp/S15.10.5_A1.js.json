@@ -1,0 +1,183 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 356,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 10,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 270,
+      "end": 355,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 9,
+          "column": 85
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 270,
+        "end": 354,
+        "loc": {
+          "start": {
+            "line": 9,
+            "column": 0
+          },
+          "end": {
+            "line": 9,
+            "column": 84
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 270,
+          "end": 286,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 0
+            },
+            "end": {
+              "line": 9,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 270,
+            "end": 276,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 0
+              },
+              "end": {
+                "line": 9,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 277,
+            "end": 286,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 7
+              },
+              "end": {
+                "line": 9,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 287,
+            "end": 300,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 17
+              },
+              "end": {
+                "line": 9,
+                "column": 30
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 287,
+              "end": 293,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 17
+                },
+                "end": {
+                  "line": 9,
+                  "column": 23
+                }
+              },
+              "name": "RegExp"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 294,
+              "end": 300,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 24
+                },
+                "end": {
+                  "line": 9,
+                  "column": 30
+                }
+              },
+              "name": "length"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 302,
+            "end": 303,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 32
+              },
+              "end": {
+                "line": 9,
+                "column": 33
+              }
+            },
+            "value": 2,
+            "raw": "2"
+          },
+          {
+            "type": "Literal",
+            "start": 305,
+            "end": 353,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 35
+              },
+              "end": {
+                "line": 9,
+                "column": 83
+              }
+            },
+            "value": "The value of RegExp.length is expected to be 2",
+            "raw": "'The value of RegExp.length is expected to be 2'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

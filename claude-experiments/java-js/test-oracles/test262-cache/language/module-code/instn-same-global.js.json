@@ -1,0 +1,282 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 542,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 20,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ImportDeclaration",
+      "start": 425,
+      "end": 469,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 44
+        }
+      },
+      "specifiers": [],
+      "source": {
+        "type": "Literal",
+        "start": 432,
+        "end": 468,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 7
+          },
+          "end": {
+            "line": 15,
+            "column": 43
+          }
+        },
+        "value": "./instn-same-global-set_FIXTURE.js",
+        "raw": "'./instn-same-global-set_FIXTURE.js'"
+      },
+      "attributes": []
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 471,
+      "end": 501,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 30
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 475,
+          "end": 500,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 4
+            },
+            "end": {
+              "line": 17,
+              "column": 29
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 475,
+            "end": 481,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 4
+              },
+              "end": {
+                "line": 17,
+                "column": 10
+              }
+            },
+            "name": "global"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 484,
+            "end": 500,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 13
+              },
+              "end": {
+                "line": 17,
+                "column": 29
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 484,
+              "end": 498,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 13
+                },
+                "end": {
+                  "line": 17,
+                  "column": 27
+                }
+              },
+              "name": "fnGlobalObject"
+            },
+            "arguments": [],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 503,
+      "end": 541,
+      "loc": {
+        "start": {
+          "line": 19,
+          "column": 0
+        },
+        "end": {
+          "line": 19,
+          "column": 38
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 503,
+        "end": 540,
+        "loc": {
+          "start": {
+            "line": 19,
+            "column": 0
+          },
+          "end": {
+            "line": 19,
+            "column": 37
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 503,
+          "end": 519,
+          "loc": {
+            "start": {
+              "line": 19,
+              "column": 0
+            },
+            "end": {
+              "line": 19,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 503,
+            "end": 509,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 0
+              },
+              "end": {
+                "line": 19,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 510,
+            "end": 519,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 7
+              },
+              "end": {
+                "line": 19,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 520,
+            "end": 534,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 17
+              },
+              "end": {
+                "line": 19,
+                "column": 31
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 520,
+              "end": 526,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 17
+                },
+                "end": {
+                  "line": 19,
+                  "column": 23
+                }
+              },
+              "name": "global"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 527,
+              "end": 534,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 24
+                },
+                "end": {
+                  "line": 19,
+                  "column": 31
+                }
+              },
+              "name": "test262"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 536,
+            "end": 539,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 33
+              },
+              "end": {
+                "line": 19,
+                "column": 36
+              }
+            },
+            "value": 262,
+            "raw": "262"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "module"
+}

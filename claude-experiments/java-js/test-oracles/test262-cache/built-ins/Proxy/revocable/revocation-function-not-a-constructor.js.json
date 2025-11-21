@@ -1,0 +1,829 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 999,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 29,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 564,
+      "end": 620,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 56
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 568,
+          "end": 619,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 4
+            },
+            "end": {
+              "line": 16,
+              "column": 55
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 568,
+            "end": 586,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 4
+              },
+              "end": {
+                "line": 16,
+                "column": 22
+              }
+            },
+            "name": "revocationFunction"
+          },
+          "init": {
+            "type": "MemberExpression",
+            "start": 589,
+            "end": 619,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 25
+              },
+              "end": {
+                "line": 16,
+                "column": 55
+              }
+            },
+            "object": {
+              "type": "CallExpression",
+              "start": 589,
+              "end": 612,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 25
+                },
+                "end": {
+                  "line": 16,
+                  "column": 48
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 589,
+                "end": 604,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 25
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 40
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 589,
+                  "end": 594,
+                  "loc": {
+                    "start": {
+                      "line": 16,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 16,
+                      "column": 30
+                    }
+                  },
+                  "name": "Proxy"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 595,
+                  "end": 604,
+                  "loc": {
+                    "start": {
+                      "line": 16,
+                      "column": 31
+                    },
+                    "end": {
+                      "line": 16,
+                      "column": 40
+                    }
+                  },
+                  "name": "revocable"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "ObjectExpression",
+                  "start": 605,
+                  "end": 607,
+                  "loc": {
+                    "start": {
+                      "line": 16,
+                      "column": 41
+                    },
+                    "end": {
+                      "line": 16,
+                      "column": 43
+                    }
+                  },
+                  "properties": []
+                },
+                {
+                  "type": "ObjectExpression",
+                  "start": 609,
+                  "end": 611,
+                  "loc": {
+                    "start": {
+                      "line": 16,
+                      "column": 45
+                    },
+                    "end": {
+                      "line": 16,
+                      "column": 47
+                    }
+                  },
+                  "properties": []
+                }
+              ],
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 613,
+              "end": 619,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 49
+                },
+                "end": {
+                  "line": 16,
+                  "column": 55
+                }
+              },
+              "name": "revoke"
+            },
+            "computed": false,
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 622,
+      "end": 816,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 622,
+        "end": 815,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 0
+          },
+          "end": {
+            "line": 22,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 622,
+          "end": 638,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 0
+            },
+            "end": {
+              "line": 18,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 622,
+            "end": 628,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 0
+              },
+              "end": {
+                "line": 18,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 629,
+            "end": 638,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 7
+              },
+              "end": {
+                "line": 18,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 642,
+            "end": 711,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 2
+              },
+              "end": {
+                "line": 19,
+                "column": 71
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 642,
+              "end": 678,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 2
+                },
+                "end": {
+                  "line": 19,
+                  "column": 38
+                }
+              },
+              "object": {
+                "type": "MemberExpression",
+                "start": 642,
+                "end": 673,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 33
+                  }
+                },
+                "object": {
+                  "type": "MemberExpression",
+                  "start": 642,
+                  "end": 658,
+                  "loc": {
+                    "start": {
+                      "line": 19,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 19,
+                      "column": 18
+                    }
+                  },
+                  "object": {
+                    "type": "Identifier",
+                    "start": 642,
+                    "end": 648,
+                    "loc": {
+                      "start": {
+                        "line": 19,
+                        "column": 2
+                      },
+                      "end": {
+                        "line": 19,
+                        "column": 8
+                      }
+                    },
+                    "name": "Object"
+                  },
+                  "property": {
+                    "type": "Identifier",
+                    "start": 649,
+                    "end": 658,
+                    "loc": {
+                      "start": {
+                        "line": 19,
+                        "column": 9
+                      },
+                      "end": {
+                        "line": 19,
+                        "column": 18
+                      }
+                    },
+                    "name": "prototype"
+                  },
+                  "computed": false,
+                  "optional": false
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 659,
+                  "end": 673,
+                  "loc": {
+                    "start": {
+                      "line": 19,
+                      "column": 19
+                    },
+                    "end": {
+                      "line": 19,
+                      "column": 33
+                    }
+                  },
+                  "name": "hasOwnProperty"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 674,
+                "end": 678,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 34
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 38
+                  }
+                },
+                "name": "call"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 679,
+                "end": 697,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 39
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 57
+                  }
+                },
+                "name": "revocationFunction"
+              },
+              {
+                "type": "Literal",
+                "start": 699,
+                "end": 710,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 59
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 70
+                  }
+                },
+                "value": "prototype",
+                "raw": "\"prototype\""
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 715,
+            "end": 720,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 2
+              },
+              "end": {
+                "line": 20,
+                "column": 7
+              }
+            },
+            "value": false,
+            "raw": "false"
+          },
+          {
+            "type": "Literal",
+            "start": 724,
+            "end": 813,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 2
+              },
+              "end": {
+                "line": 21,
+                "column": 91
+              }
+            },
+            "value": "Object.prototype.hasOwnProperty.call(revocationFunction, \"prototype\") must return false",
+            "raw": "'Object.prototype.hasOwnProperty.call(revocationFunction, \"prototype\") must return false'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 817,
+      "end": 931,
+      "loc": {
+        "start": {
+          "line": 23,
+          "column": 0
+        },
+        "end": {
+          "line": 23,
+          "column": 114
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 817,
+        "end": 930,
+        "loc": {
+          "start": {
+            "line": 23,
+            "column": 0
+          },
+          "end": {
+            "line": 23,
+            "column": 113
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 817,
+          "end": 833,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 0
+            },
+            "end": {
+              "line": 23,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 817,
+            "end": 823,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 0
+              },
+              "end": {
+                "line": 23,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 824,
+            "end": 833,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 7
+              },
+              "end": {
+                "line": 23,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 834,
+            "end": 867,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 17
+              },
+              "end": {
+                "line": 23,
+                "column": 50
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 834,
+              "end": 847,
+              "loc": {
+                "start": {
+                  "line": 23,
+                  "column": 17
+                },
+                "end": {
+                  "line": 23,
+                  "column": 30
+                }
+              },
+              "name": "isConstructor"
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 848,
+                "end": 866,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 49
+                  }
+                },
+                "name": "revocationFunction"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 869,
+            "end": 874,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 52
+              },
+              "end": {
+                "line": 23,
+                "column": 57
+              }
+            },
+            "value": false,
+            "raw": "false"
+          },
+          {
+            "type": "Literal",
+            "start": 876,
+            "end": 929,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 59
+              },
+              "end": {
+                "line": 23,
+                "column": 112
+              }
+            },
+            "value": "isConstructor(revocationFunction) must return false",
+            "raw": "'isConstructor(revocationFunction) must return false'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 932,
+      "end": 996,
+      "loc": {
+        "start": {
+          "line": 24,
+          "column": 0
+        },
+        "end": {
+          "line": 26,
+          "column": 3
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 932,
+        "end": 995,
+        "loc": {
+          "start": {
+            "line": 24,
+            "column": 0
+          },
+          "end": {
+            "line": 26,
+            "column": 2
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 932,
+          "end": 945,
+          "loc": {
+            "start": {
+              "line": 24,
+              "column": 0
+            },
+            "end": {
+              "line": 24,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 932,
+            "end": 938,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 0
+              },
+              "end": {
+                "line": 24,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 939,
+            "end": 945,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 7
+              },
+              "end": {
+                "line": 24,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 946,
+            "end": 955,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 14
+              },
+              "end": {
+                "line": 24,
+                "column": 23
+              }
+            },
+            "name": "TypeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 957,
+            "end": 994,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 25
+              },
+              "end": {
+                "line": 26,
+                "column": 1
+              }
+            },
+            "id": null,
+            "expression": false,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "BlockStatement",
+              "start": 963,
+              "end": 994,
+              "loc": {
+                "start": {
+                  "line": 24,
+                  "column": 31
+                },
+                "end": {
+                  "line": 26,
+                  "column": 1
+                }
+              },
+              "body": [
+                {
+                  "type": "ExpressionStatement",
+                  "start": 967,
+                  "end": 992,
+                  "loc": {
+                    "start": {
+                      "line": 25,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 25,
+                      "column": 27
+                    }
+                  },
+                  "expression": {
+                    "type": "NewExpression",
+                    "start": 967,
+                    "end": 991,
+                    "loc": {
+                      "start": {
+                        "line": 25,
+                        "column": 2
+                      },
+                      "end": {
+                        "line": 25,
+                        "column": 26
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 971,
+                      "end": 989,
+                      "loc": {
+                        "start": {
+                          "line": 25,
+                          "column": 6
+                        },
+                        "end": {
+                          "line": 25,
+                          "column": 24
+                        }
+                      },
+                      "name": "revocationFunction"
+                    },
+                    "arguments": []
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

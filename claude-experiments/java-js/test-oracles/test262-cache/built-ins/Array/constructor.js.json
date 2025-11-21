@@ -1,0 +1,167 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 340,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 11,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 236,
+      "end": 339,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 103
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 236,
+        "end": 338,
+        "loc": {
+          "start": {
+            "line": 10,
+            "column": 0
+          },
+          "end": {
+            "line": 10,
+            "column": 102
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 236,
+          "end": 252,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 0
+            },
+            "end": {
+              "line": 10,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 236,
+            "end": 242,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 0
+              },
+              "end": {
+                "line": 10,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 243,
+            "end": 252,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 7
+              },
+              "end": {
+                "line": 10,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 253,
+            "end": 265,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 17
+              },
+              "end": {
+                "line": 10,
+                "column": 29
+              }
+            },
+            "operator": "typeof",
+            "prefix": true,
+            "argument": {
+              "type": "Identifier",
+              "start": 260,
+              "end": 265,
+              "loc": {
+                "start": {
+                  "line": 10,
+                  "column": 24
+                },
+                "end": {
+                  "line": 10,
+                  "column": 29
+                }
+              },
+              "name": "Array"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 267,
+            "end": 277,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 31
+              },
+              "end": {
+                "line": 10,
+                "column": 41
+              }
+            },
+            "value": "function",
+            "raw": "'function'"
+          },
+          {
+            "type": "Literal",
+            "start": 279,
+            "end": 337,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 43
+              },
+              "end": {
+                "line": 10,
+                "column": 101
+              }
+            },
+            "value": "The value of `typeof Array` is expected to be \"function\"",
+            "raw": "'The value of `typeof Array` is expected to be \"function\"'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

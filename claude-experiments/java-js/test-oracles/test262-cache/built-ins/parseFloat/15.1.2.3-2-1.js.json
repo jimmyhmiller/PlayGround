@@ -1,0 +1,184 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 361,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 12,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 304,
+      "end": 360,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 56
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 304,
+        "end": 359,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 11,
+            "column": 55
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 304,
+          "end": 320,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 0
+            },
+            "end": {
+              "line": 11,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 304,
+            "end": 310,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 0
+              },
+              "end": {
+                "line": 11,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 311,
+            "end": 320,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 7
+              },
+              "end": {
+                "line": 11,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 321,
+            "end": 335,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 17
+              },
+              "end": {
+                "line": 11,
+                "column": 31
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 321,
+              "end": 331,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 17
+                },
+                "end": {
+                  "line": 11,
+                  "column": 27
+                }
+              },
+              "name": "parseFloat"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 332,
+                "end": 334,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 28
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 30
+                  }
+                },
+                "value": "",
+                "raw": "\"\""
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Identifier",
+            "start": 337,
+            "end": 340,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 33
+              },
+              "end": {
+                "line": 11,
+                "column": 36
+              }
+            },
+            "name": "NaN"
+          },
+          {
+            "type": "Literal",
+            "start": 342,
+            "end": 358,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 38
+              },
+              "end": {
+                "line": 11,
+                "column": 54
+              }
+            },
+            "value": "parseFloat(\"\")",
+            "raw": "'parseFloat(\"\")'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

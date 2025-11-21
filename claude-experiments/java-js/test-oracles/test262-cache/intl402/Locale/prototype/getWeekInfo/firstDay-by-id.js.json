@@ -1,0 +1,947 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 908,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 32,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 500,
+      "end": 689,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 24,
+          "column": 2
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 506,
+          "end": 688,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 6
+            },
+            "end": {
+              "line": 24,
+              "column": 1
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 506,
+            "end": 528,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 6
+              },
+              "end": {
+                "line": 16,
+                "column": 28
+              }
+            },
+            "name": "validFirstDayOfWeekIds"
+          },
+          "init": {
+            "type": "ArrayExpression",
+            "start": 531,
+            "end": 688,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 31
+              },
+              "end": {
+                "line": 24,
+                "column": 1
+              }
+            },
+            "elements": [
+              {
+                "type": "ArrayExpression",
+                "start": 535,
+                "end": 553,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 20
+                  }
+                },
+                "elements": [
+                  {
+                    "type": "Literal",
+                    "start": 536,
+                    "end": 549,
+                    "loc": {
+                      "start": {
+                        "line": 17,
+                        "column": 3
+                      },
+                      "end": {
+                        "line": 17,
+                        "column": 16
+                      }
+                    },
+                    "value": "en-u-fw-mon",
+                    "raw": "\"en-u-fw-mon\""
+                  },
+                  {
+                    "type": "Literal",
+                    "start": 551,
+                    "end": 552,
+                    "loc": {
+                      "start": {
+                        "line": 17,
+                        "column": 18
+                      },
+                      "end": {
+                        "line": 17,
+                        "column": 19
+                      }
+                    },
+                    "value": 1,
+                    "raw": "1"
+                  }
+                ]
+              },
+              {
+                "type": "ArrayExpression",
+                "start": 557,
+                "end": 575,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 20
+                  }
+                },
+                "elements": [
+                  {
+                    "type": "Literal",
+                    "start": 558,
+                    "end": 571,
+                    "loc": {
+                      "start": {
+                        "line": 18,
+                        "column": 3
+                      },
+                      "end": {
+                        "line": 18,
+                        "column": 16
+                      }
+                    },
+                    "value": "en-u-fw-tue",
+                    "raw": "\"en-u-fw-tue\""
+                  },
+                  {
+                    "type": "Literal",
+                    "start": 573,
+                    "end": 574,
+                    "loc": {
+                      "start": {
+                        "line": 18,
+                        "column": 18
+                      },
+                      "end": {
+                        "line": 18,
+                        "column": 19
+                      }
+                    },
+                    "value": 2,
+                    "raw": "2"
+                  }
+                ]
+              },
+              {
+                "type": "ArrayExpression",
+                "start": 579,
+                "end": 597,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 20
+                  }
+                },
+                "elements": [
+                  {
+                    "type": "Literal",
+                    "start": 580,
+                    "end": 593,
+                    "loc": {
+                      "start": {
+                        "line": 19,
+                        "column": 3
+                      },
+                      "end": {
+                        "line": 19,
+                        "column": 16
+                      }
+                    },
+                    "value": "en-u-fw-wed",
+                    "raw": "\"en-u-fw-wed\""
+                  },
+                  {
+                    "type": "Literal",
+                    "start": 595,
+                    "end": 596,
+                    "loc": {
+                      "start": {
+                        "line": 19,
+                        "column": 18
+                      },
+                      "end": {
+                        "line": 19,
+                        "column": 19
+                      }
+                    },
+                    "value": 3,
+                    "raw": "3"
+                  }
+                ]
+              },
+              {
+                "type": "ArrayExpression",
+                "start": 601,
+                "end": 619,
+                "loc": {
+                  "start": {
+                    "line": 20,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 20,
+                    "column": 20
+                  }
+                },
+                "elements": [
+                  {
+                    "type": "Literal",
+                    "start": 602,
+                    "end": 615,
+                    "loc": {
+                      "start": {
+                        "line": 20,
+                        "column": 3
+                      },
+                      "end": {
+                        "line": 20,
+                        "column": 16
+                      }
+                    },
+                    "value": "en-u-fw-thu",
+                    "raw": "\"en-u-fw-thu\""
+                  },
+                  {
+                    "type": "Literal",
+                    "start": 617,
+                    "end": 618,
+                    "loc": {
+                      "start": {
+                        "line": 20,
+                        "column": 18
+                      },
+                      "end": {
+                        "line": 20,
+                        "column": 19
+                      }
+                    },
+                    "value": 4,
+                    "raw": "4"
+                  }
+                ]
+              },
+              {
+                "type": "ArrayExpression",
+                "start": 623,
+                "end": 641,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 20
+                  }
+                },
+                "elements": [
+                  {
+                    "type": "Literal",
+                    "start": 624,
+                    "end": 637,
+                    "loc": {
+                      "start": {
+                        "line": 21,
+                        "column": 3
+                      },
+                      "end": {
+                        "line": 21,
+                        "column": 16
+                      }
+                    },
+                    "value": "en-u-fw-fri",
+                    "raw": "\"en-u-fw-fri\""
+                  },
+                  {
+                    "type": "Literal",
+                    "start": 639,
+                    "end": 640,
+                    "loc": {
+                      "start": {
+                        "line": 21,
+                        "column": 18
+                      },
+                      "end": {
+                        "line": 21,
+                        "column": 19
+                      }
+                    },
+                    "value": 5,
+                    "raw": "5"
+                  }
+                ]
+              },
+              {
+                "type": "ArrayExpression",
+                "start": 645,
+                "end": 663,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 20
+                  }
+                },
+                "elements": [
+                  {
+                    "type": "Literal",
+                    "start": 646,
+                    "end": 659,
+                    "loc": {
+                      "start": {
+                        "line": 22,
+                        "column": 3
+                      },
+                      "end": {
+                        "line": 22,
+                        "column": 16
+                      }
+                    },
+                    "value": "en-u-fw-sat",
+                    "raw": "\"en-u-fw-sat\""
+                  },
+                  {
+                    "type": "Literal",
+                    "start": 661,
+                    "end": 662,
+                    "loc": {
+                      "start": {
+                        "line": 22,
+                        "column": 18
+                      },
+                      "end": {
+                        "line": 22,
+                        "column": 19
+                      }
+                    },
+                    "value": 6,
+                    "raw": "6"
+                  }
+                ]
+              },
+              {
+                "type": "ArrayExpression",
+                "start": 667,
+                "end": 685,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 20
+                  }
+                },
+                "elements": [
+                  {
+                    "type": "Literal",
+                    "start": 668,
+                    "end": 681,
+                    "loc": {
+                      "start": {
+                        "line": 23,
+                        "column": 3
+                      },
+                      "end": {
+                        "line": 23,
+                        "column": 16
+                      }
+                    },
+                    "value": "en-u-fw-sun",
+                    "raw": "\"en-u-fw-sun\""
+                  },
+                  {
+                    "type": "Literal",
+                    "start": 683,
+                    "end": 684,
+                    "loc": {
+                      "start": {
+                        "line": 23,
+                        "column": 18
+                      },
+                      "end": {
+                        "line": 23,
+                        "column": 19
+                      }
+                    },
+                    "value": 7,
+                    "raw": "7"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ForOfStatement",
+      "start": 690,
+      "end": 907,
+      "loc": {
+        "start": {
+          "line": 25,
+          "column": 0
+        },
+        "end": {
+          "line": 31,
+          "column": 1
+        }
+      },
+      "await": false,
+      "left": {
+        "type": "VariableDeclaration",
+        "start": 695,
+        "end": 715,
+        "loc": {
+          "start": {
+            "line": 25,
+            "column": 5
+          },
+          "end": {
+            "line": 25,
+            "column": 25
+          }
+        },
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "start": 701,
+            "end": 715,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 11
+              },
+              "end": {
+                "line": 25,
+                "column": 25
+              }
+            },
+            "id": {
+              "type": "ArrayPattern",
+              "start": 701,
+              "end": 715,
+              "loc": {
+                "start": {
+                  "line": 25,
+                  "column": 11
+                },
+                "end": {
+                  "line": 25,
+                  "column": 25
+                }
+              },
+              "elements": [
+                {
+                  "type": "Identifier",
+                  "start": 702,
+                  "end": 704,
+                  "loc": {
+                    "start": {
+                      "line": 25,
+                      "column": 12
+                    },
+                    "end": {
+                      "line": 25,
+                      "column": 14
+                    }
+                  },
+                  "name": "id"
+                },
+                {
+                  "type": "Identifier",
+                  "start": 706,
+                  "end": 714,
+                  "loc": {
+                    "start": {
+                      "line": 25,
+                      "column": 16
+                    },
+                    "end": {
+                      "line": 25,
+                      "column": 24
+                    }
+                  },
+                  "name": "expected"
+                }
+              ]
+            },
+            "init": null
+          }
+        ],
+        "kind": "const"
+      },
+      "right": {
+        "type": "Identifier",
+        "start": 719,
+        "end": 741,
+        "loc": {
+          "start": {
+            "line": 25,
+            "column": 29
+          },
+          "end": {
+            "line": 25,
+            "column": 51
+          }
+        },
+        "name": "validFirstDayOfWeekIds"
+      },
+      "body": {
+        "type": "BlockStatement",
+        "start": 743,
+        "end": 907,
+        "loc": {
+          "start": {
+            "line": 25,
+            "column": 53
+          },
+          "end": {
+            "line": 31,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ExpressionStatement",
+            "start": 747,
+            "end": 905,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 2
+              },
+              "end": {
+                "line": 30,
+                "column": 4
+              }
+            },
+            "expression": {
+              "type": "CallExpression",
+              "start": 747,
+              "end": 904,
+              "loc": {
+                "start": {
+                  "line": 26,
+                  "column": 2
+                },
+                "end": {
+                  "line": 30,
+                  "column": 3
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 747,
+                "end": 763,
+                "loc": {
+                  "start": {
+                    "line": 26,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 26,
+                    "column": 18
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 747,
+                  "end": 753,
+                  "loc": {
+                    "start": {
+                      "line": 26,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 26,
+                      "column": 8
+                    }
+                  },
+                  "name": "assert"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 754,
+                  "end": 763,
+                  "loc": {
+                    "start": {
+                      "line": 26,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 26,
+                      "column": 18
+                    }
+                  },
+                  "name": "sameValue"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "MemberExpression",
+                  "start": 769,
+                  "end": 811,
+                  "loc": {
+                    "start": {
+                      "line": 27,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 27,
+                      "column": 46
+                    }
+                  },
+                  "object": {
+                    "type": "CallExpression",
+                    "start": 769,
+                    "end": 802,
+                    "loc": {
+                      "start": {
+                        "line": 27,
+                        "column": 4
+                      },
+                      "end": {
+                        "line": 27,
+                        "column": 37
+                      }
+                    },
+                    "callee": {
+                      "type": "MemberExpression",
+                      "start": 769,
+                      "end": 800,
+                      "loc": {
+                        "start": {
+                          "line": 27,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 27,
+                          "column": 35
+                        }
+                      },
+                      "object": {
+                        "type": "NewExpression",
+                        "start": 769,
+                        "end": 788,
+                        "loc": {
+                          "start": {
+                            "line": 27,
+                            "column": 4
+                          },
+                          "end": {
+                            "line": 27,
+                            "column": 23
+                          }
+                        },
+                        "callee": {
+                          "type": "MemberExpression",
+                          "start": 773,
+                          "end": 784,
+                          "loc": {
+                            "start": {
+                              "line": 27,
+                              "column": 8
+                            },
+                            "end": {
+                              "line": 27,
+                              "column": 19
+                            }
+                          },
+                          "object": {
+                            "type": "Identifier",
+                            "start": 773,
+                            "end": 777,
+                            "loc": {
+                              "start": {
+                                "line": 27,
+                                "column": 8
+                              },
+                              "end": {
+                                "line": 27,
+                                "column": 12
+                              }
+                            },
+                            "name": "Intl"
+                          },
+                          "property": {
+                            "type": "Identifier",
+                            "start": 778,
+                            "end": 784,
+                            "loc": {
+                              "start": {
+                                "line": 27,
+                                "column": 13
+                              },
+                              "end": {
+                                "line": 27,
+                                "column": 19
+                              }
+                            },
+                            "name": "Locale"
+                          },
+                          "computed": false,
+                          "optional": false
+                        },
+                        "arguments": [
+                          {
+                            "type": "Identifier",
+                            "start": 785,
+                            "end": 787,
+                            "loc": {
+                              "start": {
+                                "line": 27,
+                                "column": 20
+                              },
+                              "end": {
+                                "line": 27,
+                                "column": 22
+                              }
+                            },
+                            "name": "id"
+                          }
+                        ]
+                      },
+                      "property": {
+                        "type": "Identifier",
+                        "start": 789,
+                        "end": 800,
+                        "loc": {
+                          "start": {
+                            "line": 27,
+                            "column": 24
+                          },
+                          "end": {
+                            "line": 27,
+                            "column": 35
+                          }
+                        },
+                        "name": "getWeekInfo"
+                      },
+                      "computed": false,
+                      "optional": false
+                    },
+                    "arguments": [],
+                    "optional": false
+                  },
+                  "property": {
+                    "type": "Identifier",
+                    "start": 803,
+                    "end": 811,
+                    "loc": {
+                      "start": {
+                        "line": 27,
+                        "column": 38
+                      },
+                      "end": {
+                        "line": 27,
+                        "column": 46
+                      }
+                    },
+                    "name": "firstDay"
+                  },
+                  "computed": false,
+                  "optional": false
+                },
+                {
+                  "type": "Identifier",
+                  "start": 817,
+                  "end": 825,
+                  "loc": {
+                    "start": {
+                      "line": 28,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 28,
+                      "column": 12
+                    }
+                  },
+                  "name": "expected"
+                },
+                {
+                  "type": "TemplateLiteral",
+                  "start": 831,
+                  "end": 900,
+                  "loc": {
+                    "start": {
+                      "line": 29,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 29,
+                      "column": 73
+                    }
+                  },
+                  "expressions": [
+                    {
+                      "type": "Identifier",
+                      "start": 850,
+                      "end": 852,
+                      "loc": {
+                        "start": {
+                          "line": 29,
+                          "column": 23
+                        },
+                        "end": {
+                          "line": 29,
+                          "column": 25
+                        }
+                      },
+                      "name": "id"
+                    },
+                    {
+                      "type": "Identifier",
+                      "start": 889,
+                      "end": 897,
+                      "loc": {
+                        "start": {
+                          "line": 29,
+                          "column": 62
+                        },
+                        "end": {
+                          "line": 29,
+                          "column": 70
+                        }
+                      },
+                      "name": "expected"
+                    }
+                  ],
+                  "quasis": [
+                    {
+                      "type": "TemplateElement",
+                      "start": 832,
+                      "end": 848,
+                      "loc": {
+                        "start": {
+                          "line": 29,
+                          "column": 5
+                        },
+                        "end": {
+                          "line": 29,
+                          "column": 21
+                        }
+                      },
+                      "value": {
+                        "raw": "new Intl.Locale(",
+                        "cooked": "new Intl.Locale("
+                      },
+                      "tail": false
+                    },
+                    {
+                      "type": "TemplateElement",
+                      "start": 853,
+                      "end": 887,
+                      "loc": {
+                        "start": {
+                          "line": 29,
+                          "column": 26
+                        },
+                        "end": {
+                          "line": 29,
+                          "column": 60
+                        }
+                      },
+                      "value": {
+                        "raw": ").getWeekInfo().firstDay returns \"",
+                        "cooked": ").getWeekInfo().firstDay returns \""
+                      },
+                      "tail": false
+                    },
+                    {
+                      "type": "TemplateElement",
+                      "start": 898,
+                      "end": 899,
+                      "loc": {
+                        "start": {
+                          "line": 29,
+                          "column": 71
+                        },
+                        "end": {
+                          "line": 29,
+                          "column": 72
+                        }
+                      },
+                      "value": {
+                        "raw": "\"",
+                        "cooked": "\""
+                      },
+                      "tail": true
+                    }
+                  ]
+                }
+              ],
+              "optional": false
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "sourceType": "script"
+}

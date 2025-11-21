@@ -1,0 +1,422 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 2847,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 51,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 2691,
+      "end": 2714,
+      "loc": {
+        "start": {
+          "line": 48,
+          "column": 0
+        },
+        "end": {
+          "line": 48,
+          "column": 23
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 2695,
+          "end": 2713,
+          "loc": {
+            "start": {
+              "line": 48,
+              "column": 4
+            },
+            "end": {
+              "line": 48,
+              "column": 22
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 2695,
+            "end": 2698,
+            "loc": {
+              "start": {
+                "line": 48,
+                "column": 4
+              },
+              "end": {
+                "line": 48,
+                "column": 7
+              }
+            },
+            "name": "re1"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 2701,
+            "end": 2713,
+            "loc": {
+              "start": {
+                "line": 48,
+                "column": 10
+              },
+              "end": {
+                "line": 48,
+                "column": 22
+              }
+            },
+            "value": null,
+            "raw": "/(?-i:\\b)/ui",
+            "regex": {
+              "pattern": "(?-i:\\b)",
+              "flags": "ui"
+            }
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2715,
+      "end": 2780,
+      "loc": {
+        "start": {
+          "line": 49,
+          "column": 0
+        },
+        "end": {
+          "line": 49,
+          "column": 65
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2715,
+        "end": 2779,
+        "loc": {
+          "start": {
+            "line": 49,
+            "column": 0
+          },
+          "end": {
+            "line": 49,
+            "column": 64
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 2715,
+          "end": 2721,
+          "loc": {
+            "start": {
+              "line": 49,
+              "column": 0
+            },
+            "end": {
+              "line": 49,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 2722,
+            "end": 2741,
+            "loc": {
+              "start": {
+                "line": 49,
+                "column": 7
+              },
+              "end": {
+                "line": 49,
+                "column": 26
+              }
+            },
+            "operator": "!",
+            "prefix": true,
+            "argument": {
+              "type": "CallExpression",
+              "start": 2723,
+              "end": 2741,
+              "loc": {
+                "start": {
+                  "line": 49,
+                  "column": 8
+                },
+                "end": {
+                  "line": 49,
+                  "column": 26
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 2723,
+                "end": 2731,
+                "loc": {
+                  "start": {
+                    "line": 49,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 49,
+                    "column": 16
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 2723,
+                  "end": 2726,
+                  "loc": {
+                    "start": {
+                      "line": 49,
+                      "column": 8
+                    },
+                    "end": {
+                      "line": 49,
+                      "column": 11
+                    }
+                  },
+                  "name": "re1"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 2727,
+                  "end": 2731,
+                  "loc": {
+                    "start": {
+                      "line": 49,
+                      "column": 12
+                    },
+                    "end": {
+                      "line": 49,
+                      "column": 16
+                    }
+                  },
+                  "name": "test"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 2732,
+                  "end": 2740,
+                  "loc": {
+                    "start": {
+                      "line": 49,
+                      "column": 17
+                    },
+                    "end": {
+                      "line": 49,
+                      "column": 25
+                    }
+                  },
+                  "value": "ſ",
+                  "raw": "\"\\u017f\""
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 2743,
+            "end": 2778,
+            "loc": {
+              "start": {
+                "line": 49,
+                "column": 28
+              },
+              "end": {
+                "line": 49,
+                "column": 63
+              }
+            },
+            "value": "\\b should not match after ſ",
+            "raw": "\"\\\\b should not match after \\u017f\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2781,
+      "end": 2846,
+      "loc": {
+        "start": {
+          "line": 50,
+          "column": 0
+        },
+        "end": {
+          "line": 50,
+          "column": 65
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2781,
+        "end": 2845,
+        "loc": {
+          "start": {
+            "line": 50,
+            "column": 0
+          },
+          "end": {
+            "line": 50,
+            "column": 64
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 2781,
+          "end": 2787,
+          "loc": {
+            "start": {
+              "line": 50,
+              "column": 0
+            },
+            "end": {
+              "line": 50,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 2788,
+            "end": 2807,
+            "loc": {
+              "start": {
+                "line": 50,
+                "column": 7
+              },
+              "end": {
+                "line": 50,
+                "column": 26
+              }
+            },
+            "operator": "!",
+            "prefix": true,
+            "argument": {
+              "type": "CallExpression",
+              "start": 2789,
+              "end": 2807,
+              "loc": {
+                "start": {
+                  "line": 50,
+                  "column": 8
+                },
+                "end": {
+                  "line": 50,
+                  "column": 26
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 2789,
+                "end": 2797,
+                "loc": {
+                  "start": {
+                    "line": 50,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 50,
+                    "column": 16
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 2789,
+                  "end": 2792,
+                  "loc": {
+                    "start": {
+                      "line": 50,
+                      "column": 8
+                    },
+                    "end": {
+                      "line": 50,
+                      "column": 11
+                    }
+                  },
+                  "name": "re1"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 2793,
+                  "end": 2797,
+                  "loc": {
+                    "start": {
+                      "line": 50,
+                      "column": 12
+                    },
+                    "end": {
+                      "line": 50,
+                      "column": 16
+                    }
+                  },
+                  "name": "test"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 2798,
+                  "end": 2806,
+                  "loc": {
+                    "start": {
+                      "line": 50,
+                      "column": 17
+                    },
+                    "end": {
+                      "line": 50,
+                      "column": 25
+                    }
+                  },
+                  "value": "K",
+                  "raw": "\"\\u212a\""
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 2809,
+            "end": 2844,
+            "loc": {
+              "start": {
+                "line": 50,
+                "column": 28
+              },
+              "end": {
+                "line": 50,
+                "column": 63
+              }
+            },
+            "value": "\\b should not match after K",
+            "raw": "\"\\\\b should not match after \\u212a\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

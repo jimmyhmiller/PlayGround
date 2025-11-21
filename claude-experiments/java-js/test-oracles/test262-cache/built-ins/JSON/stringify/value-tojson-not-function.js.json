@@ -1,0 +1,961 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 859,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 26,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 587,
+      "end": 655,
+      "loc": {
+        "start": {
+          "line": 22,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 68
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 587,
+        "end": 654,
+        "loc": {
+          "start": {
+            "line": 22,
+            "column": 0
+          },
+          "end": {
+            "line": 22,
+            "column": 67
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 587,
+          "end": 603,
+          "loc": {
+            "start": {
+              "line": 22,
+              "column": 0
+            },
+            "end": {
+              "line": 22,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 587,
+            "end": 593,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 0
+              },
+              "end": {
+                "line": 22,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 594,
+            "end": 603,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 7
+              },
+              "end": {
+                "line": 22,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 604,
+            "end": 634,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 17
+              },
+              "end": {
+                "line": 22,
+                "column": 47
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 604,
+              "end": 618,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 17
+                },
+                "end": {
+                  "line": 22,
+                  "column": 31
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 604,
+                "end": 608,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 21
+                  }
+                },
+                "name": "JSON"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 609,
+                "end": 618,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 31
+                  }
+                },
+                "name": "stringify"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "ObjectExpression",
+                "start": 619,
+                "end": 633,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 46
+                  }
+                },
+                "properties": [
+                  {
+                    "type": "Property",
+                    "start": 620,
+                    "end": 632,
+                    "loc": {
+                      "start": {
+                        "line": 22,
+                        "column": 33
+                      },
+                      "end": {
+                        "line": 22,
+                        "column": 45
+                      }
+                    },
+                    "method": false,
+                    "shorthand": false,
+                    "computed": false,
+                    "key": {
+                      "type": "Identifier",
+                      "start": 620,
+                      "end": 626,
+                      "loc": {
+                        "start": {
+                          "line": 22,
+                          "column": 33
+                        },
+                        "end": {
+                          "line": 22,
+                          "column": 39
+                        }
+                      },
+                      "name": "toJSON"
+                    },
+                    "value": {
+                      "type": "Literal",
+                      "start": 628,
+                      "end": 632,
+                      "loc": {
+                        "start": {
+                          "line": 22,
+                          "column": 41
+                        },
+                        "end": {
+                          "line": 22,
+                          "column": 45
+                        }
+                      },
+                      "value": null,
+                      "raw": "null"
+                    },
+                    "kind": "init"
+                  }
+                ]
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 636,
+            "end": 653,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 49
+              },
+              "end": {
+                "line": 22,
+                "column": 66
+              }
+            },
+            "value": "{\"toJSON\":null}",
+            "raw": "'{\"toJSON\":null}'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 656,
+      "end": 726,
+      "loc": {
+        "start": {
+          "line": 23,
+          "column": 0
+        },
+        "end": {
+          "line": 23,
+          "column": 70
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 656,
+        "end": 725,
+        "loc": {
+          "start": {
+            "line": 23,
+            "column": 0
+          },
+          "end": {
+            "line": 23,
+            "column": 69
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 656,
+          "end": 672,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 0
+            },
+            "end": {
+              "line": 23,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 656,
+            "end": 662,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 0
+              },
+              "end": {
+                "line": 23,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 663,
+            "end": 672,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 7
+              },
+              "end": {
+                "line": 23,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 673,
+            "end": 704,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 17
+              },
+              "end": {
+                "line": 23,
+                "column": 48
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 673,
+              "end": 687,
+              "loc": {
+                "start": {
+                  "line": 23,
+                  "column": 17
+                },
+                "end": {
+                  "line": 23,
+                  "column": 31
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 673,
+                "end": 677,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 21
+                  }
+                },
+                "name": "JSON"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 678,
+                "end": 687,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 31
+                  }
+                },
+                "name": "stringify"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "ObjectExpression",
+                "start": 688,
+                "end": 703,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 47
+                  }
+                },
+                "properties": [
+                  {
+                    "type": "Property",
+                    "start": 689,
+                    "end": 702,
+                    "loc": {
+                      "start": {
+                        "line": 23,
+                        "column": 33
+                      },
+                      "end": {
+                        "line": 23,
+                        "column": 46
+                      }
+                    },
+                    "method": false,
+                    "shorthand": false,
+                    "computed": false,
+                    "key": {
+                      "type": "Identifier",
+                      "start": 689,
+                      "end": 695,
+                      "loc": {
+                        "start": {
+                          "line": 23,
+                          "column": 33
+                        },
+                        "end": {
+                          "line": 23,
+                          "column": 39
+                        }
+                      },
+                      "name": "toJSON"
+                    },
+                    "value": {
+                      "type": "Literal",
+                      "start": 697,
+                      "end": 702,
+                      "loc": {
+                        "start": {
+                          "line": 23,
+                          "column": 41
+                        },
+                        "end": {
+                          "line": 23,
+                          "column": 46
+                        }
+                      },
+                      "value": false,
+                      "raw": "false"
+                    },
+                    "kind": "init"
+                  }
+                ]
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 706,
+            "end": 724,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 50
+              },
+              "end": {
+                "line": 23,
+                "column": 68
+              }
+            },
+            "value": "{\"toJSON\":false}",
+            "raw": "'{\"toJSON\":false}'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 727,
+      "end": 791,
+      "loc": {
+        "start": {
+          "line": 24,
+          "column": 0
+        },
+        "end": {
+          "line": 24,
+          "column": 64
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 727,
+        "end": 790,
+        "loc": {
+          "start": {
+            "line": 24,
+            "column": 0
+          },
+          "end": {
+            "line": 24,
+            "column": 63
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 727,
+          "end": 743,
+          "loc": {
+            "start": {
+              "line": 24,
+              "column": 0
+            },
+            "end": {
+              "line": 24,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 727,
+            "end": 733,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 0
+              },
+              "end": {
+                "line": 24,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 734,
+            "end": 743,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 7
+              },
+              "end": {
+                "line": 24,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 744,
+            "end": 772,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 17
+              },
+              "end": {
+                "line": 24,
+                "column": 45
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 744,
+              "end": 758,
+              "loc": {
+                "start": {
+                  "line": 24,
+                  "column": 17
+                },
+                "end": {
+                  "line": 24,
+                  "column": 31
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 744,
+                "end": 748,
+                "loc": {
+                  "start": {
+                    "line": 24,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 24,
+                    "column": 21
+                  }
+                },
+                "name": "JSON"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 749,
+                "end": 758,
+                "loc": {
+                  "start": {
+                    "line": 24,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 24,
+                    "column": 31
+                  }
+                },
+                "name": "stringify"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "ObjectExpression",
+                "start": 759,
+                "end": 771,
+                "loc": {
+                  "start": {
+                    "line": 24,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 24,
+                    "column": 44
+                  }
+                },
+                "properties": [
+                  {
+                    "type": "Property",
+                    "start": 760,
+                    "end": 770,
+                    "loc": {
+                      "start": {
+                        "line": 24,
+                        "column": 33
+                      },
+                      "end": {
+                        "line": 24,
+                        "column": 43
+                      }
+                    },
+                    "method": false,
+                    "shorthand": false,
+                    "computed": false,
+                    "key": {
+                      "type": "Identifier",
+                      "start": 760,
+                      "end": 766,
+                      "loc": {
+                        "start": {
+                          "line": 24,
+                          "column": 33
+                        },
+                        "end": {
+                          "line": 24,
+                          "column": 39
+                        }
+                      },
+                      "name": "toJSON"
+                    },
+                    "value": {
+                      "type": "ArrayExpression",
+                      "start": 768,
+                      "end": 770,
+                      "loc": {
+                        "start": {
+                          "line": 24,
+                          "column": 41
+                        },
+                        "end": {
+                          "line": 24,
+                          "column": 43
+                        }
+                      },
+                      "elements": []
+                    },
+                    "kind": "init"
+                  }
+                ]
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 774,
+            "end": 789,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 47
+              },
+              "end": {
+                "line": 24,
+                "column": 62
+              }
+            },
+            "value": "{\"toJSON\":[]}",
+            "raw": "'{\"toJSON\":[]}'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 792,
+      "end": 858,
+      "loc": {
+        "start": {
+          "line": 25,
+          "column": 0
+        },
+        "end": {
+          "line": 25,
+          "column": 66
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 792,
+        "end": 857,
+        "loc": {
+          "start": {
+            "line": 25,
+            "column": 0
+          },
+          "end": {
+            "line": 25,
+            "column": 65
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 792,
+          "end": 808,
+          "loc": {
+            "start": {
+              "line": 25,
+              "column": 0
+            },
+            "end": {
+              "line": 25,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 792,
+            "end": 798,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 0
+              },
+              "end": {
+                "line": 25,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 799,
+            "end": 808,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 7
+              },
+              "end": {
+                "line": 25,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 809,
+            "end": 839,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 17
+              },
+              "end": {
+                "line": 25,
+                "column": 47
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 809,
+              "end": 823,
+              "loc": {
+                "start": {
+                  "line": 25,
+                  "column": 17
+                },
+                "end": {
+                  "line": 25,
+                  "column": 31
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 809,
+                "end": 813,
+                "loc": {
+                  "start": {
+                    "line": 25,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 25,
+                    "column": 21
+                  }
+                },
+                "name": "JSON"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 814,
+                "end": 823,
+                "loc": {
+                  "start": {
+                    "line": 25,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 25,
+                    "column": 31
+                  }
+                },
+                "name": "stringify"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "ObjectExpression",
+                "start": 824,
+                "end": 838,
+                "loc": {
+                  "start": {
+                    "line": 25,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 25,
+                    "column": 46
+                  }
+                },
+                "properties": [
+                  {
+                    "type": "Property",
+                    "start": 825,
+                    "end": 837,
+                    "loc": {
+                      "start": {
+                        "line": 25,
+                        "column": 33
+                      },
+                      "end": {
+                        "line": 25,
+                        "column": 45
+                      }
+                    },
+                    "method": false,
+                    "shorthand": false,
+                    "computed": false,
+                    "key": {
+                      "type": "Identifier",
+                      "start": 825,
+                      "end": 831,
+                      "loc": {
+                        "start": {
+                          "line": 25,
+                          "column": 33
+                        },
+                        "end": {
+                          "line": 25,
+                          "column": 39
+                        }
+                      },
+                      "name": "toJSON"
+                    },
+                    "value": {
+                      "type": "Literal",
+                      "start": 833,
+                      "end": 837,
+                      "loc": {
+                        "start": {
+                          "line": 25,
+                          "column": 41
+                        },
+                        "end": {
+                          "line": 25,
+                          "column": 45
+                        }
+                      },
+                      "value": {},
+                      "raw": "/re/",
+                      "regex": {
+                        "pattern": "re",
+                        "flags": ""
+                      }
+                    },
+                    "kind": "init"
+                  }
+                ]
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 841,
+            "end": 856,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 49
+              },
+              "end": {
+                "line": 25,
+                "column": 64
+              }
+            },
+            "value": "{\"toJSON\":{}}",
+            "raw": "'{\"toJSON\":{}}'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

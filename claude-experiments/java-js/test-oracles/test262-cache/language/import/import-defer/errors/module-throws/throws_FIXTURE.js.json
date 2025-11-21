@@ -1,0 +1,102 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 181,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 5,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ThrowStatement",
+      "start": 128,
+      "end": 180,
+      "loc": {
+        "start": {
+          "line": 4,
+          "column": 0
+        },
+        "end": {
+          "line": 4,
+          "column": 52
+        }
+      },
+      "argument": {
+        "type": "ObjectExpression",
+        "start": 134,
+        "end": 180,
+        "loc": {
+          "start": {
+            "line": 4,
+            "column": 6
+          },
+          "end": {
+            "line": 4,
+            "column": 52
+          }
+        },
+        "properties": [
+          {
+            "type": "Property",
+            "start": 136,
+            "end": 178,
+            "loc": {
+              "start": {
+                "line": 4,
+                "column": 8
+              },
+              "end": {
+                "line": 4,
+                "column": 50
+              }
+            },
+            "method": false,
+            "shorthand": false,
+            "computed": false,
+            "key": {
+              "type": "Identifier",
+              "start": 136,
+              "end": 145,
+              "loc": {
+                "start": {
+                  "line": 4,
+                  "column": 8
+                },
+                "end": {
+                  "line": 4,
+                  "column": 17
+                }
+              },
+              "name": "someError"
+            },
+            "value": {
+              "type": "Literal",
+              "start": 147,
+              "end": 178,
+              "loc": {
+                "start": {
+                  "line": 4,
+                  "column": 19
+                },
+                "end": {
+                  "line": 4,
+                  "column": 50
+                }
+              },
+              "value": "the error from throws_FIXTURE",
+              "raw": "\"the error from throws_FIXTURE\""
+            },
+            "kind": "init"
+          }
+        ]
+      }
+    }
+  ],
+  "sourceType": "module"
+}

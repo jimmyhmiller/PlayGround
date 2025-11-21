@@ -1,0 +1,255 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 476,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 15,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 349,
+      "end": 402,
+      "loc": {
+        "start": {
+          "line": 12,
+          "column": 0
+        },
+        "end": {
+          "line": 12,
+          "column": 53
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 353,
+          "end": 401,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 4
+            },
+            "end": {
+              "line": 12,
+              "column": 52
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 353,
+            "end": 363,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 4
+              },
+              "end": {
+                "line": 12,
+                "column": 14
+              }
+            },
+            "name": "__executed"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 366,
+            "end": 401,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 17
+              },
+              "end": {
+                "line": 12,
+                "column": 52
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 366,
+              "end": 383,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 17
+                },
+                "end": {
+                  "line": 12,
+                  "column": 34
+                }
+              },
+              "object": {
+                "type": "Literal",
+                "start": 366,
+                "end": 378,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 29
+                  }
+                },
+                "value": {},
+                "raw": "/\\s+java\\s+/",
+                "regex": {
+                  "pattern": "\\s+java\\s+",
+                  "flags": ""
+                }
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 379,
+                "end": 383,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 30
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 34
+                  }
+                },
+                "name": "test"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 384,
+                "end": 400,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 35
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 51
+                  }
+                },
+                "value": "java\n\nobject",
+                "raw": "\"java\\n\\nobject\""
+              }
+            ],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 404,
+      "end": 475,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 71
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 404,
+        "end": 474,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 70
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 404,
+          "end": 410,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 0
+            },
+            "end": {
+              "line": 14,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 411,
+            "end": 422,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 7
+              },
+              "end": {
+                "line": 14,
+                "column": 18
+              }
+            },
+            "operator": "!",
+            "prefix": true,
+            "argument": {
+              "type": "Identifier",
+              "start": 412,
+              "end": 422,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 8
+                },
+                "end": {
+                  "line": 14,
+                  "column": 18
+                }
+              },
+              "name": "__executed"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 424,
+            "end": 473,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 20
+              },
+              "end": {
+                "line": 14,
+                "column": 69
+              }
+            },
+            "value": "The value of !__executed is expected to be true",
+            "raw": "'The value of !__executed is expected to be true'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

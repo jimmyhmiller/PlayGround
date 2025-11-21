@@ -1,0 +1,83 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 157,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 5,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ThrowStatement",
+      "start": 130,
+      "end": 156,
+      "loc": {
+        "start": {
+          "line": 4,
+          "column": 0
+        },
+        "end": {
+          "line": 4,
+          "column": 26
+        }
+      },
+      "argument": {
+        "type": "NewExpression",
+        "start": 136,
+        "end": 155,
+        "loc": {
+          "start": {
+            "line": 4,
+            "column": 6
+          },
+          "end": {
+            "line": 4,
+            "column": 25
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 140,
+          "end": 145,
+          "loc": {
+            "start": {
+              "line": 4,
+              "column": 10
+            },
+            "end": {
+              "line": 4,
+              "column": 15
+            }
+          },
+          "name": "Error"
+        },
+        "arguments": [
+          {
+            "type": "Literal",
+            "start": 146,
+            "end": 154,
+            "loc": {
+              "start": {
+                "line": 4,
+                "column": 16
+              },
+              "end": {
+                "line": 4,
+                "column": 24
+              }
+            },
+            "value": "foobar",
+            "raw": "'foobar'"
+          }
+        ]
+      }
+    }
+  ],
+  "sourceType": "module"
+}

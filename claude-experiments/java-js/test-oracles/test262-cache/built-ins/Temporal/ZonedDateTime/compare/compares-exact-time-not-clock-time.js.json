@@ -1,0 +1,897 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 776,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 20,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 424,
+      "end": 502,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 78
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 430,
+          "end": 501,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 6
+            },
+            "end": {
+              "line": 14,
+              "column": 77
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 430,
+            "end": 441,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 6
+              },
+              "end": {
+                "line": 14,
+                "column": 17
+              }
+            },
+            "name": "clockBefore"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 444,
+            "end": 501,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 20
+              },
+              "end": {
+                "line": 14,
+                "column": 77
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 448,
+              "end": 470,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 24
+                },
+                "end": {
+                  "line": 14,
+                  "column": 46
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 448,
+                "end": 456,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 32
+                  }
+                },
+                "name": "Temporal"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 457,
+                "end": 470,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 33
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 46
+                  }
+                },
+                "name": "ZonedDateTime"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 471,
+                "end": 490,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 47
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 66
+                  }
+                },
+                "value": null,
+                "raw": "946711800000000000n",
+                "bigint": "946711800000000000"
+              },
+              {
+                "type": "Literal",
+                "start": 492,
+                "end": 500,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 68
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 76
+                  }
+                },
+                "value": "-08:00",
+                "raw": "\"-08:00\""
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 503,
+      "end": 580,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 77
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 509,
+          "end": 579,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 6
+            },
+            "end": {
+              "line": 15,
+              "column": 76
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 509,
+            "end": 519,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 6
+              },
+              "end": {
+                "line": 15,
+                "column": 16
+              }
+            },
+            "name": "clockAfter"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 522,
+            "end": 579,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 19
+              },
+              "end": {
+                "line": 15,
+                "column": 76
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 526,
+              "end": 548,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 23
+                },
+                "end": {
+                  "line": 15,
+                  "column": 45
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 526,
+                "end": 534,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 23
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 31
+                  }
+                },
+                "name": "Temporal"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 535,
+                "end": 548,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 45
+                  }
+                },
+                "name": "ZonedDateTime"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 549,
+                "end": 568,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 46
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 65
+                  }
+                },
+                "value": null,
+                "raw": "946704600000000000n",
+                "bigint": "946704600000000000"
+              },
+              {
+                "type": "Literal",
+                "start": 570,
+                "end": 578,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 67
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 75
+                  }
+                },
+                "value": "-04:00",
+                "raw": "\"-04:00\""
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 582,
+      "end": 659,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 77
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 582,
+        "end": 658,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 0
+          },
+          "end": {
+            "line": 17,
+            "column": 76
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 582,
+          "end": 598,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 0
+            },
+            "end": {
+              "line": 17,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 582,
+            "end": 588,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 0
+              },
+              "end": {
+                "line": 17,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 589,
+            "end": 598,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 7
+              },
+              "end": {
+                "line": 17,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 599,
+            "end": 654,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 17
+              },
+              "end": {
+                "line": 17,
+                "column": 72
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 599,
+              "end": 629,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 17
+                },
+                "end": {
+                  "line": 17,
+                  "column": 47
+                }
+              },
+              "object": {
+                "type": "MemberExpression",
+                "start": 599,
+                "end": 621,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 39
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 599,
+                  "end": 607,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 17
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 25
+                    }
+                  },
+                  "name": "Temporal"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 608,
+                  "end": 621,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 26
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 39
+                    }
+                  },
+                  "name": "ZonedDateTime"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 622,
+                "end": 629,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 40
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 47
+                  }
+                },
+                "name": "compare"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 630,
+                "end": 641,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 48
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 59
+                  }
+                },
+                "name": "clockBefore"
+              },
+              {
+                "type": "Identifier",
+                "start": 643,
+                "end": 653,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 61
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 71
+                  }
+                },
+                "name": "clockAfter"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 656,
+            "end": 657,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 74
+              },
+              "end": {
+                "line": 17,
+                "column": 75
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 660,
+      "end": 774,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 114
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 660,
+        "end": 773,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 0
+          },
+          "end": {
+            "line": 18,
+            "column": 113
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 660,
+          "end": 676,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 0
+            },
+            "end": {
+              "line": 18,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 660,
+            "end": 666,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 0
+              },
+              "end": {
+                "line": 18,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 667,
+            "end": 676,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 7
+              },
+              "end": {
+                "line": 18,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 677,
+            "end": 768,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 17
+              },
+              "end": {
+                "line": 18,
+                "column": 108
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 677,
+              "end": 707,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 17
+                },
+                "end": {
+                  "line": 18,
+                  "column": 47
+                }
+              },
+              "object": {
+                "type": "MemberExpression",
+                "start": 677,
+                "end": 699,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 39
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 677,
+                  "end": 685,
+                  "loc": {
+                    "start": {
+                      "line": 18,
+                      "column": 17
+                    },
+                    "end": {
+                      "line": 18,
+                      "column": 25
+                    }
+                  },
+                  "name": "Temporal"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 686,
+                  "end": 699,
+                  "loc": {
+                    "start": {
+                      "line": 18,
+                      "column": 26
+                    },
+                    "end": {
+                      "line": 18,
+                      "column": 39
+                    }
+                  },
+                  "name": "PlainDateTime"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 700,
+                "end": 707,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 40
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 47
+                  }
+                },
+                "name": "compare"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "CallExpression",
+                "start": 708,
+                "end": 737,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 48
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 77
+                  }
+                },
+                "callee": {
+                  "type": "MemberExpression",
+                  "start": 708,
+                  "end": 735,
+                  "loc": {
+                    "start": {
+                      "line": 18,
+                      "column": 48
+                    },
+                    "end": {
+                      "line": 18,
+                      "column": 75
+                    }
+                  },
+                  "object": {
+                    "type": "Identifier",
+                    "start": 708,
+                    "end": 719,
+                    "loc": {
+                      "start": {
+                        "line": 18,
+                        "column": 48
+                      },
+                      "end": {
+                        "line": 18,
+                        "column": 59
+                      }
+                    },
+                    "name": "clockBefore"
+                  },
+                  "property": {
+                    "type": "Identifier",
+                    "start": 720,
+                    "end": 735,
+                    "loc": {
+                      "start": {
+                        "line": 18,
+                        "column": 60
+                      },
+                      "end": {
+                        "line": 18,
+                        "column": 75
+                      }
+                    },
+                    "name": "toPlainDateTime"
+                  },
+                  "computed": false,
+                  "optional": false
+                },
+                "arguments": [],
+                "optional": false
+              },
+              {
+                "type": "CallExpression",
+                "start": 739,
+                "end": 767,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 79
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 107
+                  }
+                },
+                "callee": {
+                  "type": "MemberExpression",
+                  "start": 739,
+                  "end": 765,
+                  "loc": {
+                    "start": {
+                      "line": 18,
+                      "column": 79
+                    },
+                    "end": {
+                      "line": 18,
+                      "column": 105
+                    }
+                  },
+                  "object": {
+                    "type": "Identifier",
+                    "start": 739,
+                    "end": 749,
+                    "loc": {
+                      "start": {
+                        "line": 18,
+                        "column": 79
+                      },
+                      "end": {
+                        "line": 18,
+                        "column": 89
+                      }
+                    },
+                    "name": "clockAfter"
+                  },
+                  "property": {
+                    "type": "Identifier",
+                    "start": 750,
+                    "end": 765,
+                    "loc": {
+                      "start": {
+                        "line": 18,
+                        "column": 90
+                      },
+                      "end": {
+                        "line": 18,
+                        "column": 105
+                      }
+                    },
+                    "name": "toPlainDateTime"
+                  },
+                  "computed": false,
+                  "optional": false
+                },
+                "arguments": [],
+                "optional": false
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "UnaryExpression",
+            "start": 770,
+            "end": 772,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 110
+              },
+              "end": {
+                "line": 18,
+                "column": 112
+              }
+            },
+            "operator": "-",
+            "prefix": true,
+            "argument": {
+              "type": "Literal",
+              "start": 771,
+              "end": 772,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 111
+                },
+                "end": {
+                  "line": 18,
+                  "column": 112
+                }
+              },
+              "value": 1,
+              "raw": "1"
+            }
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

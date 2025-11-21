@@ -1,0 +1,168 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 265,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 10,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 221,
+      "end": 264,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 9,
+          "column": 43
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 221,
+        "end": 263,
+        "loc": {
+          "start": {
+            "line": 9,
+            "column": 0
+          },
+          "end": {
+            "line": 9,
+            "column": 42
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 221,
+          "end": 227,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 0
+            },
+            "end": {
+              "line": 9,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 228,
+            "end": 262,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 7
+              },
+              "end": {
+                "line": 9,
+                "column": 41
+              }
+            },
+            "operator": "!",
+            "prefix": true,
+            "argument": {
+              "type": "CallExpression",
+              "start": 229,
+              "end": 262,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 8
+                },
+                "end": {
+                  "line": 9,
+                  "column": 41
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 229,
+                "end": 250,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 29
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 229,
+                  "end": 235,
+                  "loc": {
+                    "start": {
+                      "line": 9,
+                      "column": 8
+                    },
+                    "end": {
+                      "line": 9,
+                      "column": 14
+                    }
+                  },
+                  "name": "BigInt"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 236,
+                  "end": 250,
+                  "loc": {
+                    "start": {
+                      "line": 9,
+                      "column": 15
+                    },
+                    "end": {
+                      "line": 9,
+                      "column": 29
+                    }
+                  },
+                  "name": "hasOwnProperty"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 251,
+                  "end": 261,
+                  "loc": {
+                    "start": {
+                      "line": 9,
+                      "column": 30
+                    },
+                    "end": {
+                      "line": 9,
+                      "column": 40
+                    }
+                  },
+                  "value": "parseInt",
+                  "raw": "\"parseInt\""
+                }
+              ],
+              "optional": false
+            }
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

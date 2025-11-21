@@ -1,0 +1,200 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 462,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 12,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 355,
+      "end": 461,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 106
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 355,
+        "end": 460,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 11,
+            "column": 105
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 355,
+          "end": 361,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 0
+            },
+            "end": {
+              "line": 11,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 362,
+            "end": 400,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 7
+              },
+              "end": {
+                "line": 11,
+                "column": 45
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 362,
+              "end": 394,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 7
+                },
+                "end": {
+                  "line": 11,
+                  "column": 39
+                }
+              },
+              "object": {
+                "type": "MemberExpression",
+                "start": 362,
+                "end": 380,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 7
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 25
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 362,
+                  "end": 370,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 7
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 15
+                    }
+                  },
+                  "name": "Function"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 371,
+                  "end": 380,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 16
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 25
+                    }
+                  },
+                  "name": "prototype"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 381,
+                "end": 394,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 26
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 39
+                  }
+                },
+                "name": "isPrototypeOf"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 395,
+                "end": 399,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 40
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 44
+                  }
+                },
+                "name": "Date"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 402,
+            "end": 459,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 47
+              },
+              "end": {
+                "line": 11,
+                "column": 104
+              }
+            },
+            "value": "Function.prototype.isPrototypeOf(Date) must return true",
+            "raw": "'Function.prototype.isPrototypeOf(Date) must return true'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

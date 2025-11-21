@@ -1,0 +1,380 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 536,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 21,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 395,
+      "end": 465,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 70
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 399,
+          "end": 464,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 4
+            },
+            "end": {
+              "line": 15,
+              "column": 69
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 399,
+            "end": 409,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 4
+              },
+              "end": {
+                "line": 15,
+                "column": 14
+              }
+            },
+            "name": "descriptor"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 412,
+            "end": 464,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 17
+              },
+              "end": {
+                "line": 15,
+                "column": 69
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 412,
+              "end": 443,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 17
+                },
+                "end": {
+                  "line": 15,
+                  "column": 48
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 412,
+                "end": 418,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 23
+                  }
+                },
+                "name": "Object"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 419,
+                "end": 443,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 48
+                  }
+                },
+                "name": "getOwnPropertyDescriptor"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 444,
+                "end": 447,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 49
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 52
+                  }
+                },
+                "name": "Set"
+              },
+              {
+                "type": "MemberExpression",
+                "start": 449,
+                "end": 463,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 54
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 68
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 449,
+                  "end": 455,
+                  "loc": {
+                    "start": {
+                      "line": 15,
+                      "column": 54
+                    },
+                    "end": {
+                      "line": 15,
+                      "column": 60
+                    }
+                  },
+                  "name": "Symbol"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 456,
+                  "end": 463,
+                  "loc": {
+                    "start": {
+                      "line": 15,
+                      "column": 61
+                    },
+                    "end": {
+                      "line": 15,
+                      "column": 68
+                    }
+                  },
+                  "name": "species"
+                },
+                "computed": false,
+                "optional": false
+              }
+            ],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 467,
+      "end": 535,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 20,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 467,
+        "end": 534,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 0
+          },
+          "end": {
+            "line": 20,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 467,
+          "end": 483,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 0
+            },
+            "end": {
+              "line": 17,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 467,
+            "end": 473,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 0
+              },
+              "end": {
+                "line": 17,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 474,
+            "end": 483,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 7
+              },
+              "end": {
+                "line": 17,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 487,
+            "end": 506,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 2
+              },
+              "end": {
+                "line": 18,
+                "column": 21
+              }
+            },
+            "object": {
+              "type": "MemberExpression",
+              "start": 487,
+              "end": 501,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 2
+                },
+                "end": {
+                  "line": 18,
+                  "column": 16
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 487,
+                "end": 497,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 12
+                  }
+                },
+                "name": "descriptor"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 498,
+                "end": 501,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 13
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 16
+                  }
+                },
+                "name": "get"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 502,
+              "end": 506,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 17
+                },
+                "end": {
+                  "line": 18,
+                  "column": 21
+                }
+              },
+              "name": "name"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 510,
+            "end": 532,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 2
+              },
+              "end": {
+                "line": 19,
+                "column": 24
+              }
+            },
+            "value": "get [Symbol.species]",
+            "raw": "'get [Symbol.species]'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

@@ -1,0 +1,156 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 772,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 24,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 735,
+      "end": 771,
+      "loc": {
+        "start": {
+          "line": 23,
+          "column": 0
+        },
+        "end": {
+          "line": 23,
+          "column": 36
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 735,
+        "end": 770,
+        "loc": {
+          "start": {
+            "line": 23,
+            "column": 0
+          },
+          "end": {
+            "line": 23,
+            "column": 35
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 735,
+          "end": 741,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 0
+            },
+            "end": {
+              "line": 23,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 742,
+            "end": 769,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 7
+              },
+              "end": {
+                "line": 23,
+                "column": 34
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 742,
+              "end": 753,
+              "loc": {
+                "start": {
+                  "line": 23,
+                  "column": 7
+                },
+                "end": {
+                  "line": 23,
+                  "column": 18
+                }
+              },
+              "object": {
+                "type": "Literal",
+                "start": 742,
+                "end": 748,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 7
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 13
+                  }
+                },
+                "value": {},
+                "raw": "/^.$/u",
+                "regex": {
+                  "pattern": "^.$",
+                  "flags": "u"
+                }
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 749,
+                "end": 753,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 14
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 18
+                  }
+                },
+                "name": "test"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 754,
+                "end": 768,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 19
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 33
+                  }
+                },
+                "value": "𐀀",
+                "raw": "'\\ud800\\udc00'"
+              }
+            ],
+            "optional": false
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

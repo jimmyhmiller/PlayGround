@@ -1,0 +1,332 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 2169,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 70,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 2030,
+      "end": 2042,
+      "loc": {
+        "start": {
+          "line": 62,
+          "column": 0
+        },
+        "end": {
+          "line": 62,
+          "column": 12
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 2034,
+          "end": 2041,
+          "loc": {
+            "start": {
+              "line": 62,
+              "column": 4
+            },
+            "end": {
+              "line": 62,
+              "column": 11
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 2034,
+            "end": 2037,
+            "loc": {
+              "start": {
+                "line": 62,
+                "column": 4
+              },
+              "end": {
+                "line": 62,
+                "column": 7
+              }
+            },
+            "name": "foo"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 2040,
+            "end": 2041,
+            "loc": {
+              "start": {
+                "line": 62,
+                "column": 10
+              },
+              "end": {
+                "line": 62,
+                "column": 11
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "FunctionDeclaration",
+      "start": 2045,
+      "end": 2086,
+      "loc": {
+        "start": {
+          "line": 65,
+          "column": 0
+        },
+        "end": {
+          "line": 67,
+          "column": 1
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 2054,
+        "end": 2056,
+        "loc": {
+          "start": {
+            "line": 65,
+            "column": 9
+          },
+          "end": {
+            "line": 65,
+            "column": 11
+          }
+        },
+        "name": "fn"
+      },
+      "expression": false,
+      "generator": false,
+      "async": false,
+      "params": [],
+      "body": {
+        "type": "BlockStatement",
+        "start": 2059,
+        "end": 2086,
+        "loc": {
+          "start": {
+            "line": 65,
+            "column": 14
+          },
+          "end": {
+            "line": 67,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ReturnStatement",
+            "start": 2063,
+            "end": 2084,
+            "loc": {
+              "start": {
+                "line": 66,
+                "column": 2
+              },
+              "end": {
+                "line": 66,
+                "column": 23
+              }
+            },
+            "argument": {
+              "type": "FunctionExpression",
+              "start": 2070,
+              "end": 2083,
+              "loc": {
+                "start": {
+                  "line": 66,
+                  "column": 9
+                },
+                "end": {
+                  "line": 66,
+                  "column": 22
+                }
+              },
+              "id": null,
+              "expression": false,
+              "generator": false,
+              "async": false,
+              "params": [],
+              "body": {
+                "type": "BlockStatement",
+                "start": 2081,
+                "end": 2083,
+                "loc": {
+                  "start": {
+                    "line": 66,
+                    "column": 20
+                  },
+                  "end": {
+                    "line": 66,
+                    "column": 22
+                  }
+                },
+                "body": []
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "ExportNamedDeclaration",
+      "start": 2128,
+      "end": 2167,
+      "loc": {
+        "start": {
+          "line": 69,
+          "column": 0
+        },
+        "end": {
+          "line": 69,
+          "column": 39
+        }
+      },
+      "declaration": {
+        "type": "ClassDeclaration",
+        "start": 2135,
+        "end": 2167,
+        "loc": {
+          "start": {
+            "line": 69,
+            "column": 7
+          },
+          "end": {
+            "line": 69,
+            "column": 39
+          }
+        },
+        "id": {
+          "type": "Identifier",
+          "start": 2141,
+          "end": 2142,
+          "loc": {
+            "start": {
+              "line": 69,
+              "column": 13
+            },
+            "end": {
+              "line": 69,
+              "column": 14
+            }
+          },
+          "name": "C"
+        },
+        "superClass": {
+          "type": "CallExpression",
+          "start": 2151,
+          "end": 2164,
+          "loc": {
+            "start": {
+              "line": 69,
+              "column": 23
+            },
+            "end": {
+              "line": 69,
+              "column": 36
+            }
+          },
+          "callee": {
+            "type": "Identifier",
+            "start": 2151,
+            "end": 2153,
+            "loc": {
+              "start": {
+                "line": 69,
+                "column": 23
+              },
+              "end": {
+                "line": 69,
+                "column": 25
+              }
+            },
+            "name": "fn"
+          },
+          "arguments": [
+            {
+              "type": "AwaitExpression",
+              "start": 2154,
+              "end": 2163,
+              "loc": {
+                "start": {
+                  "line": 69,
+                  "column": 26
+                },
+                "end": {
+                  "line": 69,
+                  "column": 35
+                }
+              },
+              "argument": {
+                "type": "Identifier",
+                "start": 2160,
+                "end": 2163,
+                "loc": {
+                  "start": {
+                    "line": 69,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 69,
+                    "column": 35
+                  }
+                },
+                "name": "foo"
+              }
+            }
+          ],
+          "optional": false
+        },
+        "body": {
+          "type": "ClassBody",
+          "start": 2165,
+          "end": 2167,
+          "loc": {
+            "start": {
+              "line": 69,
+              "column": 37
+            },
+            "end": {
+              "line": 69,
+              "column": 39
+            }
+          },
+          "body": []
+        }
+      },
+      "specifiers": [],
+      "source": null,
+      "attributes": []
+    },
+    {
+      "type": "EmptyStatement",
+      "start": 2167,
+      "end": 2168,
+      "loc": {
+        "start": {
+          "line": 69,
+          "column": 39
+        },
+        "end": {
+          "line": 69,
+          "column": 40
+        }
+      }
+    }
+  ],
+  "sourceType": "module"
+}

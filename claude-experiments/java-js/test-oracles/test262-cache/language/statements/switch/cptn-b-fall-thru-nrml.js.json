@@ -1,0 +1,519 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 2577,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 66,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 2154,
+      "end": 2299,
+      "loc": {
+        "start": {
+          "line": 51,
+          "column": 0
+        },
+        "end": {
+          "line": 55,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2154,
+        "end": 2298,
+        "loc": {
+          "start": {
+            "line": 51,
+            "column": 0
+          },
+          "end": {
+            "line": 55,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 2154,
+          "end": 2170,
+          "loc": {
+            "start": {
+              "line": 51,
+              "column": 0
+            },
+            "end": {
+              "line": 51,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 2154,
+            "end": 2160,
+            "loc": {
+              "start": {
+                "line": 51,
+                "column": 0
+              },
+              "end": {
+                "line": 51,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 2161,
+            "end": 2170,
+            "loc": {
+              "start": {
+                "line": 51,
+                "column": 7
+              },
+              "end": {
+                "line": 51,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 2174,
+            "end": 2236,
+            "loc": {
+              "start": {
+                "line": 52,
+                "column": 2
+              },
+              "end": {
+                "line": 52,
+                "column": 64
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 2174,
+              "end": 2178,
+              "loc": {
+                "start": {
+                  "line": 52,
+                  "column": 2
+                },
+                "end": {
+                  "line": 52,
+                  "column": 6
+                }
+              },
+              "name": "eval"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 2179,
+                "end": 2235,
+                "loc": {
+                  "start": {
+                    "line": 52,
+                    "column": 7
+                  },
+                  "end": {
+                    "line": 52,
+                    "column": 63
+                  }
+                },
+                "value": "1; switch (\"a\") { default: case \"a\": 2; case \"b\": 3; }",
+                "raw": "'1; switch (\"a\") { default: case \"a\": 2; case \"b\": 3; }'"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 2240,
+            "end": 2241,
+            "loc": {
+              "start": {
+                "line": 53,
+                "column": 2
+              },
+              "end": {
+                "line": 53,
+                "column": 3
+              }
+            },
+            "value": 3,
+            "raw": "3"
+          },
+          {
+            "type": "Literal",
+            "start": 2245,
+            "end": 2296,
+            "loc": {
+              "start": {
+                "line": 54,
+                "column": 2
+              },
+              "end": {
+                "line": 54,
+                "column": 53
+              }
+            },
+            "value": "Non-empty value replaces previous non-empty value",
+            "raw": "'Non-empty value replaces previous non-empty value'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2300,
+      "end": 2429,
+      "loc": {
+        "start": {
+          "line": 56,
+          "column": 0
+        },
+        "end": {
+          "line": 60,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2300,
+        "end": 2428,
+        "loc": {
+          "start": {
+            "line": 56,
+            "column": 0
+          },
+          "end": {
+            "line": 60,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 2300,
+          "end": 2316,
+          "loc": {
+            "start": {
+              "line": 56,
+              "column": 0
+            },
+            "end": {
+              "line": 56,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 2300,
+            "end": 2306,
+            "loc": {
+              "start": {
+                "line": 56,
+                "column": 0
+              },
+              "end": {
+                "line": 56,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 2307,
+            "end": 2316,
+            "loc": {
+              "start": {
+                "line": 56,
+                "column": 7
+              },
+              "end": {
+                "line": 56,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 2320,
+            "end": 2379,
+            "loc": {
+              "start": {
+                "line": 57,
+                "column": 2
+              },
+              "end": {
+                "line": 57,
+                "column": 61
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 2320,
+              "end": 2324,
+              "loc": {
+                "start": {
+                  "line": 57,
+                  "column": 2
+                },
+                "end": {
+                  "line": 57,
+                  "column": 6
+                }
+              },
+              "name": "eval"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 2325,
+                "end": 2378,
+                "loc": {
+                  "start": {
+                    "line": 57,
+                    "column": 7
+                  },
+                  "end": {
+                    "line": 57,
+                    "column": 60
+                  }
+                },
+                "value": "4; switch (\"a\") { default: case \"a\": case \"b\": 5; }",
+                "raw": "'4; switch (\"a\") { default: case \"a\": case \"b\": 5; }'"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 2383,
+            "end": 2384,
+            "loc": {
+              "start": {
+                "line": 58,
+                "column": 2
+              },
+              "end": {
+                "line": 58,
+                "column": 3
+              }
+            },
+            "value": 5,
+            "raw": "5"
+          },
+          {
+            "type": "Literal",
+            "start": 2388,
+            "end": 2426,
+            "loc": {
+              "start": {
+                "line": 59,
+                "column": 2
+              },
+              "end": {
+                "line": 59,
+                "column": 40
+              }
+            },
+            "value": "Non-empty value replaces empty value",
+            "raw": "'Non-empty value replaces empty value'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2430,
+      "end": 2576,
+      "loc": {
+        "start": {
+          "line": 61,
+          "column": 0
+        },
+        "end": {
+          "line": 65,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2430,
+        "end": 2575,
+        "loc": {
+          "start": {
+            "line": 61,
+            "column": 0
+          },
+          "end": {
+            "line": 65,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 2430,
+          "end": 2446,
+          "loc": {
+            "start": {
+              "line": 61,
+              "column": 0
+            },
+            "end": {
+              "line": 61,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 2430,
+            "end": 2436,
+            "loc": {
+              "start": {
+                "line": 61,
+                "column": 0
+              },
+              "end": {
+                "line": 61,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 2437,
+            "end": 2446,
+            "loc": {
+              "start": {
+                "line": 61,
+                "column": 7
+              },
+              "end": {
+                "line": 61,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 2450,
+            "end": 2509,
+            "loc": {
+              "start": {
+                "line": 62,
+                "column": 2
+              },
+              "end": {
+                "line": 62,
+                "column": 61
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 2450,
+              "end": 2454,
+              "loc": {
+                "start": {
+                  "line": 62,
+                  "column": 2
+                },
+                "end": {
+                  "line": 62,
+                  "column": 6
+                }
+              },
+              "name": "eval"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 2455,
+                "end": 2508,
+                "loc": {
+                  "start": {
+                    "line": 62,
+                    "column": 7
+                  },
+                  "end": {
+                    "line": 62,
+                    "column": 60
+                  }
+                },
+                "value": "6; switch (\"a\") { default: case \"a\": 7; case \"b\": }",
+                "raw": "'6; switch (\"a\") { default: case \"a\": 7; case \"b\": }'"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 2513,
+            "end": 2514,
+            "loc": {
+              "start": {
+                "line": 63,
+                "column": 2
+              },
+              "end": {
+                "line": 63,
+                "column": 3
+              }
+            },
+            "value": 7,
+            "raw": "7"
+          },
+          {
+            "type": "Literal",
+            "start": 2518,
+            "end": 2573,
+            "loc": {
+              "start": {
+                "line": 64,
+                "column": 2
+              },
+              "end": {
+                "line": 64,
+                "column": 57
+              }
+            },
+            "value": "Empty value does not replace previous non-empty value",
+            "raw": "'Empty value does not replace previous non-empty value'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

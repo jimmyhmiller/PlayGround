@@ -1,0 +1,299 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 465,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 18,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ImportDeclaration",
+      "start": 311,
+      "end": 367,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 56
+        }
+      },
+      "specifiers": [
+        {
+          "type": "ImportNamespaceSpecifier",
+          "start": 318,
+          "end": 329,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 7
+            },
+            "end": {
+              "line": 14,
+              "column": 18
+            }
+          },
+          "local": {
+            "type": "Identifier",
+            "start": 323,
+            "end": 329,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 12
+              },
+              "end": {
+                "line": 14,
+                "column": 18
+              }
+            },
+            "name": "Scouts"
+          }
+        }
+      ],
+      "source": {
+        "type": "Literal",
+        "start": 335,
+        "end": 366,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 24
+          },
+          "end": {
+            "line": 14,
+            "column": 55
+          }
+        },
+        "value": "./export-expname-from-star.js",
+        "raw": "\"./export-expname-from-star.js\""
+      },
+      "attributes": []
+    },
+    {
+      "type": "ExportAllDeclaration",
+      "start": 368,
+      "end": 412,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 44
+        }
+      },
+      "exported": null,
+      "source": {
+        "type": "Literal",
+        "start": 382,
+        "end": 411,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 14
+          },
+          "end": {
+            "line": 15,
+            "column": 43
+          }
+        },
+        "value": "./export-expname_FIXTURE.js",
+        "raw": "\"./export-expname_FIXTURE.js\""
+      },
+      "attributes": []
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 414,
+      "end": 464,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 50
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 414,
+        "end": 463,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 0
+          },
+          "end": {
+            "line": 17,
+            "column": 49
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 414,
+          "end": 430,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 0
+            },
+            "end": {
+              "line": 17,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 414,
+            "end": 420,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 0
+              },
+              "end": {
+                "line": 17,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 421,
+            "end": 430,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 7
+              },
+              "end": {
+                "line": 17,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 431,
+            "end": 442,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 17
+              },
+              "end": {
+                "line": 17,
+                "column": 28
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 431,
+              "end": 437,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 17
+                },
+                "end": {
+                  "line": 17,
+                  "column": 23
+                }
+              },
+              "name": "Scouts"
+            },
+            "property": {
+              "type": "Literal",
+              "start": 438,
+              "end": 441,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 24
+                },
+                "end": {
+                  "line": 17,
+                  "column": 27
+                }
+              },
+              "value": "☿",
+              "raw": "\"☿\""
+            },
+            "computed": true,
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 444,
+            "end": 462,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 30
+              },
+              "end": {
+                "line": 17,
+                "column": 48
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 444,
+              "end": 454,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 30
+                },
+                "end": {
+                  "line": 17,
+                  "column": 40
+                }
+              },
+              "name": "globalThis"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 455,
+              "end": 462,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 41
+                },
+                "end": {
+                  "line": 17,
+                  "column": 48
+                }
+              },
+              "name": "Mercury"
+            },
+            "computed": false,
+            "optional": false
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "module"
+}

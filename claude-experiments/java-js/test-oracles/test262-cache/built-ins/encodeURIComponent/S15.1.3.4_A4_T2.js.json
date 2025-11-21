@@ -1,0 +1,1113 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1741,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 24,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "IfStatement",
+      "start": 253,
+      "end": 636,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "LogicalExpression",
+        "start": 257,
+        "end": 562,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 4
+          },
+          "end": {
+            "line": 11,
+            "column": 309
+          }
+        },
+        "left": {
+          "type": "BinaryExpression",
+          "start": 258,
+          "end": 397,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 5
+            },
+            "end": {
+              "line": 11,
+              "column": 144
+            }
+          },
+          "left": {
+            "type": "CallExpression",
+            "start": 258,
+            "end": 315,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 5
+              },
+              "end": {
+                "line": 11,
+                "column": 62
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 258,
+              "end": 276,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 5
+                },
+                "end": {
+                  "line": 11,
+                  "column": 23
+                }
+              },
+              "name": "encodeURIComponent"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 277,
+                "end": 314,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 61
+                  }
+                },
+                "value": "http://ru.wikipedia.org/wiki/Юникод",
+                "raw": "\"http://ru.wikipedia.org/wiki/Юникод\""
+              }
+            ],
+            "optional": false
+          },
+          "operator": "!==",
+          "right": {
+            "type": "Literal",
+            "start": 320,
+            "end": 397,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 67
+              },
+              "end": {
+                "line": 11,
+                "column": 144
+              }
+            },
+            "value": "http%3A%2F%2Fru.wikipedia.org%2Fwiki%2F%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4",
+            "raw": "\"http%3A%2F%2Fru.wikipedia.org%2Fwiki%2F%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4\""
+          }
+        },
+        "operator": "&&",
+        "right": {
+          "type": "BinaryExpression",
+          "start": 403,
+          "end": 561,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 150
+            },
+            "end": {
+              "line": 11,
+              "column": 308
+            }
+          },
+          "left": {
+            "type": "CallExpression",
+            "start": 403,
+            "end": 460,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 150
+              },
+              "end": {
+                "line": 11,
+                "column": 207
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 403,
+              "end": 421,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 150
+                },
+                "end": {
+                  "line": 11,
+                  "column": 168
+                }
+              },
+              "name": "encodeURIComponent"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 422,
+                "end": 459,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 169
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 206
+                  }
+                },
+                "value": "http://ru.wikipedia.org/wiki/Юникод",
+                "raw": "\"http://ru.wikipedia.org/wiki/Юникод\""
+              }
+            ],
+            "optional": false
+          },
+          "operator": "!==",
+          "right": {
+            "type": "BinaryExpression",
+            "start": 465,
+            "end": 561,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 212
+              },
+              "end": {
+                "line": 11,
+                "column": 308
+              }
+            },
+            "left": {
+              "type": "Literal",
+              "start": 465,
+              "end": 506,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 212
+                },
+                "end": {
+                  "line": 11,
+                  "column": 253
+                }
+              },
+              "value": "http%3A%2F%2Fru.wikipedia.org%2Fwiki%2F",
+              "raw": "\"http%3A%2F%2Fru.wikipedia.org%2Fwiki%2F\""
+            },
+            "operator": "+",
+            "right": {
+              "type": "CallExpression",
+              "start": 509,
+              "end": 561,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 256
+                },
+                "end": {
+                  "line": 11,
+                  "column": 308
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 509,
+                "end": 559,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 256
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 306
+                  }
+                },
+                "object": {
+                  "type": "Literal",
+                  "start": 509,
+                  "end": 547,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 256
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 294
+                    }
+                  },
+                  "value": "%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4",
+                  "raw": "\"%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4\""
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 548,
+                  "end": 559,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 295
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 306
+                    }
+                  },
+                  "name": "toLowerCase"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [],
+              "optional": false
+            }
+          }
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 564,
+        "end": 636,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 311
+          },
+          "end": {
+            "line": 13,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 568,
+            "end": 634,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 2
+              },
+              "end": {
+                "line": 12,
+                "column": 68
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 574,
+              "end": 633,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 8
+                },
+                "end": {
+                  "line": 12,
+                  "column": 67
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 578,
+                "end": 590,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 591,
+                  "end": 632,
+                  "loc": {
+                    "start": {
+                      "line": 12,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 12,
+                      "column": 66
+                    }
+                  },
+                  "value": "#1: http://ru.wikipedia.org/wiki/Юникод",
+                  "raw": "'#1: http://ru.wikipedia.org/wiki/Юникод'"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 648,
+      "end": 1130,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "LogicalExpression",
+        "start": 652,
+        "end": 1049,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 4
+          },
+          "end": {
+            "line": 16,
+            "column": 401
+          }
+        },
+        "left": {
+          "type": "BinaryExpression",
+          "start": 653,
+          "end": 838,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 5
+            },
+            "end": {
+              "line": 16,
+              "column": 190
+            }
+          },
+          "left": {
+            "type": "CallExpression",
+            "start": 653,
+            "end": 717,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 5
+              },
+              "end": {
+                "line": 16,
+                "column": 69
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 653,
+              "end": 671,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 5
+                },
+                "end": {
+                  "line": 16,
+                  "column": 23
+                }
+              },
+              "name": "encodeURIComponent"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 672,
+                "end": 716,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 68
+                  }
+                },
+                "value": "http://ru.wikipedia.org/wiki/Юникод#Ссылки",
+                "raw": "\"http://ru.wikipedia.org/wiki/Юникод#Ссылки\""
+              }
+            ],
+            "optional": false
+          },
+          "operator": "!==",
+          "right": {
+            "type": "Literal",
+            "start": 722,
+            "end": 838,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 74
+              },
+              "end": {
+                "line": 16,
+                "column": 190
+              }
+            },
+            "value": "http%3A%2F%2Fru.wikipedia.org%2Fwiki%2F%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4%23%D0%A1%D1%81%D1%8B%D0%BB%D0%BA%D0%B8",
+            "raw": "\"http%3A%2F%2Fru.wikipedia.org%2Fwiki%2F%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4%23%D0%A1%D1%81%D1%8B%D0%BB%D0%BA%D0%B8\""
+          }
+        },
+        "operator": "&&",
+        "right": {
+          "type": "BinaryExpression",
+          "start": 844,
+          "end": 1048,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 196
+            },
+            "end": {
+              "line": 16,
+              "column": 400
+            }
+          },
+          "left": {
+            "type": "CallExpression",
+            "start": 844,
+            "end": 908,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 196
+              },
+              "end": {
+                "line": 16,
+                "column": 260
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 844,
+              "end": 862,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 196
+                },
+                "end": {
+                  "line": 16,
+                  "column": 214
+                }
+              },
+              "name": "encodeURIComponent"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 863,
+                "end": 907,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 215
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 259
+                  }
+                },
+                "value": "http://ru.wikipedia.org/wiki/Юникод#Ссылки",
+                "raw": "\"http://ru.wikipedia.org/wiki/Юникод#Ссылки\""
+              }
+            ],
+            "optional": false
+          },
+          "operator": "!==",
+          "right": {
+            "type": "BinaryExpression",
+            "start": 913,
+            "end": 1048,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 265
+              },
+              "end": {
+                "line": 16,
+                "column": 400
+              }
+            },
+            "left": {
+              "type": "Literal",
+              "start": 913,
+              "end": 954,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 265
+                },
+                "end": {
+                  "line": 16,
+                  "column": 306
+                }
+              },
+              "value": "http%3A%2F%2Fru.wikipedia.org%2Fwiki%2F",
+              "raw": "\"http%3A%2F%2Fru.wikipedia.org%2Fwiki%2F\""
+            },
+            "operator": "+",
+            "right": {
+              "type": "CallExpression",
+              "start": 957,
+              "end": 1048,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 309
+                },
+                "end": {
+                  "line": 16,
+                  "column": 400
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 957,
+                "end": 1046,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 309
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 398
+                  }
+                },
+                "object": {
+                  "type": "Literal",
+                  "start": 957,
+                  "end": 1034,
+                  "loc": {
+                    "start": {
+                      "line": 16,
+                      "column": 309
+                    },
+                    "end": {
+                      "line": 16,
+                      "column": 386
+                    }
+                  },
+                  "value": "%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4%23%D0%A1%D1%81%D1%8B%D0%BB%D0%BA%D0%B8",
+                  "raw": "\"%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4%23%D0%A1%D1%81%D1%8B%D0%BB%D0%BA%D0%B8\""
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 1035,
+                  "end": 1046,
+                  "loc": {
+                    "start": {
+                      "line": 16,
+                      "column": 387
+                    },
+                    "end": {
+                      "line": 16,
+                      "column": 398
+                    }
+                  },
+                  "name": "toLowerCase"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [],
+              "optional": false
+            }
+          }
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 1051,
+        "end": 1130,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 403
+          },
+          "end": {
+            "line": 18,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 1055,
+            "end": 1128,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 2
+              },
+              "end": {
+                "line": 17,
+                "column": 75
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 1061,
+              "end": 1127,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 8
+                },
+                "end": {
+                  "line": 17,
+                  "column": 74
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 1065,
+                "end": 1077,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 1078,
+                  "end": 1126,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 73
+                    }
+                  },
+                  "value": "#2: http://ru.wikipedia.org/wiki/Юникод#Ссылки",
+                  "raw": "'#2: http://ru.wikipedia.org/wiki/Юникод#Ссылки'"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 1142,
+      "end": 1740,
+      "loc": {
+        "start": {
+          "line": 21,
+          "column": 0
+        },
+        "end": {
+          "line": 23,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "LogicalExpression",
+        "start": 1146,
+        "end": 1651,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 4
+          },
+          "end": {
+            "line": 21,
+            "column": 509
+          }
+        },
+        "left": {
+          "type": "BinaryExpression",
+          "start": 1147,
+          "end": 1385,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 5
+            },
+            "end": {
+              "line": 21,
+              "column": 243
+            }
+          },
+          "left": {
+            "type": "CallExpression",
+            "start": 1147,
+            "end": 1219,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 5
+              },
+              "end": {
+                "line": 21,
+                "column": 77
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 1147,
+              "end": 1165,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 5
+                },
+                "end": {
+                  "line": 21,
+                  "column": 23
+                }
+              },
+              "name": "encodeURIComponent"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 1166,
+                "end": 1218,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 76
+                  }
+                },
+                "value": "http://ru.wikipedia.org/wiki/Юникод#Версии Юникода",
+                "raw": "\"http://ru.wikipedia.org/wiki/Юникод#Версии Юникода\""
+              }
+            ],
+            "optional": false
+          },
+          "operator": "!==",
+          "right": {
+            "type": "Literal",
+            "start": 1224,
+            "end": 1385,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 82
+              },
+              "end": {
+                "line": 21,
+                "column": 243
+              }
+            },
+            "value": "http%3A%2F%2Fru.wikipedia.org%2Fwiki%2F%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4%23%D0%92%D0%B5%D1%80%D1%81%D0%B8%D0%B8%20%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4%D0%B0",
+            "raw": "\"http%3A%2F%2Fru.wikipedia.org%2Fwiki%2F%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4%23%D0%92%D0%B5%D1%80%D1%81%D0%B8%D0%B8%20%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4%D0%B0\""
+          }
+        },
+        "operator": "&&",
+        "right": {
+          "type": "BinaryExpression",
+          "start": 1392,
+          "end": 1649,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 250
+            },
+            "end": {
+              "line": 21,
+              "column": 507
+            }
+          },
+          "left": {
+            "type": "CallExpression",
+            "start": 1392,
+            "end": 1466,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 250
+              },
+              "end": {
+                "line": 21,
+                "column": 324
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 1392,
+              "end": 1410,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 250
+                },
+                "end": {
+                  "line": 21,
+                  "column": 268
+                }
+              },
+              "name": "encodeURIComponent"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 1411,
+                "end": 1465,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 269
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 323
+                  }
+                },
+                "value": "http://ru.wikipedia.org/wiki/Юникод%23Версии Юникода",
+                "raw": "\"http://ru.wikipedia.org/wiki/Юникод%23Версии Юникода\""
+              }
+            ],
+            "optional": false
+          },
+          "operator": "!==",
+          "right": {
+            "type": "BinaryExpression",
+            "start": 1471,
+            "end": 1649,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 329
+              },
+              "end": {
+                "line": 21,
+                "column": 507
+              }
+            },
+            "left": {
+              "type": "Literal",
+              "start": 1471,
+              "end": 1512,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 329
+                },
+                "end": {
+                  "line": 21,
+                  "column": 370
+                }
+              },
+              "value": "http%3A%2F%2Fru.wikipedia.org%2Fwiki%2F",
+              "raw": "\"http%3A%2F%2Fru.wikipedia.org%2Fwiki%2F\""
+            },
+            "operator": "+",
+            "right": {
+              "type": "CallExpression",
+              "start": 1515,
+              "end": 1649,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 373
+                },
+                "end": {
+                  "line": 21,
+                  "column": 507
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 1515,
+                "end": 1647,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 373
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 505
+                  }
+                },
+                "object": {
+                  "type": "Literal",
+                  "start": 1515,
+                  "end": 1635,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 373
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 493
+                    }
+                  },
+                  "value": "%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4#%D0%92%D0%B5%D1%80%D1%81%D0%B8%D0%B8%20%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4%D0%B0",
+                  "raw": "\"%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4#%D0%92%D0%B5%D1%80%D1%81%D0%B8%D0%B8%20%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4%D0%B0\""
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 1636,
+                  "end": 1647,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 494
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 505
+                    }
+                  },
+                  "name": "toLowerCase"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [],
+              "optional": false
+            }
+          }
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 1653,
+        "end": 1740,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 511
+          },
+          "end": {
+            "line": 23,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 1657,
+            "end": 1738,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 2
+              },
+              "end": {
+                "line": 22,
+                "column": 83
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 1663,
+              "end": 1737,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 8
+                },
+                "end": {
+                  "line": 22,
+                  "column": 82
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 1667,
+                "end": 1679,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 1680,
+                  "end": 1736,
+                  "loc": {
+                    "start": {
+                      "line": 22,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 22,
+                      "column": 81
+                    }
+                  },
+                  "value": "#3: http://ru.wikipedia.org/wiki/Юникод#Версии Юникода",
+                  "raw": "'#3: http://ru.wikipedia.org/wiki/Юникод#Версии Юникода'"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    }
+  ],
+  "sourceType": "script"
+}

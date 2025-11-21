@@ -1,0 +1,560 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 775,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 28,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 600,
+      "end": 642,
+      "loc": {
+        "start": {
+          "line": 20,
+          "column": 0
+        },
+        "end": {
+          "line": 20,
+          "column": 42
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 604,
+          "end": 641,
+          "loc": {
+            "start": {
+              "line": 20,
+              "column": 4
+            },
+            "end": {
+              "line": 20,
+              "column": 41
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 604,
+            "end": 612,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 4
+              },
+              "end": {
+                "line": 20,
+                "column": 12
+              }
+            },
+            "name": "promise1"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 615,
+            "end": 641,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 15
+              },
+              "end": {
+                "line": 20,
+                "column": 41
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 619,
+              "end": 626,
+              "loc": {
+                "start": {
+                  "line": 20,
+                  "column": 19
+                },
+                "end": {
+                  "line": 20,
+                  "column": 26
+                }
+              },
+              "name": "Promise"
+            },
+            "arguments": [
+              {
+                "type": "FunctionExpression",
+                "start": 627,
+                "end": 640,
+                "loc": {
+                  "start": {
+                    "line": 20,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 20,
+                    "column": 40
+                  }
+                },
+                "id": null,
+                "expression": false,
+                "generator": false,
+                "async": false,
+                "params": [],
+                "body": {
+                  "type": "BlockStatement",
+                  "start": 638,
+                  "end": 640,
+                  "loc": {
+                    "start": {
+                      "line": 20,
+                      "column": 38
+                    },
+                    "end": {
+                      "line": 20,
+                      "column": 40
+                    }
+                  },
+                  "body": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 643,
+      "end": 656,
+      "loc": {
+        "start": {
+          "line": 21,
+          "column": 0
+        },
+        "end": {
+          "line": 21,
+          "column": 13
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 647,
+          "end": 655,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 4
+            },
+            "end": {
+              "line": 21,
+              "column": 12
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 647,
+            "end": 655,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 4
+              },
+              "end": {
+                "line": 21,
+                "column": 12
+              }
+            },
+            "name": "promise2"
+          },
+          "init": null
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 658,
+      "end": 686,
+      "loc": {
+        "start": {
+          "line": 23,
+          "column": 0
+        },
+        "end": {
+          "line": 23,
+          "column": 28
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 658,
+        "end": 685,
+        "loc": {
+          "start": {
+            "line": 23,
+            "column": 0
+          },
+          "end": {
+            "line": 23,
+            "column": 27
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "MemberExpression",
+          "start": 658,
+          "end": 678,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 0
+            },
+            "end": {
+              "line": 23,
+              "column": 20
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 658,
+            "end": 666,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 0
+              },
+              "end": {
+                "line": 23,
+                "column": 8
+              }
+            },
+            "name": "promise1"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 667,
+            "end": 678,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 9
+              },
+              "end": {
+                "line": 23,
+                "column": 20
+              }
+            },
+            "name": "constructor"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "right": {
+          "type": "Literal",
+          "start": 681,
+          "end": 685,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 23
+            },
+            "end": {
+              "line": 23,
+              "column": 27
+            }
+          },
+          "value": null,
+          "raw": "null"
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 688,
+      "end": 725,
+      "loc": {
+        "start": {
+          "line": 25,
+          "column": 0
+        },
+        "end": {
+          "line": 25,
+          "column": 37
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 688,
+        "end": 724,
+        "loc": {
+          "start": {
+            "line": 25,
+            "column": 0
+          },
+          "end": {
+            "line": 25,
+            "column": 36
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 688,
+          "end": 696,
+          "loc": {
+            "start": {
+              "line": 25,
+              "column": 0
+            },
+            "end": {
+              "line": 25,
+              "column": 8
+            }
+          },
+          "name": "promise2"
+        },
+        "right": {
+          "type": "CallExpression",
+          "start": 699,
+          "end": 724,
+          "loc": {
+            "start": {
+              "line": 25,
+              "column": 11
+            },
+            "end": {
+              "line": 25,
+              "column": 36
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 699,
+            "end": 714,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 11
+              },
+              "end": {
+                "line": 25,
+                "column": 26
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 699,
+              "end": 706,
+              "loc": {
+                "start": {
+                  "line": 25,
+                  "column": 11
+                },
+                "end": {
+                  "line": 25,
+                  "column": 18
+                }
+              },
+              "name": "Promise"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 707,
+              "end": 714,
+              "loc": {
+                "start": {
+                  "line": 25,
+                  "column": 19
+                },
+                "end": {
+                  "line": 25,
+                  "column": 26
+                }
+              },
+              "name": "resolve"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Identifier",
+              "start": 715,
+              "end": 723,
+              "loc": {
+                "start": {
+                  "line": 25,
+                  "column": 27
+                },
+                "end": {
+                  "line": 25,
+                  "column": 35
+                }
+              },
+              "name": "promise1"
+            }
+          ],
+          "optional": false
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 727,
+      "end": 774,
+      "loc": {
+        "start": {
+          "line": 27,
+          "column": 0
+        },
+        "end": {
+          "line": 27,
+          "column": 47
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 727,
+        "end": 773,
+        "loc": {
+          "start": {
+            "line": 27,
+            "column": 0
+          },
+          "end": {
+            "line": 27,
+            "column": 46
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 727,
+          "end": 743,
+          "loc": {
+            "start": {
+              "line": 27,
+              "column": 0
+            },
+            "end": {
+              "line": 27,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 727,
+            "end": 733,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 0
+              },
+              "end": {
+                "line": 27,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 734,
+            "end": 743,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 7
+              },
+              "end": {
+                "line": 27,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 744,
+            "end": 765,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 17
+              },
+              "end": {
+                "line": 27,
+                "column": 38
+              }
+            },
+            "left": {
+              "type": "Identifier",
+              "start": 744,
+              "end": 752,
+              "loc": {
+                "start": {
+                  "line": 27,
+                  "column": 17
+                },
+                "end": {
+                  "line": 27,
+                  "column": 25
+                }
+              },
+              "name": "promise1"
+            },
+            "operator": "===",
+            "right": {
+              "type": "Identifier",
+              "start": 757,
+              "end": 765,
+              "loc": {
+                "start": {
+                  "line": 27,
+                  "column": 30
+                },
+                "end": {
+                  "line": 27,
+                  "column": 38
+                }
+              },
+              "name": "promise2"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 767,
+            "end": 772,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 40
+              },
+              "end": {
+                "line": 27,
+                "column": 45
+              }
+            },
+            "value": false,
+            "raw": "false"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

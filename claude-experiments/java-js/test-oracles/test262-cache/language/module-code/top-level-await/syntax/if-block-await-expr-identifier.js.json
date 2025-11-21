@@ -1,0 +1,180 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1374,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 52,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 1332,
+      "end": 1344,
+      "loc": {
+        "start": {
+          "line": 46,
+          "column": 0
+        },
+        "end": {
+          "line": 46,
+          "column": 12
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 1336,
+          "end": 1343,
+          "loc": {
+            "start": {
+              "line": 46,
+              "column": 4
+            },
+            "end": {
+              "line": 46,
+              "column": 11
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 1336,
+            "end": 1339,
+            "loc": {
+              "start": {
+                "line": 46,
+                "column": 4
+              },
+              "end": {
+                "line": 46,
+                "column": 7
+              }
+            },
+            "name": "foo"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 1342,
+            "end": 1343,
+            "loc": {
+              "start": {
+                "line": 46,
+                "column": 10
+              },
+              "end": {
+                "line": 46,
+                "column": 11
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "IfStatement",
+      "start": 1347,
+      "end": 1373,
+      "loc": {
+        "start": {
+          "line": 49,
+          "column": 0
+        },
+        "end": {
+          "line": 51,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "Literal",
+        "start": 1351,
+        "end": 1355,
+        "loc": {
+          "start": {
+            "line": 49,
+            "column": 4
+          },
+          "end": {
+            "line": 49,
+            "column": 8
+          }
+        },
+        "value": true,
+        "raw": "true"
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 1357,
+        "end": 1373,
+        "loc": {
+          "start": {
+            "line": 49,
+            "column": 10
+          },
+          "end": {
+            "line": 51,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ExpressionStatement",
+            "start": 1361,
+            "end": 1371,
+            "loc": {
+              "start": {
+                "line": 50,
+                "column": 2
+              },
+              "end": {
+                "line": 50,
+                "column": 12
+              }
+            },
+            "expression": {
+              "type": "AwaitExpression",
+              "start": 1361,
+              "end": 1370,
+              "loc": {
+                "start": {
+                  "line": 50,
+                  "column": 2
+                },
+                "end": {
+                  "line": 50,
+                  "column": 11
+                }
+              },
+              "argument": {
+                "type": "Identifier",
+                "start": 1367,
+                "end": 1370,
+                "loc": {
+                  "start": {
+                    "line": 50,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 50,
+                    "column": 11
+                  }
+                },
+                "name": "foo"
+              }
+            }
+          }
+        ]
+      },
+      "alternate": null
+    }
+  ],
+  "sourceType": "module"
+}

@@ -1,0 +1,1108 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 3237,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 54,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 277,
+      "end": 3105,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 48,
+          "column": 2
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 283,
+          "end": 3104,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 6
+            },
+            "end": {
+              "line": 48,
+              "column": 1
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 283,
+            "end": 292,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 6
+              },
+              "end": {
+                "line": 10,
+                "column": 15
+              }
+            },
+            "name": "testCases"
+          },
+          "init": {
+            "type": "ArrayExpression",
+            "start": 295,
+            "end": 3104,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 18
+              },
+              "end": {
+                "line": 48,
+                "column": 1
+              }
+            },
+            "elements": [
+              {
+                "type": "Literal",
+                "start": 299,
+                "end": 313,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 16
+                  }
+                },
+                "value": "Africa/Accra",
+                "raw": "\"Africa/Accra\""
+              },
+              {
+                "type": "Literal",
+                "start": 369,
+                "end": 384,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 17
+                  }
+                },
+                "value": "Africa/Bamako",
+                "raw": "\"Africa/Bamako\""
+              },
+              {
+                "type": "Literal",
+                "start": 439,
+                "end": 454,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 17
+                  }
+                },
+                "value": "Africa/Banjul",
+                "raw": "\"Africa/Banjul\""
+              },
+              {
+                "type": "Literal",
+                "start": 515,
+                "end": 531,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 18
+                  }
+                },
+                "value": "Africa/Conakry",
+                "raw": "\"Africa/Conakry\""
+              },
+              {
+                "type": "Literal",
+                "start": 588,
+                "end": 602,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 16
+                  }
+                },
+                "value": "Africa/Dakar",
+                "raw": "\"Africa/Dakar\""
+              },
+              {
+                "type": "Literal",
+                "start": 660,
+                "end": 677,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 19
+                  }
+                },
+                "value": "Africa/Freetown",
+                "raw": "\"Africa/Freetown\""
+              },
+              {
+                "type": "Literal",
+                "start": 740,
+                "end": 753,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 15
+                  }
+                },
+                "value": "Africa/Lome",
+                "raw": "\"Africa/Lome\""
+              },
+              {
+                "type": "Literal",
+                "start": 808,
+                "end": 827,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 21
+                  }
+                },
+                "value": "Africa/Nouakchott",
+                "raw": "\"Africa/Nouakchott\""
+              },
+              {
+                "type": "Literal",
+                "start": 888,
+                "end": 908,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 22
+                  }
+                },
+                "value": "Africa/Ouagadougou",
+                "raw": "\"Africa/Ouagadougou\""
+              },
+              {
+                "type": "Literal",
+                "start": 971,
+                "end": 991,
+                "loc": {
+                  "start": {
+                    "line": 20,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 20,
+                    "column": 22
+                  }
+                },
+                "value": "Atlantic/St_Helena",
+                "raw": "\"Atlantic/St_Helena\""
+              },
+              {
+                "type": "Literal",
+                "start": 1051,
+                "end": 1071,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 22
+                  }
+                },
+                "value": "Africa/Addis_Ababa",
+                "raw": "\"Africa/Addis_Ababa\""
+              },
+              {
+                "type": "Literal",
+                "start": 1131,
+                "end": 1146,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 17
+                  }
+                },
+                "value": "Africa/Asmara",
+                "raw": "\"Africa/Asmara\""
+              },
+              {
+                "type": "Literal",
+                "start": 1205,
+                "end": 1227,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 24
+                  }
+                },
+                "value": "Africa/Dar_es_Salaam",
+                "raw": "\"Africa/Dar_es_Salaam\""
+              },
+              {
+                "type": "Literal",
+                "start": 1287,
+                "end": 1304,
+                "loc": {
+                  "start": {
+                    "line": 24,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 24,
+                    "column": 19
+                  }
+                },
+                "value": "Africa/Djibouti",
+                "raw": "\"Africa/Djibouti\""
+              },
+              {
+                "type": "Literal",
+                "start": 1348,
+                "end": 1364,
+                "loc": {
+                  "start": {
+                    "line": 25,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 25,
+                    "column": 18
+                  }
+                },
+                "value": "Africa/Kampala",
+                "raw": "\"Africa/Kampala\""
+              },
+              {
+                "type": "Literal",
+                "start": 1422,
+                "end": 1440,
+                "loc": {
+                  "start": {
+                    "line": 26,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 26,
+                    "column": 20
+                  }
+                },
+                "value": "Africa/Mogadishu",
+                "raw": "\"Africa/Mogadishu\""
+              },
+              {
+                "type": "Literal",
+                "start": 1499,
+                "end": 1520,
+                "loc": {
+                  "start": {
+                    "line": 27,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 27,
+                    "column": 23
+                  }
+                },
+                "value": "Indian/Antananarivo",
+                "raw": "\"Indian/Antananarivo\""
+              },
+              {
+                "type": "Literal",
+                "start": 1582,
+                "end": 1597,
+                "loc": {
+                  "start": {
+                    "line": 28,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 28,
+                    "column": 17
+                  }
+                },
+                "value": "Indian/Comoro",
+                "raw": "\"Indian/Comoro\""
+              },
+              {
+                "type": "Literal",
+                "start": 1639,
+                "end": 1655,
+                "loc": {
+                  "start": {
+                    "line": 29,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 29,
+                    "column": 18
+                  }
+                },
+                "value": "Indian/Mayotte",
+                "raw": "\"Indian/Mayotte\""
+              },
+              {
+                "type": "Literal",
+                "start": 1698,
+                "end": 1715,
+                "loc": {
+                  "start": {
+                    "line": 30,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 30,
+                    "column": 19
+                  }
+                },
+                "value": "Africa/Blantyre",
+                "raw": "\"Africa/Blantyre\""
+              },
+              {
+                "type": "Literal",
+                "start": 1772,
+                "end": 1790,
+                "loc": {
+                  "start": {
+                    "line": 31,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 31,
+                    "column": 20
+                  }
+                },
+                "value": "Africa/Bujumbura",
+                "raw": "\"Africa/Bujumbura\""
+              },
+              {
+                "type": "Literal",
+                "start": 1848,
+                "end": 1865,
+                "loc": {
+                  "start": {
+                    "line": 32,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 32,
+                    "column": 19
+                  }
+                },
+                "value": "Africa/Gaborone",
+                "raw": "\"Africa/Gaborone\""
+              },
+              {
+                "type": "Literal",
+                "start": 1924,
+                "end": 1939,
+                "loc": {
+                  "start": {
+                    "line": 33,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 33,
+                    "column": 17
+                  }
+                },
+                "value": "Africa/Harare",
+                "raw": "\"Africa/Harare\""
+              },
+              {
+                "type": "Literal",
+                "start": 1998,
+                "end": 2013,
+                "loc": {
+                  "start": {
+                    "line": 34,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 34,
+                    "column": 17
+                  }
+                },
+                "value": "Africa/Kigali",
+                "raw": "\"Africa/Kigali\""
+              },
+              {
+                "type": "Literal",
+                "start": 2070,
+                "end": 2089,
+                "loc": {
+                  "start": {
+                    "line": 35,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 35,
+                    "column": 21
+                  }
+                },
+                "value": "Africa/Lubumbashi",
+                "raw": "\"Africa/Lubumbashi\""
+              },
+              {
+                "type": "Literal",
+                "start": 2160,
+                "end": 2175,
+                "loc": {
+                  "start": {
+                    "line": 36,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 36,
+                    "column": 17
+                  }
+                },
+                "value": "Africa/Lusaka",
+                "raw": "\"Africa/Lusaka\""
+              },
+              {
+                "type": "Literal",
+                "start": 2232,
+                "end": 2247,
+                "loc": {
+                  "start": {
+                    "line": 37,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 37,
+                    "column": 17
+                  }
+                },
+                "value": "Africa/Bangui",
+                "raw": "\"Africa/Bangui\""
+              },
+              {
+                "type": "Literal",
+                "start": 2322,
+                "end": 2342,
+                "loc": {
+                  "start": {
+                    "line": 38,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 38,
+                    "column": 22
+                  }
+                },
+                "value": "Africa/Brazzaville",
+                "raw": "\"Africa/Brazzaville\""
+              },
+              {
+                "type": "Literal",
+                "start": 2410,
+                "end": 2425,
+                "loc": {
+                  "start": {
+                    "line": 39,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 39,
+                    "column": 17
+                  }
+                },
+                "value": "Africa/Douala",
+                "raw": "\"Africa/Douala\""
+              },
+              {
+                "type": "Literal",
+                "start": 2484,
+                "end": 2501,
+                "loc": {
+                  "start": {
+                    "line": 40,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 40,
+                    "column": 19
+                  }
+                },
+                "value": "Africa/Kinshasa",
+                "raw": "\"Africa/Kinshasa\""
+              },
+              {
+                "type": "Literal",
+                "start": 2581,
+                "end": 2600,
+                "loc": {
+                  "start": {
+                    "line": 41,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 41,
+                    "column": 21
+                  }
+                },
+                "value": "Africa/Libreville",
+                "raw": "\"Africa/Libreville\""
+              },
+              {
+                "type": "Literal",
+                "start": 2656,
+                "end": 2671,
+                "loc": {
+                  "start": {
+                    "line": 42,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 42,
+                    "column": 17
+                  }
+                },
+                "value": "Africa/Luanda",
+                "raw": "\"Africa/Luanda\""
+              },
+              {
+                "type": "Literal",
+                "start": 2728,
+                "end": 2743,
+                "loc": {
+                  "start": {
+                    "line": 43,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 43,
+                    "column": 17
+                  }
+                },
+                "value": "Africa/Malabo",
+                "raw": "\"Africa/Malabo\""
+              },
+              {
+                "type": "Literal",
+                "start": 2811,
+                "end": 2826,
+                "loc": {
+                  "start": {
+                    "line": 44,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 44,
+                    "column": 17
+                  }
+                },
+                "value": "Africa/Niamey",
+                "raw": "\"Africa/Niamey\""
+              },
+              {
+                "type": "Literal",
+                "start": 2882,
+                "end": 2901,
+                "loc": {
+                  "start": {
+                    "line": 45,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 45,
+                    "column": 21
+                  }
+                },
+                "value": "Africa/Porto-Novo",
+                "raw": "\"Africa/Porto-Novo\""
+              },
+              {
+                "type": "Literal",
+                "start": 2957,
+                "end": 2972,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 17
+                  }
+                },
+                "value": "Africa/Maseru",
+                "raw": "\"Africa/Maseru\""
+              },
+              {
+                "type": "Literal",
+                "start": 3030,
+                "end": 3046,
+                "loc": {
+                  "start": {
+                    "line": 47,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 47,
+                    "column": 18
+                  }
+                },
+                "value": "Africa/Mbabane",
+                "raw": "\"Africa/Mbabane\""
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ForOfStatement",
+      "start": 3107,
+      "end": 3236,
+      "loc": {
+        "start": {
+          "line": 50,
+          "column": 0
+        },
+        "end": {
+          "line": 53,
+          "column": 1
+        }
+      },
+      "await": false,
+      "left": {
+        "type": "VariableDeclaration",
+        "start": 3112,
+        "end": 3118,
+        "loc": {
+          "start": {
+            "line": 50,
+            "column": 5
+          },
+          "end": {
+            "line": 50,
+            "column": 11
+          }
+        },
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "start": 3116,
+            "end": 3118,
+            "loc": {
+              "start": {
+                "line": 50,
+                "column": 9
+              },
+              "end": {
+                "line": 50,
+                "column": 11
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 3116,
+              "end": 3118,
+              "loc": {
+                "start": {
+                  "line": 50,
+                  "column": 9
+                },
+                "end": {
+                  "line": 50,
+                  "column": 11
+                }
+              },
+              "name": "id"
+            },
+            "init": null
+          }
+        ],
+        "kind": "let"
+      },
+      "right": {
+        "type": "Identifier",
+        "start": 3122,
+        "end": 3131,
+        "loc": {
+          "start": {
+            "line": 50,
+            "column": 15
+          },
+          "end": {
+            "line": 50,
+            "column": 24
+          }
+        },
+        "name": "testCases"
+      },
+      "body": {
+        "type": "BlockStatement",
+        "start": 3133,
+        "end": 3236,
+        "loc": {
+          "start": {
+            "line": 50,
+            "column": 26
+          },
+          "end": {
+            "line": 53,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "VariableDeclaration",
+            "start": 3137,
+            "end": 3189,
+            "loc": {
+              "start": {
+                "line": 51,
+                "column": 2
+              },
+              "end": {
+                "line": 51,
+                "column": 54
+              }
+            },
+            "declarations": [
+              {
+                "type": "VariableDeclarator",
+                "start": 3143,
+                "end": 3188,
+                "loc": {
+                  "start": {
+                    "line": 51,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 51,
+                    "column": 53
+                  }
+                },
+                "id": {
+                  "type": "Identifier",
+                  "start": 3143,
+                  "end": 3151,
+                  "loc": {
+                    "start": {
+                      "line": 51,
+                      "column": 8
+                    },
+                    "end": {
+                      "line": 51,
+                      "column": 16
+                    }
+                  },
+                  "name": "instance"
+                },
+                "init": {
+                  "type": "NewExpression",
+                  "start": 3154,
+                  "end": 3188,
+                  "loc": {
+                    "start": {
+                      "line": 51,
+                      "column": 19
+                    },
+                    "end": {
+                      "line": 51,
+                      "column": 53
+                    }
+                  },
+                  "callee": {
+                    "type": "MemberExpression",
+                    "start": 3158,
+                    "end": 3180,
+                    "loc": {
+                      "start": {
+                        "line": 51,
+                        "column": 23
+                      },
+                      "end": {
+                        "line": 51,
+                        "column": 45
+                      }
+                    },
+                    "object": {
+                      "type": "Identifier",
+                      "start": 3158,
+                      "end": 3166,
+                      "loc": {
+                        "start": {
+                          "line": 51,
+                          "column": 23
+                        },
+                        "end": {
+                          "line": 51,
+                          "column": 31
+                        }
+                      },
+                      "name": "Temporal"
+                    },
+                    "property": {
+                      "type": "Identifier",
+                      "start": 3167,
+                      "end": 3180,
+                      "loc": {
+                        "start": {
+                          "line": 51,
+                          "column": 32
+                        },
+                        "end": {
+                          "line": 51,
+                          "column": 45
+                        }
+                      },
+                      "name": "ZonedDateTime"
+                    },
+                    "computed": false,
+                    "optional": false
+                  },
+                  "arguments": [
+                    {
+                      "type": "Literal",
+                      "start": 3181,
+                      "end": 3183,
+                      "loc": {
+                        "start": {
+                          "line": 51,
+                          "column": 46
+                        },
+                        "end": {
+                          "line": 51,
+                          "column": 48
+                        }
+                      },
+                      "value": null,
+                      "raw": "0n",
+                      "bigint": "0"
+                    },
+                    {
+                      "type": "Identifier",
+                      "start": 3185,
+                      "end": 3187,
+                      "loc": {
+                        "start": {
+                          "line": 51,
+                          "column": 50
+                        },
+                        "end": {
+                          "line": 51,
+                          "column": 52
+                        }
+                      },
+                      "name": "id"
+                    }
+                  ]
+                }
+              }
+            ],
+            "kind": "const"
+          },
+          {
+            "type": "ExpressionStatement",
+            "start": 3192,
+            "end": 3234,
+            "loc": {
+              "start": {
+                "line": 52,
+                "column": 2
+              },
+              "end": {
+                "line": 52,
+                "column": 44
+              }
+            },
+            "expression": {
+              "type": "CallExpression",
+              "start": 3192,
+              "end": 3233,
+              "loc": {
+                "start": {
+                  "line": 52,
+                  "column": 2
+                },
+                "end": {
+                  "line": 52,
+                  "column": 43
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 3192,
+                "end": 3208,
+                "loc": {
+                  "start": {
+                    "line": 52,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 52,
+                    "column": 18
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 3192,
+                  "end": 3198,
+                  "loc": {
+                    "start": {
+                      "line": 52,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 52,
+                      "column": 8
+                    }
+                  },
+                  "name": "assert"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 3199,
+                  "end": 3208,
+                  "loc": {
+                    "start": {
+                      "line": 52,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 52,
+                      "column": 18
+                    }
+                  },
+                  "name": "sameValue"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "MemberExpression",
+                  "start": 3209,
+                  "end": 3228,
+                  "loc": {
+                    "start": {
+                      "line": 52,
+                      "column": 19
+                    },
+                    "end": {
+                      "line": 52,
+                      "column": 38
+                    }
+                  },
+                  "object": {
+                    "type": "Identifier",
+                    "start": 3209,
+                    "end": 3217,
+                    "loc": {
+                      "start": {
+                        "line": 52,
+                        "column": 19
+                      },
+                      "end": {
+                        "line": 52,
+                        "column": 27
+                      }
+                    },
+                    "name": "instance"
+                  },
+                  "property": {
+                    "type": "Identifier",
+                    "start": 3218,
+                    "end": 3228,
+                    "loc": {
+                      "start": {
+                        "line": 52,
+                        "column": 28
+                      },
+                      "end": {
+                        "line": 52,
+                        "column": 38
+                      }
+                    },
+                    "name": "timeZoneId"
+                  },
+                  "computed": false,
+                  "optional": false
+                },
+                {
+                  "type": "Identifier",
+                  "start": 3230,
+                  "end": 3232,
+                  "loc": {
+                    "start": {
+                      "line": 52,
+                      "column": 40
+                    },
+                    "end": {
+                      "line": 52,
+                      "column": 42
+                    }
+                  },
+                  "name": "id"
+                }
+              ],
+              "optional": false
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "sourceType": "script"
+}

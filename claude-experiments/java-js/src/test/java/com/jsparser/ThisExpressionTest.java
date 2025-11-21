@@ -1,0 +1,43 @@
+package com.jsparser;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jsparser.ast.Program;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import static org.junit.jupiter.api.Assertions.*;
+
+public class ThisExpressionTest {
+    private static final ObjectMapper mapper = new ObjectMapper();
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "this;",
+        "this.x;",
+        "this.x.y;",
+        "this[0];",
+        "this['key'];",
+        "this.method();",
+        "this.x = 1;",
+        "var x = this;",
+        "function f() { return this; }",
+        "var obj = { method: function() { return this; } };",
+        "this.x + this.y;",
+    })
+    void testThisExpressionsAgainstOracle(String source) throws Exception {
+        Program expected = OracleParser.parse(source);
+        Program actual = Parser.parse(source);
+
+        String expectedJson = mapper.writeValueAsString(expected);
+        String actualJson = mapper.writeValueAsString(actual);
+
+        System.out.println("Testing: " + source);
+        if (!expectedJson.equals(actualJson)) {
+            System.out.println("EXPECTED:");
+            System.out.println(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(expected));
+            System.out.println("\nACTUAL:");
+            System.out.println(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(actual));
+        }
+
+        assertEquals(expectedJson, actualJson, "AST mismatch for: " + source);
+    }
+}

@@ -1,0 +1,1712 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 3085,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 71,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 2175,
+      "end": 2253,
+      "loc": {
+        "start": {
+          "line": 50,
+          "column": 0
+        },
+        "end": {
+          "line": 50,
+          "column": 78
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 2179,
+          "end": 2252,
+          "loc": {
+            "start": {
+              "line": 50,
+              "column": 4
+            },
+            "end": {
+              "line": 50,
+              "column": 77
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 2179,
+            "end": 2182,
+            "loc": {
+              "start": {
+                "line": 50,
+                "column": 4
+              },
+              "end": {
+                "line": 50,
+                "column": 7
+              }
+            },
+            "name": "str"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 2185,
+            "end": 2252,
+            "loc": {
+              "start": {
+                "line": 50,
+                "column": 10
+              },
+              "end": {
+                "line": 50,
+                "column": 77
+              }
+            },
+            "value": "Ninguém é igual a ninguém. Todo o ser humano é um estranho ímpar.",
+            "raw": "'Ninguém é igual a ninguém. Todo o ser humano é um estranho ímpar.'"
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 2255,
+      "end": 2266,
+      "loc": {
+        "start": {
+          "line": 52,
+          "column": 0
+        },
+        "end": {
+          "line": 52,
+          "column": 11
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 2259,
+          "end": 2265,
+          "loc": {
+            "start": {
+              "line": 52,
+              "column": 4
+            },
+            "end": {
+              "line": 52,
+              "column": 10
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 2259,
+            "end": 2265,
+            "loc": {
+              "start": {
+                "line": 52,
+                "column": 4
+              },
+              "end": {
+                "line": 52,
+                "column": 10
+              }
+            },
+            "name": "result"
+          },
+          "init": null
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2268,
+      "end": 2309,
+      "loc": {
+        "start": {
+          "line": 54,
+          "column": 0
+        },
+        "end": {
+          "line": 54,
+          "column": 41
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 2268,
+        "end": 2308,
+        "loc": {
+          "start": {
+            "line": 54,
+            "column": 0
+          },
+          "end": {
+            "line": 54,
+            "column": 40
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 2268,
+          "end": 2274,
+          "loc": {
+            "start": {
+              "line": 54,
+              "column": 0
+            },
+            "end": {
+              "line": 54,
+              "column": 6
+            }
+          },
+          "name": "result"
+        },
+        "right": {
+          "type": "CallExpression",
+          "start": 2277,
+          "end": 2308,
+          "loc": {
+            "start": {
+              "line": 54,
+              "column": 9
+            },
+            "end": {
+              "line": 54,
+              "column": 40
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 2277,
+            "end": 2291,
+            "loc": {
+              "start": {
+                "line": 54,
+                "column": 9
+              },
+              "end": {
+                "line": 54,
+                "column": 23
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 2277,
+              "end": 2280,
+              "loc": {
+                "start": {
+                  "line": 54,
+                  "column": 9
+                },
+                "end": {
+                  "line": 54,
+                  "column": 12
+                }
+              },
+              "name": "str"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 2281,
+              "end": 2291,
+              "loc": {
+                "start": {
+                  "line": 54,
+                  "column": 13
+                },
+                "end": {
+                  "line": 54,
+                  "column": 23
+                }
+              },
+              "name": "replaceAll"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 2292,
+              "end": 2301,
+              "loc": {
+                "start": {
+                  "line": 54,
+                  "column": 24
+                },
+                "end": {
+                  "line": 54,
+                  "column": 33
+                }
+              },
+              "value": "ninguém",
+              "raw": "'ninguém'"
+            },
+            {
+              "type": "Literal",
+              "start": 2303,
+              "end": 2307,
+              "loc": {
+                "start": {
+                  "line": 54,
+                  "column": 35
+                },
+                "end": {
+                  "line": 54,
+                  "column": 39
+                }
+              },
+              "value": "$$",
+              "raw": "'$$'"
+            }
+          ],
+          "optional": false
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2310,
+      "end": 2398,
+      "loc": {
+        "start": {
+          "line": 55,
+          "column": 0
+        },
+        "end": {
+          "line": 55,
+          "column": 88
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2310,
+        "end": 2397,
+        "loc": {
+          "start": {
+            "line": 55,
+            "column": 0
+          },
+          "end": {
+            "line": 55,
+            "column": 87
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 2310,
+          "end": 2326,
+          "loc": {
+            "start": {
+              "line": 55,
+              "column": 0
+            },
+            "end": {
+              "line": 55,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 2310,
+            "end": 2316,
+            "loc": {
+              "start": {
+                "line": 55,
+                "column": 0
+              },
+              "end": {
+                "line": 55,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 2317,
+            "end": 2326,
+            "loc": {
+              "start": {
+                "line": 55,
+                "column": 7
+              },
+              "end": {
+                "line": 55,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 2327,
+            "end": 2333,
+            "loc": {
+              "start": {
+                "line": 55,
+                "column": 17
+              },
+              "end": {
+                "line": 55,
+                "column": 23
+              }
+            },
+            "name": "result"
+          },
+          {
+            "type": "Literal",
+            "start": 2335,
+            "end": 2396,
+            "loc": {
+              "start": {
+                "line": 55,
+                "column": 25
+              },
+              "end": {
+                "line": 55,
+                "column": 86
+              }
+            },
+            "value": "Ninguém é igual a $. Todo o ser humano é um estranho ímpar.",
+            "raw": "'Ninguém é igual a $. Todo o ser humano é um estranho ímpar.'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2400,
+      "end": 2435,
+      "loc": {
+        "start": {
+          "line": 57,
+          "column": 0
+        },
+        "end": {
+          "line": 57,
+          "column": 35
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 2400,
+        "end": 2434,
+        "loc": {
+          "start": {
+            "line": 57,
+            "column": 0
+          },
+          "end": {
+            "line": 57,
+            "column": 34
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 2400,
+          "end": 2406,
+          "loc": {
+            "start": {
+              "line": 57,
+              "column": 0
+            },
+            "end": {
+              "line": 57,
+              "column": 6
+            }
+          },
+          "name": "result"
+        },
+        "right": {
+          "type": "CallExpression",
+          "start": 2409,
+          "end": 2434,
+          "loc": {
+            "start": {
+              "line": 57,
+              "column": 9
+            },
+            "end": {
+              "line": 57,
+              "column": 34
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 2409,
+            "end": 2423,
+            "loc": {
+              "start": {
+                "line": 57,
+                "column": 9
+              },
+              "end": {
+                "line": 57,
+                "column": 23
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 2409,
+              "end": 2412,
+              "loc": {
+                "start": {
+                  "line": 57,
+                  "column": 9
+                },
+                "end": {
+                  "line": 57,
+                  "column": 12
+                }
+              },
+              "name": "str"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 2413,
+              "end": 2423,
+              "loc": {
+                "start": {
+                  "line": 57,
+                  "column": 13
+                },
+                "end": {
+                  "line": 57,
+                  "column": 23
+                }
+              },
+              "name": "replaceAll"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 2424,
+              "end": 2427,
+              "loc": {
+                "start": {
+                  "line": 57,
+                  "column": 24
+                },
+                "end": {
+                  "line": 57,
+                  "column": 27
+                }
+              },
+              "value": "é",
+              "raw": "'é'"
+            },
+            {
+              "type": "Literal",
+              "start": 2429,
+              "end": 2433,
+              "loc": {
+                "start": {
+                  "line": 57,
+                  "column": 29
+                },
+                "end": {
+                  "line": 57,
+                  "column": 33
+                }
+              },
+              "value": "$$",
+              "raw": "'$$'"
+            }
+          ],
+          "optional": false
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2436,
+      "end": 2530,
+      "loc": {
+        "start": {
+          "line": 58,
+          "column": 0
+        },
+        "end": {
+          "line": 58,
+          "column": 94
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2436,
+        "end": 2529,
+        "loc": {
+          "start": {
+            "line": 58,
+            "column": 0
+          },
+          "end": {
+            "line": 58,
+            "column": 93
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 2436,
+          "end": 2452,
+          "loc": {
+            "start": {
+              "line": 58,
+              "column": 0
+            },
+            "end": {
+              "line": 58,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 2436,
+            "end": 2442,
+            "loc": {
+              "start": {
+                "line": 58,
+                "column": 0
+              },
+              "end": {
+                "line": 58,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 2443,
+            "end": 2452,
+            "loc": {
+              "start": {
+                "line": 58,
+                "column": 7
+              },
+              "end": {
+                "line": 58,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 2453,
+            "end": 2459,
+            "loc": {
+              "start": {
+                "line": 58,
+                "column": 17
+              },
+              "end": {
+                "line": 58,
+                "column": 23
+              }
+            },
+            "name": "result"
+          },
+          {
+            "type": "Literal",
+            "start": 2461,
+            "end": 2528,
+            "loc": {
+              "start": {
+                "line": 58,
+                "column": 25
+              },
+              "end": {
+                "line": 58,
+                "column": 92
+              }
+            },
+            "value": "Ningu$m $ igual a ningu$m. Todo o ser humano $ um estranho ímpar.",
+            "raw": "'Ningu$m $ igual a ningu$m. Todo o ser humano $ um estranho ímpar.'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2532,
+      "end": 2569,
+      "loc": {
+        "start": {
+          "line": 60,
+          "column": 0
+        },
+        "end": {
+          "line": 60,
+          "column": 37
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 2532,
+        "end": 2568,
+        "loc": {
+          "start": {
+            "line": 60,
+            "column": 0
+          },
+          "end": {
+            "line": 60,
+            "column": 36
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 2532,
+          "end": 2538,
+          "loc": {
+            "start": {
+              "line": 60,
+              "column": 0
+            },
+            "end": {
+              "line": 60,
+              "column": 6
+            }
+          },
+          "name": "result"
+        },
+        "right": {
+          "type": "CallExpression",
+          "start": 2541,
+          "end": 2568,
+          "loc": {
+            "start": {
+              "line": 60,
+              "column": 9
+            },
+            "end": {
+              "line": 60,
+              "column": 36
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 2541,
+            "end": 2555,
+            "loc": {
+              "start": {
+                "line": 60,
+                "column": 9
+              },
+              "end": {
+                "line": 60,
+                "column": 23
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 2541,
+              "end": 2544,
+              "loc": {
+                "start": {
+                  "line": 60,
+                  "column": 9
+                },
+                "end": {
+                  "line": 60,
+                  "column": 12
+                }
+              },
+              "name": "str"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 2545,
+              "end": 2555,
+              "loc": {
+                "start": {
+                  "line": 60,
+                  "column": 13
+                },
+                "end": {
+                  "line": 60,
+                  "column": 23
+                }
+              },
+              "name": "replaceAll"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 2556,
+              "end": 2559,
+              "loc": {
+                "start": {
+                  "line": 60,
+                  "column": 24
+                },
+                "end": {
+                  "line": 60,
+                  "column": 27
+                }
+              },
+              "value": "é",
+              "raw": "'é'"
+            },
+            {
+              "type": "Literal",
+              "start": 2561,
+              "end": 2567,
+              "loc": {
+                "start": {
+                  "line": 60,
+                  "column": 29
+                },
+                "end": {
+                  "line": 60,
+                  "column": 35
+                }
+              },
+              "value": "$$ -",
+              "raw": "'$$ -'"
+            }
+          ],
+          "optional": false
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2570,
+      "end": 2672,
+      "loc": {
+        "start": {
+          "line": 61,
+          "column": 0
+        },
+        "end": {
+          "line": 61,
+          "column": 102
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2570,
+        "end": 2671,
+        "loc": {
+          "start": {
+            "line": 61,
+            "column": 0
+          },
+          "end": {
+            "line": 61,
+            "column": 101
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 2570,
+          "end": 2586,
+          "loc": {
+            "start": {
+              "line": 61,
+              "column": 0
+            },
+            "end": {
+              "line": 61,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 2570,
+            "end": 2576,
+            "loc": {
+              "start": {
+                "line": 61,
+                "column": 0
+              },
+              "end": {
+                "line": 61,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 2577,
+            "end": 2586,
+            "loc": {
+              "start": {
+                "line": 61,
+                "column": 7
+              },
+              "end": {
+                "line": 61,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 2587,
+            "end": 2593,
+            "loc": {
+              "start": {
+                "line": 61,
+                "column": 17
+              },
+              "end": {
+                "line": 61,
+                "column": 23
+              }
+            },
+            "name": "result"
+          },
+          {
+            "type": "Literal",
+            "start": 2595,
+            "end": 2670,
+            "loc": {
+              "start": {
+                "line": 61,
+                "column": 25
+              },
+              "end": {
+                "line": 61,
+                "column": 100
+              }
+            },
+            "value": "Ningu$ -m $ - igual a ningu$ -m. Todo o ser humano $ - um estranho ímpar.",
+            "raw": "'Ningu$ -m $ - igual a ningu$ -m. Todo o ser humano $ - um estranho ímpar.'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2674,
+      "end": 2710,
+      "loc": {
+        "start": {
+          "line": 63,
+          "column": 0
+        },
+        "end": {
+          "line": 63,
+          "column": 36
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 2674,
+        "end": 2709,
+        "loc": {
+          "start": {
+            "line": 63,
+            "column": 0
+          },
+          "end": {
+            "line": 63,
+            "column": 35
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 2674,
+          "end": 2680,
+          "loc": {
+            "start": {
+              "line": 63,
+              "column": 0
+            },
+            "end": {
+              "line": 63,
+              "column": 6
+            }
+          },
+          "name": "result"
+        },
+        "right": {
+          "type": "CallExpression",
+          "start": 2683,
+          "end": 2709,
+          "loc": {
+            "start": {
+              "line": 63,
+              "column": 9
+            },
+            "end": {
+              "line": 63,
+              "column": 35
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 2683,
+            "end": 2697,
+            "loc": {
+              "start": {
+                "line": 63,
+                "column": 9
+              },
+              "end": {
+                "line": 63,
+                "column": 23
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 2683,
+              "end": 2686,
+              "loc": {
+                "start": {
+                  "line": 63,
+                  "column": 9
+                },
+                "end": {
+                  "line": 63,
+                  "column": 12
+                }
+              },
+              "name": "str"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 2687,
+              "end": 2697,
+              "loc": {
+                "start": {
+                  "line": 63,
+                  "column": 13
+                },
+                "end": {
+                  "line": 63,
+                  "column": 23
+                }
+              },
+              "name": "replaceAll"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 2698,
+              "end": 2701,
+              "loc": {
+                "start": {
+                  "line": 63,
+                  "column": 24
+                },
+                "end": {
+                  "line": 63,
+                  "column": 27
+                }
+              },
+              "value": "é",
+              "raw": "'é'"
+            },
+            {
+              "type": "Literal",
+              "start": 2703,
+              "end": 2708,
+              "loc": {
+                "start": {
+                  "line": 63,
+                  "column": 29
+                },
+                "end": {
+                  "line": 63,
+                  "column": 34
+                }
+              },
+              "value": "$$&",
+              "raw": "'$$&'"
+            }
+          ],
+          "optional": false
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2711,
+      "end": 2809,
+      "loc": {
+        "start": {
+          "line": 64,
+          "column": 0
+        },
+        "end": {
+          "line": 64,
+          "column": 98
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2711,
+        "end": 2808,
+        "loc": {
+          "start": {
+            "line": 64,
+            "column": 0
+          },
+          "end": {
+            "line": 64,
+            "column": 97
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 2711,
+          "end": 2727,
+          "loc": {
+            "start": {
+              "line": 64,
+              "column": 0
+            },
+            "end": {
+              "line": 64,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 2711,
+            "end": 2717,
+            "loc": {
+              "start": {
+                "line": 64,
+                "column": 0
+              },
+              "end": {
+                "line": 64,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 2718,
+            "end": 2727,
+            "loc": {
+              "start": {
+                "line": 64,
+                "column": 7
+              },
+              "end": {
+                "line": 64,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 2728,
+            "end": 2734,
+            "loc": {
+              "start": {
+                "line": 64,
+                "column": 17
+              },
+              "end": {
+                "line": 64,
+                "column": 23
+              }
+            },
+            "name": "result"
+          },
+          {
+            "type": "Literal",
+            "start": 2736,
+            "end": 2807,
+            "loc": {
+              "start": {
+                "line": 64,
+                "column": 25
+              },
+              "end": {
+                "line": 64,
+                "column": 96
+              }
+            },
+            "value": "Ningu$&m $& igual a ningu$&m. Todo o ser humano $& um estranho ímpar.",
+            "raw": "'Ningu$&m $& igual a ningu$&m. Todo o ser humano $& um estranho ímpar.'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2811,
+      "end": 2847,
+      "loc": {
+        "start": {
+          "line": 66,
+          "column": 0
+        },
+        "end": {
+          "line": 66,
+          "column": 36
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 2811,
+        "end": 2846,
+        "loc": {
+          "start": {
+            "line": 66,
+            "column": 0
+          },
+          "end": {
+            "line": 66,
+            "column": 35
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 2811,
+          "end": 2817,
+          "loc": {
+            "start": {
+              "line": 66,
+              "column": 0
+            },
+            "end": {
+              "line": 66,
+              "column": 6
+            }
+          },
+          "name": "result"
+        },
+        "right": {
+          "type": "CallExpression",
+          "start": 2820,
+          "end": 2846,
+          "loc": {
+            "start": {
+              "line": 66,
+              "column": 9
+            },
+            "end": {
+              "line": 66,
+              "column": 35
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 2820,
+            "end": 2834,
+            "loc": {
+              "start": {
+                "line": 66,
+                "column": 9
+              },
+              "end": {
+                "line": 66,
+                "column": 23
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 2820,
+              "end": 2823,
+              "loc": {
+                "start": {
+                  "line": 66,
+                  "column": 9
+                },
+                "end": {
+                  "line": 66,
+                  "column": 12
+                }
+              },
+              "name": "str"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 2824,
+              "end": 2834,
+              "loc": {
+                "start": {
+                  "line": 66,
+                  "column": 13
+                },
+                "end": {
+                  "line": 66,
+                  "column": 23
+                }
+              },
+              "name": "replaceAll"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 2835,
+              "end": 2838,
+              "loc": {
+                "start": {
+                  "line": 66,
+                  "column": 24
+                },
+                "end": {
+                  "line": 66,
+                  "column": 27
+                }
+              },
+              "value": "é",
+              "raw": "'é'"
+            },
+            {
+              "type": "Literal",
+              "start": 2840,
+              "end": 2845,
+              "loc": {
+                "start": {
+                  "line": 66,
+                  "column": 29
+                },
+                "end": {
+                  "line": 66,
+                  "column": 34
+                }
+              },
+              "value": "$$$",
+              "raw": "'$$$'"
+            }
+          ],
+          "optional": false
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2848,
+      "end": 2946,
+      "loc": {
+        "start": {
+          "line": 67,
+          "column": 0
+        },
+        "end": {
+          "line": 67,
+          "column": 98
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2848,
+        "end": 2945,
+        "loc": {
+          "start": {
+            "line": 67,
+            "column": 0
+          },
+          "end": {
+            "line": 67,
+            "column": 97
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 2848,
+          "end": 2864,
+          "loc": {
+            "start": {
+              "line": 67,
+              "column": 0
+            },
+            "end": {
+              "line": 67,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 2848,
+            "end": 2854,
+            "loc": {
+              "start": {
+                "line": 67,
+                "column": 0
+              },
+              "end": {
+                "line": 67,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 2855,
+            "end": 2864,
+            "loc": {
+              "start": {
+                "line": 67,
+                "column": 7
+              },
+              "end": {
+                "line": 67,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 2865,
+            "end": 2871,
+            "loc": {
+              "start": {
+                "line": 67,
+                "column": 17
+              },
+              "end": {
+                "line": 67,
+                "column": 23
+              }
+            },
+            "name": "result"
+          },
+          {
+            "type": "Literal",
+            "start": 2873,
+            "end": 2944,
+            "loc": {
+              "start": {
+                "line": 67,
+                "column": 25
+              },
+              "end": {
+                "line": 67,
+                "column": 96
+              }
+            },
+            "value": "Ningu$$m $$ igual a ningu$$m. Todo o ser humano $$ um estranho ímpar.",
+            "raw": "'Ningu$$m $$ igual a ningu$$m. Todo o ser humano $$ um estranho ímpar.'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2948,
+      "end": 2985,
+      "loc": {
+        "start": {
+          "line": 69,
+          "column": 0
+        },
+        "end": {
+          "line": 69,
+          "column": 37
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 2948,
+        "end": 2984,
+        "loc": {
+          "start": {
+            "line": 69,
+            "column": 0
+          },
+          "end": {
+            "line": 69,
+            "column": 36
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 2948,
+          "end": 2954,
+          "loc": {
+            "start": {
+              "line": 69,
+              "column": 0
+            },
+            "end": {
+              "line": 69,
+              "column": 6
+            }
+          },
+          "name": "result"
+        },
+        "right": {
+          "type": "CallExpression",
+          "start": 2957,
+          "end": 2984,
+          "loc": {
+            "start": {
+              "line": 69,
+              "column": 9
+            },
+            "end": {
+              "line": 69,
+              "column": 36
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 2957,
+            "end": 2971,
+            "loc": {
+              "start": {
+                "line": 69,
+                "column": 9
+              },
+              "end": {
+                "line": 69,
+                "column": 23
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 2957,
+              "end": 2960,
+              "loc": {
+                "start": {
+                  "line": 69,
+                  "column": 9
+                },
+                "end": {
+                  "line": 69,
+                  "column": 12
+                }
+              },
+              "name": "str"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 2961,
+              "end": 2971,
+              "loc": {
+                "start": {
+                  "line": 69,
+                  "column": 13
+                },
+                "end": {
+                  "line": 69,
+                  "column": 23
+                }
+              },
+              "name": "replaceAll"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 2972,
+              "end": 2975,
+              "loc": {
+                "start": {
+                  "line": 69,
+                  "column": 24
+                },
+                "end": {
+                  "line": 69,
+                  "column": 27
+                }
+              },
+              "value": "é",
+              "raw": "'é'"
+            },
+            {
+              "type": "Literal",
+              "start": 2977,
+              "end": 2983,
+              "loc": {
+                "start": {
+                  "line": 69,
+                  "column": 29
+                },
+                "end": {
+                  "line": 69,
+                  "column": 35
+                }
+              },
+              "value": "$$$$",
+              "raw": "'$$$$'"
+            }
+          ],
+          "optional": false
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2986,
+      "end": 3084,
+      "loc": {
+        "start": {
+          "line": 70,
+          "column": 0
+        },
+        "end": {
+          "line": 70,
+          "column": 98
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2986,
+        "end": 3083,
+        "loc": {
+          "start": {
+            "line": 70,
+            "column": 0
+          },
+          "end": {
+            "line": 70,
+            "column": 97
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 2986,
+          "end": 3002,
+          "loc": {
+            "start": {
+              "line": 70,
+              "column": 0
+            },
+            "end": {
+              "line": 70,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 2986,
+            "end": 2992,
+            "loc": {
+              "start": {
+                "line": 70,
+                "column": 0
+              },
+              "end": {
+                "line": 70,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 2993,
+            "end": 3002,
+            "loc": {
+              "start": {
+                "line": 70,
+                "column": 7
+              },
+              "end": {
+                "line": 70,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 3003,
+            "end": 3009,
+            "loc": {
+              "start": {
+                "line": 70,
+                "column": 17
+              },
+              "end": {
+                "line": 70,
+                "column": 23
+              }
+            },
+            "name": "result"
+          },
+          {
+            "type": "Literal",
+            "start": 3011,
+            "end": 3082,
+            "loc": {
+              "start": {
+                "line": 70,
+                "column": 25
+              },
+              "end": {
+                "line": 70,
+                "column": 96
+              }
+            },
+            "value": "Ningu$$m $$ igual a ningu$$m. Todo o ser humano $$ um estranho ímpar.",
+            "raw": "'Ningu$$m $$ igual a ningu$$m. Todo o ser humano $$ um estranho ímpar.'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

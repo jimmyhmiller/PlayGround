@@ -1,0 +1,2450 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1147,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 29,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 324,
+      "end": 332,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 8
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 328,
+          "end": 331,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 4
+            },
+            "end": {
+              "line": 10,
+              "column": 7
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 328,
+            "end": 331,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 4
+              },
+              "end": {
+                "line": 10,
+                "column": 7
+              }
+            },
+            "name": "dtf"
+          },
+          "init": null
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 334,
+      "end": 397,
+      "loc": {
+        "start": {
+          "line": 12,
+          "column": 0
+        },
+        "end": {
+          "line": 12,
+          "column": 63
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 334,
+        "end": 396,
+        "loc": {
+          "start": {
+            "line": 12,
+            "column": 0
+          },
+          "end": {
+            "line": 12,
+            "column": 62
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 334,
+          "end": 337,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 0
+            },
+            "end": {
+              "line": 12,
+              "column": 3
+            }
+          },
+          "name": "dtf"
+        },
+        "right": {
+          "type": "NewExpression",
+          "start": 340,
+          "end": 396,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 6
+            },
+            "end": {
+              "line": 12,
+              "column": 62
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 344,
+            "end": 363,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 10
+              },
+              "end": {
+                "line": 12,
+                "column": 29
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 344,
+              "end": 348,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 10
+                },
+                "end": {
+                  "line": 12,
+                  "column": 14
+                }
+              },
+              "name": "Intl"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 349,
+              "end": 363,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 15
+                },
+                "end": {
+                  "line": 12,
+                  "column": 29
+                }
+              },
+              "name": "DateTimeFormat"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 364,
+              "end": 368,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 30
+                },
+                "end": {
+                  "line": 12,
+                  "column": 34
+                }
+              },
+              "value": "en",
+              "raw": "'en'"
+            },
+            {
+              "type": "ObjectExpression",
+              "start": 370,
+              "end": 395,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 36
+                },
+                "end": {
+                  "line": 12,
+                  "column": 61
+                }
+              },
+              "properties": [
+                {
+                  "type": "Property",
+                  "start": 372,
+                  "end": 393,
+                  "loc": {
+                    "start": {
+                      "line": 12,
+                      "column": 38
+                    },
+                    "end": {
+                      "line": 12,
+                      "column": 59
+                    }
+                  },
+                  "method": false,
+                  "shorthand": false,
+                  "computed": false,
+                  "key": {
+                    "type": "Identifier",
+                    "start": 372,
+                    "end": 384,
+                    "loc": {
+                      "start": {
+                        "line": 12,
+                        "column": 38
+                      },
+                      "end": {
+                        "line": 12,
+                        "column": 50
+                      }
+                    },
+                    "name": "timeZoneName"
+                  },
+                  "value": {
+                    "type": "Literal",
+                    "start": 386,
+                    "end": 393,
+                    "loc": {
+                      "start": {
+                        "line": 12,
+                        "column": 52
+                      },
+                      "end": {
+                        "line": 12,
+                        "column": 59
+                      }
+                    },
+                    "value": "short",
+                    "raw": "'short'"
+                  },
+                  "kind": "init"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 398,
+      "end": 460,
+      "loc": {
+        "start": {
+          "line": 13,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 62
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 398,
+        "end": 459,
+        "loc": {
+          "start": {
+            "line": 13,
+            "column": 0
+          },
+          "end": {
+            "line": 13,
+            "column": 61
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 398,
+          "end": 414,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 0
+            },
+            "end": {
+              "line": 13,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 398,
+            "end": 404,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 0
+              },
+              "end": {
+                "line": 13,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 405,
+            "end": 414,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 7
+              },
+              "end": {
+                "line": 13,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 415,
+            "end": 449,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 17
+              },
+              "end": {
+                "line": 13,
+                "column": 51
+              }
+            },
+            "object": {
+              "type": "CallExpression",
+              "start": 415,
+              "end": 436,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 17
+                },
+                "end": {
+                  "line": 13,
+                  "column": 38
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 415,
+                "end": 434,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 36
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 415,
+                  "end": 418,
+                  "loc": {
+                    "start": {
+                      "line": 13,
+                      "column": 17
+                    },
+                    "end": {
+                      "line": 13,
+                      "column": 20
+                    }
+                  },
+                  "name": "dtf"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 419,
+                  "end": 434,
+                  "loc": {
+                    "start": {
+                      "line": 13,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 13,
+                      "column": 36
+                    }
+                  },
+                  "name": "resolvedOptions"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [],
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 437,
+              "end": 449,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 39
+                },
+                "end": {
+                  "line": 13,
+                  "column": 51
+                }
+              },
+              "name": "timeZoneName"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 451,
+            "end": 458,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 53
+              },
+              "end": {
+                "line": 13,
+                "column": 60
+              }
+            },
+            "value": "short",
+            "raw": "'short'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 462,
+      "end": 524,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 62
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 462,
+        "end": 523,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 0
+          },
+          "end": {
+            "line": 15,
+            "column": 61
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 462,
+          "end": 465,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 0
+            },
+            "end": {
+              "line": 15,
+              "column": 3
+            }
+          },
+          "name": "dtf"
+        },
+        "right": {
+          "type": "NewExpression",
+          "start": 468,
+          "end": 523,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 6
+            },
+            "end": {
+              "line": 15,
+              "column": 61
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 472,
+            "end": 491,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 10
+              },
+              "end": {
+                "line": 15,
+                "column": 29
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 472,
+              "end": 476,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 10
+                },
+                "end": {
+                  "line": 15,
+                  "column": 14
+                }
+              },
+              "name": "Intl"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 477,
+              "end": 491,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 15
+                },
+                "end": {
+                  "line": 15,
+                  "column": 29
+                }
+              },
+              "name": "DateTimeFormat"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 492,
+              "end": 496,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 30
+                },
+                "end": {
+                  "line": 15,
+                  "column": 34
+                }
+              },
+              "value": "en",
+              "raw": "'en'"
+            },
+            {
+              "type": "ObjectExpression",
+              "start": 498,
+              "end": 522,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 36
+                },
+                "end": {
+                  "line": 15,
+                  "column": 60
+                }
+              },
+              "properties": [
+                {
+                  "type": "Property",
+                  "start": 500,
+                  "end": 520,
+                  "loc": {
+                    "start": {
+                      "line": 15,
+                      "column": 38
+                    },
+                    "end": {
+                      "line": 15,
+                      "column": 58
+                    }
+                  },
+                  "method": false,
+                  "shorthand": false,
+                  "computed": false,
+                  "key": {
+                    "type": "Identifier",
+                    "start": 500,
+                    "end": 512,
+                    "loc": {
+                      "start": {
+                        "line": 15,
+                        "column": 38
+                      },
+                      "end": {
+                        "line": 15,
+                        "column": 50
+                      }
+                    },
+                    "name": "timeZoneName"
+                  },
+                  "value": {
+                    "type": "Literal",
+                    "start": 514,
+                    "end": 520,
+                    "loc": {
+                      "start": {
+                        "line": 15,
+                        "column": 52
+                      },
+                      "end": {
+                        "line": 15,
+                        "column": 58
+                      }
+                    },
+                    "value": "long",
+                    "raw": "'long'"
+                  },
+                  "kind": "init"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 525,
+      "end": 586,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 61
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 525,
+        "end": 585,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 0
+          },
+          "end": {
+            "line": 16,
+            "column": 60
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 525,
+          "end": 541,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 0
+            },
+            "end": {
+              "line": 16,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 525,
+            "end": 531,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 0
+              },
+              "end": {
+                "line": 16,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 532,
+            "end": 541,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 7
+              },
+              "end": {
+                "line": 16,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 542,
+            "end": 576,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 17
+              },
+              "end": {
+                "line": 16,
+                "column": 51
+              }
+            },
+            "object": {
+              "type": "CallExpression",
+              "start": 542,
+              "end": 563,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 17
+                },
+                "end": {
+                  "line": 16,
+                  "column": 38
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 542,
+                "end": 561,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 36
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 542,
+                  "end": 545,
+                  "loc": {
+                    "start": {
+                      "line": 16,
+                      "column": 17
+                    },
+                    "end": {
+                      "line": 16,
+                      "column": 20
+                    }
+                  },
+                  "name": "dtf"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 546,
+                  "end": 561,
+                  "loc": {
+                    "start": {
+                      "line": 16,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 16,
+                      "column": 36
+                    }
+                  },
+                  "name": "resolvedOptions"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [],
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 564,
+              "end": 576,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 39
+                },
+                "end": {
+                  "line": 16,
+                  "column": 51
+                }
+              },
+              "name": "timeZoneName"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 578,
+            "end": 584,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 53
+              },
+              "end": {
+                "line": 16,
+                "column": 59
+              }
+            },
+            "value": "long",
+            "raw": "'long'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 588,
+      "end": 657,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 69
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 588,
+        "end": 656,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 0
+          },
+          "end": {
+            "line": 18,
+            "column": 68
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 588,
+          "end": 591,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 0
+            },
+            "end": {
+              "line": 18,
+              "column": 3
+            }
+          },
+          "name": "dtf"
+        },
+        "right": {
+          "type": "NewExpression",
+          "start": 594,
+          "end": 656,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 6
+            },
+            "end": {
+              "line": 18,
+              "column": 68
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 598,
+            "end": 617,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 10
+              },
+              "end": {
+                "line": 18,
+                "column": 29
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 598,
+              "end": 602,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 10
+                },
+                "end": {
+                  "line": 18,
+                  "column": 14
+                }
+              },
+              "name": "Intl"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 603,
+              "end": 617,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 15
+                },
+                "end": {
+                  "line": 18,
+                  "column": 29
+                }
+              },
+              "name": "DateTimeFormat"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 618,
+              "end": 622,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 30
+                },
+                "end": {
+                  "line": 18,
+                  "column": 34
+                }
+              },
+              "value": "en",
+              "raw": "'en'"
+            },
+            {
+              "type": "ObjectExpression",
+              "start": 624,
+              "end": 655,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 36
+                },
+                "end": {
+                  "line": 18,
+                  "column": 67
+                }
+              },
+              "properties": [
+                {
+                  "type": "Property",
+                  "start": 626,
+                  "end": 653,
+                  "loc": {
+                    "start": {
+                      "line": 18,
+                      "column": 38
+                    },
+                    "end": {
+                      "line": 18,
+                      "column": 65
+                    }
+                  },
+                  "method": false,
+                  "shorthand": false,
+                  "computed": false,
+                  "key": {
+                    "type": "Identifier",
+                    "start": 626,
+                    "end": 638,
+                    "loc": {
+                      "start": {
+                        "line": 18,
+                        "column": 38
+                      },
+                      "end": {
+                        "line": 18,
+                        "column": 50
+                      }
+                    },
+                    "name": "timeZoneName"
+                  },
+                  "value": {
+                    "type": "Literal",
+                    "start": 640,
+                    "end": 653,
+                    "loc": {
+                      "start": {
+                        "line": 18,
+                        "column": 52
+                      },
+                      "end": {
+                        "line": 18,
+                        "column": 65
+                      }
+                    },
+                    "value": "shortOffset",
+                    "raw": "'shortOffset'"
+                  },
+                  "kind": "init"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 658,
+      "end": 726,
+      "loc": {
+        "start": {
+          "line": 19,
+          "column": 0
+        },
+        "end": {
+          "line": 19,
+          "column": 68
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 658,
+        "end": 725,
+        "loc": {
+          "start": {
+            "line": 19,
+            "column": 0
+          },
+          "end": {
+            "line": 19,
+            "column": 67
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 658,
+          "end": 674,
+          "loc": {
+            "start": {
+              "line": 19,
+              "column": 0
+            },
+            "end": {
+              "line": 19,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 658,
+            "end": 664,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 0
+              },
+              "end": {
+                "line": 19,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 665,
+            "end": 674,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 7
+              },
+              "end": {
+                "line": 19,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 675,
+            "end": 709,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 17
+              },
+              "end": {
+                "line": 19,
+                "column": 51
+              }
+            },
+            "object": {
+              "type": "CallExpression",
+              "start": 675,
+              "end": 696,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 17
+                },
+                "end": {
+                  "line": 19,
+                  "column": 38
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 675,
+                "end": 694,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 36
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 675,
+                  "end": 678,
+                  "loc": {
+                    "start": {
+                      "line": 19,
+                      "column": 17
+                    },
+                    "end": {
+                      "line": 19,
+                      "column": 20
+                    }
+                  },
+                  "name": "dtf"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 679,
+                  "end": 694,
+                  "loc": {
+                    "start": {
+                      "line": 19,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 19,
+                      "column": 36
+                    }
+                  },
+                  "name": "resolvedOptions"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [],
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 697,
+              "end": 709,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 39
+                },
+                "end": {
+                  "line": 19,
+                  "column": 51
+                }
+              },
+              "name": "timeZoneName"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 711,
+            "end": 724,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 53
+              },
+              "end": {
+                "line": 19,
+                "column": 66
+              }
+            },
+            "value": "shortOffset",
+            "raw": "'shortOffset'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 728,
+      "end": 796,
+      "loc": {
+        "start": {
+          "line": 21,
+          "column": 0
+        },
+        "end": {
+          "line": 21,
+          "column": 68
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 728,
+        "end": 795,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 0
+          },
+          "end": {
+            "line": 21,
+            "column": 67
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 728,
+          "end": 731,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 0
+            },
+            "end": {
+              "line": 21,
+              "column": 3
+            }
+          },
+          "name": "dtf"
+        },
+        "right": {
+          "type": "NewExpression",
+          "start": 734,
+          "end": 795,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 6
+            },
+            "end": {
+              "line": 21,
+              "column": 67
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 738,
+            "end": 757,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 10
+              },
+              "end": {
+                "line": 21,
+                "column": 29
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 738,
+              "end": 742,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 10
+                },
+                "end": {
+                  "line": 21,
+                  "column": 14
+                }
+              },
+              "name": "Intl"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 743,
+              "end": 757,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 15
+                },
+                "end": {
+                  "line": 21,
+                  "column": 29
+                }
+              },
+              "name": "DateTimeFormat"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 758,
+              "end": 762,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 30
+                },
+                "end": {
+                  "line": 21,
+                  "column": 34
+                }
+              },
+              "value": "en",
+              "raw": "'en'"
+            },
+            {
+              "type": "ObjectExpression",
+              "start": 764,
+              "end": 794,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 36
+                },
+                "end": {
+                  "line": 21,
+                  "column": 66
+                }
+              },
+              "properties": [
+                {
+                  "type": "Property",
+                  "start": 766,
+                  "end": 792,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 38
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 64
+                    }
+                  },
+                  "method": false,
+                  "shorthand": false,
+                  "computed": false,
+                  "key": {
+                    "type": "Identifier",
+                    "start": 766,
+                    "end": 778,
+                    "loc": {
+                      "start": {
+                        "line": 21,
+                        "column": 38
+                      },
+                      "end": {
+                        "line": 21,
+                        "column": 50
+                      }
+                    },
+                    "name": "timeZoneName"
+                  },
+                  "value": {
+                    "type": "Literal",
+                    "start": 780,
+                    "end": 792,
+                    "loc": {
+                      "start": {
+                        "line": 21,
+                        "column": 52
+                      },
+                      "end": {
+                        "line": 21,
+                        "column": 64
+                      }
+                    },
+                    "value": "longOffset",
+                    "raw": "'longOffset'"
+                  },
+                  "kind": "init"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 797,
+      "end": 864,
+      "loc": {
+        "start": {
+          "line": 22,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 67
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 797,
+        "end": 863,
+        "loc": {
+          "start": {
+            "line": 22,
+            "column": 0
+          },
+          "end": {
+            "line": 22,
+            "column": 66
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 797,
+          "end": 813,
+          "loc": {
+            "start": {
+              "line": 22,
+              "column": 0
+            },
+            "end": {
+              "line": 22,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 797,
+            "end": 803,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 0
+              },
+              "end": {
+                "line": 22,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 804,
+            "end": 813,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 7
+              },
+              "end": {
+                "line": 22,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 814,
+            "end": 848,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 17
+              },
+              "end": {
+                "line": 22,
+                "column": 51
+              }
+            },
+            "object": {
+              "type": "CallExpression",
+              "start": 814,
+              "end": 835,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 17
+                },
+                "end": {
+                  "line": 22,
+                  "column": 38
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 814,
+                "end": 833,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 36
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 814,
+                  "end": 817,
+                  "loc": {
+                    "start": {
+                      "line": 22,
+                      "column": 17
+                    },
+                    "end": {
+                      "line": 22,
+                      "column": 20
+                    }
+                  },
+                  "name": "dtf"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 818,
+                  "end": 833,
+                  "loc": {
+                    "start": {
+                      "line": 22,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 22,
+                      "column": 36
+                    }
+                  },
+                  "name": "resolvedOptions"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [],
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 836,
+              "end": 848,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 39
+                },
+                "end": {
+                  "line": 22,
+                  "column": 51
+                }
+              },
+              "name": "timeZoneName"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 850,
+            "end": 862,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 53
+              },
+              "end": {
+                "line": 22,
+                "column": 65
+              }
+            },
+            "value": "longOffset",
+            "raw": "'longOffset'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 866,
+      "end": 936,
+      "loc": {
+        "start": {
+          "line": 24,
+          "column": 0
+        },
+        "end": {
+          "line": 24,
+          "column": 70
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 866,
+        "end": 935,
+        "loc": {
+          "start": {
+            "line": 24,
+            "column": 0
+          },
+          "end": {
+            "line": 24,
+            "column": 69
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 866,
+          "end": 869,
+          "loc": {
+            "start": {
+              "line": 24,
+              "column": 0
+            },
+            "end": {
+              "line": 24,
+              "column": 3
+            }
+          },
+          "name": "dtf"
+        },
+        "right": {
+          "type": "NewExpression",
+          "start": 872,
+          "end": 935,
+          "loc": {
+            "start": {
+              "line": 24,
+              "column": 6
+            },
+            "end": {
+              "line": 24,
+              "column": 69
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 876,
+            "end": 895,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 10
+              },
+              "end": {
+                "line": 24,
+                "column": 29
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 876,
+              "end": 880,
+              "loc": {
+                "start": {
+                  "line": 24,
+                  "column": 10
+                },
+                "end": {
+                  "line": 24,
+                  "column": 14
+                }
+              },
+              "name": "Intl"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 881,
+              "end": 895,
+              "loc": {
+                "start": {
+                  "line": 24,
+                  "column": 15
+                },
+                "end": {
+                  "line": 24,
+                  "column": 29
+                }
+              },
+              "name": "DateTimeFormat"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 896,
+              "end": 900,
+              "loc": {
+                "start": {
+                  "line": 24,
+                  "column": 30
+                },
+                "end": {
+                  "line": 24,
+                  "column": 34
+                }
+              },
+              "value": "en",
+              "raw": "'en'"
+            },
+            {
+              "type": "ObjectExpression",
+              "start": 902,
+              "end": 934,
+              "loc": {
+                "start": {
+                  "line": 24,
+                  "column": 36
+                },
+                "end": {
+                  "line": 24,
+                  "column": 68
+                }
+              },
+              "properties": [
+                {
+                  "type": "Property",
+                  "start": 904,
+                  "end": 932,
+                  "loc": {
+                    "start": {
+                      "line": 24,
+                      "column": 38
+                    },
+                    "end": {
+                      "line": 24,
+                      "column": 66
+                    }
+                  },
+                  "method": false,
+                  "shorthand": false,
+                  "computed": false,
+                  "key": {
+                    "type": "Identifier",
+                    "start": 904,
+                    "end": 916,
+                    "loc": {
+                      "start": {
+                        "line": 24,
+                        "column": 38
+                      },
+                      "end": {
+                        "line": 24,
+                        "column": 50
+                      }
+                    },
+                    "name": "timeZoneName"
+                  },
+                  "value": {
+                    "type": "Literal",
+                    "start": 918,
+                    "end": 932,
+                    "loc": {
+                      "start": {
+                        "line": 24,
+                        "column": 52
+                      },
+                      "end": {
+                        "line": 24,
+                        "column": 66
+                      }
+                    },
+                    "value": "shortGeneric",
+                    "raw": "'shortGeneric'"
+                  },
+                  "kind": "init"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 937,
+      "end": 1006,
+      "loc": {
+        "start": {
+          "line": 25,
+          "column": 0
+        },
+        "end": {
+          "line": 25,
+          "column": 69
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 937,
+        "end": 1005,
+        "loc": {
+          "start": {
+            "line": 25,
+            "column": 0
+          },
+          "end": {
+            "line": 25,
+            "column": 68
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 937,
+          "end": 953,
+          "loc": {
+            "start": {
+              "line": 25,
+              "column": 0
+            },
+            "end": {
+              "line": 25,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 937,
+            "end": 943,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 0
+              },
+              "end": {
+                "line": 25,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 944,
+            "end": 953,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 7
+              },
+              "end": {
+                "line": 25,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 954,
+            "end": 988,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 17
+              },
+              "end": {
+                "line": 25,
+                "column": 51
+              }
+            },
+            "object": {
+              "type": "CallExpression",
+              "start": 954,
+              "end": 975,
+              "loc": {
+                "start": {
+                  "line": 25,
+                  "column": 17
+                },
+                "end": {
+                  "line": 25,
+                  "column": 38
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 954,
+                "end": 973,
+                "loc": {
+                  "start": {
+                    "line": 25,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 25,
+                    "column": 36
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 954,
+                  "end": 957,
+                  "loc": {
+                    "start": {
+                      "line": 25,
+                      "column": 17
+                    },
+                    "end": {
+                      "line": 25,
+                      "column": 20
+                    }
+                  },
+                  "name": "dtf"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 958,
+                  "end": 973,
+                  "loc": {
+                    "start": {
+                      "line": 25,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 25,
+                      "column": 36
+                    }
+                  },
+                  "name": "resolvedOptions"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [],
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 976,
+              "end": 988,
+              "loc": {
+                "start": {
+                  "line": 25,
+                  "column": 39
+                },
+                "end": {
+                  "line": 25,
+                  "column": 51
+                }
+              },
+              "name": "timeZoneName"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 990,
+            "end": 1004,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 53
+              },
+              "end": {
+                "line": 25,
+                "column": 67
+              }
+            },
+            "value": "shortGeneric",
+            "raw": "'shortGeneric'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1008,
+      "end": 1077,
+      "loc": {
+        "start": {
+          "line": 27,
+          "column": 0
+        },
+        "end": {
+          "line": 27,
+          "column": 69
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 1008,
+        "end": 1076,
+        "loc": {
+          "start": {
+            "line": 27,
+            "column": 0
+          },
+          "end": {
+            "line": 27,
+            "column": 68
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 1008,
+          "end": 1011,
+          "loc": {
+            "start": {
+              "line": 27,
+              "column": 0
+            },
+            "end": {
+              "line": 27,
+              "column": 3
+            }
+          },
+          "name": "dtf"
+        },
+        "right": {
+          "type": "NewExpression",
+          "start": 1014,
+          "end": 1076,
+          "loc": {
+            "start": {
+              "line": 27,
+              "column": 6
+            },
+            "end": {
+              "line": 27,
+              "column": 68
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 1018,
+            "end": 1037,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 10
+              },
+              "end": {
+                "line": 27,
+                "column": 29
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 1018,
+              "end": 1022,
+              "loc": {
+                "start": {
+                  "line": 27,
+                  "column": 10
+                },
+                "end": {
+                  "line": 27,
+                  "column": 14
+                }
+              },
+              "name": "Intl"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 1023,
+              "end": 1037,
+              "loc": {
+                "start": {
+                  "line": 27,
+                  "column": 15
+                },
+                "end": {
+                  "line": 27,
+                  "column": 29
+                }
+              },
+              "name": "DateTimeFormat"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 1038,
+              "end": 1042,
+              "loc": {
+                "start": {
+                  "line": 27,
+                  "column": 30
+                },
+                "end": {
+                  "line": 27,
+                  "column": 34
+                }
+              },
+              "value": "en",
+              "raw": "'en'"
+            },
+            {
+              "type": "ObjectExpression",
+              "start": 1044,
+              "end": 1075,
+              "loc": {
+                "start": {
+                  "line": 27,
+                  "column": 36
+                },
+                "end": {
+                  "line": 27,
+                  "column": 67
+                }
+              },
+              "properties": [
+                {
+                  "type": "Property",
+                  "start": 1046,
+                  "end": 1073,
+                  "loc": {
+                    "start": {
+                      "line": 27,
+                      "column": 38
+                    },
+                    "end": {
+                      "line": 27,
+                      "column": 65
+                    }
+                  },
+                  "method": false,
+                  "shorthand": false,
+                  "computed": false,
+                  "key": {
+                    "type": "Identifier",
+                    "start": 1046,
+                    "end": 1058,
+                    "loc": {
+                      "start": {
+                        "line": 27,
+                        "column": 38
+                      },
+                      "end": {
+                        "line": 27,
+                        "column": 50
+                      }
+                    },
+                    "name": "timeZoneName"
+                  },
+                  "value": {
+                    "type": "Literal",
+                    "start": 1060,
+                    "end": 1073,
+                    "loc": {
+                      "start": {
+                        "line": 27,
+                        "column": 52
+                      },
+                      "end": {
+                        "line": 27,
+                        "column": 65
+                      }
+                    },
+                    "value": "longGeneric",
+                    "raw": "'longGeneric'"
+                  },
+                  "kind": "init"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1078,
+      "end": 1146,
+      "loc": {
+        "start": {
+          "line": 28,
+          "column": 0
+        },
+        "end": {
+          "line": 28,
+          "column": 68
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1078,
+        "end": 1145,
+        "loc": {
+          "start": {
+            "line": 28,
+            "column": 0
+          },
+          "end": {
+            "line": 28,
+            "column": 67
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1078,
+          "end": 1094,
+          "loc": {
+            "start": {
+              "line": 28,
+              "column": 0
+            },
+            "end": {
+              "line": 28,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1078,
+            "end": 1084,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 0
+              },
+              "end": {
+                "line": 28,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1085,
+            "end": 1094,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 7
+              },
+              "end": {
+                "line": 28,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 1095,
+            "end": 1129,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 17
+              },
+              "end": {
+                "line": 28,
+                "column": 51
+              }
+            },
+            "object": {
+              "type": "CallExpression",
+              "start": 1095,
+              "end": 1116,
+              "loc": {
+                "start": {
+                  "line": 28,
+                  "column": 17
+                },
+                "end": {
+                  "line": 28,
+                  "column": 38
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 1095,
+                "end": 1114,
+                "loc": {
+                  "start": {
+                    "line": 28,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 28,
+                    "column": 36
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 1095,
+                  "end": 1098,
+                  "loc": {
+                    "start": {
+                      "line": 28,
+                      "column": 17
+                    },
+                    "end": {
+                      "line": 28,
+                      "column": 20
+                    }
+                  },
+                  "name": "dtf"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 1099,
+                  "end": 1114,
+                  "loc": {
+                    "start": {
+                      "line": 28,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 28,
+                      "column": 36
+                    }
+                  },
+                  "name": "resolvedOptions"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [],
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 1117,
+              "end": 1129,
+              "loc": {
+                "start": {
+                  "line": 28,
+                  "column": 39
+                },
+                "end": {
+                  "line": 28,
+                  "column": 51
+                }
+              },
+              "name": "timeZoneName"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 1131,
+            "end": 1144,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 53
+              },
+              "end": {
+                "line": 28,
+                "column": 66
+              }
+            },
+            "value": "longGeneric",
+            "raw": "'longGeneric'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

@@ -1,0 +1,1251 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 937,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 31,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 491,
+      "end": 499,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 8
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 495,
+          "end": 498,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 4
+            },
+            "end": {
+              "line": 18,
+              "column": 7
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 495,
+            "end": 498,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 4
+              },
+              "end": {
+                "line": 18,
+                "column": 7
+              }
+            },
+            "name": "zdt"
+          },
+          "init": null
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 537,
+      "end": 595,
+      "loc": {
+        "start": {
+          "line": 21,
+          "column": 0
+        },
+        "end": {
+          "line": 21,
+          "column": 58
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 537,
+        "end": 594,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 0
+          },
+          "end": {
+            "line": 21,
+            "column": 57
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 537,
+          "end": 540,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 0
+            },
+            "end": {
+              "line": 21,
+              "column": 3
+            }
+          },
+          "name": "zdt"
+        },
+        "right": {
+          "type": "NewExpression",
+          "start": 543,
+          "end": 594,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 6
+            },
+            "end": {
+              "line": 21,
+              "column": 57
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 547,
+            "end": 569,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 10
+              },
+              "end": {
+                "line": 21,
+                "column": 32
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 547,
+              "end": 555,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 10
+                },
+                "end": {
+                  "line": 21,
+                  "column": 18
+                }
+              },
+              "name": "Temporal"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 556,
+              "end": 569,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 19
+                },
+                "end": {
+                  "line": 21,
+                  "column": 32
+                }
+              },
+              "name": "ZonedDateTime"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "BinaryExpression",
+              "start": 570,
+              "end": 586,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 33
+                },
+                "end": {
+                  "line": 21,
+                  "column": 49
+                }
+              },
+              "left": {
+                "type": "UnaryExpression",
+                "start": 570,
+                "end": 575,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 33
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 38
+                  }
+                },
+                "operator": "-",
+                "prefix": true,
+                "argument": {
+                  "type": "Literal",
+                  "start": 571,
+                  "end": 575,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 34
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 38
+                    }
+                  },
+                  "value": null,
+                  "raw": "864n",
+                  "bigint": "864"
+                }
+              },
+              "operator": "*",
+              "right": {
+                "type": "BinaryExpression",
+                "start": 578,
+                "end": 586,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 41
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 49
+                  }
+                },
+                "left": {
+                  "type": "Literal",
+                  "start": 578,
+                  "end": 581,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 41
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 44
+                    }
+                  },
+                  "value": null,
+                  "raw": "10n",
+                  "bigint": "10"
+                },
+                "operator": "**",
+                "right": {
+                  "type": "Literal",
+                  "start": 583,
+                  "end": 586,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 46
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 49
+                    }
+                  },
+                  "value": null,
+                  "raw": "19n",
+                  "bigint": "19"
+                }
+              }
+            },
+            {
+              "type": "Literal",
+              "start": 588,
+              "end": 593,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 51
+                },
+                "end": {
+                  "line": 21,
+                  "column": 56
+                }
+              },
+              "value": "-01",
+              "raw": "\"-01\""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 596,
+      "end": 644,
+      "loc": {
+        "start": {
+          "line": 22,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 48
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 596,
+        "end": 643,
+        "loc": {
+          "start": {
+            "line": 22,
+            "column": 0
+          },
+          "end": {
+            "line": 22,
+            "column": 47
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 596,
+          "end": 609,
+          "loc": {
+            "start": {
+              "line": 22,
+              "column": 0
+            },
+            "end": {
+              "line": 22,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 596,
+            "end": 602,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 0
+              },
+              "end": {
+                "line": 22,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 603,
+            "end": 609,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 7
+              },
+              "end": {
+                "line": 22,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 610,
+            "end": 620,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 14
+              },
+              "end": {
+                "line": 22,
+                "column": 24
+              }
+            },
+            "name": "RangeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 622,
+            "end": 642,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 26
+              },
+              "end": {
+                "line": 22,
+                "column": 46
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "MemberExpression",
+              "start": 628,
+              "end": 642,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 32
+                },
+                "end": {
+                  "line": 22,
+                  "column": 46
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 628,
+                "end": 631,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 35
+                  }
+                },
+                "name": "zdt"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 632,
+                "end": 642,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 36
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 46
+                  }
+                },
+                "name": "hoursInDay"
+              },
+              "computed": false,
+              "optional": false
+            }
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 682,
+      "end": 740,
+      "loc": {
+        "start": {
+          "line": 25,
+          "column": 0
+        },
+        "end": {
+          "line": 25,
+          "column": 58
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 682,
+        "end": 739,
+        "loc": {
+          "start": {
+            "line": 25,
+            "column": 0
+          },
+          "end": {
+            "line": 25,
+            "column": 57
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 682,
+          "end": 685,
+          "loc": {
+            "start": {
+              "line": 25,
+              "column": 0
+            },
+            "end": {
+              "line": 25,
+              "column": 3
+            }
+          },
+          "name": "zdt"
+        },
+        "right": {
+          "type": "NewExpression",
+          "start": 688,
+          "end": 739,
+          "loc": {
+            "start": {
+              "line": 25,
+              "column": 6
+            },
+            "end": {
+              "line": 25,
+              "column": 57
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 692,
+            "end": 714,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 10
+              },
+              "end": {
+                "line": 25,
+                "column": 32
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 692,
+              "end": 700,
+              "loc": {
+                "start": {
+                  "line": 25,
+                  "column": 10
+                },
+                "end": {
+                  "line": 25,
+                  "column": 18
+                }
+              },
+              "name": "Temporal"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 701,
+              "end": 714,
+              "loc": {
+                "start": {
+                  "line": 25,
+                  "column": 19
+                },
+                "end": {
+                  "line": 25,
+                  "column": 32
+                }
+              },
+              "name": "ZonedDateTime"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "BinaryExpression",
+              "start": 715,
+              "end": 731,
+              "loc": {
+                "start": {
+                  "line": 25,
+                  "column": 33
+                },
+                "end": {
+                  "line": 25,
+                  "column": 49
+                }
+              },
+              "left": {
+                "type": "UnaryExpression",
+                "start": 715,
+                "end": 720,
+                "loc": {
+                  "start": {
+                    "line": 25,
+                    "column": 33
+                  },
+                  "end": {
+                    "line": 25,
+                    "column": 38
+                  }
+                },
+                "operator": "-",
+                "prefix": true,
+                "argument": {
+                  "type": "Literal",
+                  "start": 716,
+                  "end": 720,
+                  "loc": {
+                    "start": {
+                      "line": 25,
+                      "column": 34
+                    },
+                    "end": {
+                      "line": 25,
+                      "column": 38
+                    }
+                  },
+                  "value": null,
+                  "raw": "864n",
+                  "bigint": "864"
+                }
+              },
+              "operator": "*",
+              "right": {
+                "type": "BinaryExpression",
+                "start": 723,
+                "end": 731,
+                "loc": {
+                  "start": {
+                    "line": 25,
+                    "column": 41
+                  },
+                  "end": {
+                    "line": 25,
+                    "column": 49
+                  }
+                },
+                "left": {
+                  "type": "Literal",
+                  "start": 723,
+                  "end": 726,
+                  "loc": {
+                    "start": {
+                      "line": 25,
+                      "column": 41
+                    },
+                    "end": {
+                      "line": 25,
+                      "column": 44
+                    }
+                  },
+                  "value": null,
+                  "raw": "10n",
+                  "bigint": "10"
+                },
+                "operator": "**",
+                "right": {
+                  "type": "Literal",
+                  "start": 728,
+                  "end": 731,
+                  "loc": {
+                    "start": {
+                      "line": 25,
+                      "column": 46
+                    },
+                    "end": {
+                      "line": 25,
+                      "column": 49
+                    }
+                  },
+                  "value": null,
+                  "raw": "19n",
+                  "bigint": "19"
+                }
+              }
+            },
+            {
+              "type": "Literal",
+              "start": 733,
+              "end": 738,
+              "loc": {
+                "start": {
+                  "line": 25,
+                  "column": 51
+                },
+                "end": {
+                  "line": 25,
+                  "column": 56
+                }
+              },
+              "value": "+01",
+              "raw": "\"+01\""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 741,
+      "end": 789,
+      "loc": {
+        "start": {
+          "line": 26,
+          "column": 0
+        },
+        "end": {
+          "line": 26,
+          "column": 48
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 741,
+        "end": 788,
+        "loc": {
+          "start": {
+            "line": 26,
+            "column": 0
+          },
+          "end": {
+            "line": 26,
+            "column": 47
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 741,
+          "end": 754,
+          "loc": {
+            "start": {
+              "line": 26,
+              "column": 0
+            },
+            "end": {
+              "line": 26,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 741,
+            "end": 747,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 0
+              },
+              "end": {
+                "line": 26,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 748,
+            "end": 754,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 7
+              },
+              "end": {
+                "line": 26,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 755,
+            "end": 765,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 14
+              },
+              "end": {
+                "line": 26,
+                "column": 24
+              }
+            },
+            "name": "RangeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 767,
+            "end": 787,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 26
+              },
+              "end": {
+                "line": 26,
+                "column": 46
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "MemberExpression",
+              "start": 773,
+              "end": 787,
+              "loc": {
+                "start": {
+                  "line": 26,
+                  "column": 32
+                },
+                "end": {
+                  "line": 26,
+                  "column": 46
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 773,
+                "end": 776,
+                "loc": {
+                  "start": {
+                    "line": 26,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 26,
+                    "column": 35
+                  }
+                },
+                "name": "zdt"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 777,
+                "end": 787,
+                "loc": {
+                  "start": {
+                    "line": 26,
+                    "column": 36
+                  },
+                  "end": {
+                    "line": 26,
+                    "column": 46
+                  }
+                },
+                "name": "hoursInDay"
+              },
+              "computed": false,
+              "optional": false
+            }
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 830,
+      "end": 887,
+      "loc": {
+        "start": {
+          "line": 29,
+          "column": 0
+        },
+        "end": {
+          "line": 29,
+          "column": 57
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 830,
+        "end": 886,
+        "loc": {
+          "start": {
+            "line": 29,
+            "column": 0
+          },
+          "end": {
+            "line": 29,
+            "column": 56
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 830,
+          "end": 833,
+          "loc": {
+            "start": {
+              "line": 29,
+              "column": 0
+            },
+            "end": {
+              "line": 29,
+              "column": 3
+            }
+          },
+          "name": "zdt"
+        },
+        "right": {
+          "type": "NewExpression",
+          "start": 836,
+          "end": 886,
+          "loc": {
+            "start": {
+              "line": 29,
+              "column": 6
+            },
+            "end": {
+              "line": 29,
+              "column": 56
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 840,
+            "end": 862,
+            "loc": {
+              "start": {
+                "line": 29,
+                "column": 10
+              },
+              "end": {
+                "line": 29,
+                "column": 32
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 840,
+              "end": 848,
+              "loc": {
+                "start": {
+                  "line": 29,
+                  "column": 10
+                },
+                "end": {
+                  "line": 29,
+                  "column": 18
+                }
+              },
+              "name": "Temporal"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 849,
+              "end": 862,
+              "loc": {
+                "start": {
+                  "line": 29,
+                  "column": 19
+                },
+                "end": {
+                  "line": 29,
+                  "column": 32
+                }
+              },
+              "name": "ZonedDateTime"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "BinaryExpression",
+              "start": 863,
+              "end": 878,
+              "loc": {
+                "start": {
+                  "line": 29,
+                  "column": 33
+                },
+                "end": {
+                  "line": 29,
+                  "column": 48
+                }
+              },
+              "left": {
+                "type": "Literal",
+                "start": 863,
+                "end": 867,
+                "loc": {
+                  "start": {
+                    "line": 29,
+                    "column": 33
+                  },
+                  "end": {
+                    "line": 29,
+                    "column": 37
+                  }
+                },
+                "value": null,
+                "raw": "864n",
+                "bigint": "864"
+              },
+              "operator": "*",
+              "right": {
+                "type": "BinaryExpression",
+                "start": 870,
+                "end": 878,
+                "loc": {
+                  "start": {
+                    "line": 29,
+                    "column": 40
+                  },
+                  "end": {
+                    "line": 29,
+                    "column": 48
+                  }
+                },
+                "left": {
+                  "type": "Literal",
+                  "start": 870,
+                  "end": 873,
+                  "loc": {
+                    "start": {
+                      "line": 29,
+                      "column": 40
+                    },
+                    "end": {
+                      "line": 29,
+                      "column": 43
+                    }
+                  },
+                  "value": null,
+                  "raw": "10n",
+                  "bigint": "10"
+                },
+                "operator": "**",
+                "right": {
+                  "type": "Literal",
+                  "start": 875,
+                  "end": 878,
+                  "loc": {
+                    "start": {
+                      "line": 29,
+                      "column": 45
+                    },
+                    "end": {
+                      "line": 29,
+                      "column": 48
+                    }
+                  },
+                  "value": null,
+                  "raw": "19n",
+                  "bigint": "19"
+                }
+              }
+            },
+            {
+              "type": "Literal",
+              "start": 880,
+              "end": 885,
+              "loc": {
+                "start": {
+                  "line": 29,
+                  "column": 50
+                },
+                "end": {
+                  "line": 29,
+                  "column": 55
+                }
+              },
+              "value": "-01",
+              "raw": "\"-01\""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 888,
+      "end": 936,
+      "loc": {
+        "start": {
+          "line": 30,
+          "column": 0
+        },
+        "end": {
+          "line": 30,
+          "column": 48
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 888,
+        "end": 935,
+        "loc": {
+          "start": {
+            "line": 30,
+            "column": 0
+          },
+          "end": {
+            "line": 30,
+            "column": 47
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 888,
+          "end": 901,
+          "loc": {
+            "start": {
+              "line": 30,
+              "column": 0
+            },
+            "end": {
+              "line": 30,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 888,
+            "end": 894,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 0
+              },
+              "end": {
+                "line": 30,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 895,
+            "end": 901,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 7
+              },
+              "end": {
+                "line": 30,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 902,
+            "end": 912,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 14
+              },
+              "end": {
+                "line": 30,
+                "column": 24
+              }
+            },
+            "name": "RangeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 914,
+            "end": 934,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 26
+              },
+              "end": {
+                "line": 30,
+                "column": 46
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "MemberExpression",
+              "start": 920,
+              "end": 934,
+              "loc": {
+                "start": {
+                  "line": 30,
+                  "column": 32
+                },
+                "end": {
+                  "line": 30,
+                  "column": 46
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 920,
+                "end": 923,
+                "loc": {
+                  "start": {
+                    "line": 30,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 30,
+                    "column": 35
+                  }
+                },
+                "name": "zdt"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 924,
+                "end": 934,
+                "loc": {
+                  "start": {
+                    "line": 30,
+                    "column": 36
+                  },
+                  "end": {
+                    "line": 30,
+                    "column": 46
+                  }
+                },
+                "name": "hoursInDay"
+              },
+              "computed": false,
+              "optional": false
+            }
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

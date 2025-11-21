@@ -1,0 +1,334 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 351,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 10,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 253,
+      "end": 350,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 9,
+          "column": 97
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 253,
+        "end": 349,
+        "loc": {
+          "start": {
+            "line": 9,
+            "column": 0
+          },
+          "end": {
+            "line": 9,
+            "column": 96
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 253,
+          "end": 269,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 0
+            },
+            "end": {
+              "line": 9,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 253,
+            "end": 259,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 0
+              },
+              "end": {
+                "line": 9,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 260,
+            "end": 269,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 7
+              },
+              "end": {
+                "line": 9,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 270,
+            "end": 305,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 17
+              },
+              "end": {
+                "line": 9,
+                "column": 52
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 270,
+              "end": 299,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 17
+                },
+                "end": {
+                  "line": 9,
+                  "column": 46
+                }
+              },
+              "object": {
+                "type": "ArrayExpression",
+                "start": 270,
+                "end": 287,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 34
+                  }
+                },
+                "elements": [
+                  {
+                    "type": "UnaryExpression",
+                    "start": 271,
+                    "end": 275,
+                    "loc": {
+                      "start": {
+                        "line": 9,
+                        "column": 18
+                      },
+                      "end": {
+                        "line": 9,
+                        "column": 22
+                      }
+                    },
+                    "operator": "+",
+                    "prefix": true,
+                    "argument": {
+                      "type": "Identifier",
+                      "start": 272,
+                      "end": 275,
+                      "loc": {
+                        "start": {
+                          "line": 9,
+                          "column": 19
+                        },
+                        "end": {
+                          "line": 9,
+                          "column": 22
+                        }
+                      },
+                      "name": "NaN"
+                    }
+                  },
+                  {
+                    "type": "Identifier",
+                    "start": 277,
+                    "end": 280,
+                    "loc": {
+                      "start": {
+                        "line": 9,
+                        "column": 24
+                      },
+                      "end": {
+                        "line": 9,
+                        "column": 27
+                      }
+                    },
+                    "name": "NaN"
+                  },
+                  {
+                    "type": "UnaryExpression",
+                    "start": 282,
+                    "end": 286,
+                    "loc": {
+                      "start": {
+                        "line": 9,
+                        "column": 29
+                      },
+                      "end": {
+                        "line": 9,
+                        "column": 33
+                      }
+                    },
+                    "operator": "-",
+                    "prefix": true,
+                    "argument": {
+                      "type": "Identifier",
+                      "start": 283,
+                      "end": 286,
+                      "loc": {
+                        "start": {
+                          "line": 9,
+                          "column": 30
+                        },
+                        "end": {
+                          "line": 9,
+                          "column": 33
+                        }
+                      },
+                      "name": "NaN"
+                    }
+                  }
+                ]
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 288,
+                "end": 299,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 35
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 46
+                  }
+                },
+                "name": "lastIndexOf"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "UnaryExpression",
+                "start": 300,
+                "end": 304,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 47
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 51
+                  }
+                },
+                "operator": "-",
+                "prefix": true,
+                "argument": {
+                  "type": "Identifier",
+                  "start": 301,
+                  "end": 304,
+                  "loc": {
+                    "start": {
+                      "line": 9,
+                      "column": 48
+                    },
+                    "end": {
+                      "line": 9,
+                      "column": 51
+                    }
+                  },
+                  "name": "NaN"
+                }
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "UnaryExpression",
+            "start": 307,
+            "end": 309,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 54
+              },
+              "end": {
+                "line": 9,
+                "column": 56
+              }
+            },
+            "operator": "-",
+            "prefix": true,
+            "argument": {
+              "type": "Literal",
+              "start": 308,
+              "end": 309,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 55
+                },
+                "end": {
+                  "line": 9,
+                  "column": 56
+                }
+              },
+              "value": 1,
+              "raw": "1"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 311,
+            "end": 348,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 58
+              },
+              "end": {
+                "line": 9,
+                "column": 95
+              }
+            },
+            "value": "[+NaN, NaN, -NaN].lastIndexOf(-NaN)",
+            "raw": "'[+NaN, NaN, -NaN].lastIndexOf(-NaN)'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

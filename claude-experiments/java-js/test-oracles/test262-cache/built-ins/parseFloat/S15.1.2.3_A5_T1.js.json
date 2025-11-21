@@ -1,0 +1,861 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 846,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 24,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "IfStatement",
+      "start": 269,
+      "end": 451,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 273,
+        "end": 324,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 4
+          },
+          "end": {
+            "line": 11,
+            "column": 55
+          }
+        },
+        "left": {
+          "type": "CallExpression",
+          "start": 273,
+          "end": 295,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 4
+            },
+            "end": {
+              "line": 11,
+              "column": 26
+            }
+          },
+          "callee": {
+            "type": "Identifier",
+            "start": 273,
+            "end": 283,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 4
+              },
+              "end": {
+                "line": 11,
+                "column": 14
+              }
+            },
+            "name": "parseFloat"
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 284,
+              "end": 294,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 15
+                },
+                "end": {
+                  "line": 11,
+                  "column": 25
+                }
+              },
+              "value": "Infinity",
+              "raw": "\"Infinity\""
+            }
+          ],
+          "optional": false
+        },
+        "operator": "!==",
+        "right": {
+          "type": "MemberExpression",
+          "start": 300,
+          "end": 324,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 31
+            },
+            "end": {
+              "line": 11,
+              "column": 55
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 300,
+            "end": 306,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 31
+              },
+              "end": {
+                "line": 11,
+                "column": 37
+              }
+            },
+            "name": "Number"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 307,
+            "end": 324,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 38
+              },
+              "end": {
+                "line": 11,
+                "column": 55
+              }
+            },
+            "name": "POSITIVE_INFINITY"
+          },
+          "computed": false,
+          "optional": false
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 326,
+        "end": 451,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 57
+          },
+          "end": {
+            "line": 13,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 330,
+            "end": 449,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 2
+              },
+              "end": {
+                "line": 12,
+                "column": 121
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 336,
+              "end": 448,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 8
+                },
+                "end": {
+                  "line": 12,
+                  "column": 120
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 340,
+                "end": 352,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "BinaryExpression",
+                  "start": 353,
+                  "end": 447,
+                  "loc": {
+                    "start": {
+                      "line": 12,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 12,
+                      "column": 119
+                    }
+                  },
+                  "left": {
+                    "type": "Literal",
+                    "start": 353,
+                    "end": 420,
+                    "loc": {
+                      "start": {
+                        "line": 12,
+                        "column": 25
+                      },
+                      "end": {
+                        "line": 12,
+                        "column": 92
+                      }
+                    },
+                    "value": "#1: parseFloat(\"Infinity\") === Number.POSITIVE_INFINITY. Actual: ",
+                    "raw": "'#1: parseFloat(\"Infinity\") === Number.POSITIVE_INFINITY. Actual: '"
+                  },
+                  "operator": "+",
+                  "right": {
+                    "type": "CallExpression",
+                    "start": 424,
+                    "end": 446,
+                    "loc": {
+                      "start": {
+                        "line": 12,
+                        "column": 96
+                      },
+                      "end": {
+                        "line": 12,
+                        "column": 118
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 424,
+                      "end": 434,
+                      "loc": {
+                        "start": {
+                          "line": 12,
+                          "column": 96
+                        },
+                        "end": {
+                          "line": 12,
+                          "column": 106
+                        }
+                      },
+                      "name": "parseFloat"
+                    },
+                    "arguments": [
+                      {
+                        "type": "Literal",
+                        "start": 435,
+                        "end": 445,
+                        "loc": {
+                          "start": {
+                            "line": 12,
+                            "column": 107
+                          },
+                          "end": {
+                            "line": 12,
+                            "column": 117
+                          }
+                        },
+                        "value": "Infinity",
+                        "raw": "\"Infinity\""
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 463,
+      "end": 648,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 467,
+        "end": 519,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 4
+          },
+          "end": {
+            "line": 16,
+            "column": 56
+          }
+        },
+        "left": {
+          "type": "CallExpression",
+          "start": 467,
+          "end": 490,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 4
+            },
+            "end": {
+              "line": 16,
+              "column": 27
+            }
+          },
+          "callee": {
+            "type": "Identifier",
+            "start": 467,
+            "end": 477,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 4
+              },
+              "end": {
+                "line": 16,
+                "column": 14
+              }
+            },
+            "name": "parseFloat"
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 478,
+              "end": 489,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 15
+                },
+                "end": {
+                  "line": 16,
+                  "column": 26
+                }
+              },
+              "value": "+Infinity",
+              "raw": "\"+Infinity\""
+            }
+          ],
+          "optional": false
+        },
+        "operator": "!==",
+        "right": {
+          "type": "MemberExpression",
+          "start": 495,
+          "end": 519,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 32
+            },
+            "end": {
+              "line": 16,
+              "column": 56
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 495,
+            "end": 501,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 32
+              },
+              "end": {
+                "line": 16,
+                "column": 38
+              }
+            },
+            "name": "Number"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 502,
+            "end": 519,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 39
+              },
+              "end": {
+                "line": 16,
+                "column": 56
+              }
+            },
+            "name": "POSITIVE_INFINITY"
+          },
+          "computed": false,
+          "optional": false
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 521,
+        "end": 648,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 58
+          },
+          "end": {
+            "line": 18,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 525,
+            "end": 646,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 2
+              },
+              "end": {
+                "line": 17,
+                "column": 123
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 531,
+              "end": 645,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 8
+                },
+                "end": {
+                  "line": 17,
+                  "column": 122
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 535,
+                "end": 547,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "BinaryExpression",
+                  "start": 548,
+                  "end": 644,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 121
+                    }
+                  },
+                  "left": {
+                    "type": "Literal",
+                    "start": 548,
+                    "end": 616,
+                    "loc": {
+                      "start": {
+                        "line": 17,
+                        "column": 25
+                      },
+                      "end": {
+                        "line": 17,
+                        "column": 93
+                      }
+                    },
+                    "value": "#2: parseFloat(\"+Infinity\") === Number.POSITIVE_INFINITY. Actual: ",
+                    "raw": "'#2: parseFloat(\"+Infinity\") === Number.POSITIVE_INFINITY. Actual: '"
+                  },
+                  "operator": "+",
+                  "right": {
+                    "type": "CallExpression",
+                    "start": 620,
+                    "end": 643,
+                    "loc": {
+                      "start": {
+                        "line": 17,
+                        "column": 97
+                      },
+                      "end": {
+                        "line": 17,
+                        "column": 120
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 620,
+                      "end": 630,
+                      "loc": {
+                        "start": {
+                          "line": 17,
+                          "column": 97
+                        },
+                        "end": {
+                          "line": 17,
+                          "column": 107
+                        }
+                      },
+                      "name": "parseFloat"
+                    },
+                    "arguments": [
+                      {
+                        "type": "Literal",
+                        "start": 631,
+                        "end": 642,
+                        "loc": {
+                          "start": {
+                            "line": 17,
+                            "column": 108
+                          },
+                          "end": {
+                            "line": 17,
+                            "column": 119
+                          }
+                        },
+                        "value": "+Infinity",
+                        "raw": "\"+Infinity\""
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 660,
+      "end": 845,
+      "loc": {
+        "start": {
+          "line": 21,
+          "column": 0
+        },
+        "end": {
+          "line": 23,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 664,
+        "end": 716,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 4
+          },
+          "end": {
+            "line": 21,
+            "column": 56
+          }
+        },
+        "left": {
+          "type": "CallExpression",
+          "start": 664,
+          "end": 687,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 4
+            },
+            "end": {
+              "line": 21,
+              "column": 27
+            }
+          },
+          "callee": {
+            "type": "Identifier",
+            "start": 664,
+            "end": 674,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 4
+              },
+              "end": {
+                "line": 21,
+                "column": 14
+              }
+            },
+            "name": "parseFloat"
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 675,
+              "end": 686,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 15
+                },
+                "end": {
+                  "line": 21,
+                  "column": 26
+                }
+              },
+              "value": "-Infinity",
+              "raw": "\"-Infinity\""
+            }
+          ],
+          "optional": false
+        },
+        "operator": "!==",
+        "right": {
+          "type": "MemberExpression",
+          "start": 692,
+          "end": 716,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 32
+            },
+            "end": {
+              "line": 21,
+              "column": 56
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 692,
+            "end": 698,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 32
+              },
+              "end": {
+                "line": 21,
+                "column": 38
+              }
+            },
+            "name": "Number"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 699,
+            "end": 716,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 39
+              },
+              "end": {
+                "line": 21,
+                "column": 56
+              }
+            },
+            "name": "NEGATIVE_INFINITY"
+          },
+          "computed": false,
+          "optional": false
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 718,
+        "end": 845,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 58
+          },
+          "end": {
+            "line": 23,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 722,
+            "end": 843,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 2
+              },
+              "end": {
+                "line": 22,
+                "column": 123
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 728,
+              "end": 842,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 8
+                },
+                "end": {
+                  "line": 22,
+                  "column": 122
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 732,
+                "end": 744,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "BinaryExpression",
+                  "start": 745,
+                  "end": 841,
+                  "loc": {
+                    "start": {
+                      "line": 22,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 22,
+                      "column": 121
+                    }
+                  },
+                  "left": {
+                    "type": "Literal",
+                    "start": 745,
+                    "end": 813,
+                    "loc": {
+                      "start": {
+                        "line": 22,
+                        "column": 25
+                      },
+                      "end": {
+                        "line": 22,
+                        "column": 93
+                      }
+                    },
+                    "value": "#3: parseFloat(\"-Infinity\") === Number.NEGATIVE_INFINITY. Actual: ",
+                    "raw": "'#3: parseFloat(\"-Infinity\") === Number.NEGATIVE_INFINITY. Actual: '"
+                  },
+                  "operator": "+",
+                  "right": {
+                    "type": "CallExpression",
+                    "start": 817,
+                    "end": 840,
+                    "loc": {
+                      "start": {
+                        "line": 22,
+                        "column": 97
+                      },
+                      "end": {
+                        "line": 22,
+                        "column": 120
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 817,
+                      "end": 827,
+                      "loc": {
+                        "start": {
+                          "line": 22,
+                          "column": 97
+                        },
+                        "end": {
+                          "line": 22,
+                          "column": 107
+                        }
+                      },
+                      "name": "parseFloat"
+                    },
+                    "arguments": [
+                      {
+                        "type": "Literal",
+                        "start": 828,
+                        "end": 839,
+                        "loc": {
+                          "start": {
+                            "line": 22,
+                            "column": 108
+                          },
+                          "end": {
+                            "line": 22,
+                            "column": 119
+                          }
+                        },
+                        "value": "-Infinity",
+                        "raw": "\"-Infinity\""
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    }
+  ],
+  "sourceType": "script"
+}

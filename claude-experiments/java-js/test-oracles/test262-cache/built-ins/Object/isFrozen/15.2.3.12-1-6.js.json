@@ -1,0 +1,495 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 388,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 15,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 223,
+      "end": 246,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 9,
+          "column": 23
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 227,
+          "end": 245,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 4
+            },
+            "end": {
+              "line": 9,
+              "column": 22
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 227,
+            "end": 236,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 4
+              },
+              "end": {
+                "line": 9,
+                "column": 13
+              }
+            },
+            "name": "sparseArr"
+          },
+          "init": {
+            "type": "ArrayExpression",
+            "start": 239,
+            "end": 245,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 16
+              },
+              "end": {
+                "line": 9,
+                "column": 22
+              }
+            },
+            "elements": [
+              {
+                "type": "Literal",
+                "start": 240,
+                "end": 241,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 18
+                  }
+                },
+                "value": 0,
+                "raw": "0"
+              },
+              {
+                "type": "Literal",
+                "start": 243,
+                "end": 244,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 20
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 21
+                  }
+                },
+                "value": 1,
+                "raw": "1"
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 247,
+      "end": 272,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 25
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 247,
+        "end": 271,
+        "loc": {
+          "start": {
+            "line": 10,
+            "column": 0
+          },
+          "end": {
+            "line": 10,
+            "column": 24
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "MemberExpression",
+          "start": 247,
+          "end": 263,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 0
+            },
+            "end": {
+              "line": 10,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 247,
+            "end": 256,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 0
+              },
+              "end": {
+                "line": 10,
+                "column": 9
+              }
+            },
+            "name": "sparseArr"
+          },
+          "property": {
+            "type": "Literal",
+            "start": 257,
+            "end": 262,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 10
+              },
+              "end": {
+                "line": 10,
+                "column": 15
+              }
+            },
+            "value": 10000,
+            "raw": "10000"
+          },
+          "computed": true,
+          "optional": false
+        },
+        "right": {
+          "type": "Literal",
+          "start": 266,
+          "end": 271,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 19
+            },
+            "end": {
+              "line": 10,
+              "column": 24
+            }
+          },
+          "value": 10000,
+          "raw": "10000"
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 274,
+      "end": 311,
+      "loc": {
+        "start": {
+          "line": 12,
+          "column": 0
+        },
+        "end": {
+          "line": 12,
+          "column": 37
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 274,
+        "end": 310,
+        "loc": {
+          "start": {
+            "line": 12,
+            "column": 0
+          },
+          "end": {
+            "line": 12,
+            "column": 36
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 274,
+          "end": 283,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 0
+            },
+            "end": {
+              "line": 12,
+              "column": 9
+            }
+          },
+          "name": "sparseArr"
+        },
+        "right": {
+          "type": "CallExpression",
+          "start": 286,
+          "end": 310,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 12
+            },
+            "end": {
+              "line": 12,
+              "column": 36
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 286,
+            "end": 299,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 12
+              },
+              "end": {
+                "line": 12,
+                "column": 25
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 286,
+              "end": 292,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 12
+                },
+                "end": {
+                  "line": 12,
+                  "column": 18
+                }
+              },
+              "name": "Object"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 293,
+              "end": 299,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 19
+                },
+                "end": {
+                  "line": 12,
+                  "column": 25
+                }
+              },
+              "name": "freeze"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Identifier",
+              "start": 300,
+              "end": 309,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 26
+                },
+                "end": {
+                  "line": 12,
+                  "column": 35
+                }
+              },
+              "name": "sparseArr"
+            }
+          ],
+          "optional": false
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 313,
+      "end": 387,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 74
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 313,
+        "end": 386,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 73
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 313,
+          "end": 319,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 0
+            },
+            "end": {
+              "line": 14,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 320,
+            "end": 346,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 7
+              },
+              "end": {
+                "line": 14,
+                "column": 33
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 320,
+              "end": 335,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 7
+                },
+                "end": {
+                  "line": 14,
+                  "column": 22
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 320,
+                "end": 326,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 7
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 13
+                  }
+                },
+                "name": "Object"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 327,
+                "end": 335,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 14
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 22
+                  }
+                },
+                "name": "isFrozen"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 336,
+                "end": 345,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 23
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 32
+                  }
+                },
+                "name": "sparseArr"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 348,
+            "end": 385,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 35
+              },
+              "end": {
+                "line": 14,
+                "column": 72
+              }
+            },
+            "value": "Object.isFrozen(sparseArr) !== true",
+            "raw": "'Object.isFrozen(sparseArr) !== true'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

@@ -1,0 +1,470 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 2451,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 53,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 2124,
+      "end": 2450,
+      "loc": {
+        "start": {
+          "line": 41,
+          "column": 0
+        },
+        "end": {
+          "line": 52,
+          "column": 3
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2124,
+        "end": 2449,
+        "loc": {
+          "start": {
+            "line": 41,
+            "column": 0
+          },
+          "end": {
+            "line": 52,
+            "column": 2
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 2124,
+          "end": 2133,
+          "loc": {
+            "start": {
+              "line": 41,
+              "column": 0
+            },
+            "end": {
+              "line": 41,
+              "column": 9
+            }
+          },
+          "name": "asyncTest"
+        },
+        "arguments": [
+          {
+            "type": "FunctionExpression",
+            "start": 2134,
+            "end": 2448,
+            "loc": {
+              "start": {
+                "line": 41,
+                "column": 10
+              },
+              "end": {
+                "line": 52,
+                "column": 1
+              }
+            },
+            "id": null,
+            "expression": false,
+            "generator": false,
+            "async": true,
+            "params": [],
+            "body": {
+              "type": "BlockStatement",
+              "start": 2152,
+              "end": 2448,
+              "loc": {
+                "start": {
+                  "line": 41,
+                  "column": 28
+                },
+                "end": {
+                  "line": 52,
+                  "column": 1
+                }
+              },
+              "body": [
+                {
+                  "type": "ExpressionStatement",
+                  "start": 2156,
+                  "end": 2299,
+                  "loc": {
+                    "start": {
+                      "line": 42,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 46,
+                      "column": 4
+                    }
+                  },
+                  "expression": {
+                    "type": "AwaitExpression",
+                    "start": 2156,
+                    "end": 2298,
+                    "loc": {
+                      "start": {
+                        "line": 42,
+                        "column": 2
+                      },
+                      "end": {
+                        "line": 46,
+                        "column": 3
+                      }
+                    },
+                    "argument": {
+                      "type": "CallExpression",
+                      "start": 2162,
+                      "end": 2298,
+                      "loc": {
+                        "start": {
+                          "line": 42,
+                          "column": 8
+                        },
+                        "end": {
+                          "line": 46,
+                          "column": 3
+                        }
+                      },
+                      "callee": {
+                        "type": "MemberExpression",
+                        "start": 2162,
+                        "end": 2180,
+                        "loc": {
+                          "start": {
+                            "line": 42,
+                            "column": 8
+                          },
+                          "end": {
+                            "line": 42,
+                            "column": 26
+                          }
+                        },
+                        "object": {
+                          "type": "Identifier",
+                          "start": 2162,
+                          "end": 2168,
+                          "loc": {
+                            "start": {
+                              "line": 42,
+                              "column": 8
+                            },
+                            "end": {
+                              "line": 42,
+                              "column": 14
+                            }
+                          },
+                          "name": "assert"
+                        },
+                        "property": {
+                          "type": "Identifier",
+                          "start": 2169,
+                          "end": 2180,
+                          "loc": {
+                            "start": {
+                              "line": 42,
+                              "column": 15
+                            },
+                            "end": {
+                              "line": 42,
+                              "column": 26
+                            }
+                          },
+                          "name": "throwsAsync"
+                        },
+                        "computed": false,
+                        "optional": false
+                      },
+                      "arguments": [
+                        {
+                          "type": "Identifier",
+                          "start": 2186,
+                          "end": 2191,
+                          "loc": {
+                            "start": {
+                              "line": 43,
+                              "column": 4
+                            },
+                            "end": {
+                              "line": 43,
+                              "column": 9
+                            }
+                          },
+                          "name": "Error"
+                        },
+                        {
+                          "type": "ArrowFunctionExpression",
+                          "start": 2197,
+                          "end": 2247,
+                          "loc": {
+                            "start": {
+                              "line": 44,
+                              "column": 4
+                            },
+                            "end": {
+                              "line": 44,
+                              "column": 54
+                            }
+                          },
+                          "id": null,
+                          "expression": true,
+                          "generator": false,
+                          "async": false,
+                          "params": [],
+                          "body": {
+                            "type": "ImportExpression",
+                            "start": 2203,
+                            "end": 2247,
+                            "loc": {
+                              "start": {
+                                "line": 44,
+                                "column": 10
+                              },
+                              "end": {
+                                "line": 44,
+                                "column": 54
+                              }
+                            },
+                            "source": {
+                              "type": "Literal",
+                              "start": 2210,
+                              "end": 2246,
+                              "loc": {
+                                "start": {
+                                  "line": 44,
+                                  "column": 17
+                                },
+                                "end": {
+                                  "line": 44,
+                                  "column": 53
+                                }
+                              },
+                              "value": "./import-errored-module_FIXTURE.js",
+                              "raw": "'./import-errored-module_FIXTURE.js'"
+                            },
+                            "options": null
+                          }
+                        },
+                        {
+                          "type": "Literal",
+                          "start": 2253,
+                          "end": 2294,
+                          "loc": {
+                            "start": {
+                              "line": 45,
+                              "column": 4
+                            },
+                            "end": {
+                              "line": 45,
+                              "column": 45
+                            }
+                          },
+                          "value": "The import should reject (first import)",
+                          "raw": "'The import should reject (first import)'"
+                        }
+                      ],
+                      "optional": false
+                    }
+                  }
+                },
+                {
+                  "type": "ExpressionStatement",
+                  "start": 2302,
+                  "end": 2446,
+                  "loc": {
+                    "start": {
+                      "line": 47,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 51,
+                      "column": 4
+                    }
+                  },
+                  "expression": {
+                    "type": "AwaitExpression",
+                    "start": 2302,
+                    "end": 2445,
+                    "loc": {
+                      "start": {
+                        "line": 47,
+                        "column": 2
+                      },
+                      "end": {
+                        "line": 51,
+                        "column": 3
+                      }
+                    },
+                    "argument": {
+                      "type": "CallExpression",
+                      "start": 2308,
+                      "end": 2445,
+                      "loc": {
+                        "start": {
+                          "line": 47,
+                          "column": 8
+                        },
+                        "end": {
+                          "line": 51,
+                          "column": 3
+                        }
+                      },
+                      "callee": {
+                        "type": "MemberExpression",
+                        "start": 2308,
+                        "end": 2326,
+                        "loc": {
+                          "start": {
+                            "line": 47,
+                            "column": 8
+                          },
+                          "end": {
+                            "line": 47,
+                            "column": 26
+                          }
+                        },
+                        "object": {
+                          "type": "Identifier",
+                          "start": 2308,
+                          "end": 2314,
+                          "loc": {
+                            "start": {
+                              "line": 47,
+                              "column": 8
+                            },
+                            "end": {
+                              "line": 47,
+                              "column": 14
+                            }
+                          },
+                          "name": "assert"
+                        },
+                        "property": {
+                          "type": "Identifier",
+                          "start": 2315,
+                          "end": 2326,
+                          "loc": {
+                            "start": {
+                              "line": 47,
+                              "column": 15
+                            },
+                            "end": {
+                              "line": 47,
+                              "column": 26
+                            }
+                          },
+                          "name": "throwsAsync"
+                        },
+                        "computed": false,
+                        "optional": false
+                      },
+                      "arguments": [
+                        {
+                          "type": "Identifier",
+                          "start": 2332,
+                          "end": 2337,
+                          "loc": {
+                            "start": {
+                              "line": 48,
+                              "column": 4
+                            },
+                            "end": {
+                              "line": 48,
+                              "column": 9
+                            }
+                          },
+                          "name": "Error"
+                        },
+                        {
+                          "type": "ArrowFunctionExpression",
+                          "start": 2343,
+                          "end": 2393,
+                          "loc": {
+                            "start": {
+                              "line": 49,
+                              "column": 4
+                            },
+                            "end": {
+                              "line": 49,
+                              "column": 54
+                            }
+                          },
+                          "id": null,
+                          "expression": true,
+                          "generator": false,
+                          "async": false,
+                          "params": [],
+                          "body": {
+                            "type": "ImportExpression",
+                            "start": 2349,
+                            "end": 2393,
+                            "loc": {
+                              "start": {
+                                "line": 49,
+                                "column": 10
+                              },
+                              "end": {
+                                "line": 49,
+                                "column": 54
+                              }
+                            },
+                            "source": {
+                              "type": "Literal",
+                              "start": 2356,
+                              "end": 2392,
+                              "loc": {
+                                "start": {
+                                  "line": 49,
+                                  "column": 17
+                                },
+                                "end": {
+                                  "line": 49,
+                                  "column": 53
+                                }
+                              },
+                              "value": "./import-errored-module_FIXTURE.js",
+                              "raw": "'./import-errored-module_FIXTURE.js'"
+                            },
+                            "options": null
+                          }
+                        },
+                        {
+                          "type": "Literal",
+                          "start": 2399,
+                          "end": 2441,
+                          "loc": {
+                            "start": {
+                              "line": 50,
+                              "column": 4
+                            },
+                            "end": {
+                              "line": 50,
+                              "column": 46
+                            }
+                          },
+                          "value": "The import should reject (second import)",
+                          "raw": "'The import should reject (second import)'"
+                        }
+                      ],
+                      "optional": false
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

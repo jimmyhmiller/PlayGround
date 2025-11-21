@@ -1,0 +1,787 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 814,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 26,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "IfStatement",
+      "start": 318,
+      "end": 539,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 322,
+        "end": 379,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 4
+          },
+          "end": {
+            "line": 11,
+            "column": 61
+          }
+        },
+        "left": {
+          "type": "CallExpression",
+          "start": 322,
+          "end": 369,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 4
+            },
+            "end": {
+              "line": 11,
+              "column": 51
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 322,
+            "end": 347,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 4
+              },
+              "end": {
+                "line": 11,
+                "column": 29
+              }
+            },
+            "object": {
+              "type": "ThisExpression",
+              "start": 322,
+              "end": 326,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 4
+                },
+                "end": {
+                  "line": 11,
+                  "column": 8
+                }
+              }
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 327,
+              "end": 347,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 9
+                },
+                "end": {
+                  "line": 11,
+                  "column": 29
+                }
+              },
+              "name": "propertyIsEnumerable"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 348,
+              "end": 368,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 30
+                },
+                "end": {
+                  "line": 11,
+                  "column": 50
+                }
+              },
+              "value": "encodeURIComponent",
+              "raw": "'encodeURIComponent'"
+            }
+          ],
+          "optional": false
+        },
+        "operator": "!==",
+        "right": {
+          "type": "Literal",
+          "start": 374,
+          "end": 379,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 56
+            },
+            "end": {
+              "line": 11,
+              "column": 61
+            }
+          },
+          "value": false,
+          "raw": "false"
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 381,
+        "end": 539,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 63
+          },
+          "end": {
+            "line": 13,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 385,
+            "end": 537,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 2
+              },
+              "end": {
+                "line": 12,
+                "column": 154
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 391,
+              "end": 536,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 8
+                },
+                "end": {
+                  "line": 12,
+                  "column": 153
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 395,
+                "end": 407,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "BinaryExpression",
+                  "start": 408,
+                  "end": 535,
+                  "loc": {
+                    "start": {
+                      "line": 12,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 12,
+                      "column": 152
+                    }
+                  },
+                  "left": {
+                    "type": "Literal",
+                    "start": 408,
+                    "end": 483,
+                    "loc": {
+                      "start": {
+                        "line": 12,
+                        "column": 25
+                      },
+                      "end": {
+                        "line": 12,
+                        "column": 100
+                      }
+                    },
+                    "value": "#1: this.propertyIsEnumerable('encodeURIComponent') === false. Actual: ",
+                    "raw": "'#1: this.propertyIsEnumerable(\\'encodeURIComponent\\') === false. Actual: '"
+                  },
+                  "operator": "+",
+                  "right": {
+                    "type": "CallExpression",
+                    "start": 487,
+                    "end": 534,
+                    "loc": {
+                      "start": {
+                        "line": 12,
+                        "column": 104
+                      },
+                      "end": {
+                        "line": 12,
+                        "column": 151
+                      }
+                    },
+                    "callee": {
+                      "type": "MemberExpression",
+                      "start": 487,
+                      "end": 512,
+                      "loc": {
+                        "start": {
+                          "line": 12,
+                          "column": 104
+                        },
+                        "end": {
+                          "line": 12,
+                          "column": 129
+                        }
+                      },
+                      "object": {
+                        "type": "ThisExpression",
+                        "start": 487,
+                        "end": 491,
+                        "loc": {
+                          "start": {
+                            "line": 12,
+                            "column": 104
+                          },
+                          "end": {
+                            "line": 12,
+                            "column": 108
+                          }
+                        }
+                      },
+                      "property": {
+                        "type": "Identifier",
+                        "start": 492,
+                        "end": 512,
+                        "loc": {
+                          "start": {
+                            "line": 12,
+                            "column": 109
+                          },
+                          "end": {
+                            "line": 12,
+                            "column": 129
+                          }
+                        },
+                        "name": "propertyIsEnumerable"
+                      },
+                      "computed": false,
+                      "optional": false
+                    },
+                    "arguments": [
+                      {
+                        "type": "Literal",
+                        "start": 513,
+                        "end": 533,
+                        "loc": {
+                          "start": {
+                            "line": 12,
+                            "column": 130
+                          },
+                          "end": {
+                            "line": 12,
+                            "column": 150
+                          }
+                        },
+                        "value": "encodeURIComponent",
+                        "raw": "'encodeURIComponent'"
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 551,
+      "end": 569,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 18
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 555,
+          "end": 568,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 4
+            },
+            "end": {
+              "line": 16,
+              "column": 17
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 555,
+            "end": 561,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 4
+              },
+              "end": {
+                "line": 16,
+                "column": 10
+              }
+            },
+            "name": "result"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 564,
+            "end": 568,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 13
+              },
+              "end": {
+                "line": 16,
+                "column": 17
+              }
+            },
+            "value": true,
+            "raw": "true"
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ForInStatement",
+      "start": 570,
+      "end": 653,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 21,
+          "column": 1
+        }
+      },
+      "left": {
+        "type": "VariableDeclaration",
+        "start": 575,
+        "end": 580,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 5
+          },
+          "end": {
+            "line": 17,
+            "column": 10
+          }
+        },
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "start": 579,
+            "end": 580,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 9
+              },
+              "end": {
+                "line": 17,
+                "column": 10
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 579,
+              "end": 580,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 9
+                },
+                "end": {
+                  "line": 17,
+                  "column": 10
+                }
+              },
+              "name": "p"
+            },
+            "init": null
+          }
+        ],
+        "kind": "var"
+      },
+      "right": {
+        "type": "ThisExpression",
+        "start": 584,
+        "end": 588,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 14
+          },
+          "end": {
+            "line": 17,
+            "column": 18
+          }
+        }
+      },
+      "body": {
+        "type": "BlockStatement",
+        "start": 590,
+        "end": 653,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 20
+          },
+          "end": {
+            "line": 21,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "IfStatement",
+            "start": 594,
+            "end": 651,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 2
+              },
+              "end": {
+                "line": 20,
+                "column": 3
+              }
+            },
+            "test": {
+              "type": "BinaryExpression",
+              "start": 598,
+              "end": 624,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 6
+                },
+                "end": {
+                  "line": 18,
+                  "column": 32
+                }
+              },
+              "left": {
+                "type": "Identifier",
+                "start": 598,
+                "end": 599,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 6
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 7
+                  }
+                },
+                "name": "p"
+              },
+              "operator": "===",
+              "right": {
+                "type": "Literal",
+                "start": 604,
+                "end": 624,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 32
+                  }
+                },
+                "value": "encodeURIComponent",
+                "raw": "\"encodeURIComponent\""
+              }
+            },
+            "consequent": {
+              "type": "BlockStatement",
+              "start": 626,
+              "end": 651,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 34
+                },
+                "end": {
+                  "line": 20,
+                  "column": 3
+                }
+              },
+              "body": [
+                {
+                  "type": "ExpressionStatement",
+                  "start": 632,
+                  "end": 647,
+                  "loc": {
+                    "start": {
+                      "line": 19,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 19,
+                      "column": 19
+                    }
+                  },
+                  "expression": {
+                    "type": "AssignmentExpression",
+                    "start": 632,
+                    "end": 646,
+                    "loc": {
+                      "start": {
+                        "line": 19,
+                        "column": 4
+                      },
+                      "end": {
+                        "line": 19,
+                        "column": 18
+                      }
+                    },
+                    "operator": "=",
+                    "left": {
+                      "type": "Identifier",
+                      "start": 632,
+                      "end": 638,
+                      "loc": {
+                        "start": {
+                          "line": 19,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 19,
+                          "column": 10
+                        }
+                      },
+                      "name": "result"
+                    },
+                    "right": {
+                      "type": "Literal",
+                      "start": 641,
+                      "end": 646,
+                      "loc": {
+                        "start": {
+                          "line": 19,
+                          "column": 13
+                        },
+                        "end": {
+                          "line": 19,
+                          "column": 18
+                        }
+                      },
+                      "value": false,
+                      "raw": "false"
+                    }
+                  }
+                }
+              ]
+            },
+            "alternate": null
+          }
+        ]
+      }
+    },
+    {
+      "type": "IfStatement",
+      "start": 655,
+      "end": 813,
+      "loc": {
+        "start": {
+          "line": 23,
+          "column": 0
+        },
+        "end": {
+          "line": 25,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 659,
+        "end": 674,
+        "loc": {
+          "start": {
+            "line": 23,
+            "column": 4
+          },
+          "end": {
+            "line": 23,
+            "column": 19
+          }
+        },
+        "left": {
+          "type": "Identifier",
+          "start": 659,
+          "end": 665,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 4
+            },
+            "end": {
+              "line": 23,
+              "column": 10
+            }
+          },
+          "name": "result"
+        },
+        "operator": "!==",
+        "right": {
+          "type": "Literal",
+          "start": 670,
+          "end": 674,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 15
+            },
+            "end": {
+              "line": 23,
+              "column": 19
+            }
+          },
+          "value": true,
+          "raw": "true"
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 676,
+        "end": 813,
+        "loc": {
+          "start": {
+            "line": 23,
+            "column": 21
+          },
+          "end": {
+            "line": 25,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 680,
+            "end": 811,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 2
+              },
+              "end": {
+                "line": 24,
+                "column": 133
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 686,
+              "end": 810,
+              "loc": {
+                "start": {
+                  "line": 24,
+                  "column": 8
+                },
+                "end": {
+                  "line": 24,
+                  "column": 132
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 690,
+                "end": 702,
+                "loc": {
+                  "start": {
+                    "line": 24,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 24,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 703,
+                  "end": 809,
+                  "loc": {
+                    "start": {
+                      "line": 24,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 24,
+                      "column": 131
+                    }
+                  },
+                  "value": "#2: result = true; for (p in this) { if (p === \"encodeURIComponent\") result = false; }  result === true;",
+                  "raw": "'#2: result = true; for (p in this) { if (p === \"encodeURIComponent\") result = false; }  result === true;'"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    }
+  ],
+  "sourceType": "script"
+}

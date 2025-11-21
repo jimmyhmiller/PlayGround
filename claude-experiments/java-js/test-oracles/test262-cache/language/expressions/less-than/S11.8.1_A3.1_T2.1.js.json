@@ -1,0 +1,1730 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1405,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 54,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "IfStatement",
+      "start": 488,
+      "end": 567,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 492,
+        "end": 510,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 4
+          },
+          "end": {
+            "line": 16,
+            "column": 22
+          }
+        },
+        "left": {
+          "type": "BinaryExpression",
+          "start": 492,
+          "end": 500,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 4
+            },
+            "end": {
+              "line": 16,
+              "column": 12
+            }
+          },
+          "left": {
+            "type": "Literal",
+            "start": 492,
+            "end": 496,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 4
+              },
+              "end": {
+                "line": 16,
+                "column": 8
+              }
+            },
+            "value": true,
+            "raw": "true"
+          },
+          "operator": "<",
+          "right": {
+            "type": "Literal",
+            "start": 499,
+            "end": 500,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 11
+              },
+              "end": {
+                "line": 16,
+                "column": 12
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          }
+        },
+        "operator": "!==",
+        "right": {
+          "type": "Literal",
+          "start": 505,
+          "end": 510,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 17
+            },
+            "end": {
+              "line": 16,
+              "column": 22
+            }
+          },
+          "value": false,
+          "raw": "false"
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 512,
+        "end": 567,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 24
+          },
+          "end": {
+            "line": 18,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 516,
+            "end": 565,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 2
+              },
+              "end": {
+                "line": 17,
+                "column": 51
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 522,
+              "end": 564,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 8
+                },
+                "end": {
+                  "line": 17,
+                  "column": 50
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 526,
+                "end": 538,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 539,
+                  "end": 563,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 49
+                    }
+                  },
+                  "value": "#1: true < 1 === false",
+                  "raw": "'#1: true < 1 === false'"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 579,
+      "end": 658,
+      "loc": {
+        "start": {
+          "line": 21,
+          "column": 0
+        },
+        "end": {
+          "line": 23,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 583,
+        "end": 601,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 4
+          },
+          "end": {
+            "line": 21,
+            "column": 22
+          }
+        },
+        "left": {
+          "type": "BinaryExpression",
+          "start": 583,
+          "end": 591,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 4
+            },
+            "end": {
+              "line": 21,
+              "column": 12
+            }
+          },
+          "left": {
+            "type": "Literal",
+            "start": 583,
+            "end": 584,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 4
+              },
+              "end": {
+                "line": 21,
+                "column": 5
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          },
+          "operator": "<",
+          "right": {
+            "type": "Literal",
+            "start": 587,
+            "end": 591,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 8
+              },
+              "end": {
+                "line": 21,
+                "column": 12
+              }
+            },
+            "value": true,
+            "raw": "true"
+          }
+        },
+        "operator": "!==",
+        "right": {
+          "type": "Literal",
+          "start": 596,
+          "end": 601,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 17
+            },
+            "end": {
+              "line": 21,
+              "column": 22
+            }
+          },
+          "value": false,
+          "raw": "false"
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 603,
+        "end": 658,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 24
+          },
+          "end": {
+            "line": 23,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 607,
+            "end": 656,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 2
+              },
+              "end": {
+                "line": 22,
+                "column": 51
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 613,
+              "end": 655,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 8
+                },
+                "end": {
+                  "line": 22,
+                  "column": 50
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 617,
+                "end": 629,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 630,
+                  "end": 654,
+                  "loc": {
+                    "start": {
+                      "line": 22,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 22,
+                      "column": 49
+                    }
+                  },
+                  "value": "#2: 1 < true === false",
+                  "raw": "'#2: 1 < true === false'"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 670,
+      "end": 775,
+      "loc": {
+        "start": {
+          "line": 26,
+          "column": 0
+        },
+        "end": {
+          "line": 28,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 674,
+        "end": 705,
+        "loc": {
+          "start": {
+            "line": 26,
+            "column": 4
+          },
+          "end": {
+            "line": 26,
+            "column": 35
+          }
+        },
+        "left": {
+          "type": "BinaryExpression",
+          "start": 674,
+          "end": 695,
+          "loc": {
+            "start": {
+              "line": 26,
+              "column": 4
+            },
+            "end": {
+              "line": 26,
+              "column": 25
+            }
+          },
+          "left": {
+            "type": "NewExpression",
+            "start": 674,
+            "end": 691,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 4
+              },
+              "end": {
+                "line": 26,
+                "column": 21
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 678,
+              "end": 685,
+              "loc": {
+                "start": {
+                  "line": 26,
+                  "column": 8
+                },
+                "end": {
+                  "line": 26,
+                  "column": 15
+                }
+              },
+              "name": "Boolean"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 686,
+                "end": 690,
+                "loc": {
+                  "start": {
+                    "line": 26,
+                    "column": 16
+                  },
+                  "end": {
+                    "line": 26,
+                    "column": 20
+                  }
+                },
+                "value": true,
+                "raw": "true"
+              }
+            ]
+          },
+          "operator": "<",
+          "right": {
+            "type": "Literal",
+            "start": 694,
+            "end": 695,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 24
+              },
+              "end": {
+                "line": 26,
+                "column": 25
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          }
+        },
+        "operator": "!==",
+        "right": {
+          "type": "Literal",
+          "start": 700,
+          "end": 705,
+          "loc": {
+            "start": {
+              "line": 26,
+              "column": 30
+            },
+            "end": {
+              "line": 26,
+              "column": 35
+            }
+          },
+          "value": false,
+          "raw": "false"
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 707,
+        "end": 775,
+        "loc": {
+          "start": {
+            "line": 26,
+            "column": 37
+          },
+          "end": {
+            "line": 28,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 711,
+            "end": 773,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 2
+              },
+              "end": {
+                "line": 27,
+                "column": 64
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 717,
+              "end": 772,
+              "loc": {
+                "start": {
+                  "line": 27,
+                  "column": 8
+                },
+                "end": {
+                  "line": 27,
+                  "column": 63
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 721,
+                "end": 733,
+                "loc": {
+                  "start": {
+                    "line": 27,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 27,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 734,
+                  "end": 771,
+                  "loc": {
+                    "start": {
+                      "line": 27,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 27,
+                      "column": 62
+                    }
+                  },
+                  "value": "#3: new Boolean(true) < 1 === false",
+                  "raw": "'#3: new Boolean(true) < 1 === false'"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 787,
+      "end": 892,
+      "loc": {
+        "start": {
+          "line": 31,
+          "column": 0
+        },
+        "end": {
+          "line": 33,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 791,
+        "end": 822,
+        "loc": {
+          "start": {
+            "line": 31,
+            "column": 4
+          },
+          "end": {
+            "line": 31,
+            "column": 35
+          }
+        },
+        "left": {
+          "type": "BinaryExpression",
+          "start": 791,
+          "end": 812,
+          "loc": {
+            "start": {
+              "line": 31,
+              "column": 4
+            },
+            "end": {
+              "line": 31,
+              "column": 25
+            }
+          },
+          "left": {
+            "type": "Literal",
+            "start": 791,
+            "end": 792,
+            "loc": {
+              "start": {
+                "line": 31,
+                "column": 4
+              },
+              "end": {
+                "line": 31,
+                "column": 5
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          },
+          "operator": "<",
+          "right": {
+            "type": "NewExpression",
+            "start": 795,
+            "end": 812,
+            "loc": {
+              "start": {
+                "line": 31,
+                "column": 8
+              },
+              "end": {
+                "line": 31,
+                "column": 25
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 799,
+              "end": 806,
+              "loc": {
+                "start": {
+                  "line": 31,
+                  "column": 12
+                },
+                "end": {
+                  "line": 31,
+                  "column": 19
+                }
+              },
+              "name": "Boolean"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 807,
+                "end": 811,
+                "loc": {
+                  "start": {
+                    "line": 31,
+                    "column": 20
+                  },
+                  "end": {
+                    "line": 31,
+                    "column": 24
+                  }
+                },
+                "value": true,
+                "raw": "true"
+              }
+            ]
+          }
+        },
+        "operator": "!==",
+        "right": {
+          "type": "Literal",
+          "start": 817,
+          "end": 822,
+          "loc": {
+            "start": {
+              "line": 31,
+              "column": 30
+            },
+            "end": {
+              "line": 31,
+              "column": 35
+            }
+          },
+          "value": false,
+          "raw": "false"
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 824,
+        "end": 892,
+        "loc": {
+          "start": {
+            "line": 31,
+            "column": 37
+          },
+          "end": {
+            "line": 33,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 828,
+            "end": 890,
+            "loc": {
+              "start": {
+                "line": 32,
+                "column": 2
+              },
+              "end": {
+                "line": 32,
+                "column": 64
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 834,
+              "end": 889,
+              "loc": {
+                "start": {
+                  "line": 32,
+                  "column": 8
+                },
+                "end": {
+                  "line": 32,
+                  "column": 63
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 838,
+                "end": 850,
+                "loc": {
+                  "start": {
+                    "line": 32,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 32,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 851,
+                  "end": 888,
+                  "loc": {
+                    "start": {
+                      "line": 32,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 32,
+                      "column": 62
+                    }
+                  },
+                  "value": "#4: 1 < new Boolean(true) === false",
+                  "raw": "'#4: 1 < new Boolean(true) === false'"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 904,
+      "end": 1007,
+      "loc": {
+        "start": {
+          "line": 36,
+          "column": 0
+        },
+        "end": {
+          "line": 38,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 908,
+        "end": 938,
+        "loc": {
+          "start": {
+            "line": 36,
+            "column": 4
+          },
+          "end": {
+            "line": 36,
+            "column": 34
+          }
+        },
+        "left": {
+          "type": "BinaryExpression",
+          "start": 908,
+          "end": 928,
+          "loc": {
+            "start": {
+              "line": 36,
+              "column": 4
+            },
+            "end": {
+              "line": 36,
+              "column": 24
+            }
+          },
+          "left": {
+            "type": "Literal",
+            "start": 908,
+            "end": 912,
+            "loc": {
+              "start": {
+                "line": 36,
+                "column": 4
+              },
+              "end": {
+                "line": 36,
+                "column": 8
+              }
+            },
+            "value": true,
+            "raw": "true"
+          },
+          "operator": "<",
+          "right": {
+            "type": "NewExpression",
+            "start": 915,
+            "end": 928,
+            "loc": {
+              "start": {
+                "line": 36,
+                "column": 11
+              },
+              "end": {
+                "line": 36,
+                "column": 24
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 919,
+              "end": 925,
+              "loc": {
+                "start": {
+                  "line": 36,
+                  "column": 15
+                },
+                "end": {
+                  "line": 36,
+                  "column": 21
+                }
+              },
+              "name": "Number"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 926,
+                "end": 927,
+                "loc": {
+                  "start": {
+                    "line": 36,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 36,
+                    "column": 23
+                  }
+                },
+                "value": 1,
+                "raw": "1"
+              }
+            ]
+          }
+        },
+        "operator": "!==",
+        "right": {
+          "type": "Literal",
+          "start": 933,
+          "end": 938,
+          "loc": {
+            "start": {
+              "line": 36,
+              "column": 29
+            },
+            "end": {
+              "line": 36,
+              "column": 34
+            }
+          },
+          "value": false,
+          "raw": "false"
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 940,
+        "end": 1007,
+        "loc": {
+          "start": {
+            "line": 36,
+            "column": 36
+          },
+          "end": {
+            "line": 38,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 944,
+            "end": 1005,
+            "loc": {
+              "start": {
+                "line": 37,
+                "column": 2
+              },
+              "end": {
+                "line": 37,
+                "column": 63
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 950,
+              "end": 1004,
+              "loc": {
+                "start": {
+                  "line": 37,
+                  "column": 8
+                },
+                "end": {
+                  "line": 37,
+                  "column": 62
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 954,
+                "end": 966,
+                "loc": {
+                  "start": {
+                    "line": 37,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 37,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 967,
+                  "end": 1003,
+                  "loc": {
+                    "start": {
+                      "line": 37,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 37,
+                      "column": 61
+                    }
+                  },
+                  "value": "#5: true < new Number(1) === false",
+                  "raw": "'#5: true < new Number(1) === false'"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 1019,
+      "end": 1122,
+      "loc": {
+        "start": {
+          "line": 41,
+          "column": 0
+        },
+        "end": {
+          "line": 43,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 1023,
+        "end": 1053,
+        "loc": {
+          "start": {
+            "line": 41,
+            "column": 4
+          },
+          "end": {
+            "line": 41,
+            "column": 34
+          }
+        },
+        "left": {
+          "type": "BinaryExpression",
+          "start": 1023,
+          "end": 1043,
+          "loc": {
+            "start": {
+              "line": 41,
+              "column": 4
+            },
+            "end": {
+              "line": 41,
+              "column": 24
+            }
+          },
+          "left": {
+            "type": "NewExpression",
+            "start": 1023,
+            "end": 1036,
+            "loc": {
+              "start": {
+                "line": 41,
+                "column": 4
+              },
+              "end": {
+                "line": 41,
+                "column": 17
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 1027,
+              "end": 1033,
+              "loc": {
+                "start": {
+                  "line": 41,
+                  "column": 8
+                },
+                "end": {
+                  "line": 41,
+                  "column": 14
+                }
+              },
+              "name": "Number"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 1034,
+                "end": 1035,
+                "loc": {
+                  "start": {
+                    "line": 41,
+                    "column": 15
+                  },
+                  "end": {
+                    "line": 41,
+                    "column": 16
+                  }
+                },
+                "value": 1,
+                "raw": "1"
+              }
+            ]
+          },
+          "operator": "<",
+          "right": {
+            "type": "Literal",
+            "start": 1039,
+            "end": 1043,
+            "loc": {
+              "start": {
+                "line": 41,
+                "column": 20
+              },
+              "end": {
+                "line": 41,
+                "column": 24
+              }
+            },
+            "value": true,
+            "raw": "true"
+          }
+        },
+        "operator": "!==",
+        "right": {
+          "type": "Literal",
+          "start": 1048,
+          "end": 1053,
+          "loc": {
+            "start": {
+              "line": 41,
+              "column": 29
+            },
+            "end": {
+              "line": 41,
+              "column": 34
+            }
+          },
+          "value": false,
+          "raw": "false"
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 1055,
+        "end": 1122,
+        "loc": {
+          "start": {
+            "line": 41,
+            "column": 36
+          },
+          "end": {
+            "line": 43,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 1059,
+            "end": 1120,
+            "loc": {
+              "start": {
+                "line": 42,
+                "column": 2
+              },
+              "end": {
+                "line": 42,
+                "column": 63
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 1065,
+              "end": 1119,
+              "loc": {
+                "start": {
+                  "line": 42,
+                  "column": 8
+                },
+                "end": {
+                  "line": 42,
+                  "column": 62
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 1069,
+                "end": 1081,
+                "loc": {
+                  "start": {
+                    "line": 42,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 42,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 1082,
+                  "end": 1118,
+                  "loc": {
+                    "start": {
+                      "line": 42,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 42,
+                      "column": 61
+                    }
+                  },
+                  "value": "#6: new Number(1) < true === false",
+                  "raw": "'#6: new Number(1) < true === false'"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 1134,
+      "end": 1263,
+      "loc": {
+        "start": {
+          "line": 46,
+          "column": 0
+        },
+        "end": {
+          "line": 48,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 1138,
+        "end": 1181,
+        "loc": {
+          "start": {
+            "line": 46,
+            "column": 4
+          },
+          "end": {
+            "line": 46,
+            "column": 47
+          }
+        },
+        "left": {
+          "type": "BinaryExpression",
+          "start": 1138,
+          "end": 1171,
+          "loc": {
+            "start": {
+              "line": 46,
+              "column": 4
+            },
+            "end": {
+              "line": 46,
+              "column": 37
+            }
+          },
+          "left": {
+            "type": "NewExpression",
+            "start": 1138,
+            "end": 1155,
+            "loc": {
+              "start": {
+                "line": 46,
+                "column": 4
+              },
+              "end": {
+                "line": 46,
+                "column": 21
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 1142,
+              "end": 1149,
+              "loc": {
+                "start": {
+                  "line": 46,
+                  "column": 8
+                },
+                "end": {
+                  "line": 46,
+                  "column": 15
+                }
+              },
+              "name": "Boolean"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 1150,
+                "end": 1154,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 16
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 20
+                  }
+                },
+                "value": true,
+                "raw": "true"
+              }
+            ]
+          },
+          "operator": "<",
+          "right": {
+            "type": "NewExpression",
+            "start": 1158,
+            "end": 1171,
+            "loc": {
+              "start": {
+                "line": 46,
+                "column": 24
+              },
+              "end": {
+                "line": 46,
+                "column": 37
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 1162,
+              "end": 1168,
+              "loc": {
+                "start": {
+                  "line": 46,
+                  "column": 28
+                },
+                "end": {
+                  "line": 46,
+                  "column": 34
+                }
+              },
+              "name": "Number"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 1169,
+                "end": 1170,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 35
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 36
+                  }
+                },
+                "value": 1,
+                "raw": "1"
+              }
+            ]
+          }
+        },
+        "operator": "!==",
+        "right": {
+          "type": "Literal",
+          "start": 1176,
+          "end": 1181,
+          "loc": {
+            "start": {
+              "line": 46,
+              "column": 42
+            },
+            "end": {
+              "line": 46,
+              "column": 47
+            }
+          },
+          "value": false,
+          "raw": "false"
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 1183,
+        "end": 1263,
+        "loc": {
+          "start": {
+            "line": 46,
+            "column": 49
+          },
+          "end": {
+            "line": 48,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 1187,
+            "end": 1261,
+            "loc": {
+              "start": {
+                "line": 47,
+                "column": 2
+              },
+              "end": {
+                "line": 47,
+                "column": 76
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 1193,
+              "end": 1260,
+              "loc": {
+                "start": {
+                  "line": 47,
+                  "column": 8
+                },
+                "end": {
+                  "line": 47,
+                  "column": 75
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 1197,
+                "end": 1209,
+                "loc": {
+                  "start": {
+                    "line": 47,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 47,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 1210,
+                  "end": 1259,
+                  "loc": {
+                    "start": {
+                      "line": 47,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 47,
+                      "column": 74
+                    }
+                  },
+                  "value": "#7: new Boolean(true) < new Number(1) === false",
+                  "raw": "'#7: new Boolean(true) < new Number(1) === false'"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 1275,
+      "end": 1404,
+      "loc": {
+        "start": {
+          "line": 51,
+          "column": 0
+        },
+        "end": {
+          "line": 53,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 1279,
+        "end": 1322,
+        "loc": {
+          "start": {
+            "line": 51,
+            "column": 4
+          },
+          "end": {
+            "line": 51,
+            "column": 47
+          }
+        },
+        "left": {
+          "type": "BinaryExpression",
+          "start": 1279,
+          "end": 1312,
+          "loc": {
+            "start": {
+              "line": 51,
+              "column": 4
+            },
+            "end": {
+              "line": 51,
+              "column": 37
+            }
+          },
+          "left": {
+            "type": "NewExpression",
+            "start": 1279,
+            "end": 1292,
+            "loc": {
+              "start": {
+                "line": 51,
+                "column": 4
+              },
+              "end": {
+                "line": 51,
+                "column": 17
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 1283,
+              "end": 1289,
+              "loc": {
+                "start": {
+                  "line": 51,
+                  "column": 8
+                },
+                "end": {
+                  "line": 51,
+                  "column": 14
+                }
+              },
+              "name": "Number"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 1290,
+                "end": 1291,
+                "loc": {
+                  "start": {
+                    "line": 51,
+                    "column": 15
+                  },
+                  "end": {
+                    "line": 51,
+                    "column": 16
+                  }
+                },
+                "value": 1,
+                "raw": "1"
+              }
+            ]
+          },
+          "operator": "<",
+          "right": {
+            "type": "NewExpression",
+            "start": 1295,
+            "end": 1312,
+            "loc": {
+              "start": {
+                "line": 51,
+                "column": 20
+              },
+              "end": {
+                "line": 51,
+                "column": 37
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 1299,
+              "end": 1306,
+              "loc": {
+                "start": {
+                  "line": 51,
+                  "column": 24
+                },
+                "end": {
+                  "line": 51,
+                  "column": 31
+                }
+              },
+              "name": "Boolean"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 1307,
+                "end": 1311,
+                "loc": {
+                  "start": {
+                    "line": 51,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 51,
+                    "column": 36
+                  }
+                },
+                "value": true,
+                "raw": "true"
+              }
+            ]
+          }
+        },
+        "operator": "!==",
+        "right": {
+          "type": "Literal",
+          "start": 1317,
+          "end": 1322,
+          "loc": {
+            "start": {
+              "line": 51,
+              "column": 42
+            },
+            "end": {
+              "line": 51,
+              "column": 47
+            }
+          },
+          "value": false,
+          "raw": "false"
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 1324,
+        "end": 1404,
+        "loc": {
+          "start": {
+            "line": 51,
+            "column": 49
+          },
+          "end": {
+            "line": 53,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 1328,
+            "end": 1402,
+            "loc": {
+              "start": {
+                "line": 52,
+                "column": 2
+              },
+              "end": {
+                "line": 52,
+                "column": 76
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 1334,
+              "end": 1401,
+              "loc": {
+                "start": {
+                  "line": 52,
+                  "column": 8
+                },
+                "end": {
+                  "line": 52,
+                  "column": 75
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 1338,
+                "end": 1350,
+                "loc": {
+                  "start": {
+                    "line": 52,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 52,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "start": 1351,
+                  "end": 1400,
+                  "loc": {
+                    "start": {
+                      "line": 52,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 52,
+                      "column": 74
+                    }
+                  },
+                  "value": "#8: new Number(1) < new Boolean(true) === false",
+                  "raw": "'#8: new Number(1) < new Boolean(true) === false'"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    }
+  ],
+  "sourceType": "script"
+}

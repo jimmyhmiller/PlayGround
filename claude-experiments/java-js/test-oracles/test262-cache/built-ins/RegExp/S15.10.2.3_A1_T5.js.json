@@ -1,0 +1,255 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 699,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 18,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 559,
+      "end": 625,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 66
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 563,
+          "end": 624,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 4
+            },
+            "end": {
+              "line": 15,
+              "column": 65
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 563,
+            "end": 573,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 4
+              },
+              "end": {
+                "line": 15,
+                "column": 14
+              }
+            },
+            "name": "__executed"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 576,
+            "end": 624,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 17
+              },
+              "end": {
+                "line": 15,
+                "column": 65
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 576,
+              "end": 597,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 17
+                },
+                "end": {
+                  "line": 15,
+                  "column": 38
+                }
+              },
+              "object": {
+                "type": "Literal",
+                "start": 576,
+                "end": 592,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 33
+                  }
+                },
+                "value": {},
+                "raw": "/\\d{3}|[a-z]{4}/",
+                "regex": {
+                  "pattern": "\\d{3}|[a-z]{4}",
+                  "flags": ""
+                }
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 593,
+                "end": 597,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 34
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 38
+                  }
+                },
+                "name": "test"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 598,
+                "end": 623,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 39
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 64
+                  }
+                },
+                "value": "2, 12 and 23 AND 0.00.1",
+                "raw": "\"2, 12 and 23 AND 0.00.1\""
+              }
+            ],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 627,
+      "end": 698,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 71
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 627,
+        "end": 697,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 0
+          },
+          "end": {
+            "line": 17,
+            "column": 70
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 627,
+          "end": 633,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 0
+            },
+            "end": {
+              "line": 17,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 634,
+            "end": 645,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 7
+              },
+              "end": {
+                "line": 17,
+                "column": 18
+              }
+            },
+            "operator": "!",
+            "prefix": true,
+            "argument": {
+              "type": "Identifier",
+              "start": 635,
+              "end": 645,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 8
+                },
+                "end": {
+                  "line": 17,
+                  "column": 18
+                }
+              },
+              "name": "__executed"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 647,
+            "end": 696,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 20
+              },
+              "end": {
+                "line": 17,
+                "column": 69
+              }
+            },
+            "value": "The value of !__executed is expected to be true",
+            "raw": "'The value of !__executed is expected to be true'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

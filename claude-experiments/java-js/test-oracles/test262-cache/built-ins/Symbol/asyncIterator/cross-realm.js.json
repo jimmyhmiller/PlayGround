@@ -1,0 +1,379 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 461,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 16,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 349,
+      "end": 396,
+      "loc": {
+        "start": {
+          "line": 13,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 47
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 353,
+          "end": 395,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 4
+            },
+            "end": {
+              "line": 13,
+              "column": 46
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 353,
+            "end": 360,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 4
+              },
+              "end": {
+                "line": 13,
+                "column": 11
+              }
+            },
+            "name": "OSymbol"
+          },
+          "init": {
+            "type": "MemberExpression",
+            "start": 363,
+            "end": 395,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 14
+              },
+              "end": {
+                "line": 13,
+                "column": 46
+              }
+            },
+            "object": {
+              "type": "MemberExpression",
+              "start": 363,
+              "end": 388,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 14
+                },
+                "end": {
+                  "line": 13,
+                  "column": 39
+                }
+              },
+              "object": {
+                "type": "CallExpression",
+                "start": 363,
+                "end": 381,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 14
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 32
+                  }
+                },
+                "callee": {
+                  "type": "MemberExpression",
+                  "start": 363,
+                  "end": 379,
+                  "loc": {
+                    "start": {
+                      "line": 13,
+                      "column": 14
+                    },
+                    "end": {
+                      "line": 13,
+                      "column": 30
+                    }
+                  },
+                  "object": {
+                    "type": "Identifier",
+                    "start": 363,
+                    "end": 367,
+                    "loc": {
+                      "start": {
+                        "line": 13,
+                        "column": 14
+                      },
+                      "end": {
+                        "line": 13,
+                        "column": 18
+                      }
+                    },
+                    "name": "$262"
+                  },
+                  "property": {
+                    "type": "Identifier",
+                    "start": 368,
+                    "end": 379,
+                    "loc": {
+                      "start": {
+                        "line": 13,
+                        "column": 19
+                      },
+                      "end": {
+                        "line": 13,
+                        "column": 30
+                      }
+                    },
+                    "name": "createRealm"
+                  },
+                  "computed": false,
+                  "optional": false
+                },
+                "arguments": [],
+                "optional": false
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 382,
+                "end": 388,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 33
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 39
+                  }
+                },
+                "name": "global"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 389,
+              "end": 395,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 40
+                },
+                "end": {
+                  "line": 13,
+                  "column": 46
+                }
+              },
+              "name": "Symbol"
+            },
+            "computed": false,
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 398,
+      "end": 460,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 62
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 398,
+        "end": 459,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 0
+          },
+          "end": {
+            "line": 15,
+            "column": 61
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 398,
+          "end": 414,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 0
+            },
+            "end": {
+              "line": 15,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 398,
+            "end": 404,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 0
+              },
+              "end": {
+                "line": 15,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 405,
+            "end": 414,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 7
+              },
+              "end": {
+                "line": 15,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 415,
+            "end": 435,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 17
+              },
+              "end": {
+                "line": 15,
+                "column": 37
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 415,
+              "end": 421,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 17
+                },
+                "end": {
+                  "line": 15,
+                  "column": 23
+                }
+              },
+              "name": "Symbol"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 422,
+              "end": 435,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 24
+                },
+                "end": {
+                  "line": 15,
+                  "column": 37
+                }
+              },
+              "name": "asyncIterator"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 437,
+            "end": 458,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 39
+              },
+              "end": {
+                "line": 15,
+                "column": 60
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 437,
+              "end": 444,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 39
+                },
+                "end": {
+                  "line": 15,
+                  "column": 46
+                }
+              },
+              "name": "OSymbol"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 445,
+              "end": 458,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 47
+                },
+                "end": {
+                  "line": 15,
+                  "column": 60
+                }
+              },
+              "name": "asyncIterator"
+            },
+            "computed": false,
+            "optional": false
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

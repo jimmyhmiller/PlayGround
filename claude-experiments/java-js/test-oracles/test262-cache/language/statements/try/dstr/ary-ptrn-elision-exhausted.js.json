@@ -1,0 +1,527 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1182,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 47,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 1011,
+      "end": 1039,
+      "loc": {
+        "start": {
+          "line": 34,
+          "column": 0
+        },
+        "end": {
+          "line": 34,
+          "column": 28
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 1015,
+          "end": 1038,
+          "loc": {
+            "start": {
+              "line": 34,
+              "column": 4
+            },
+            "end": {
+              "line": 34,
+              "column": 27
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 1015,
+            "end": 1019,
+            "loc": {
+              "start": {
+                "line": 34,
+                "column": 4
+              },
+              "end": {
+                "line": 34,
+                "column": 8
+              }
+            },
+            "name": "iter"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 1022,
+            "end": 1038,
+            "loc": {
+              "start": {
+                "line": 34,
+                "column": 11
+              },
+              "end": {
+                "line": 34,
+                "column": 27
+              }
+            },
+            "callee": {
+              "type": "FunctionExpression",
+              "start": 1022,
+              "end": 1036,
+              "loc": {
+                "start": {
+                  "line": 34,
+                  "column": 11
+                },
+                "end": {
+                  "line": 34,
+                  "column": 25
+                }
+              },
+              "id": null,
+              "expression": false,
+              "generator": true,
+              "async": false,
+              "params": [],
+              "body": {
+                "type": "BlockStatement",
+                "start": 1034,
+                "end": 1036,
+                "loc": {
+                  "start": {
+                    "line": 34,
+                    "column": 23
+                  },
+                  "end": {
+                    "line": 34,
+                    "column": 25
+                  }
+                },
+                "body": []
+              }
+            },
+            "arguments": [],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1040,
+      "end": 1052,
+      "loc": {
+        "start": {
+          "line": 35,
+          "column": 0
+        },
+        "end": {
+          "line": 35,
+          "column": 12
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1040,
+        "end": 1051,
+        "loc": {
+          "start": {
+            "line": 35,
+            "column": 0
+          },
+          "end": {
+            "line": 35,
+            "column": 11
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1040,
+          "end": 1049,
+          "loc": {
+            "start": {
+              "line": 35,
+              "column": 0
+            },
+            "end": {
+              "line": 35,
+              "column": 9
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1040,
+            "end": 1044,
+            "loc": {
+              "start": {
+                "line": 35,
+                "column": 0
+              },
+              "end": {
+                "line": 35,
+                "column": 4
+              }
+            },
+            "name": "iter"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1045,
+            "end": 1049,
+            "loc": {
+              "start": {
+                "line": 35,
+                "column": 5
+              },
+              "end": {
+                "line": 35,
+                "column": 9
+              }
+            },
+            "name": "next"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [],
+        "optional": false
+      }
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 1054,
+      "end": 1075,
+      "loc": {
+        "start": {
+          "line": 37,
+          "column": 0
+        },
+        "end": {
+          "line": 37,
+          "column": 21
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 1058,
+          "end": 1074,
+          "loc": {
+            "start": {
+              "line": 37,
+              "column": 4
+            },
+            "end": {
+              "line": 37,
+              "column": 20
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 1058,
+            "end": 1066,
+            "loc": {
+              "start": {
+                "line": 37,
+                "column": 4
+              },
+              "end": {
+                "line": 37,
+                "column": 12
+              }
+            },
+            "name": "ranCatch"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 1069,
+            "end": 1074,
+            "loc": {
+              "start": {
+                "line": 37,
+                "column": 15
+              },
+              "end": {
+                "line": 37,
+                "column": 20
+              }
+            },
+            "value": false,
+            "raw": "false"
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "TryStatement",
+      "start": 1077,
+      "end": 1136,
+      "loc": {
+        "start": {
+          "line": 39,
+          "column": 0
+        },
+        "end": {
+          "line": 44,
+          "column": 1
+        }
+      },
+      "block": {
+        "type": "BlockStatement",
+        "start": 1081,
+        "end": 1098,
+        "loc": {
+          "start": {
+            "line": 39,
+            "column": 4
+          },
+          "end": {
+            "line": 41,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 1085,
+            "end": 1096,
+            "loc": {
+              "start": {
+                "line": 40,
+                "column": 2
+              },
+              "end": {
+                "line": 40,
+                "column": 13
+              }
+            },
+            "argument": {
+              "type": "Identifier",
+              "start": 1091,
+              "end": 1095,
+              "loc": {
+                "start": {
+                  "line": 40,
+                  "column": 8
+                },
+                "end": {
+                  "line": 40,
+                  "column": 12
+                }
+              },
+              "name": "iter"
+            }
+          }
+        ]
+      },
+      "handler": {
+        "type": "CatchClause",
+        "start": 1099,
+        "end": 1136,
+        "loc": {
+          "start": {
+            "line": 41,
+            "column": 2
+          },
+          "end": {
+            "line": 44,
+            "column": 1
+          }
+        },
+        "param": {
+          "type": "ArrayPattern",
+          "start": 1106,
+          "end": 1109,
+          "loc": {
+            "start": {
+              "line": 41,
+              "column": 9
+            },
+            "end": {
+              "line": 41,
+              "column": 12
+            }
+          },
+          "elements": [
+            null
+          ]
+        },
+        "body": {
+          "type": "BlockStatement",
+          "start": 1111,
+          "end": 1136,
+          "loc": {
+            "start": {
+              "line": 41,
+              "column": 14
+            },
+            "end": {
+              "line": 44,
+              "column": 1
+            }
+          },
+          "body": [
+            {
+              "type": "ExpressionStatement",
+              "start": 1118,
+              "end": 1134,
+              "loc": {
+                "start": {
+                  "line": 43,
+                  "column": 2
+                },
+                "end": {
+                  "line": 43,
+                  "column": 18
+                }
+              },
+              "expression": {
+                "type": "AssignmentExpression",
+                "start": 1118,
+                "end": 1133,
+                "loc": {
+                  "start": {
+                    "line": 43,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 43,
+                    "column": 17
+                  }
+                },
+                "operator": "=",
+                "left": {
+                  "type": "Identifier",
+                  "start": 1118,
+                  "end": 1126,
+                  "loc": {
+                    "start": {
+                      "line": 43,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 43,
+                      "column": 10
+                    }
+                  },
+                  "name": "ranCatch"
+                },
+                "right": {
+                  "type": "Literal",
+                  "start": 1129,
+                  "end": 1133,
+                  "loc": {
+                    "start": {
+                      "line": 43,
+                      "column": 13
+                    },
+                    "end": {
+                      "line": 43,
+                      "column": 17
+                    }
+                  },
+                  "value": true,
+                  "raw": "true"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "finalizer": null
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1138,
+      "end": 1181,
+      "loc": {
+        "start": {
+          "line": 46,
+          "column": 0
+        },
+        "end": {
+          "line": 46,
+          "column": 43
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1138,
+        "end": 1180,
+        "loc": {
+          "start": {
+            "line": 46,
+            "column": 0
+          },
+          "end": {
+            "line": 46,
+            "column": 42
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 1138,
+          "end": 1144,
+          "loc": {
+            "start": {
+              "line": 46,
+              "column": 0
+            },
+            "end": {
+              "line": 46,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 1145,
+            "end": 1153,
+            "loc": {
+              "start": {
+                "line": 46,
+                "column": 7
+              },
+              "end": {
+                "line": 46,
+                "column": 15
+              }
+            },
+            "name": "ranCatch"
+          },
+          {
+            "type": "Literal",
+            "start": 1155,
+            "end": 1179,
+            "loc": {
+              "start": {
+                "line": 46,
+                "column": 17
+              },
+              "end": {
+                "line": 46,
+                "column": 41
+              }
+            },
+            "value": "executed `catch` block",
+            "raw": "'executed `catch` block'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}
