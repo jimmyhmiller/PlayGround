@@ -586,7 +586,12 @@ function Widget({ theme, config, clipPath, onResize, dashboardId, layout, allWid
         position={position}
         onResizeStop={handleResizeStop}
         onDragStop={handleDragStop}
-        bounds="parent"
+        bounds={{
+          left: 0,
+          top: 0,
+          right: typeof window !== 'undefined' ? window.innerWidth - parseInt(size.width) - 160 : 0,
+          bottom: typeof window !== 'undefined' ? window.innerHeight - parseInt(size.height) - 105 : 0
+        }}
         minWidth={minSize.width}
         minHeight={minSize.height}
         resizeGrid={gridSize > 0 ? [gridSize, gridSize] : undefined}
