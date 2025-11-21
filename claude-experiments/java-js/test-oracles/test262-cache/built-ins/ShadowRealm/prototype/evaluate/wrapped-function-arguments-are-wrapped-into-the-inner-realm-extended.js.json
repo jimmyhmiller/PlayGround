@@ -1,0 +1,799 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1158,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 47,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 325,
+      "end": 476,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 325,
+        "end": 475,
+        "loc": {
+          "start": {
+            "line": 10,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 325,
+          "end": 341,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 0
+            },
+            "end": {
+              "line": 10,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 325,
+            "end": 331,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 0
+              },
+              "end": {
+                "line": 10,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 332,
+            "end": 341,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 7
+              },
+              "end": {
+                "line": 10,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 345,
+            "end": 382,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 2
+              },
+              "end": {
+                "line": 11,
+                "column": 39
+              }
+            },
+            "operator": "typeof",
+            "prefix": true,
+            "argument": {
+              "type": "MemberExpression",
+              "start": 352,
+              "end": 382,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 9
+                },
+                "end": {
+                  "line": 11,
+                  "column": 39
+                }
+              },
+              "object": {
+                "type": "MemberExpression",
+                "start": 352,
+                "end": 373,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 30
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 352,
+                  "end": 363,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 20
+                    }
+                  },
+                  "name": "ShadowRealm"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 364,
+                  "end": 373,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 30
+                    }
+                  },
+                  "name": "prototype"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 374,
+                "end": 382,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 39
+                  }
+                },
+                "name": "evaluate"
+              },
+              "computed": false,
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 386,
+            "end": 396,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 2
+              },
+              "end": {
+                "line": 12,
+                "column": 12
+              }
+            },
+            "value": "function",
+            "raw": "'function'"
+          },
+          {
+            "type": "Literal",
+            "start": 400,
+            "end": 473,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 2
+              },
+              "end": {
+                "line": 13,
+                "column": 75
+              }
+            },
+            "value": "This test must fail if ShadowRealm.prototype.evaluate is not a function",
+            "raw": "'This test must fail if ShadowRealm.prototype.evaluate is not a function'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 478,
+      "end": 506,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 28
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 484,
+          "end": 505,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 6
+            },
+            "end": {
+              "line": 16,
+              "column": 27
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 484,
+            "end": 485,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 6
+              },
+              "end": {
+                "line": 16,
+                "column": 7
+              }
+            },
+            "name": "r"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 488,
+            "end": 505,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 10
+              },
+              "end": {
+                "line": 16,
+                "column": 27
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 492,
+              "end": 503,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 14
+                },
+                "end": {
+                  "line": 16,
+                  "column": 25
+                }
+              },
+              "name": "ShadowRealm"
+            },
+            "arguments": []
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 507,
+      "end": 538,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 31
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 513,
+          "end": 537,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 6
+            },
+            "end": {
+              "line": 17,
+              "column": 30
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 513,
+            "end": 519,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 6
+              },
+              "end": {
+                "line": 17,
+                "column": 12
+              }
+            },
+            "name": "blueFn"
+          },
+          "init": {
+            "type": "ArrowFunctionExpression",
+            "start": 522,
+            "end": 537,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 15
+              },
+              "end": {
+                "line": 17,
+                "column": 30
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [
+              {
+                "type": "Identifier",
+                "start": 523,
+                "end": 524,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 16
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 17
+                  }
+                },
+                "name": "x"
+              },
+              {
+                "type": "Identifier",
+                "start": 526,
+                "end": 527,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 19
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 20
+                  }
+                },
+                "name": "y"
+              }
+            ],
+            "body": {
+              "type": "BinaryExpression",
+              "start": 532,
+              "end": 537,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 25
+                },
+                "end": {
+                  "line": 17,
+                  "column": 30
+                }
+              },
+              "left": {
+                "type": "Identifier",
+                "start": 532,
+                "end": 533,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 25
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 26
+                  }
+                },
+                "name": "x"
+              },
+              "operator": "+",
+              "right": {
+                "type": "Identifier",
+                "start": 536,
+                "end": 537,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 29
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 30
+                  }
+                },
+                "name": "y"
+              }
+            }
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 540,
+      "end": 1089,
+      "loc": {
+        "start": {
+          "line": 19,
+          "column": 0
+        },
+        "end": {
+          "line": 45,
+          "column": 3
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 546,
+          "end": 1088,
+          "loc": {
+            "start": {
+              "line": 19,
+              "column": 6
+            },
+            "end": {
+              "line": 45,
+              "column": 2
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 546,
+            "end": 558,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 6
+              },
+              "end": {
+                "line": 19,
+                "column": 18
+              }
+            },
+            "name": "redWrappedFn"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 561,
+            "end": 1088,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 21
+              },
+              "end": {
+                "line": 45,
+                "column": 2
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 561,
+              "end": 571,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 21
+                },
+                "end": {
+                  "line": 19,
+                  "column": 31
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 561,
+                "end": 562,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 21
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 22
+                  }
+                },
+                "name": "r"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 563,
+                "end": 571,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 23
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 31
+                  }
+                },
+                "name": "evaluate"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "TemplateLiteral",
+                "start": 572,
+                "end": 1087,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 45,
+                    "column": 1
+                  }
+                },
+                "expressions": [],
+                "quasis": [
+                  {
+                    "type": "TemplateElement",
+                    "start": 573,
+                    "end": 1086,
+                    "loc": {
+                      "start": {
+                        "line": 19,
+                        "column": 33
+                      },
+                      "end": {
+                        "line": 45,
+                        "column": 0
+                      }
+                    },
+                    "value": {
+                      "raw": "\n    function fn(wrapped1, wrapped2, wrapped3) {\n        if (wrapped1.x) {\n            return 1;\n        }\n        if (wrapped2.x) {\n            return 2;\n        }\n        if (wrapped3.x) {\n            // Not unwrapped\n            return 3;\n        }\n        if (wrapped1 === wrapped2) {\n            // Always a new wrapped function\n            return 4;\n        }\n\n        // No unwrapping\n        if (wrapped3 === fn) {\n            return 5;\n        };\n\n        return true;\n    }\n    fn.x = 'secret';\n    fn;\n",
+                      "cooked": "\n    function fn(wrapped1, wrapped2, wrapped3) {\n        if (wrapped1.x) {\n            return 1;\n        }\n        if (wrapped2.x) {\n            return 2;\n        }\n        if (wrapped3.x) {\n            // Not unwrapped\n            return 3;\n        }\n        if (wrapped1 === wrapped2) {\n            // Always a new wrapped function\n            return 4;\n        }\n\n        // No unwrapping\n        if (wrapped3 === fn) {\n            return 5;\n        };\n\n        return true;\n    }\n    fn.x = 'secret';\n    fn;\n"
+                    },
+                    "tail": true
+                  }
+                ]
+              }
+            ],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1090,
+      "end": 1157,
+      "loc": {
+        "start": {
+          "line": 46,
+          "column": 0
+        },
+        "end": {
+          "line": 46,
+          "column": 67
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1090,
+        "end": 1156,
+        "loc": {
+          "start": {
+            "line": 46,
+            "column": 0
+          },
+          "end": {
+            "line": 46,
+            "column": 66
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1090,
+          "end": 1106,
+          "loc": {
+            "start": {
+              "line": 46,
+              "column": 0
+            },
+            "end": {
+              "line": 46,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1090,
+            "end": 1096,
+            "loc": {
+              "start": {
+                "line": 46,
+                "column": 0
+              },
+              "end": {
+                "line": 46,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1097,
+            "end": 1106,
+            "loc": {
+              "start": {
+                "line": 46,
+                "column": 7
+              },
+              "end": {
+                "line": 46,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 1107,
+            "end": 1149,
+            "loc": {
+              "start": {
+                "line": 46,
+                "column": 17
+              },
+              "end": {
+                "line": 46,
+                "column": 59
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 1107,
+              "end": 1119,
+              "loc": {
+                "start": {
+                  "line": 46,
+                  "column": 17
+                },
+                "end": {
+                  "line": 46,
+                  "column": 29
+                }
+              },
+              "name": "redWrappedFn"
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 1120,
+                "end": 1126,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 30
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 36
+                  }
+                },
+                "name": "blueFn"
+              },
+              {
+                "type": "Identifier",
+                "start": 1128,
+                "end": 1134,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 38
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 44
+                  }
+                },
+                "name": "blueFn"
+              },
+              {
+                "type": "Identifier",
+                "start": 1136,
+                "end": 1148,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 46
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 58
+                  }
+                },
+                "name": "redWrappedFn"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 1151,
+            "end": 1155,
+            "loc": {
+              "start": {
+                "line": 46,
+                "column": 61
+              },
+              "end": {
+                "line": 46,
+                "column": 65
+              }
+            },
+            "value": true,
+            "raw": "true"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

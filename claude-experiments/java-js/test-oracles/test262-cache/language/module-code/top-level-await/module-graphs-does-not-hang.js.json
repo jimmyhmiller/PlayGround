@@ -1,0 +1,163 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 385,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 14,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ImportDeclaration",
+      "start": 267,
+      "end": 314,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 47
+        }
+      },
+      "specifiers": [],
+      "source": {
+        "type": "Literal",
+        "start": 274,
+        "end": 313,
+        "loc": {
+          "start": {
+            "line": 10,
+            "column": 7
+          },
+          "end": {
+            "line": 10,
+            "column": 46
+          }
+        },
+        "value": "./module-graphs-parent-tla_FIXTURE.js",
+        "raw": "\"./module-graphs-parent-tla_FIXTURE.js\""
+      },
+      "attributes": []
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 315,
+      "end": 374,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 59
+        }
+      },
+      "expression": {
+        "type": "AwaitExpression",
+        "start": 315,
+        "end": 373,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 11,
+            "column": 58
+          }
+        },
+        "argument": {
+          "type": "ImportExpression",
+          "start": 321,
+          "end": 373,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 6
+            },
+            "end": {
+              "line": 11,
+              "column": 58
+            }
+          },
+          "source": {
+            "type": "Literal",
+            "start": 328,
+            "end": 372,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 13
+              },
+              "end": {
+                "line": 11,
+                "column": 57
+              }
+            },
+            "value": "./module-graphs-grandparent-tla_FIXTURE.js",
+            "raw": "\"./module-graphs-grandparent-tla_FIXTURE.js\""
+          },
+          "options": null
+        }
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 376,
+      "end": 384,
+      "loc": {
+        "start": {
+          "line": 13,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 8
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 376,
+        "end": 383,
+        "loc": {
+          "start": {
+            "line": 13,
+            "column": 0
+          },
+          "end": {
+            "line": 13,
+            "column": 7
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 376,
+          "end": 381,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 0
+            },
+            "end": {
+              "line": 13,
+              "column": 5
+            }
+          },
+          "name": "$DONE"
+        },
+        "arguments": [],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "module"
+}

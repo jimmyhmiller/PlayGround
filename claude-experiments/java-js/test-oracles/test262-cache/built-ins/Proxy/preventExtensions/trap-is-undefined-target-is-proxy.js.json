@@ -1,0 +1,496 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 918,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 33,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ImportDeclaration",
+      "start": 704,
+      "end": 765,
+      "loc": {
+        "start": {
+          "line": 25,
+          "column": 0
+        },
+        "end": {
+          "line": 25,
+          "column": 61
+        }
+      },
+      "specifiers": [
+        {
+          "type": "ImportNamespaceSpecifier",
+          "start": 711,
+          "end": 718,
+          "loc": {
+            "start": {
+              "line": 25,
+              "column": 7
+            },
+            "end": {
+              "line": 25,
+              "column": 14
+            }
+          },
+          "local": {
+            "type": "Identifier",
+            "start": 716,
+            "end": 718,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 12
+              },
+              "end": {
+                "line": 25,
+                "column": 14
+              }
+            },
+            "name": "ns"
+          }
+        }
+      ],
+      "source": {
+        "type": "Literal",
+        "start": 724,
+        "end": 764,
+        "loc": {
+          "start": {
+            "line": 25,
+            "column": 20
+          },
+          "end": {
+            "line": 25,
+            "column": 60
+          }
+        },
+        "value": "./trap-is-undefined-target-is-proxy.js",
+        "raw": "\"./trap-is-undefined-target-is-proxy.js\""
+      },
+      "attributes": []
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 767,
+      "end": 800,
+      "loc": {
+        "start": {
+          "line": 27,
+          "column": 0
+        },
+        "end": {
+          "line": 27,
+          "column": 33
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 771,
+          "end": 799,
+          "loc": {
+            "start": {
+              "line": 27,
+              "column": 4
+            },
+            "end": {
+              "line": 27,
+              "column": 32
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 771,
+            "end": 779,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 4
+              },
+              "end": {
+                "line": 27,
+                "column": 12
+              }
+            },
+            "name": "nsTarget"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 782,
+            "end": 799,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 15
+              },
+              "end": {
+                "line": 27,
+                "column": 32
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 786,
+              "end": 791,
+              "loc": {
+                "start": {
+                  "line": 27,
+                  "column": 19
+                },
+                "end": {
+                  "line": 27,
+                  "column": 24
+                }
+              },
+              "name": "Proxy"
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 792,
+                "end": 794,
+                "loc": {
+                  "start": {
+                    "line": 27,
+                    "column": 25
+                  },
+                  "end": {
+                    "line": 27,
+                    "column": 27
+                  }
+                },
+                "name": "ns"
+              },
+              {
+                "type": "ObjectExpression",
+                "start": 796,
+                "end": 798,
+                "loc": {
+                  "start": {
+                    "line": 27,
+                    "column": 29
+                  },
+                  "end": {
+                    "line": 27,
+                    "column": 31
+                  }
+                },
+                "properties": []
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 801,
+      "end": 872,
+      "loc": {
+        "start": {
+          "line": 28,
+          "column": 0
+        },
+        "end": {
+          "line": 30,
+          "column": 3
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 805,
+          "end": 871,
+          "loc": {
+            "start": {
+              "line": 28,
+              "column": 4
+            },
+            "end": {
+              "line": 30,
+              "column": 2
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 805,
+            "end": 812,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 4
+              },
+              "end": {
+                "line": 28,
+                "column": 11
+              }
+            },
+            "name": "nsProxy"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 815,
+            "end": 871,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 14
+              },
+              "end": {
+                "line": 30,
+                "column": 2
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 819,
+              "end": 824,
+              "loc": {
+                "start": {
+                  "line": 28,
+                  "column": 18
+                },
+                "end": {
+                  "line": 28,
+                  "column": 23
+                }
+              },
+              "name": "Proxy"
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 825,
+                "end": 833,
+                "loc": {
+                  "start": {
+                    "line": 28,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 28,
+                    "column": 32
+                  }
+                },
+                "name": "nsTarget"
+              },
+              {
+                "type": "ObjectExpression",
+                "start": 835,
+                "end": 870,
+                "loc": {
+                  "start": {
+                    "line": 28,
+                    "column": 34
+                  },
+                  "end": {
+                    "line": 30,
+                    "column": 1
+                  }
+                },
+                "properties": [
+                  {
+                    "type": "Property",
+                    "start": 839,
+                    "end": 867,
+                    "loc": {
+                      "start": {
+                        "line": 29,
+                        "column": 2
+                      },
+                      "end": {
+                        "line": 29,
+                        "column": 30
+                      }
+                    },
+                    "method": false,
+                    "shorthand": false,
+                    "computed": false,
+                    "key": {
+                      "type": "Identifier",
+                      "start": 839,
+                      "end": 856,
+                      "loc": {
+                        "start": {
+                          "line": 29,
+                          "column": 2
+                        },
+                        "end": {
+                          "line": 29,
+                          "column": 19
+                        }
+                      },
+                      "name": "preventExtensions"
+                    },
+                    "value": {
+                      "type": "Identifier",
+                      "start": 858,
+                      "end": 867,
+                      "loc": {
+                        "start": {
+                          "line": 29,
+                          "column": 21
+                        },
+                        "end": {
+                          "line": 29,
+                          "column": 30
+                        }
+                      },
+                      "name": "undefined"
+                    },
+                    "kind": "init"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 874,
+      "end": 917,
+      "loc": {
+        "start": {
+          "line": 32,
+          "column": 0
+        },
+        "end": {
+          "line": 32,
+          "column": 43
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 874,
+        "end": 916,
+        "loc": {
+          "start": {
+            "line": 32,
+            "column": 0
+          },
+          "end": {
+            "line": 32,
+            "column": 42
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 874,
+          "end": 880,
+          "loc": {
+            "start": {
+              "line": 32,
+              "column": 0
+            },
+            "end": {
+              "line": 32,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 881,
+            "end": 915,
+            "loc": {
+              "start": {
+                "line": 32,
+                "column": 7
+              },
+              "end": {
+                "line": 32,
+                "column": 41
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 881,
+              "end": 906,
+              "loc": {
+                "start": {
+                  "line": 32,
+                  "column": 7
+                },
+                "end": {
+                  "line": 32,
+                  "column": 32
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 881,
+                "end": 888,
+                "loc": {
+                  "start": {
+                    "line": 32,
+                    "column": 7
+                  },
+                  "end": {
+                    "line": 32,
+                    "column": 14
+                  }
+                },
+                "name": "Reflect"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 889,
+                "end": 906,
+                "loc": {
+                  "start": {
+                    "line": 32,
+                    "column": 15
+                  },
+                  "end": {
+                    "line": 32,
+                    "column": 32
+                  }
+                },
+                "name": "preventExtensions"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 907,
+                "end": 914,
+                "loc": {
+                  "start": {
+                    "line": 32,
+                    "column": 33
+                  },
+                  "end": {
+                    "line": 32,
+                    "column": 40
+                  }
+                },
+                "name": "nsProxy"
+              }
+            ],
+            "optional": false
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "module"
+}

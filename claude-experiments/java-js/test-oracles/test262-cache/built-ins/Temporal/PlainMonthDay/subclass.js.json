@@ -1,0 +1,854 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 742,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 19,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ClassDeclaration",
+      "start": 284,
+      "end": 344,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 12,
+          "column": 1
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 290,
+        "end": 309,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 6
+          },
+          "end": {
+            "line": 11,
+            "column": 25
+          }
+        },
+        "name": "CustomPlainMonthDay"
+      },
+      "superClass": {
+        "type": "MemberExpression",
+        "start": 318,
+        "end": 340,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 34
+          },
+          "end": {
+            "line": 11,
+            "column": 56
+          }
+        },
+        "object": {
+          "type": "Identifier",
+          "start": 318,
+          "end": 326,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 34
+            },
+            "end": {
+              "line": 11,
+              "column": 42
+            }
+          },
+          "name": "Temporal"
+        },
+        "property": {
+          "type": "Identifier",
+          "start": 327,
+          "end": 340,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 43
+            },
+            "end": {
+              "line": 11,
+              "column": 56
+            }
+          },
+          "name": "PlainMonthDay"
+        },
+        "computed": false,
+        "optional": false
+      },
+      "body": {
+        "type": "ClassBody",
+        "start": 341,
+        "end": 344,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 57
+          },
+          "end": {
+            "line": 12,
+            "column": 1
+          }
+        },
+        "body": []
+      }
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 346,
+      "end": 393,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 47
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 352,
+          "end": 392,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 6
+            },
+            "end": {
+              "line": 14,
+              "column": 46
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 352,
+            "end": 360,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 6
+              },
+              "end": {
+                "line": 14,
+                "column": 14
+              }
+            },
+            "name": "instance"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 363,
+            "end": 392,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 17
+              },
+              "end": {
+                "line": 14,
+                "column": 46
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 367,
+              "end": 386,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 21
+                },
+                "end": {
+                  "line": 14,
+                  "column": 40
+                }
+              },
+              "name": "CustomPlainMonthDay"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 387,
+                "end": 388,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 41
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 42
+                  }
+                },
+                "value": 5,
+                "raw": "5"
+              },
+              {
+                "type": "Literal",
+                "start": 390,
+                "end": 391,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 44
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 45
+                  }
+                },
+                "value": 2,
+                "raw": "2"
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 394,
+      "end": 450,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 56
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 394,
+        "end": 449,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 0
+          },
+          "end": {
+            "line": 15,
+            "column": 55
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 394,
+          "end": 429,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 0
+            },
+            "end": {
+              "line": 15,
+              "column": 35
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 394,
+            "end": 409,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 0
+              },
+              "end": {
+                "line": 15,
+                "column": 15
+              }
+            },
+            "name": "TemporalHelpers"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 410,
+            "end": 429,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 16
+              },
+              "end": {
+                "line": 15,
+                "column": 35
+              }
+            },
+            "name": "assertPlainMonthDay"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 430,
+            "end": 438,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 36
+              },
+              "end": {
+                "line": 15,
+                "column": 44
+              }
+            },
+            "name": "instance"
+          },
+          {
+            "type": "Literal",
+            "start": 440,
+            "end": 445,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 46
+              },
+              "end": {
+                "line": 15,
+                "column": 51
+              }
+            },
+            "value": "M05",
+            "raw": "\"M05\""
+          },
+          {
+            "type": "Literal",
+            "start": 447,
+            "end": 448,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 53
+              },
+              "end": {
+                "line": 15,
+                "column": 54
+              }
+            },
+            "value": 2,
+            "raw": "2"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 451,
+      "end": 567,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 116
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 451,
+        "end": 566,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 0
+          },
+          "end": {
+            "line": 16,
+            "column": 115
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 451,
+          "end": 467,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 0
+            },
+            "end": {
+              "line": 16,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 451,
+            "end": 457,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 0
+              },
+              "end": {
+                "line": 16,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 458,
+            "end": 467,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 7
+              },
+              "end": {
+                "line": 16,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 468,
+            "end": 499,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 17
+              },
+              "end": {
+                "line": 16,
+                "column": 48
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 468,
+              "end": 489,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 17
+                },
+                "end": {
+                  "line": 16,
+                  "column": 38
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 468,
+                "end": 474,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 23
+                  }
+                },
+                "name": "Object"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 475,
+                "end": 489,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 38
+                  }
+                },
+                "name": "getPrototypeOf"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 490,
+                "end": 498,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 39
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 47
+                  }
+                },
+                "name": "instance"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 501,
+            "end": 530,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 50
+              },
+              "end": {
+                "line": 16,
+                "column": 79
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 501,
+              "end": 520,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 50
+                },
+                "end": {
+                  "line": 16,
+                  "column": 69
+                }
+              },
+              "name": "CustomPlainMonthDay"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 521,
+              "end": 530,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 70
+                },
+                "end": {
+                  "line": 16,
+                  "column": 79
+                }
+              },
+              "name": "prototype"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 532,
+            "end": 565,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 81
+              },
+              "end": {
+                "line": 16,
+                "column": 114
+              }
+            },
+            "value": "Instance of CustomPlainMonthDay",
+            "raw": "\"Instance of CustomPlainMonthDay\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 568,
+      "end": 651,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 83
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 568,
+        "end": 650,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 0
+          },
+          "end": {
+            "line": 17,
+            "column": 82
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 568,
+          "end": 574,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 0
+            },
+            "end": {
+              "line": 17,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 575,
+            "end": 614,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 7
+              },
+              "end": {
+                "line": 17,
+                "column": 46
+              }
+            },
+            "left": {
+              "type": "Identifier",
+              "start": 575,
+              "end": 583,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 7
+                },
+                "end": {
+                  "line": 17,
+                  "column": 15
+                }
+              },
+              "name": "instance"
+            },
+            "operator": "instanceof",
+            "right": {
+              "type": "Identifier",
+              "start": 595,
+              "end": 614,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 27
+                },
+                "end": {
+                  "line": 17,
+                  "column": 46
+                }
+              },
+              "name": "CustomPlainMonthDay"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 616,
+            "end": 649,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 48
+              },
+              "end": {
+                "line": 17,
+                "column": 81
+              }
+            },
+            "value": "Instance of CustomPlainMonthDay",
+            "raw": "\"Instance of CustomPlainMonthDay\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 652,
+      "end": 741,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 89
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 652,
+        "end": 740,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 0
+          },
+          "end": {
+            "line": 18,
+            "column": 88
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 652,
+          "end": 658,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 0
+            },
+            "end": {
+              "line": 18,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 659,
+            "end": 701,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 7
+              },
+              "end": {
+                "line": 18,
+                "column": 49
+              }
+            },
+            "left": {
+              "type": "Identifier",
+              "start": 659,
+              "end": 667,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 7
+                },
+                "end": {
+                  "line": 18,
+                  "column": 15
+                }
+              },
+              "name": "instance"
+            },
+            "operator": "instanceof",
+            "right": {
+              "type": "MemberExpression",
+              "start": 679,
+              "end": 701,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 27
+                },
+                "end": {
+                  "line": 18,
+                  "column": 49
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 679,
+                "end": 687,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 35
+                  }
+                },
+                "name": "Temporal"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 688,
+                "end": 701,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 36
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 49
+                  }
+                },
+                "name": "PlainMonthDay"
+              },
+              "computed": false,
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 703,
+            "end": 739,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 51
+              },
+              "end": {
+                "line": 18,
+                "column": 87
+              }
+            },
+            "value": "Instance of Temporal.PlainMonthDay",
+            "raw": "\"Instance of Temporal.PlainMonthDay\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

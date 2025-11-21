@@ -1,0 +1,131 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1333,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 33,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "IfStatement",
+      "start": 1282,
+      "end": 1332,
+      "loc": {
+        "start": {
+          "line": 30,
+          "column": 0
+        },
+        "end": {
+          "line": 32,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "Literal",
+        "start": 1286,
+        "end": 1290,
+        "loc": {
+          "start": {
+            "line": 30,
+            "column": 4
+          },
+          "end": {
+            "line": 30,
+            "column": 8
+          }
+        },
+        "value": true,
+        "raw": "true"
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 1292,
+        "end": 1332,
+        "loc": {
+          "start": {
+            "line": 30,
+            "column": 10
+          },
+          "end": {
+            "line": 32,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ExpressionStatement",
+            "start": 1296,
+            "end": 1330,
+            "loc": {
+              "start": {
+                "line": 31,
+                "column": 2
+              },
+              "end": {
+                "line": 31,
+                "column": 36
+              }
+            },
+            "expression": {
+              "type": "ImportExpression",
+              "start": 1296,
+              "end": 1329,
+              "loc": {
+                "start": {
+                  "line": 31,
+                  "column": 2
+                },
+                "end": {
+                  "line": 31,
+                  "column": 35
+                }
+              },
+              "source": {
+                "type": "Literal",
+                "start": 1303,
+                "end": 1323,
+                "loc": {
+                  "start": {
+                    "line": 31,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 31,
+                    "column": 29
+                  }
+                },
+                "value": "./empty_FIXTURE.js",
+                "raw": "'./empty_FIXTURE.js'"
+              },
+              "options": {
+                "type": "ObjectExpression",
+                "start": 1325,
+                "end": 1327,
+                "loc": {
+                  "start": {
+                    "line": 31,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 31,
+                    "column": 33
+                  }
+                },
+                "properties": []
+              }
+            }
+          }
+        ]
+      },
+      "alternate": null
+    }
+  ],
+  "sourceType": "script"
+}

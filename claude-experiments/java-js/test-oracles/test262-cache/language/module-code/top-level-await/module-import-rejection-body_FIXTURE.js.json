@@ -1,0 +1,346 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 260,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 10,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExportDefaultDeclaration",
+      "start": 127,
+      "end": 145,
+      "loc": {
+        "start": {
+          "line": 4,
+          "column": 0
+        },
+        "end": {
+          "line": 4,
+          "column": 18
+        }
+      },
+      "declaration": {
+        "type": "Literal",
+        "start": 142,
+        "end": 144,
+        "loc": {
+          "start": {
+            "line": 4,
+            "column": 15
+          },
+          "end": {
+            "line": 4,
+            "column": 17
+          }
+        },
+        "value": 42,
+        "raw": "42"
+      }
+    },
+    {
+      "type": "ExportNamedDeclaration",
+      "start": 147,
+      "end": 176,
+      "loc": {
+        "start": {
+          "line": 6,
+          "column": 0
+        },
+        "end": {
+          "line": 6,
+          "column": 29
+        }
+      },
+      "declaration": {
+        "type": "VariableDeclaration",
+        "start": 154,
+        "end": 176,
+        "loc": {
+          "start": {
+            "line": 6,
+            "column": 7
+          },
+          "end": {
+            "line": 6,
+            "column": 29
+          }
+        },
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "start": 160,
+            "end": 175,
+            "loc": {
+              "start": {
+                "line": 6,
+                "column": 13
+              },
+              "end": {
+                "line": 6,
+                "column": 28
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 160,
+              "end": 165,
+              "loc": {
+                "start": {
+                  "line": 6,
+                  "column": 13
+                },
+                "end": {
+                  "line": 6,
+                  "column": 18
+                }
+              },
+              "name": "named"
+            },
+            "init": {
+              "type": "Literal",
+              "start": 168,
+              "end": 175,
+              "loc": {
+                "start": {
+                  "line": 6,
+                  "column": 21
+                },
+                "end": {
+                  "line": 6,
+                  "column": 28
+                }
+              },
+              "value": "named",
+              "raw": "'named'"
+            }
+          }
+        ],
+        "kind": "const"
+      },
+      "specifiers": [],
+      "source": null,
+      "attributes": []
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 178,
+      "end": 242,
+      "loc": {
+        "start": {
+          "line": 8,
+          "column": 0
+        },
+        "end": {
+          "line": 8,
+          "column": 64
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 182,
+          "end": 241,
+          "loc": {
+            "start": {
+              "line": 8,
+              "column": 4
+            },
+            "end": {
+              "line": 8,
+              "column": 63
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 182,
+            "end": 191,
+            "loc": {
+              "start": {
+                "line": 8,
+                "column": 4
+              },
+              "end": {
+                "line": 8,
+                "column": 13
+              }
+            },
+            "name": "rejection"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 194,
+            "end": 241,
+            "loc": {
+              "start": {
+                "line": 8,
+                "column": 16
+              },
+              "end": {
+                "line": 8,
+                "column": 63
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 194,
+              "end": 208,
+              "loc": {
+                "start": {
+                  "line": 8,
+                  "column": 16
+                },
+                "end": {
+                  "line": 8,
+                  "column": 30
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 194,
+                "end": 201,
+                "loc": {
+                  "start": {
+                    "line": 8,
+                    "column": 16
+                  },
+                  "end": {
+                    "line": 8,
+                    "column": 23
+                  }
+                },
+                "name": "Promise"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 202,
+                "end": 208,
+                "loc": {
+                  "start": {
+                    "line": 8,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 8,
+                    "column": 30
+                  }
+                },
+                "name": "reject"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "NewExpression",
+                "start": 209,
+                "end": 240,
+                "loc": {
+                  "start": {
+                    "line": 8,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 8,
+                    "column": 62
+                  }
+                },
+                "callee": {
+                  "type": "Identifier",
+                  "start": 213,
+                  "end": 222,
+                  "loc": {
+                    "start": {
+                      "line": 8,
+                      "column": 35
+                    },
+                    "end": {
+                      "line": 8,
+                      "column": 44
+                    }
+                  },
+                  "name": "TypeError"
+                },
+                "arguments": [
+                  {
+                    "type": "Literal",
+                    "start": 223,
+                    "end": 239,
+                    "loc": {
+                      "start": {
+                        "line": 8,
+                        "column": 45
+                      },
+                      "end": {
+                        "line": 8,
+                        "column": 61
+                      }
+                    },
+                    "value": "I reject this!",
+                    "raw": "'I reject this!'"
+                  }
+                ]
+              }
+            ],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 243,
+      "end": 259,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 9,
+          "column": 16
+        }
+      },
+      "expression": {
+        "type": "AwaitExpression",
+        "start": 243,
+        "end": 258,
+        "loc": {
+          "start": {
+            "line": 9,
+            "column": 0
+          },
+          "end": {
+            "line": 9,
+            "column": 15
+          }
+        },
+        "argument": {
+          "type": "Identifier",
+          "start": 249,
+          "end": 258,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 6
+            },
+            "end": {
+              "line": 9,
+              "column": 15
+            }
+          },
+          "name": "rejection"
+        }
+      }
+    }
+  ],
+  "sourceType": "module"
+}

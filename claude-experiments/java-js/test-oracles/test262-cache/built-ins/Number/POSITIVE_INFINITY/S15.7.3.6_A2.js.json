@@ -1,0 +1,300 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 543,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 20,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 313,
+      "end": 369,
+      "loc": {
+        "start": {
+          "line": 12,
+          "column": 0
+        },
+        "end": {
+          "line": 12,
+          "column": 56
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 313,
+        "end": 368,
+        "loc": {
+          "start": {
+            "line": 12,
+            "column": 0
+          },
+          "end": {
+            "line": 12,
+            "column": 55
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 313,
+          "end": 330,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 0
+            },
+            "end": {
+              "line": 12,
+              "column": 17
+            }
+          },
+          "name": "verifyNotWritable"
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 331,
+            "end": 337,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 18
+              },
+              "end": {
+                "line": 12,
+                "column": 24
+              }
+            },
+            "name": "Number"
+          },
+          {
+            "type": "Literal",
+            "start": 339,
+            "end": 358,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 26
+              },
+              "end": {
+                "line": 12,
+                "column": 45
+              }
+            },
+            "value": "POSITIVE_INFINITY",
+            "raw": "\"POSITIVE_INFINITY\""
+          },
+          {
+            "type": "Literal",
+            "start": 360,
+            "end": 364,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 47
+              },
+              "end": {
+                "line": 12,
+                "column": 51
+              }
+            },
+            "value": null,
+            "raw": "null"
+          },
+          {
+            "type": "Literal",
+            "start": 366,
+            "end": 367,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 53
+              },
+              "end": {
+                "line": 12,
+                "column": 54
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 371,
+      "end": 496,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 371,
+        "end": 495,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 0
+          },
+          "end": {
+            "line": 17,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 371,
+          "end": 377,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 0
+            },
+            "end": {
+              "line": 14,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 381,
+            "end": 416,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 2
+              },
+              "end": {
+                "line": 15,
+                "column": 37
+              }
+            },
+            "operator": "!",
+            "prefix": true,
+            "argument": {
+              "type": "CallExpression",
+              "start": 382,
+              "end": 416,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 3
+                },
+                "end": {
+                  "line": 15,
+                  "column": 37
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 382,
+                "end": 390,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 3
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 11
+                  }
+                },
+                "name": "isFinite"
+              },
+              "arguments": [
+                {
+                  "type": "MemberExpression",
+                  "start": 391,
+                  "end": 415,
+                  "loc": {
+                    "start": {
+                      "line": 15,
+                      "column": 12
+                    },
+                    "end": {
+                      "line": 15,
+                      "column": 36
+                    }
+                  },
+                  "object": {
+                    "type": "Identifier",
+                    "start": 391,
+                    "end": 397,
+                    "loc": {
+                      "start": {
+                        "line": 15,
+                        "column": 12
+                      },
+                      "end": {
+                        "line": 15,
+                        "column": 18
+                      }
+                    },
+                    "name": "Number"
+                  },
+                  "property": {
+                    "type": "Identifier",
+                    "start": 398,
+                    "end": 415,
+                    "loc": {
+                      "start": {
+                        "line": 15,
+                        "column": 19
+                      },
+                      "end": {
+                        "line": 15,
+                        "column": 36
+                      }
+                    },
+                    "name": "POSITIVE_INFINITY"
+                  },
+                  "computed": false,
+                  "optional": false
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 420,
+            "end": 493,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 2
+              },
+              "end": {
+                "line": 16,
+                "column": 75
+              }
+            },
+            "value": "The value of !isFinite(Number.POSITIVE_INFINITY) is expected to be true",
+            "raw": "'The value of !isFinite(Number.POSITIVE_INFINITY) is expected to be true'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

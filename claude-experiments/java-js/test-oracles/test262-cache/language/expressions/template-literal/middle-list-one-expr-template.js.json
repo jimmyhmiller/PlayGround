@@ -1,0 +1,289 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 526,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 15,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 459,
+      "end": 525,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 66
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 459,
+        "end": 524,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 65
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 459,
+          "end": 475,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 0
+            },
+            "end": {
+              "line": 14,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 459,
+            "end": 465,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 0
+              },
+              "end": {
+                "line": 14,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 466,
+            "end": 475,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 7
+              },
+              "end": {
+                "line": 14,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "TemplateLiteral",
+            "start": 476,
+            "end": 504,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 17
+              },
+              "end": {
+                "line": 14,
+                "column": 45
+              }
+            },
+            "expressions": [
+              {
+                "type": "Literal",
+                "start": 479,
+                "end": 480,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 20
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 21
+                  }
+                },
+                "value": 0,
+                "raw": "0"
+              },
+              {
+                "type": "TemplateLiteral",
+                "start": 484,
+                "end": 498,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 25
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 39
+                  }
+                },
+                "expressions": [
+                  {
+                    "type": "Literal",
+                    "start": 491,
+                    "end": 492,
+                    "loc": {
+                      "start": {
+                        "line": 14,
+                        "column": 32
+                      },
+                      "end": {
+                        "line": 14,
+                        "column": 33
+                      }
+                    },
+                    "value": 5,
+                    "raw": "5"
+                  }
+                ],
+                "quasis": [
+                  {
+                    "type": "TemplateElement",
+                    "start": 485,
+                    "end": 489,
+                    "loc": {
+                      "start": {
+                        "line": 14,
+                        "column": 26
+                      },
+                      "end": {
+                        "line": 14,
+                        "column": 30
+                      }
+                    },
+                    "value": {
+                      "raw": "bar ",
+                      "cooked": "bar "
+                    },
+                    "tail": false
+                  },
+                  {
+                    "type": "TemplateElement",
+                    "start": 493,
+                    "end": 497,
+                    "loc": {
+                      "start": {
+                        "line": 14,
+                        "column": 34
+                      },
+                      "end": {
+                        "line": 14,
+                        "column": 38
+                      }
+                    },
+                    "value": {
+                      "raw": " baz",
+                      "cooked": " baz"
+                    },
+                    "tail": true
+                  }
+                ]
+              }
+            ],
+            "quasis": [
+              {
+                "type": "TemplateElement",
+                "start": 477,
+                "end": 477,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 18
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 18
+                  }
+                },
+                "value": {
+                  "raw": "",
+                  "cooked": ""
+                },
+                "tail": false
+              },
+              {
+                "type": "TemplateElement",
+                "start": 481,
+                "end": 482,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 23
+                  }
+                },
+                "value": {
+                  "raw": " ",
+                  "cooked": " "
+                },
+                "tail": false
+              },
+              {
+                "type": "TemplateElement",
+                "start": 499,
+                "end": 503,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 40
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 44
+                  }
+                },
+                "value": {
+                  "raw": " qux",
+                  "cooked": " qux"
+                },
+                "tail": true
+              }
+            ]
+          },
+          {
+            "type": "Literal",
+            "start": 506,
+            "end": 523,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 47
+              },
+              "end": {
+                "line": 14,
+                "column": 64
+              }
+            },
+            "value": "0 bar 5 baz qux",
+            "raw": "'0 bar 5 baz qux'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

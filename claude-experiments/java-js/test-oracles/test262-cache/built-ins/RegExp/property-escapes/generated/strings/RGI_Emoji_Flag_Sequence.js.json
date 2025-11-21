@@ -1,0 +1,4869 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 7568,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 293,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 498,
+      "end": 7567,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 292,
+          "column": 3
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 498,
+        "end": 7566,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 0
+          },
+          "end": {
+            "line": 292,
+            "column": 2
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 498,
+          "end": 519,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 0
+            },
+            "end": {
+              "line": 16,
+              "column": 21
+            }
+          },
+          "name": "testPropertyOfStrings"
+        },
+        "arguments": [
+          {
+            "type": "ObjectExpression",
+            "start": 520,
+            "end": 7565,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 22
+              },
+              "end": {
+                "line": 292,
+                "column": 1
+              }
+            },
+            "properties": [
+              {
+                "type": "Property",
+                "start": 524,
+                "end": 565,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 43
+                  }
+                },
+                "method": false,
+                "shorthand": false,
+                "computed": false,
+                "key": {
+                  "type": "Identifier",
+                  "start": 524,
+                  "end": 530,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 8
+                    }
+                  },
+                  "name": "regExp"
+                },
+                "value": {
+                  "type": "Literal",
+                  "start": 532,
+                  "end": 565,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 10
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 43
+                    }
+                  },
+                  "value": null,
+                  "raw": "/^\\p{RGI_Emoji_Flag_Sequence}+$/v",
+                  "regex": {
+                    "pattern": "^\\p{RGI_Emoji_Flag_Sequence}+$",
+                    "flags": "v"
+                  }
+                },
+                "kind": "init"
+              },
+              {
+                "type": "Property",
+                "start": 569,
+                "end": 611,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 44
+                  }
+                },
+                "method": false,
+                "shorthand": false,
+                "computed": false,
+                "key": {
+                  "type": "Identifier",
+                  "start": 569,
+                  "end": 579,
+                  "loc": {
+                    "start": {
+                      "line": 18,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 18,
+                      "column": 12
+                    }
+                  },
+                  "name": "expression"
+                },
+                "value": {
+                  "type": "Literal",
+                  "start": 581,
+                  "end": 611,
+                  "loc": {
+                    "start": {
+                      "line": 18,
+                      "column": 14
+                    },
+                    "end": {
+                      "line": 18,
+                      "column": 44
+                    }
+                  },
+                  "value": "\\p{RGI_Emoji_Flag_Sequence}",
+                  "raw": "\"\\\\p{RGI_Emoji_Flag_Sequence}\""
+                },
+                "kind": "init"
+              },
+              {
+                "type": "Property",
+                "start": 615,
+                "end": 7367,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 279,
+                    "column": 3
+                  }
+                },
+                "method": false,
+                "shorthand": false,
+                "computed": false,
+                "key": {
+                  "type": "Identifier",
+                  "start": 615,
+                  "end": 627,
+                  "loc": {
+                    "start": {
+                      "line": 19,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 19,
+                      "column": 14
+                    }
+                  },
+                  "name": "matchStrings"
+                },
+                "value": {
+                  "type": "ArrayExpression",
+                  "start": 629,
+                  "end": 7367,
+                  "loc": {
+                    "start": {
+                      "line": 19,
+                      "column": 16
+                    },
+                    "end": {
+                      "line": 279,
+                      "column": 3
+                    }
+                  },
+                  "elements": [
+                    {
+                      "type": "Literal",
+                      "start": 635,
+                      "end": 655,
+                      "loc": {
+                        "start": {
+                          "line": 20,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 20,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇨",
+                      "raw": "\"\\u{1F1E6}\\u{1F1E8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 661,
+                      "end": 681,
+                      "loc": {
+                        "start": {
+                          "line": 21,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 21,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇩",
+                      "raw": "\"\\u{1F1E6}\\u{1F1E9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 687,
+                      "end": 707,
+                      "loc": {
+                        "start": {
+                          "line": 22,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 22,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇪",
+                      "raw": "\"\\u{1F1E6}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 713,
+                      "end": 733,
+                      "loc": {
+                        "start": {
+                          "line": 23,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 23,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇫",
+                      "raw": "\"\\u{1F1E6}\\u{1F1EB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 739,
+                      "end": 759,
+                      "loc": {
+                        "start": {
+                          "line": 24,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 24,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇬",
+                      "raw": "\"\\u{1F1E6}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 765,
+                      "end": 785,
+                      "loc": {
+                        "start": {
+                          "line": 25,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 25,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇮",
+                      "raw": "\"\\u{1F1E6}\\u{1F1EE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 791,
+                      "end": 811,
+                      "loc": {
+                        "start": {
+                          "line": 26,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 26,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇱",
+                      "raw": "\"\\u{1F1E6}\\u{1F1F1}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 817,
+                      "end": 837,
+                      "loc": {
+                        "start": {
+                          "line": 27,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 27,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇲",
+                      "raw": "\"\\u{1F1E6}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 843,
+                      "end": 863,
+                      "loc": {
+                        "start": {
+                          "line": 28,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 28,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇴",
+                      "raw": "\"\\u{1F1E6}\\u{1F1F4}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 869,
+                      "end": 889,
+                      "loc": {
+                        "start": {
+                          "line": 29,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 29,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇶",
+                      "raw": "\"\\u{1F1E6}\\u{1F1F6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 895,
+                      "end": 915,
+                      "loc": {
+                        "start": {
+                          "line": 30,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 30,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇷",
+                      "raw": "\"\\u{1F1E6}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 921,
+                      "end": 941,
+                      "loc": {
+                        "start": {
+                          "line": 31,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 31,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇸",
+                      "raw": "\"\\u{1F1E6}\\u{1F1F8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 947,
+                      "end": 967,
+                      "loc": {
+                        "start": {
+                          "line": 32,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 32,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇹",
+                      "raw": "\"\\u{1F1E6}\\u{1F1F9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 973,
+                      "end": 993,
+                      "loc": {
+                        "start": {
+                          "line": 33,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 33,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇺",
+                      "raw": "\"\\u{1F1E6}\\u{1F1FA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 999,
+                      "end": 1019,
+                      "loc": {
+                        "start": {
+                          "line": 34,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 34,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇼",
+                      "raw": "\"\\u{1F1E6}\\u{1F1FC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1025,
+                      "end": 1045,
+                      "loc": {
+                        "start": {
+                          "line": 35,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 35,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇽",
+                      "raw": "\"\\u{1F1E6}\\u{1F1FD}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1051,
+                      "end": 1071,
+                      "loc": {
+                        "start": {
+                          "line": 36,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 36,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇦🇿",
+                      "raw": "\"\\u{1F1E6}\\u{1F1FF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1077,
+                      "end": 1097,
+                      "loc": {
+                        "start": {
+                          "line": 37,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 37,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇦",
+                      "raw": "\"\\u{1F1E7}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1103,
+                      "end": 1123,
+                      "loc": {
+                        "start": {
+                          "line": 38,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 38,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇧",
+                      "raw": "\"\\u{1F1E7}\\u{1F1E7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1129,
+                      "end": 1149,
+                      "loc": {
+                        "start": {
+                          "line": 39,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 39,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇩",
+                      "raw": "\"\\u{1F1E7}\\u{1F1E9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1155,
+                      "end": 1175,
+                      "loc": {
+                        "start": {
+                          "line": 40,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 40,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇪",
+                      "raw": "\"\\u{1F1E7}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1181,
+                      "end": 1201,
+                      "loc": {
+                        "start": {
+                          "line": 41,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 41,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇫",
+                      "raw": "\"\\u{1F1E7}\\u{1F1EB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1207,
+                      "end": 1227,
+                      "loc": {
+                        "start": {
+                          "line": 42,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 42,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇬",
+                      "raw": "\"\\u{1F1E7}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1233,
+                      "end": 1253,
+                      "loc": {
+                        "start": {
+                          "line": 43,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 43,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇭",
+                      "raw": "\"\\u{1F1E7}\\u{1F1ED}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1259,
+                      "end": 1279,
+                      "loc": {
+                        "start": {
+                          "line": 44,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 44,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇮",
+                      "raw": "\"\\u{1F1E7}\\u{1F1EE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1285,
+                      "end": 1305,
+                      "loc": {
+                        "start": {
+                          "line": 45,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 45,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇯",
+                      "raw": "\"\\u{1F1E7}\\u{1F1EF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1311,
+                      "end": 1331,
+                      "loc": {
+                        "start": {
+                          "line": 46,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 46,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇱",
+                      "raw": "\"\\u{1F1E7}\\u{1F1F1}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1337,
+                      "end": 1357,
+                      "loc": {
+                        "start": {
+                          "line": 47,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 47,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇲",
+                      "raw": "\"\\u{1F1E7}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1363,
+                      "end": 1383,
+                      "loc": {
+                        "start": {
+                          "line": 48,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 48,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇳",
+                      "raw": "\"\\u{1F1E7}\\u{1F1F3}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1389,
+                      "end": 1409,
+                      "loc": {
+                        "start": {
+                          "line": 49,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 49,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇴",
+                      "raw": "\"\\u{1F1E7}\\u{1F1F4}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1415,
+                      "end": 1435,
+                      "loc": {
+                        "start": {
+                          "line": 50,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 50,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇶",
+                      "raw": "\"\\u{1F1E7}\\u{1F1F6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1441,
+                      "end": 1461,
+                      "loc": {
+                        "start": {
+                          "line": 51,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 51,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇷",
+                      "raw": "\"\\u{1F1E7}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1467,
+                      "end": 1487,
+                      "loc": {
+                        "start": {
+                          "line": 52,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 52,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇸",
+                      "raw": "\"\\u{1F1E7}\\u{1F1F8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1493,
+                      "end": 1513,
+                      "loc": {
+                        "start": {
+                          "line": 53,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 53,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇹",
+                      "raw": "\"\\u{1F1E7}\\u{1F1F9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1519,
+                      "end": 1539,
+                      "loc": {
+                        "start": {
+                          "line": 54,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 54,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇻",
+                      "raw": "\"\\u{1F1E7}\\u{1F1FB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1545,
+                      "end": 1565,
+                      "loc": {
+                        "start": {
+                          "line": 55,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 55,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇼",
+                      "raw": "\"\\u{1F1E7}\\u{1F1FC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1571,
+                      "end": 1591,
+                      "loc": {
+                        "start": {
+                          "line": 56,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 56,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇾",
+                      "raw": "\"\\u{1F1E7}\\u{1F1FE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1597,
+                      "end": 1617,
+                      "loc": {
+                        "start": {
+                          "line": 57,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 57,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇧🇿",
+                      "raw": "\"\\u{1F1E7}\\u{1F1FF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1623,
+                      "end": 1643,
+                      "loc": {
+                        "start": {
+                          "line": 58,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 58,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇦",
+                      "raw": "\"\\u{1F1E8}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1649,
+                      "end": 1669,
+                      "loc": {
+                        "start": {
+                          "line": 59,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 59,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇨",
+                      "raw": "\"\\u{1F1E8}\\u{1F1E8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1675,
+                      "end": 1695,
+                      "loc": {
+                        "start": {
+                          "line": 60,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 60,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇩",
+                      "raw": "\"\\u{1F1E8}\\u{1F1E9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1701,
+                      "end": 1721,
+                      "loc": {
+                        "start": {
+                          "line": 61,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 61,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇫",
+                      "raw": "\"\\u{1F1E8}\\u{1F1EB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1727,
+                      "end": 1747,
+                      "loc": {
+                        "start": {
+                          "line": 62,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 62,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇬",
+                      "raw": "\"\\u{1F1E8}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1753,
+                      "end": 1773,
+                      "loc": {
+                        "start": {
+                          "line": 63,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 63,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇭",
+                      "raw": "\"\\u{1F1E8}\\u{1F1ED}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1779,
+                      "end": 1799,
+                      "loc": {
+                        "start": {
+                          "line": 64,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 64,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇮",
+                      "raw": "\"\\u{1F1E8}\\u{1F1EE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1805,
+                      "end": 1825,
+                      "loc": {
+                        "start": {
+                          "line": 65,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 65,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇰",
+                      "raw": "\"\\u{1F1E8}\\u{1F1F0}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1831,
+                      "end": 1851,
+                      "loc": {
+                        "start": {
+                          "line": 66,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 66,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇱",
+                      "raw": "\"\\u{1F1E8}\\u{1F1F1}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1857,
+                      "end": 1877,
+                      "loc": {
+                        "start": {
+                          "line": 67,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 67,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇲",
+                      "raw": "\"\\u{1F1E8}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1883,
+                      "end": 1903,
+                      "loc": {
+                        "start": {
+                          "line": 68,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 68,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇳",
+                      "raw": "\"\\u{1F1E8}\\u{1F1F3}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1909,
+                      "end": 1929,
+                      "loc": {
+                        "start": {
+                          "line": 69,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 69,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇴",
+                      "raw": "\"\\u{1F1E8}\\u{1F1F4}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1935,
+                      "end": 1955,
+                      "loc": {
+                        "start": {
+                          "line": 70,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 70,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇵",
+                      "raw": "\"\\u{1F1E8}\\u{1F1F5}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1961,
+                      "end": 1981,
+                      "loc": {
+                        "start": {
+                          "line": 71,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 71,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇶",
+                      "raw": "\"\\u{1F1E8}\\u{1F1F6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 1987,
+                      "end": 2007,
+                      "loc": {
+                        "start": {
+                          "line": 72,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 72,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇷",
+                      "raw": "\"\\u{1F1E8}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2013,
+                      "end": 2033,
+                      "loc": {
+                        "start": {
+                          "line": 73,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 73,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇺",
+                      "raw": "\"\\u{1F1E8}\\u{1F1FA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2039,
+                      "end": 2059,
+                      "loc": {
+                        "start": {
+                          "line": 74,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 74,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇻",
+                      "raw": "\"\\u{1F1E8}\\u{1F1FB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2065,
+                      "end": 2085,
+                      "loc": {
+                        "start": {
+                          "line": 75,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 75,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇼",
+                      "raw": "\"\\u{1F1E8}\\u{1F1FC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2091,
+                      "end": 2111,
+                      "loc": {
+                        "start": {
+                          "line": 76,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 76,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇽",
+                      "raw": "\"\\u{1F1E8}\\u{1F1FD}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2117,
+                      "end": 2137,
+                      "loc": {
+                        "start": {
+                          "line": 77,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 77,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇾",
+                      "raw": "\"\\u{1F1E8}\\u{1F1FE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2143,
+                      "end": 2163,
+                      "loc": {
+                        "start": {
+                          "line": 78,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 78,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇨🇿",
+                      "raw": "\"\\u{1F1E8}\\u{1F1FF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2169,
+                      "end": 2189,
+                      "loc": {
+                        "start": {
+                          "line": 79,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 79,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇩🇪",
+                      "raw": "\"\\u{1F1E9}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2195,
+                      "end": 2215,
+                      "loc": {
+                        "start": {
+                          "line": 80,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 80,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇩🇬",
+                      "raw": "\"\\u{1F1E9}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2221,
+                      "end": 2241,
+                      "loc": {
+                        "start": {
+                          "line": 81,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 81,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇩🇯",
+                      "raw": "\"\\u{1F1E9}\\u{1F1EF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2247,
+                      "end": 2267,
+                      "loc": {
+                        "start": {
+                          "line": 82,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 82,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇩🇰",
+                      "raw": "\"\\u{1F1E9}\\u{1F1F0}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2273,
+                      "end": 2293,
+                      "loc": {
+                        "start": {
+                          "line": 83,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 83,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇩🇲",
+                      "raw": "\"\\u{1F1E9}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2299,
+                      "end": 2319,
+                      "loc": {
+                        "start": {
+                          "line": 84,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 84,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇩🇴",
+                      "raw": "\"\\u{1F1E9}\\u{1F1F4}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2325,
+                      "end": 2345,
+                      "loc": {
+                        "start": {
+                          "line": 85,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 85,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇩🇿",
+                      "raw": "\"\\u{1F1E9}\\u{1F1FF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2351,
+                      "end": 2371,
+                      "loc": {
+                        "start": {
+                          "line": 86,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 86,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇪🇦",
+                      "raw": "\"\\u{1F1EA}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2377,
+                      "end": 2397,
+                      "loc": {
+                        "start": {
+                          "line": 87,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 87,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇪🇨",
+                      "raw": "\"\\u{1F1EA}\\u{1F1E8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2403,
+                      "end": 2423,
+                      "loc": {
+                        "start": {
+                          "line": 88,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 88,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇪🇪",
+                      "raw": "\"\\u{1F1EA}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2429,
+                      "end": 2449,
+                      "loc": {
+                        "start": {
+                          "line": 89,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 89,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇪🇬",
+                      "raw": "\"\\u{1F1EA}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2455,
+                      "end": 2475,
+                      "loc": {
+                        "start": {
+                          "line": 90,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 90,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇪🇭",
+                      "raw": "\"\\u{1F1EA}\\u{1F1ED}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2481,
+                      "end": 2501,
+                      "loc": {
+                        "start": {
+                          "line": 91,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 91,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇪🇷",
+                      "raw": "\"\\u{1F1EA}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2507,
+                      "end": 2527,
+                      "loc": {
+                        "start": {
+                          "line": 92,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 92,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇪🇸",
+                      "raw": "\"\\u{1F1EA}\\u{1F1F8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2533,
+                      "end": 2553,
+                      "loc": {
+                        "start": {
+                          "line": 93,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 93,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇪🇹",
+                      "raw": "\"\\u{1F1EA}\\u{1F1F9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2559,
+                      "end": 2579,
+                      "loc": {
+                        "start": {
+                          "line": 94,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 94,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇪🇺",
+                      "raw": "\"\\u{1F1EA}\\u{1F1FA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2585,
+                      "end": 2605,
+                      "loc": {
+                        "start": {
+                          "line": 95,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 95,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇫🇮",
+                      "raw": "\"\\u{1F1EB}\\u{1F1EE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2611,
+                      "end": 2631,
+                      "loc": {
+                        "start": {
+                          "line": 96,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 96,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇫🇯",
+                      "raw": "\"\\u{1F1EB}\\u{1F1EF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2637,
+                      "end": 2657,
+                      "loc": {
+                        "start": {
+                          "line": 97,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 97,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇫🇰",
+                      "raw": "\"\\u{1F1EB}\\u{1F1F0}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2663,
+                      "end": 2683,
+                      "loc": {
+                        "start": {
+                          "line": 98,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 98,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇫🇲",
+                      "raw": "\"\\u{1F1EB}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2689,
+                      "end": 2709,
+                      "loc": {
+                        "start": {
+                          "line": 99,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 99,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇫🇴",
+                      "raw": "\"\\u{1F1EB}\\u{1F1F4}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2715,
+                      "end": 2735,
+                      "loc": {
+                        "start": {
+                          "line": 100,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 100,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇫🇷",
+                      "raw": "\"\\u{1F1EB}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2741,
+                      "end": 2761,
+                      "loc": {
+                        "start": {
+                          "line": 101,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 101,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇦",
+                      "raw": "\"\\u{1F1EC}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2767,
+                      "end": 2787,
+                      "loc": {
+                        "start": {
+                          "line": 102,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 102,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇧",
+                      "raw": "\"\\u{1F1EC}\\u{1F1E7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2793,
+                      "end": 2813,
+                      "loc": {
+                        "start": {
+                          "line": 103,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 103,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇩",
+                      "raw": "\"\\u{1F1EC}\\u{1F1E9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2819,
+                      "end": 2839,
+                      "loc": {
+                        "start": {
+                          "line": 104,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 104,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇪",
+                      "raw": "\"\\u{1F1EC}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2845,
+                      "end": 2865,
+                      "loc": {
+                        "start": {
+                          "line": 105,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 105,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇫",
+                      "raw": "\"\\u{1F1EC}\\u{1F1EB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2871,
+                      "end": 2891,
+                      "loc": {
+                        "start": {
+                          "line": 106,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 106,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇬",
+                      "raw": "\"\\u{1F1EC}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2897,
+                      "end": 2917,
+                      "loc": {
+                        "start": {
+                          "line": 107,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 107,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇭",
+                      "raw": "\"\\u{1F1EC}\\u{1F1ED}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2923,
+                      "end": 2943,
+                      "loc": {
+                        "start": {
+                          "line": 108,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 108,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇮",
+                      "raw": "\"\\u{1F1EC}\\u{1F1EE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2949,
+                      "end": 2969,
+                      "loc": {
+                        "start": {
+                          "line": 109,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 109,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇱",
+                      "raw": "\"\\u{1F1EC}\\u{1F1F1}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 2975,
+                      "end": 2995,
+                      "loc": {
+                        "start": {
+                          "line": 110,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 110,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇲",
+                      "raw": "\"\\u{1F1EC}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3001,
+                      "end": 3021,
+                      "loc": {
+                        "start": {
+                          "line": 111,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 111,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇳",
+                      "raw": "\"\\u{1F1EC}\\u{1F1F3}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3027,
+                      "end": 3047,
+                      "loc": {
+                        "start": {
+                          "line": 112,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 112,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇵",
+                      "raw": "\"\\u{1F1EC}\\u{1F1F5}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3053,
+                      "end": 3073,
+                      "loc": {
+                        "start": {
+                          "line": 113,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 113,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇶",
+                      "raw": "\"\\u{1F1EC}\\u{1F1F6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3079,
+                      "end": 3099,
+                      "loc": {
+                        "start": {
+                          "line": 114,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 114,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇷",
+                      "raw": "\"\\u{1F1EC}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3105,
+                      "end": 3125,
+                      "loc": {
+                        "start": {
+                          "line": 115,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 115,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇸",
+                      "raw": "\"\\u{1F1EC}\\u{1F1F8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3131,
+                      "end": 3151,
+                      "loc": {
+                        "start": {
+                          "line": 116,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 116,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇹",
+                      "raw": "\"\\u{1F1EC}\\u{1F1F9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3157,
+                      "end": 3177,
+                      "loc": {
+                        "start": {
+                          "line": 117,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 117,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇺",
+                      "raw": "\"\\u{1F1EC}\\u{1F1FA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3183,
+                      "end": 3203,
+                      "loc": {
+                        "start": {
+                          "line": 118,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 118,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇼",
+                      "raw": "\"\\u{1F1EC}\\u{1F1FC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3209,
+                      "end": 3229,
+                      "loc": {
+                        "start": {
+                          "line": 119,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 119,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇬🇾",
+                      "raw": "\"\\u{1F1EC}\\u{1F1FE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3235,
+                      "end": 3255,
+                      "loc": {
+                        "start": {
+                          "line": 120,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 120,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇭🇰",
+                      "raw": "\"\\u{1F1ED}\\u{1F1F0}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3261,
+                      "end": 3281,
+                      "loc": {
+                        "start": {
+                          "line": 121,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 121,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇭🇲",
+                      "raw": "\"\\u{1F1ED}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3287,
+                      "end": 3307,
+                      "loc": {
+                        "start": {
+                          "line": 122,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 122,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇭🇳",
+                      "raw": "\"\\u{1F1ED}\\u{1F1F3}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3313,
+                      "end": 3333,
+                      "loc": {
+                        "start": {
+                          "line": 123,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 123,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇭🇷",
+                      "raw": "\"\\u{1F1ED}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3339,
+                      "end": 3359,
+                      "loc": {
+                        "start": {
+                          "line": 124,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 124,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇭🇹",
+                      "raw": "\"\\u{1F1ED}\\u{1F1F9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3365,
+                      "end": 3385,
+                      "loc": {
+                        "start": {
+                          "line": 125,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 125,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇭🇺",
+                      "raw": "\"\\u{1F1ED}\\u{1F1FA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3391,
+                      "end": 3411,
+                      "loc": {
+                        "start": {
+                          "line": 126,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 126,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇮🇨",
+                      "raw": "\"\\u{1F1EE}\\u{1F1E8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3417,
+                      "end": 3437,
+                      "loc": {
+                        "start": {
+                          "line": 127,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 127,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇮🇩",
+                      "raw": "\"\\u{1F1EE}\\u{1F1E9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3443,
+                      "end": 3463,
+                      "loc": {
+                        "start": {
+                          "line": 128,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 128,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇮🇪",
+                      "raw": "\"\\u{1F1EE}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3469,
+                      "end": 3489,
+                      "loc": {
+                        "start": {
+                          "line": 129,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 129,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇮🇱",
+                      "raw": "\"\\u{1F1EE}\\u{1F1F1}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3495,
+                      "end": 3515,
+                      "loc": {
+                        "start": {
+                          "line": 130,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 130,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇮🇲",
+                      "raw": "\"\\u{1F1EE}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3521,
+                      "end": 3541,
+                      "loc": {
+                        "start": {
+                          "line": 131,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 131,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇮🇳",
+                      "raw": "\"\\u{1F1EE}\\u{1F1F3}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3547,
+                      "end": 3567,
+                      "loc": {
+                        "start": {
+                          "line": 132,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 132,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇮🇴",
+                      "raw": "\"\\u{1F1EE}\\u{1F1F4}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3573,
+                      "end": 3593,
+                      "loc": {
+                        "start": {
+                          "line": 133,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 133,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇮🇶",
+                      "raw": "\"\\u{1F1EE}\\u{1F1F6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3599,
+                      "end": 3619,
+                      "loc": {
+                        "start": {
+                          "line": 134,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 134,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇮🇷",
+                      "raw": "\"\\u{1F1EE}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3625,
+                      "end": 3645,
+                      "loc": {
+                        "start": {
+                          "line": 135,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 135,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇮🇸",
+                      "raw": "\"\\u{1F1EE}\\u{1F1F8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3651,
+                      "end": 3671,
+                      "loc": {
+                        "start": {
+                          "line": 136,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 136,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇮🇹",
+                      "raw": "\"\\u{1F1EE}\\u{1F1F9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3677,
+                      "end": 3697,
+                      "loc": {
+                        "start": {
+                          "line": 137,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 137,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇯🇪",
+                      "raw": "\"\\u{1F1EF}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3703,
+                      "end": 3723,
+                      "loc": {
+                        "start": {
+                          "line": 138,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 138,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇯🇲",
+                      "raw": "\"\\u{1F1EF}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3729,
+                      "end": 3749,
+                      "loc": {
+                        "start": {
+                          "line": 139,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 139,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇯🇴",
+                      "raw": "\"\\u{1F1EF}\\u{1F1F4}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3755,
+                      "end": 3775,
+                      "loc": {
+                        "start": {
+                          "line": 140,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 140,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇯🇵",
+                      "raw": "\"\\u{1F1EF}\\u{1F1F5}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3781,
+                      "end": 3801,
+                      "loc": {
+                        "start": {
+                          "line": 141,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 141,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇰🇪",
+                      "raw": "\"\\u{1F1F0}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3807,
+                      "end": 3827,
+                      "loc": {
+                        "start": {
+                          "line": 142,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 142,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇰🇬",
+                      "raw": "\"\\u{1F1F0}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3833,
+                      "end": 3853,
+                      "loc": {
+                        "start": {
+                          "line": 143,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 143,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇰🇭",
+                      "raw": "\"\\u{1F1F0}\\u{1F1ED}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3859,
+                      "end": 3879,
+                      "loc": {
+                        "start": {
+                          "line": 144,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 144,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇰🇮",
+                      "raw": "\"\\u{1F1F0}\\u{1F1EE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3885,
+                      "end": 3905,
+                      "loc": {
+                        "start": {
+                          "line": 145,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 145,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇰🇲",
+                      "raw": "\"\\u{1F1F0}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3911,
+                      "end": 3931,
+                      "loc": {
+                        "start": {
+                          "line": 146,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 146,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇰🇳",
+                      "raw": "\"\\u{1F1F0}\\u{1F1F3}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3937,
+                      "end": 3957,
+                      "loc": {
+                        "start": {
+                          "line": 147,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 147,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇰🇵",
+                      "raw": "\"\\u{1F1F0}\\u{1F1F5}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3963,
+                      "end": 3983,
+                      "loc": {
+                        "start": {
+                          "line": 148,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 148,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇰🇷",
+                      "raw": "\"\\u{1F1F0}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 3989,
+                      "end": 4009,
+                      "loc": {
+                        "start": {
+                          "line": 149,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 149,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇰🇼",
+                      "raw": "\"\\u{1F1F0}\\u{1F1FC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4015,
+                      "end": 4035,
+                      "loc": {
+                        "start": {
+                          "line": 150,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 150,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇰🇾",
+                      "raw": "\"\\u{1F1F0}\\u{1F1FE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4041,
+                      "end": 4061,
+                      "loc": {
+                        "start": {
+                          "line": 151,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 151,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇰🇿",
+                      "raw": "\"\\u{1F1F0}\\u{1F1FF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4067,
+                      "end": 4087,
+                      "loc": {
+                        "start": {
+                          "line": 152,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 152,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇱🇦",
+                      "raw": "\"\\u{1F1F1}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4093,
+                      "end": 4113,
+                      "loc": {
+                        "start": {
+                          "line": 153,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 153,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇱🇧",
+                      "raw": "\"\\u{1F1F1}\\u{1F1E7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4119,
+                      "end": 4139,
+                      "loc": {
+                        "start": {
+                          "line": 154,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 154,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇱🇨",
+                      "raw": "\"\\u{1F1F1}\\u{1F1E8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4145,
+                      "end": 4165,
+                      "loc": {
+                        "start": {
+                          "line": 155,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 155,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇱🇮",
+                      "raw": "\"\\u{1F1F1}\\u{1F1EE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4171,
+                      "end": 4191,
+                      "loc": {
+                        "start": {
+                          "line": 156,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 156,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇱🇰",
+                      "raw": "\"\\u{1F1F1}\\u{1F1F0}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4197,
+                      "end": 4217,
+                      "loc": {
+                        "start": {
+                          "line": 157,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 157,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇱🇷",
+                      "raw": "\"\\u{1F1F1}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4223,
+                      "end": 4243,
+                      "loc": {
+                        "start": {
+                          "line": 158,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 158,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇱🇸",
+                      "raw": "\"\\u{1F1F1}\\u{1F1F8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4249,
+                      "end": 4269,
+                      "loc": {
+                        "start": {
+                          "line": 159,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 159,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇱🇹",
+                      "raw": "\"\\u{1F1F1}\\u{1F1F9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4275,
+                      "end": 4295,
+                      "loc": {
+                        "start": {
+                          "line": 160,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 160,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇱🇺",
+                      "raw": "\"\\u{1F1F1}\\u{1F1FA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4301,
+                      "end": 4321,
+                      "loc": {
+                        "start": {
+                          "line": 161,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 161,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇱🇻",
+                      "raw": "\"\\u{1F1F1}\\u{1F1FB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4327,
+                      "end": 4347,
+                      "loc": {
+                        "start": {
+                          "line": 162,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 162,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇱🇾",
+                      "raw": "\"\\u{1F1F1}\\u{1F1FE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4353,
+                      "end": 4373,
+                      "loc": {
+                        "start": {
+                          "line": 163,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 163,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇦",
+                      "raw": "\"\\u{1F1F2}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4379,
+                      "end": 4399,
+                      "loc": {
+                        "start": {
+                          "line": 164,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 164,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇨",
+                      "raw": "\"\\u{1F1F2}\\u{1F1E8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4405,
+                      "end": 4425,
+                      "loc": {
+                        "start": {
+                          "line": 165,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 165,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇩",
+                      "raw": "\"\\u{1F1F2}\\u{1F1E9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4431,
+                      "end": 4451,
+                      "loc": {
+                        "start": {
+                          "line": 166,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 166,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇪",
+                      "raw": "\"\\u{1F1F2}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4457,
+                      "end": 4477,
+                      "loc": {
+                        "start": {
+                          "line": 167,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 167,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇫",
+                      "raw": "\"\\u{1F1F2}\\u{1F1EB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4483,
+                      "end": 4503,
+                      "loc": {
+                        "start": {
+                          "line": 168,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 168,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇬",
+                      "raw": "\"\\u{1F1F2}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4509,
+                      "end": 4529,
+                      "loc": {
+                        "start": {
+                          "line": 169,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 169,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇭",
+                      "raw": "\"\\u{1F1F2}\\u{1F1ED}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4535,
+                      "end": 4555,
+                      "loc": {
+                        "start": {
+                          "line": 170,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 170,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇰",
+                      "raw": "\"\\u{1F1F2}\\u{1F1F0}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4561,
+                      "end": 4581,
+                      "loc": {
+                        "start": {
+                          "line": 171,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 171,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇱",
+                      "raw": "\"\\u{1F1F2}\\u{1F1F1}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4587,
+                      "end": 4607,
+                      "loc": {
+                        "start": {
+                          "line": 172,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 172,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇲",
+                      "raw": "\"\\u{1F1F2}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4613,
+                      "end": 4633,
+                      "loc": {
+                        "start": {
+                          "line": 173,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 173,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇳",
+                      "raw": "\"\\u{1F1F2}\\u{1F1F3}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4639,
+                      "end": 4659,
+                      "loc": {
+                        "start": {
+                          "line": 174,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 174,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇴",
+                      "raw": "\"\\u{1F1F2}\\u{1F1F4}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4665,
+                      "end": 4685,
+                      "loc": {
+                        "start": {
+                          "line": 175,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 175,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇵",
+                      "raw": "\"\\u{1F1F2}\\u{1F1F5}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4691,
+                      "end": 4711,
+                      "loc": {
+                        "start": {
+                          "line": 176,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 176,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇶",
+                      "raw": "\"\\u{1F1F2}\\u{1F1F6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4717,
+                      "end": 4737,
+                      "loc": {
+                        "start": {
+                          "line": 177,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 177,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇷",
+                      "raw": "\"\\u{1F1F2}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4743,
+                      "end": 4763,
+                      "loc": {
+                        "start": {
+                          "line": 178,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 178,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇸",
+                      "raw": "\"\\u{1F1F2}\\u{1F1F8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4769,
+                      "end": 4789,
+                      "loc": {
+                        "start": {
+                          "line": 179,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 179,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇹",
+                      "raw": "\"\\u{1F1F2}\\u{1F1F9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4795,
+                      "end": 4815,
+                      "loc": {
+                        "start": {
+                          "line": 180,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 180,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇺",
+                      "raw": "\"\\u{1F1F2}\\u{1F1FA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4821,
+                      "end": 4841,
+                      "loc": {
+                        "start": {
+                          "line": 181,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 181,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇻",
+                      "raw": "\"\\u{1F1F2}\\u{1F1FB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4847,
+                      "end": 4867,
+                      "loc": {
+                        "start": {
+                          "line": 182,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 182,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇼",
+                      "raw": "\"\\u{1F1F2}\\u{1F1FC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4873,
+                      "end": 4893,
+                      "loc": {
+                        "start": {
+                          "line": 183,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 183,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇽",
+                      "raw": "\"\\u{1F1F2}\\u{1F1FD}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4899,
+                      "end": 4919,
+                      "loc": {
+                        "start": {
+                          "line": 184,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 184,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇾",
+                      "raw": "\"\\u{1F1F2}\\u{1F1FE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4925,
+                      "end": 4945,
+                      "loc": {
+                        "start": {
+                          "line": 185,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 185,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇲🇿",
+                      "raw": "\"\\u{1F1F2}\\u{1F1FF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4951,
+                      "end": 4971,
+                      "loc": {
+                        "start": {
+                          "line": 186,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 186,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇳🇦",
+                      "raw": "\"\\u{1F1F3}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 4977,
+                      "end": 4997,
+                      "loc": {
+                        "start": {
+                          "line": 187,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 187,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇳🇨",
+                      "raw": "\"\\u{1F1F3}\\u{1F1E8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5003,
+                      "end": 5023,
+                      "loc": {
+                        "start": {
+                          "line": 188,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 188,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇳🇪",
+                      "raw": "\"\\u{1F1F3}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5029,
+                      "end": 5049,
+                      "loc": {
+                        "start": {
+                          "line": 189,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 189,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇳🇫",
+                      "raw": "\"\\u{1F1F3}\\u{1F1EB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5055,
+                      "end": 5075,
+                      "loc": {
+                        "start": {
+                          "line": 190,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 190,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇳🇬",
+                      "raw": "\"\\u{1F1F3}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5081,
+                      "end": 5101,
+                      "loc": {
+                        "start": {
+                          "line": 191,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 191,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇳🇮",
+                      "raw": "\"\\u{1F1F3}\\u{1F1EE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5107,
+                      "end": 5127,
+                      "loc": {
+                        "start": {
+                          "line": 192,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 192,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇳🇱",
+                      "raw": "\"\\u{1F1F3}\\u{1F1F1}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5133,
+                      "end": 5153,
+                      "loc": {
+                        "start": {
+                          "line": 193,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 193,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇳🇴",
+                      "raw": "\"\\u{1F1F3}\\u{1F1F4}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5159,
+                      "end": 5179,
+                      "loc": {
+                        "start": {
+                          "line": 194,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 194,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇳🇵",
+                      "raw": "\"\\u{1F1F3}\\u{1F1F5}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5185,
+                      "end": 5205,
+                      "loc": {
+                        "start": {
+                          "line": 195,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 195,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇳🇷",
+                      "raw": "\"\\u{1F1F3}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5211,
+                      "end": 5231,
+                      "loc": {
+                        "start": {
+                          "line": 196,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 196,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇳🇺",
+                      "raw": "\"\\u{1F1F3}\\u{1F1FA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5237,
+                      "end": 5257,
+                      "loc": {
+                        "start": {
+                          "line": 197,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 197,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇳🇿",
+                      "raw": "\"\\u{1F1F3}\\u{1F1FF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5263,
+                      "end": 5283,
+                      "loc": {
+                        "start": {
+                          "line": 198,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 198,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇴🇲",
+                      "raw": "\"\\u{1F1F4}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5289,
+                      "end": 5309,
+                      "loc": {
+                        "start": {
+                          "line": 199,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 199,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇦",
+                      "raw": "\"\\u{1F1F5}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5315,
+                      "end": 5335,
+                      "loc": {
+                        "start": {
+                          "line": 200,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 200,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇪",
+                      "raw": "\"\\u{1F1F5}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5341,
+                      "end": 5361,
+                      "loc": {
+                        "start": {
+                          "line": 201,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 201,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇫",
+                      "raw": "\"\\u{1F1F5}\\u{1F1EB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5367,
+                      "end": 5387,
+                      "loc": {
+                        "start": {
+                          "line": 202,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 202,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇬",
+                      "raw": "\"\\u{1F1F5}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5393,
+                      "end": 5413,
+                      "loc": {
+                        "start": {
+                          "line": 203,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 203,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇭",
+                      "raw": "\"\\u{1F1F5}\\u{1F1ED}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5419,
+                      "end": 5439,
+                      "loc": {
+                        "start": {
+                          "line": 204,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 204,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇰",
+                      "raw": "\"\\u{1F1F5}\\u{1F1F0}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5445,
+                      "end": 5465,
+                      "loc": {
+                        "start": {
+                          "line": 205,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 205,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇱",
+                      "raw": "\"\\u{1F1F5}\\u{1F1F1}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5471,
+                      "end": 5491,
+                      "loc": {
+                        "start": {
+                          "line": 206,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 206,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇲",
+                      "raw": "\"\\u{1F1F5}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5497,
+                      "end": 5517,
+                      "loc": {
+                        "start": {
+                          "line": 207,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 207,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇳",
+                      "raw": "\"\\u{1F1F5}\\u{1F1F3}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5523,
+                      "end": 5543,
+                      "loc": {
+                        "start": {
+                          "line": 208,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 208,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇷",
+                      "raw": "\"\\u{1F1F5}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5549,
+                      "end": 5569,
+                      "loc": {
+                        "start": {
+                          "line": 209,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 209,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇸",
+                      "raw": "\"\\u{1F1F5}\\u{1F1F8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5575,
+                      "end": 5595,
+                      "loc": {
+                        "start": {
+                          "line": 210,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 210,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇹",
+                      "raw": "\"\\u{1F1F5}\\u{1F1F9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5601,
+                      "end": 5621,
+                      "loc": {
+                        "start": {
+                          "line": 211,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 211,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇼",
+                      "raw": "\"\\u{1F1F5}\\u{1F1FC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5627,
+                      "end": 5647,
+                      "loc": {
+                        "start": {
+                          "line": 212,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 212,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇵🇾",
+                      "raw": "\"\\u{1F1F5}\\u{1F1FE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5653,
+                      "end": 5673,
+                      "loc": {
+                        "start": {
+                          "line": 213,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 213,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇶🇦",
+                      "raw": "\"\\u{1F1F6}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5679,
+                      "end": 5699,
+                      "loc": {
+                        "start": {
+                          "line": 214,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 214,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇷🇪",
+                      "raw": "\"\\u{1F1F7}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5705,
+                      "end": 5725,
+                      "loc": {
+                        "start": {
+                          "line": 215,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 215,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇷🇴",
+                      "raw": "\"\\u{1F1F7}\\u{1F1F4}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5731,
+                      "end": 5751,
+                      "loc": {
+                        "start": {
+                          "line": 216,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 216,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇷🇸",
+                      "raw": "\"\\u{1F1F7}\\u{1F1F8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5757,
+                      "end": 5777,
+                      "loc": {
+                        "start": {
+                          "line": 217,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 217,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇷🇺",
+                      "raw": "\"\\u{1F1F7}\\u{1F1FA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5783,
+                      "end": 5803,
+                      "loc": {
+                        "start": {
+                          "line": 218,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 218,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇷🇼",
+                      "raw": "\"\\u{1F1F7}\\u{1F1FC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5809,
+                      "end": 5829,
+                      "loc": {
+                        "start": {
+                          "line": 219,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 219,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇦",
+                      "raw": "\"\\u{1F1F8}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5835,
+                      "end": 5855,
+                      "loc": {
+                        "start": {
+                          "line": 220,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 220,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇧",
+                      "raw": "\"\\u{1F1F8}\\u{1F1E7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5861,
+                      "end": 5881,
+                      "loc": {
+                        "start": {
+                          "line": 221,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 221,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇨",
+                      "raw": "\"\\u{1F1F8}\\u{1F1E8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5887,
+                      "end": 5907,
+                      "loc": {
+                        "start": {
+                          "line": 222,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 222,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇩",
+                      "raw": "\"\\u{1F1F8}\\u{1F1E9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5913,
+                      "end": 5933,
+                      "loc": {
+                        "start": {
+                          "line": 223,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 223,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇪",
+                      "raw": "\"\\u{1F1F8}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5939,
+                      "end": 5959,
+                      "loc": {
+                        "start": {
+                          "line": 224,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 224,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇬",
+                      "raw": "\"\\u{1F1F8}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5965,
+                      "end": 5985,
+                      "loc": {
+                        "start": {
+                          "line": 225,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 225,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇭",
+                      "raw": "\"\\u{1F1F8}\\u{1F1ED}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 5991,
+                      "end": 6011,
+                      "loc": {
+                        "start": {
+                          "line": 226,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 226,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇮",
+                      "raw": "\"\\u{1F1F8}\\u{1F1EE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6017,
+                      "end": 6037,
+                      "loc": {
+                        "start": {
+                          "line": 227,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 227,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇯",
+                      "raw": "\"\\u{1F1F8}\\u{1F1EF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6043,
+                      "end": 6063,
+                      "loc": {
+                        "start": {
+                          "line": 228,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 228,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇰",
+                      "raw": "\"\\u{1F1F8}\\u{1F1F0}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6069,
+                      "end": 6089,
+                      "loc": {
+                        "start": {
+                          "line": 229,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 229,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇱",
+                      "raw": "\"\\u{1F1F8}\\u{1F1F1}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6095,
+                      "end": 6115,
+                      "loc": {
+                        "start": {
+                          "line": 230,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 230,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇲",
+                      "raw": "\"\\u{1F1F8}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6121,
+                      "end": 6141,
+                      "loc": {
+                        "start": {
+                          "line": 231,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 231,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇳",
+                      "raw": "\"\\u{1F1F8}\\u{1F1F3}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6147,
+                      "end": 6167,
+                      "loc": {
+                        "start": {
+                          "line": 232,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 232,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇴",
+                      "raw": "\"\\u{1F1F8}\\u{1F1F4}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6173,
+                      "end": 6193,
+                      "loc": {
+                        "start": {
+                          "line": 233,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 233,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇷",
+                      "raw": "\"\\u{1F1F8}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6199,
+                      "end": 6219,
+                      "loc": {
+                        "start": {
+                          "line": 234,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 234,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇸",
+                      "raw": "\"\\u{1F1F8}\\u{1F1F8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6225,
+                      "end": 6245,
+                      "loc": {
+                        "start": {
+                          "line": 235,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 235,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇹",
+                      "raw": "\"\\u{1F1F8}\\u{1F1F9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6251,
+                      "end": 6271,
+                      "loc": {
+                        "start": {
+                          "line": 236,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 236,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇻",
+                      "raw": "\"\\u{1F1F8}\\u{1F1FB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6277,
+                      "end": 6297,
+                      "loc": {
+                        "start": {
+                          "line": 237,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 237,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇽",
+                      "raw": "\"\\u{1F1F8}\\u{1F1FD}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6303,
+                      "end": 6323,
+                      "loc": {
+                        "start": {
+                          "line": 238,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 238,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇾",
+                      "raw": "\"\\u{1F1F8}\\u{1F1FE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6329,
+                      "end": 6349,
+                      "loc": {
+                        "start": {
+                          "line": 239,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 239,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇸🇿",
+                      "raw": "\"\\u{1F1F8}\\u{1F1FF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6355,
+                      "end": 6375,
+                      "loc": {
+                        "start": {
+                          "line": 240,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 240,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇦",
+                      "raw": "\"\\u{1F1F9}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6381,
+                      "end": 6401,
+                      "loc": {
+                        "start": {
+                          "line": 241,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 241,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇨",
+                      "raw": "\"\\u{1F1F9}\\u{1F1E8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6407,
+                      "end": 6427,
+                      "loc": {
+                        "start": {
+                          "line": 242,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 242,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇩",
+                      "raw": "\"\\u{1F1F9}\\u{1F1E9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6433,
+                      "end": 6453,
+                      "loc": {
+                        "start": {
+                          "line": 243,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 243,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇫",
+                      "raw": "\"\\u{1F1F9}\\u{1F1EB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6459,
+                      "end": 6479,
+                      "loc": {
+                        "start": {
+                          "line": 244,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 244,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇬",
+                      "raw": "\"\\u{1F1F9}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6485,
+                      "end": 6505,
+                      "loc": {
+                        "start": {
+                          "line": 245,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 245,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇭",
+                      "raw": "\"\\u{1F1F9}\\u{1F1ED}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6511,
+                      "end": 6531,
+                      "loc": {
+                        "start": {
+                          "line": 246,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 246,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇯",
+                      "raw": "\"\\u{1F1F9}\\u{1F1EF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6537,
+                      "end": 6557,
+                      "loc": {
+                        "start": {
+                          "line": 247,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 247,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇰",
+                      "raw": "\"\\u{1F1F9}\\u{1F1F0}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6563,
+                      "end": 6583,
+                      "loc": {
+                        "start": {
+                          "line": 248,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 248,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇱",
+                      "raw": "\"\\u{1F1F9}\\u{1F1F1}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6589,
+                      "end": 6609,
+                      "loc": {
+                        "start": {
+                          "line": 249,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 249,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇲",
+                      "raw": "\"\\u{1F1F9}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6615,
+                      "end": 6635,
+                      "loc": {
+                        "start": {
+                          "line": 250,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 250,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇳",
+                      "raw": "\"\\u{1F1F9}\\u{1F1F3}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6641,
+                      "end": 6661,
+                      "loc": {
+                        "start": {
+                          "line": 251,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 251,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇴",
+                      "raw": "\"\\u{1F1F9}\\u{1F1F4}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6667,
+                      "end": 6687,
+                      "loc": {
+                        "start": {
+                          "line": 252,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 252,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇷",
+                      "raw": "\"\\u{1F1F9}\\u{1F1F7}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6693,
+                      "end": 6713,
+                      "loc": {
+                        "start": {
+                          "line": 253,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 253,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇹",
+                      "raw": "\"\\u{1F1F9}\\u{1F1F9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6719,
+                      "end": 6739,
+                      "loc": {
+                        "start": {
+                          "line": 254,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 254,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇻",
+                      "raw": "\"\\u{1F1F9}\\u{1F1FB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6745,
+                      "end": 6765,
+                      "loc": {
+                        "start": {
+                          "line": 255,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 255,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇼",
+                      "raw": "\"\\u{1F1F9}\\u{1F1FC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6771,
+                      "end": 6791,
+                      "loc": {
+                        "start": {
+                          "line": 256,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 256,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇹🇿",
+                      "raw": "\"\\u{1F1F9}\\u{1F1FF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6797,
+                      "end": 6817,
+                      "loc": {
+                        "start": {
+                          "line": 257,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 257,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇺🇦",
+                      "raw": "\"\\u{1F1FA}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6823,
+                      "end": 6843,
+                      "loc": {
+                        "start": {
+                          "line": 258,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 258,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇺🇬",
+                      "raw": "\"\\u{1F1FA}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6849,
+                      "end": 6869,
+                      "loc": {
+                        "start": {
+                          "line": 259,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 259,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇺🇲",
+                      "raw": "\"\\u{1F1FA}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6875,
+                      "end": 6895,
+                      "loc": {
+                        "start": {
+                          "line": 260,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 260,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇺🇳",
+                      "raw": "\"\\u{1F1FA}\\u{1F1F3}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6901,
+                      "end": 6921,
+                      "loc": {
+                        "start": {
+                          "line": 261,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 261,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇺🇸",
+                      "raw": "\"\\u{1F1FA}\\u{1F1F8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6927,
+                      "end": 6947,
+                      "loc": {
+                        "start": {
+                          "line": 262,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 262,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇺🇾",
+                      "raw": "\"\\u{1F1FA}\\u{1F1FE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6953,
+                      "end": 6973,
+                      "loc": {
+                        "start": {
+                          "line": 263,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 263,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇺🇿",
+                      "raw": "\"\\u{1F1FA}\\u{1F1FF}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 6979,
+                      "end": 6999,
+                      "loc": {
+                        "start": {
+                          "line": 264,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 264,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇻🇦",
+                      "raw": "\"\\u{1F1FB}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7005,
+                      "end": 7025,
+                      "loc": {
+                        "start": {
+                          "line": 265,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 265,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇻🇨",
+                      "raw": "\"\\u{1F1FB}\\u{1F1E8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7031,
+                      "end": 7051,
+                      "loc": {
+                        "start": {
+                          "line": 266,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 266,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇻🇪",
+                      "raw": "\"\\u{1F1FB}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7057,
+                      "end": 7077,
+                      "loc": {
+                        "start": {
+                          "line": 267,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 267,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇻🇬",
+                      "raw": "\"\\u{1F1FB}\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7083,
+                      "end": 7103,
+                      "loc": {
+                        "start": {
+                          "line": 268,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 268,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇻🇮",
+                      "raw": "\"\\u{1F1FB}\\u{1F1EE}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7109,
+                      "end": 7129,
+                      "loc": {
+                        "start": {
+                          "line": 269,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 269,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇻🇳",
+                      "raw": "\"\\u{1F1FB}\\u{1F1F3}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7135,
+                      "end": 7155,
+                      "loc": {
+                        "start": {
+                          "line": 270,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 270,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇻🇺",
+                      "raw": "\"\\u{1F1FB}\\u{1F1FA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7161,
+                      "end": 7181,
+                      "loc": {
+                        "start": {
+                          "line": 271,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 271,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇼🇫",
+                      "raw": "\"\\u{1F1FC}\\u{1F1EB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7187,
+                      "end": 7207,
+                      "loc": {
+                        "start": {
+                          "line": 272,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 272,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇼🇸",
+                      "raw": "\"\\u{1F1FC}\\u{1F1F8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7213,
+                      "end": 7233,
+                      "loc": {
+                        "start": {
+                          "line": 273,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 273,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇽🇰",
+                      "raw": "\"\\u{1F1FD}\\u{1F1F0}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7239,
+                      "end": 7259,
+                      "loc": {
+                        "start": {
+                          "line": 274,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 274,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇾🇪",
+                      "raw": "\"\\u{1F1FE}\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7265,
+                      "end": 7285,
+                      "loc": {
+                        "start": {
+                          "line": 275,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 275,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇾🇹",
+                      "raw": "\"\\u{1F1FE}\\u{1F1F9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7291,
+                      "end": 7311,
+                      "loc": {
+                        "start": {
+                          "line": 276,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 276,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇿🇦",
+                      "raw": "\"\\u{1F1FF}\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7317,
+                      "end": 7337,
+                      "loc": {
+                        "start": {
+                          "line": 277,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 277,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇿🇲",
+                      "raw": "\"\\u{1F1FF}\\u{1F1F2}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7343,
+                      "end": 7363,
+                      "loc": {
+                        "start": {
+                          "line": 278,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 278,
+                          "column": 24
+                        }
+                      },
+                      "value": "🇿🇼",
+                      "raw": "\"\\u{1F1FF}\\u{1F1FC}\""
+                    }
+                  ]
+                },
+                "kind": "init"
+              },
+              {
+                "type": "Property",
+                "start": 7371,
+                "end": 7562,
+                "loc": {
+                  "start": {
+                    "line": 280,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 291,
+                    "column": 3
+                  }
+                },
+                "method": false,
+                "shorthand": false,
+                "computed": false,
+                "key": {
+                  "type": "Identifier",
+                  "start": 7371,
+                  "end": 7386,
+                  "loc": {
+                    "start": {
+                      "line": 280,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 280,
+                      "column": 17
+                    }
+                  },
+                  "name": "nonMatchStrings"
+                },
+                "value": {
+                  "type": "ArrayExpression",
+                  "start": 7388,
+                  "end": 7562,
+                  "loc": {
+                    "start": {
+                      "line": 280,
+                      "column": 19
+                    },
+                    "end": {
+                      "line": 291,
+                      "column": 3
+                    }
+                  },
+                  "elements": [
+                    {
+                      "type": "Literal",
+                      "start": 7394,
+                      "end": 7405,
+                      "loc": {
+                        "start": {
+                          "line": 281,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 281,
+                          "column": 15
+                        }
+                      },
+                      "value": "🇨",
+                      "raw": "\"\\u{1F1E8}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7411,
+                      "end": 7422,
+                      "loc": {
+                        "start": {
+                          "line": 282,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 282,
+                          "column": 15
+                        }
+                      },
+                      "value": "🇦",
+                      "raw": "\"\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7428,
+                      "end": 7439,
+                      "loc": {
+                        "start": {
+                          "line": 283,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 283,
+                          "column": 15
+                        }
+                      },
+                      "value": "🇩",
+                      "raw": "\"\\u{1F1E9}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7445,
+                      "end": 7456,
+                      "loc": {
+                        "start": {
+                          "line": 284,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 284,
+                          "column": 15
+                        }
+                      },
+                      "value": "🇦",
+                      "raw": "\"\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7462,
+                      "end": 7473,
+                      "loc": {
+                        "start": {
+                          "line": 285,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 285,
+                          "column": 15
+                        }
+                      },
+                      "value": "🇪",
+                      "raw": "\"\\u{1F1EA}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7479,
+                      "end": 7490,
+                      "loc": {
+                        "start": {
+                          "line": 286,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 286,
+                          "column": 15
+                        }
+                      },
+                      "value": "🇦",
+                      "raw": "\"\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7496,
+                      "end": 7507,
+                      "loc": {
+                        "start": {
+                          "line": 287,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 287,
+                          "column": 15
+                        }
+                      },
+                      "value": "🇫",
+                      "raw": "\"\\u{1F1EB}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7513,
+                      "end": 7524,
+                      "loc": {
+                        "start": {
+                          "line": 288,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 288,
+                          "column": 15
+                        }
+                      },
+                      "value": "🇦",
+                      "raw": "\"\\u{1F1E6}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7530,
+                      "end": 7541,
+                      "loc": {
+                        "start": {
+                          "line": 289,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 289,
+                          "column": 15
+                        }
+                      },
+                      "value": "🇬",
+                      "raw": "\"\\u{1F1EC}\""
+                    },
+                    {
+                      "type": "Literal",
+                      "start": 7547,
+                      "end": 7558,
+                      "loc": {
+                        "start": {
+                          "line": 290,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 290,
+                          "column": 15
+                        }
+                      },
+                      "value": "🇦",
+                      "raw": "\"\\u{1F1E6}\""
+                    }
+                  ]
+                },
+                "kind": "init"
+              }
+            ]
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

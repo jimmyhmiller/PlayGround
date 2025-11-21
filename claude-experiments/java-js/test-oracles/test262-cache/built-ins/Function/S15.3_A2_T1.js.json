@@ -1,0 +1,327 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 609,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 21,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "TryStatement",
+      "start": 422,
+      "end": 608,
+      "loc": {
+        "start": {
+          "line": 13,
+          "column": 0
+        },
+        "end": {
+          "line": 20,
+          "column": 1
+        }
+      },
+      "block": {
+        "type": "BlockStatement",
+        "start": 426,
+        "end": 468,
+        "loc": {
+          "start": {
+            "line": 13,
+            "column": 4
+          },
+          "end": {
+            "line": 15,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ExpressionStatement",
+            "start": 430,
+            "end": 466,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 2
+              },
+              "end": {
+                "line": 14,
+                "column": 38
+              }
+            },
+            "expression": {
+              "type": "CallExpression",
+              "start": 430,
+              "end": 465,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 2
+                },
+                "end": {
+                  "line": 14,
+                  "column": 37
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 430,
+                "end": 443,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 15
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 430,
+                  "end": 438,
+                  "loc": {
+                    "start": {
+                      "line": 14,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 14,
+                      "column": 10
+                    }
+                  },
+                  "name": "Function"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 439,
+                  "end": 443,
+                  "loc": {
+                    "start": {
+                      "line": 14,
+                      "column": 11
+                    },
+                    "end": {
+                      "line": 14,
+                      "column": 15
+                    }
+                  },
+                  "name": "call"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "ThisExpression",
+                  "start": 444,
+                  "end": 448,
+                  "loc": {
+                    "start": {
+                      "line": 14,
+                      "column": 16
+                    },
+                    "end": {
+                      "line": 14,
+                      "column": 20
+                    }
+                  }
+                },
+                {
+                  "type": "Literal",
+                  "start": 450,
+                  "end": 464,
+                  "loc": {
+                    "start": {
+                      "line": 14,
+                      "column": 22
+                    },
+                    "end": {
+                      "line": 14,
+                      "column": 36
+                    }
+                  },
+                  "value": "var x / = 1;",
+                  "raw": "\"var x / = 1;\""
+                }
+              ],
+              "optional": false
+            }
+          }
+        ]
+      },
+      "handler": {
+        "type": "CatchClause",
+        "start": 469,
+        "end": 608,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 2
+          },
+          "end": {
+            "line": 20,
+            "column": 1
+          }
+        },
+        "param": {
+          "type": "Identifier",
+          "start": 476,
+          "end": 477,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 9
+            },
+            "end": {
+              "line": 15,
+              "column": 10
+            }
+          },
+          "name": "e"
+        },
+        "body": {
+          "type": "BlockStatement",
+          "start": 479,
+          "end": 608,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 12
+            },
+            "end": {
+              "line": 20,
+              "column": 1
+            }
+          },
+          "body": [
+            {
+              "type": "ExpressionStatement",
+              "start": 483,
+              "end": 606,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 2
+                },
+                "end": {
+                  "line": 19,
+                  "column": 4
+                }
+              },
+              "expression": {
+                "type": "CallExpression",
+                "start": 483,
+                "end": 605,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 3
+                  }
+                },
+                "callee": {
+                  "type": "Identifier",
+                  "start": 483,
+                  "end": 489,
+                  "loc": {
+                    "start": {
+                      "line": 16,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 16,
+                      "column": 8
+                    }
+                  },
+                  "name": "assert"
+                },
+                "arguments": [
+                  {
+                    "type": "BinaryExpression",
+                    "start": 495,
+                    "end": 519,
+                    "loc": {
+                      "start": {
+                        "line": 17,
+                        "column": 4
+                      },
+                      "end": {
+                        "line": 17,
+                        "column": 28
+                      }
+                    },
+                    "left": {
+                      "type": "Identifier",
+                      "start": 495,
+                      "end": 496,
+                      "loc": {
+                        "start": {
+                          "line": 17,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 17,
+                          "column": 5
+                        }
+                      },
+                      "name": "e"
+                    },
+                    "operator": "instanceof",
+                    "right": {
+                      "type": "Identifier",
+                      "start": 508,
+                      "end": 519,
+                      "loc": {
+                        "start": {
+                          "line": 17,
+                          "column": 17
+                        },
+                        "end": {
+                          "line": 17,
+                          "column": 28
+                        }
+                      },
+                      "name": "SyntaxError"
+                    }
+                  },
+                  {
+                    "type": "Literal",
+                    "start": 525,
+                    "end": 601,
+                    "loc": {
+                      "start": {
+                        "line": 18,
+                        "column": 4
+                      },
+                      "end": {
+                        "line": 18,
+                        "column": 80
+                      }
+                    },
+                    "value": "The result of evaluating (e instanceof SyntaxError) is expected to be true",
+                    "raw": "'The result of evaluating (e instanceof SyntaxError) is expected to be true'"
+                  }
+                ],
+                "optional": false
+              }
+            }
+          ]
+        }
+      },
+      "finalizer": null
+    }
+  ],
+  "sourceType": "script"
+}

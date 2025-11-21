@@ -1,0 +1,479 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1436,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 36,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ImportDeclaration",
+      "start": 1146,
+      "end": 1202,
+      "loc": {
+        "start": {
+          "line": 31,
+          "column": 0
+        },
+        "end": {
+          "line": 31,
+          "column": 56
+        }
+      },
+      "specifiers": [
+        {
+          "type": "ImportNamespaceSpecifier",
+          "start": 1153,
+          "end": 1160,
+          "loc": {
+            "start": {
+              "line": 31,
+              "column": 7
+            },
+            "end": {
+              "line": 31,
+              "column": 14
+            }
+          },
+          "local": {
+            "type": "Identifier",
+            "start": 1158,
+            "end": 1160,
+            "loc": {
+              "start": {
+                "line": 31,
+                "column": 12
+              },
+              "end": {
+                "line": 31,
+                "column": 14
+              }
+            },
+            "name": "ns"
+          }
+        }
+      ],
+      "source": {
+        "type": "Literal",
+        "start": 1166,
+        "end": 1201,
+        "loc": {
+          "start": {
+            "line": 31,
+            "column": 20
+          },
+          "end": {
+            "line": 31,
+            "column": 55
+          }
+        },
+        "value": "./instn-star-ambiguous_FIXTURE.js",
+        "raw": "'./instn-star-ambiguous_FIXTURE.js'"
+      },
+      "attributes": []
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1204,
+      "end": 1281,
+      "loc": {
+        "start": {
+          "line": 33,
+          "column": 0
+        },
+        "end": {
+          "line": 33,
+          "column": 77
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1204,
+        "end": 1280,
+        "loc": {
+          "start": {
+            "line": 33,
+            "column": 0
+          },
+          "end": {
+            "line": 33,
+            "column": 76
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 1204,
+          "end": 1210,
+          "loc": {
+            "start": {
+              "line": 33,
+              "column": 0
+            },
+            "end": {
+              "line": 33,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 1211,
+            "end": 1224,
+            "loc": {
+              "start": {
+                "line": 33,
+                "column": 7
+              },
+              "end": {
+                "line": 33,
+                "column": 20
+              }
+            },
+            "left": {
+              "type": "Literal",
+              "start": 1211,
+              "end": 1218,
+              "loc": {
+                "start": {
+                  "line": 33,
+                  "column": 7
+                },
+                "end": {
+                  "line": 33,
+                  "column": 14
+                }
+              },
+              "value": "first",
+              "raw": "'first'"
+            },
+            "operator": "in",
+            "right": {
+              "type": "Identifier",
+              "start": 1222,
+              "end": 1224,
+              "loc": {
+                "start": {
+                  "line": 33,
+                  "column": 18
+                },
+                "end": {
+                  "line": 33,
+                  "column": 20
+                }
+              },
+              "name": "ns"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 1226,
+            "end": 1279,
+            "loc": {
+              "start": {
+                "line": 33,
+                "column": 22
+              },
+              "end": {
+                "line": 33,
+                "column": 75
+              }
+            },
+            "value": "Non-ambiguous exports from first module are present",
+            "raw": "'Non-ambiguous exports from first module are present'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1282,
+      "end": 1361,
+      "loc": {
+        "start": {
+          "line": 34,
+          "column": 0
+        },
+        "end": {
+          "line": 34,
+          "column": 79
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1282,
+        "end": 1360,
+        "loc": {
+          "start": {
+            "line": 34,
+            "column": 0
+          },
+          "end": {
+            "line": 34,
+            "column": 78
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 1282,
+          "end": 1288,
+          "loc": {
+            "start": {
+              "line": 34,
+              "column": 0
+            },
+            "end": {
+              "line": 34,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 1289,
+            "end": 1303,
+            "loc": {
+              "start": {
+                "line": 34,
+                "column": 7
+              },
+              "end": {
+                "line": 34,
+                "column": 21
+              }
+            },
+            "left": {
+              "type": "Literal",
+              "start": 1289,
+              "end": 1297,
+              "loc": {
+                "start": {
+                  "line": 34,
+                  "column": 7
+                },
+                "end": {
+                  "line": 34,
+                  "column": 15
+                }
+              },
+              "value": "second",
+              "raw": "'second'"
+            },
+            "operator": "in",
+            "right": {
+              "type": "Identifier",
+              "start": 1301,
+              "end": 1303,
+              "loc": {
+                "start": {
+                  "line": 34,
+                  "column": 19
+                },
+                "end": {
+                  "line": 34,
+                  "column": 21
+                }
+              },
+              "name": "ns"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 1305,
+            "end": 1359,
+            "loc": {
+              "start": {
+                "line": 34,
+                "column": 23
+              },
+              "end": {
+                "line": 34,
+                "column": 77
+              }
+            },
+            "value": "Non-ambiguous exports from second module are present",
+            "raw": "'Non-ambiguous exports from second module are present'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1362,
+      "end": 1435,
+      "loc": {
+        "start": {
+          "line": 35,
+          "column": 0
+        },
+        "end": {
+          "line": 35,
+          "column": 73
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1362,
+        "end": 1434,
+        "loc": {
+          "start": {
+            "line": 35,
+            "column": 0
+          },
+          "end": {
+            "line": 35,
+            "column": 72
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1362,
+          "end": 1378,
+          "loc": {
+            "start": {
+              "line": 35,
+              "column": 0
+            },
+            "end": {
+              "line": 35,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1362,
+            "end": 1368,
+            "loc": {
+              "start": {
+                "line": 35,
+                "column": 0
+              },
+              "end": {
+                "line": 35,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1369,
+            "end": 1378,
+            "loc": {
+              "start": {
+                "line": 35,
+                "column": 7
+              },
+              "end": {
+                "line": 35,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 1379,
+            "end": 1391,
+            "loc": {
+              "start": {
+                "line": 35,
+                "column": 17
+              },
+              "end": {
+                "line": 35,
+                "column": 29
+              }
+            },
+            "left": {
+              "type": "Literal",
+              "start": 1379,
+              "end": 1385,
+              "loc": {
+                "start": {
+                  "line": 35,
+                  "column": 17
+                },
+                "end": {
+                  "line": 35,
+                  "column": 23
+                }
+              },
+              "value": "both",
+              "raw": "'both'"
+            },
+            "operator": "in",
+            "right": {
+              "type": "Identifier",
+              "start": 1389,
+              "end": 1391,
+              "loc": {
+                "start": {
+                  "line": 35,
+                  "column": 27
+                },
+                "end": {
+                  "line": 35,
+                  "column": 29
+                }
+              },
+              "name": "ns"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 1393,
+            "end": 1398,
+            "loc": {
+              "start": {
+                "line": 35,
+                "column": 31
+              },
+              "end": {
+                "line": 35,
+                "column": 36
+              }
+            },
+            "value": false,
+            "raw": "false"
+          },
+          {
+            "type": "Literal",
+            "start": 1400,
+            "end": 1433,
+            "loc": {
+              "start": {
+                "line": 35,
+                "column": 38
+              },
+              "end": {
+                "line": 35,
+                "column": 71
+              }
+            },
+            "value": "Ambiguous export is not present",
+            "raw": "'Ambiguous export is not present'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "module"
+}

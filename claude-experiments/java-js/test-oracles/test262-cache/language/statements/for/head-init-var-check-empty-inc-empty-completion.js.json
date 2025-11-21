@@ -1,0 +1,365 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 512,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 17,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 300,
+      "end": 314,
+      "loc": {
+        "start": {
+          "line": 12,
+          "column": 0
+        },
+        "end": {
+          "line": 12,
+          "column": 14
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 304,
+          "end": 313,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 4
+            },
+            "end": {
+              "line": 12,
+              "column": 13
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 304,
+            "end": 311,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 4
+              },
+              "end": {
+                "line": 12,
+                "column": 11
+              }
+            },
+            "name": "supreme"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 312,
+            "end": 313,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 12
+              },
+              "end": {
+                "line": 12,
+                "column": 13
+              }
+            },
+            "value": 5,
+            "raw": "5"
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 316,
+      "end": 405,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 89
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 320,
+          "end": 404,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 4
+            },
+            "end": {
+              "line": 14,
+              "column": 88
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 320,
+            "end": 331,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 4
+              },
+              "end": {
+                "line": 14,
+                "column": 15
+              }
+            },
+            "name": "__evaluated"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 335,
+            "end": 404,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 19
+              },
+              "end": {
+                "line": 14,
+                "column": 88
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 335,
+              "end": 339,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 19
+                },
+                "end": {
+                  "line": 14,
+                  "column": 23
+                }
+              },
+              "name": "eval"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 340,
+                "end": 403,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 87
+                  }
+                },
+                "value": "for(var count=0;;) {if (count===supreme)break;else count++; }",
+                "raw": "\"for(var count=0;;) {if (count===supreme)break;else count++; }\""
+              }
+            ],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 407,
+      "end": 511,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 104
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 407,
+        "end": 510,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 0
+          },
+          "end": {
+            "line": 16,
+            "column": 103
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 407,
+          "end": 423,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 0
+            },
+            "end": {
+              "line": 16,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 407,
+            "end": 413,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 0
+              },
+              "end": {
+                "line": 16,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 414,
+            "end": 423,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 7
+              },
+              "end": {
+                "line": 16,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 424,
+            "end": 435,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 17
+              },
+              "end": {
+                "line": 16,
+                "column": 28
+              }
+            },
+            "name": "__evaluated"
+          },
+          {
+            "type": "UnaryExpression",
+            "start": 437,
+            "end": 443,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 30
+              },
+              "end": {
+                "line": 16,
+                "column": 36
+              }
+            },
+            "operator": "void",
+            "prefix": true,
+            "argument": {
+              "type": "Literal",
+              "start": 442,
+              "end": 443,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 35
+                },
+                "end": {
+                  "line": 16,
+                  "column": 36
+                }
+              },
+              "value": 0,
+              "raw": "0"
+            }
+          },
+          {
+            "type": "BinaryExpression",
+            "start": 445,
+            "end": 507,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 38
+              },
+              "end": {
+                "line": 16,
+                "column": 100
+              }
+            },
+            "left": {
+              "type": "Literal",
+              "start": 445,
+              "end": 494,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 38
+                },
+                "end": {
+                  "line": 16,
+                  "column": 87
+                }
+              },
+              "value": "#1: __evaluated === 4. Actual:  __evaluated ===",
+              "raw": "'#1: __evaluated === 4. Actual:  __evaluated ==='"
+            },
+            "operator": "+",
+            "right": {
+              "type": "Identifier",
+              "start": 496,
+              "end": 507,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 89
+                },
+                "end": {
+                  "line": 16,
+                  "column": 100
+                }
+              },
+              "name": "__evaluated"
+            }
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

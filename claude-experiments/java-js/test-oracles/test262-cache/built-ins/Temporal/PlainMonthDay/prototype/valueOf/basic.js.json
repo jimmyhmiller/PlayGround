@@ -1,0 +1,1939 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 989,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 22,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 253,
+      "end": 317,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 64
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 259,
+          "end": 316,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 6
+            },
+            "end": {
+              "line": 10,
+              "column": 63
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 259,
+            "end": 272,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 6
+              },
+              "end": {
+                "line": 10,
+                "column": 19
+              }
+            },
+            "name": "plainMonthDay"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 275,
+            "end": 316,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 22
+              },
+              "end": {
+                "line": 10,
+                "column": 63
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 275,
+              "end": 302,
+              "loc": {
+                "start": {
+                  "line": 10,
+                  "column": 22
+                },
+                "end": {
+                  "line": 10,
+                  "column": 49
+                }
+              },
+              "object": {
+                "type": "MemberExpression",
+                "start": 275,
+                "end": 297,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 44
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 275,
+                  "end": 283,
+                  "loc": {
+                    "start": {
+                      "line": 10,
+                      "column": 22
+                    },
+                    "end": {
+                      "line": 10,
+                      "column": 30
+                    }
+                  },
+                  "name": "Temporal"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 284,
+                  "end": 297,
+                  "loc": {
+                    "start": {
+                      "line": 10,
+                      "column": 31
+                    },
+                    "end": {
+                      "line": 10,
+                      "column": 44
+                    }
+                  },
+                  "name": "PlainMonthDay"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 298,
+                "end": 302,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 45
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 49
+                  }
+                },
+                "name": "from"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 303,
+                "end": 315,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 50
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 62
+                  }
+                },
+                "value": "1963-02-13",
+                "raw": "\"1963-02-13\""
+              }
+            ],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 318,
+      "end": 383,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 65
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 324,
+          "end": 382,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 6
+            },
+            "end": {
+              "line": 11,
+              "column": 64
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 324,
+            "end": 338,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 6
+              },
+              "end": {
+                "line": 11,
+                "column": 20
+              }
+            },
+            "name": "plainMonthDay2"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 341,
+            "end": 382,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 23
+              },
+              "end": {
+                "line": 11,
+                "column": 64
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 341,
+              "end": 368,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 23
+                },
+                "end": {
+                  "line": 11,
+                  "column": 50
+                }
+              },
+              "object": {
+                "type": "MemberExpression",
+                "start": 341,
+                "end": 363,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 23
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 45
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 341,
+                  "end": 349,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 23
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 31
+                    }
+                  },
+                  "name": "Temporal"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 350,
+                  "end": 363,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 32
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 45
+                    }
+                  },
+                  "name": "PlainMonthDay"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 364,
+                "end": 368,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 46
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 50
+                  }
+                },
+                "name": "from"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 369,
+                "end": 381,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 51
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 63
+                  }
+                },
+                "value": "1963-02-13",
+                "raw": "\"1963-02-13\""
+              }
+            ],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 385,
+      "end": 452,
+      "loc": {
+        "start": {
+          "line": 13,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 67
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 385,
+        "end": 451,
+        "loc": {
+          "start": {
+            "line": 13,
+            "column": 0
+          },
+          "end": {
+            "line": 13,
+            "column": 66
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 385,
+          "end": 398,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 0
+            },
+            "end": {
+              "line": 13,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 385,
+            "end": 391,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 0
+              },
+              "end": {
+                "line": 13,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 392,
+            "end": 398,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 7
+              },
+              "end": {
+                "line": 13,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 399,
+            "end": 408,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 14
+              },
+              "end": {
+                "line": 13,
+                "column": 23
+              }
+            },
+            "name": "TypeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 410,
+            "end": 439,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 25
+              },
+              "end": {
+                "line": 13,
+                "column": 54
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "CallExpression",
+              "start": 416,
+              "end": 439,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 31
+                },
+                "end": {
+                  "line": 13,
+                  "column": 54
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 416,
+                "end": 437,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 52
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 416,
+                  "end": 429,
+                  "loc": {
+                    "start": {
+                      "line": 13,
+                      "column": 31
+                    },
+                    "end": {
+                      "line": 13,
+                      "column": 44
+                    }
+                  },
+                  "name": "plainMonthDay"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 430,
+                  "end": 437,
+                  "loc": {
+                    "start": {
+                      "line": 13,
+                      "column": 45
+                    },
+                    "end": {
+                      "line": 13,
+                      "column": 52
+                    }
+                  },
+                  "name": "valueOf"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [],
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 441,
+            "end": 450,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 56
+              },
+              "end": {
+                "line": 13,
+                "column": 65
+              }
+            },
+            "value": "valueOf",
+            "raw": "\"valueOf\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 453,
+      "end": 520,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 67
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 453,
+        "end": 519,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 66
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 453,
+          "end": 466,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 0
+            },
+            "end": {
+              "line": 14,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 453,
+            "end": 459,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 0
+              },
+              "end": {
+                "line": 14,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 460,
+            "end": 466,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 7
+              },
+              "end": {
+                "line": 14,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 467,
+            "end": 476,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 14
+              },
+              "end": {
+                "line": 14,
+                "column": 23
+              }
+            },
+            "name": "TypeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 478,
+            "end": 513,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 25
+              },
+              "end": {
+                "line": 14,
+                "column": 60
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "BinaryExpression",
+              "start": 484,
+              "end": 513,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 31
+                },
+                "end": {
+                  "line": 14,
+                  "column": 60
+                }
+              },
+              "left": {
+                "type": "Identifier",
+                "start": 484,
+                "end": 497,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 44
+                  }
+                },
+                "name": "plainMonthDay"
+              },
+              "operator": "<",
+              "right": {
+                "type": "Identifier",
+                "start": 500,
+                "end": 513,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 47
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 60
+                  }
+                },
+                "name": "plainMonthDay"
+              }
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 515,
+            "end": 518,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 62
+              },
+              "end": {
+                "line": 14,
+                "column": 65
+              }
+            },
+            "value": "<",
+            "raw": "\"<\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 521,
+      "end": 590,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 69
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 521,
+        "end": 589,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 0
+          },
+          "end": {
+            "line": 15,
+            "column": 68
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 521,
+          "end": 534,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 0
+            },
+            "end": {
+              "line": 15,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 521,
+            "end": 527,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 0
+              },
+              "end": {
+                "line": 15,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 528,
+            "end": 534,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 7
+              },
+              "end": {
+                "line": 15,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 535,
+            "end": 544,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 14
+              },
+              "end": {
+                "line": 15,
+                "column": 23
+              }
+            },
+            "name": "TypeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 546,
+            "end": 582,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 25
+              },
+              "end": {
+                "line": 15,
+                "column": 61
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "BinaryExpression",
+              "start": 552,
+              "end": 582,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 31
+                },
+                "end": {
+                  "line": 15,
+                  "column": 61
+                }
+              },
+              "left": {
+                "type": "Identifier",
+                "start": 552,
+                "end": 565,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 44
+                  }
+                },
+                "name": "plainMonthDay"
+              },
+              "operator": "<=",
+              "right": {
+                "type": "Identifier",
+                "start": 569,
+                "end": 582,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 48
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 61
+                  }
+                },
+                "name": "plainMonthDay"
+              }
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 584,
+            "end": 588,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 63
+              },
+              "end": {
+                "line": 15,
+                "column": 67
+              }
+            },
+            "value": "<=",
+            "raw": "\"<=\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 591,
+      "end": 658,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 67
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 591,
+        "end": 657,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 0
+          },
+          "end": {
+            "line": 16,
+            "column": 66
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 591,
+          "end": 604,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 0
+            },
+            "end": {
+              "line": 16,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 591,
+            "end": 597,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 0
+              },
+              "end": {
+                "line": 16,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 598,
+            "end": 604,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 7
+              },
+              "end": {
+                "line": 16,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 605,
+            "end": 614,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 14
+              },
+              "end": {
+                "line": 16,
+                "column": 23
+              }
+            },
+            "name": "TypeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 616,
+            "end": 651,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 25
+              },
+              "end": {
+                "line": 16,
+                "column": 60
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "BinaryExpression",
+              "start": 622,
+              "end": 651,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 31
+                },
+                "end": {
+                  "line": 16,
+                  "column": 60
+                }
+              },
+              "left": {
+                "type": "Identifier",
+                "start": 622,
+                "end": 635,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 44
+                  }
+                },
+                "name": "plainMonthDay"
+              },
+              "operator": ">",
+              "right": {
+                "type": "Identifier",
+                "start": 638,
+                "end": 651,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 47
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 60
+                  }
+                },
+                "name": "plainMonthDay"
+              }
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 653,
+            "end": 656,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 62
+              },
+              "end": {
+                "line": 16,
+                "column": 65
+              }
+            },
+            "value": ">",
+            "raw": "\">\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 659,
+      "end": 728,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 69
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 659,
+        "end": 727,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 0
+          },
+          "end": {
+            "line": 17,
+            "column": 68
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 659,
+          "end": 672,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 0
+            },
+            "end": {
+              "line": 17,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 659,
+            "end": 665,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 0
+              },
+              "end": {
+                "line": 17,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 666,
+            "end": 672,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 7
+              },
+              "end": {
+                "line": 17,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 673,
+            "end": 682,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 14
+              },
+              "end": {
+                "line": 17,
+                "column": 23
+              }
+            },
+            "name": "TypeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 684,
+            "end": 720,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 25
+              },
+              "end": {
+                "line": 17,
+                "column": 61
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "BinaryExpression",
+              "start": 690,
+              "end": 720,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 31
+                },
+                "end": {
+                  "line": 17,
+                  "column": 61
+                }
+              },
+              "left": {
+                "type": "Identifier",
+                "start": 690,
+                "end": 703,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 44
+                  }
+                },
+                "name": "plainMonthDay"
+              },
+              "operator": ">=",
+              "right": {
+                "type": "Identifier",
+                "start": 707,
+                "end": 720,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 48
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 61
+                  }
+                },
+                "name": "plainMonthDay"
+              }
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 722,
+            "end": 726,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 63
+              },
+              "end": {
+                "line": 17,
+                "column": 67
+              }
+            },
+            "value": ">=",
+            "raw": "\">=\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 729,
+      "end": 792,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 63
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 729,
+        "end": 791,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 0
+          },
+          "end": {
+            "line": 18,
+            "column": 62
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 729,
+          "end": 745,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 0
+            },
+            "end": {
+              "line": 18,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 729,
+            "end": 735,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 0
+              },
+              "end": {
+                "line": 18,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 736,
+            "end": 745,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 7
+              },
+              "end": {
+                "line": 18,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 746,
+            "end": 777,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 17
+              },
+              "end": {
+                "line": 18,
+                "column": 48
+              }
+            },
+            "left": {
+              "type": "Identifier",
+              "start": 746,
+              "end": 759,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 17
+                },
+                "end": {
+                  "line": 18,
+                  "column": 30
+                }
+              },
+              "name": "plainMonthDay"
+            },
+            "operator": "===",
+            "right": {
+              "type": "Identifier",
+              "start": 764,
+              "end": 777,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 35
+                },
+                "end": {
+                  "line": 18,
+                  "column": 48
+                }
+              },
+              "name": "plainMonthDay"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 779,
+            "end": 783,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 50
+              },
+              "end": {
+                "line": 18,
+                "column": 54
+              }
+            },
+            "value": true,
+            "raw": "true"
+          },
+          {
+            "type": "Literal",
+            "start": 785,
+            "end": 790,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 56
+              },
+              "end": {
+                "line": 18,
+                "column": 61
+              }
+            },
+            "value": "===",
+            "raw": "\"===\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 793,
+      "end": 858,
+      "loc": {
+        "start": {
+          "line": 19,
+          "column": 0
+        },
+        "end": {
+          "line": 19,
+          "column": 65
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 793,
+        "end": 857,
+        "loc": {
+          "start": {
+            "line": 19,
+            "column": 0
+          },
+          "end": {
+            "line": 19,
+            "column": 64
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 793,
+          "end": 809,
+          "loc": {
+            "start": {
+              "line": 19,
+              "column": 0
+            },
+            "end": {
+              "line": 19,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 793,
+            "end": 799,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 0
+              },
+              "end": {
+                "line": 19,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 800,
+            "end": 809,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 7
+              },
+              "end": {
+                "line": 19,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 810,
+            "end": 842,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 17
+              },
+              "end": {
+                "line": 19,
+                "column": 49
+              }
+            },
+            "left": {
+              "type": "Identifier",
+              "start": 810,
+              "end": 823,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 17
+                },
+                "end": {
+                  "line": 19,
+                  "column": 30
+                }
+              },
+              "name": "plainMonthDay"
+            },
+            "operator": "===",
+            "right": {
+              "type": "Identifier",
+              "start": 828,
+              "end": 842,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 35
+                },
+                "end": {
+                  "line": 19,
+                  "column": 49
+                }
+              },
+              "name": "plainMonthDay2"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 844,
+            "end": 849,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 51
+              },
+              "end": {
+                "line": 19,
+                "column": 56
+              }
+            },
+            "value": false,
+            "raw": "false"
+          },
+          {
+            "type": "Literal",
+            "start": 851,
+            "end": 856,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 58
+              },
+              "end": {
+                "line": 19,
+                "column": 63
+              }
+            },
+            "value": "===",
+            "raw": "\"===\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 859,
+      "end": 923,
+      "loc": {
+        "start": {
+          "line": 20,
+          "column": 0
+        },
+        "end": {
+          "line": 20,
+          "column": 64
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 859,
+        "end": 922,
+        "loc": {
+          "start": {
+            "line": 20,
+            "column": 0
+          },
+          "end": {
+            "line": 20,
+            "column": 63
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 859,
+          "end": 875,
+          "loc": {
+            "start": {
+              "line": 20,
+              "column": 0
+            },
+            "end": {
+              "line": 20,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 859,
+            "end": 865,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 0
+              },
+              "end": {
+                "line": 20,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 866,
+            "end": 875,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 7
+              },
+              "end": {
+                "line": 20,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 876,
+            "end": 907,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 17
+              },
+              "end": {
+                "line": 20,
+                "column": 48
+              }
+            },
+            "left": {
+              "type": "Identifier",
+              "start": 876,
+              "end": 889,
+              "loc": {
+                "start": {
+                  "line": 20,
+                  "column": 17
+                },
+                "end": {
+                  "line": 20,
+                  "column": 30
+                }
+              },
+              "name": "plainMonthDay"
+            },
+            "operator": "!==",
+            "right": {
+              "type": "Identifier",
+              "start": 894,
+              "end": 907,
+              "loc": {
+                "start": {
+                  "line": 20,
+                  "column": 35
+                },
+                "end": {
+                  "line": 20,
+                  "column": 48
+                }
+              },
+              "name": "plainMonthDay"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 909,
+            "end": 914,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 50
+              },
+              "end": {
+                "line": 20,
+                "column": 55
+              }
+            },
+            "value": false,
+            "raw": "false"
+          },
+          {
+            "type": "Literal",
+            "start": 916,
+            "end": 921,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 57
+              },
+              "end": {
+                "line": 20,
+                "column": 62
+              }
+            },
+            "value": "!==",
+            "raw": "\"!==\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 924,
+      "end": 988,
+      "loc": {
+        "start": {
+          "line": 21,
+          "column": 0
+        },
+        "end": {
+          "line": 21,
+          "column": 64
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 924,
+        "end": 987,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 0
+          },
+          "end": {
+            "line": 21,
+            "column": 63
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 924,
+          "end": 940,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 0
+            },
+            "end": {
+              "line": 21,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 924,
+            "end": 930,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 0
+              },
+              "end": {
+                "line": 21,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 931,
+            "end": 940,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 7
+              },
+              "end": {
+                "line": 21,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 941,
+            "end": 973,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 17
+              },
+              "end": {
+                "line": 21,
+                "column": 49
+              }
+            },
+            "left": {
+              "type": "Identifier",
+              "start": 941,
+              "end": 954,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 17
+                },
+                "end": {
+                  "line": 21,
+                  "column": 30
+                }
+              },
+              "name": "plainMonthDay"
+            },
+            "operator": "!==",
+            "right": {
+              "type": "Identifier",
+              "start": 959,
+              "end": 973,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 35
+                },
+                "end": {
+                  "line": 21,
+                  "column": 49
+                }
+              },
+              "name": "plainMonthDay2"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 975,
+            "end": 979,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 51
+              },
+              "end": {
+                "line": 21,
+                "column": 55
+              }
+            },
+            "value": true,
+            "raw": "true"
+          },
+          {
+            "type": "Literal",
+            "start": 981,
+            "end": 986,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 57
+              },
+              "end": {
+                "line": 21,
+                "column": 62
+              }
+            },
+            "value": "!==",
+            "raw": "\"!==\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

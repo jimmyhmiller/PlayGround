@@ -1,0 +1,201 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 356,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 12,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 273,
+      "end": 355,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 82
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 273,
+        "end": 354,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 11,
+            "column": 81
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 273,
+          "end": 289,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 0
+            },
+            "end": {
+              "line": 11,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 273,
+            "end": 279,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 0
+              },
+              "end": {
+                "line": 11,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 280,
+            "end": 289,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 7
+              },
+              "end": {
+                "line": 11,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 290,
+            "end": 316,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 17
+              },
+              "end": {
+                "line": 11,
+                "column": 43
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 290,
+              "end": 314,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 17
+                },
+                "end": {
+                  "line": 11,
+                  "column": 41
+                }
+              },
+              "object": {
+                "type": "Literal",
+                "start": 290,
+                "end": 309,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 36
+                  }
+                },
+                "value": " \tabc \t",
+                "raw": "\" \\u0009abc \\u0009\""
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 310,
+                "end": 314,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 37
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 41
+                  }
+                },
+                "name": "trim"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 318,
+            "end": 323,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 45
+              },
+              "end": {
+                "line": 11,
+                "column": 50
+              }
+            },
+            "value": "abc",
+            "raw": "\"abc\""
+          },
+          {
+            "type": "Literal",
+            "start": 325,
+            "end": 353,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 52
+              },
+              "end": {
+                "line": 11,
+                "column": 80
+              }
+            },
+            "value": "\" \tabc \t\".trim()",
+            "raw": "'\" \\u0009abc \\u0009\".trim()'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

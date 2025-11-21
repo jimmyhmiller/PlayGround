@@ -1,0 +1,248 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 500,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 15,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 423,
+      "end": 499,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 76
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 423,
+        "end": 498,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 75
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 423,
+          "end": 439,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 0
+            },
+            "end": {
+              "line": 14,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 423,
+            "end": 429,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 0
+              },
+              "end": {
+                "line": 14,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 430,
+            "end": 439,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 7
+              },
+              "end": {
+                "line": 14,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 440,
+            "end": 476,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 17
+              },
+              "end": {
+                "line": 14,
+                "column": 53
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 440,
+              "end": 461,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 17
+                },
+                "end": {
+                  "line": 14,
+                  "column": 38
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 440,
+                "end": 446,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 23
+                  }
+                },
+                "name": "Object"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 447,
+                "end": 461,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 24
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 38
+                  }
+                },
+                "name": "getPrototypeOf"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "NewExpression",
+                "start": 462,
+                "end": 475,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 39
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 52
+                  }
+                },
+                "callee": {
+                  "type": "Identifier",
+                  "start": 466,
+                  "end": 475,
+                  "loc": {
+                    "start": {
+                      "line": 14,
+                      "column": 43
+                    },
+                    "end": {
+                      "line": 14,
+                      "column": 52
+                    }
+                  },
+                  "name": "TypeError"
+                },
+                "arguments": []
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 478,
+            "end": 497,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 55
+              },
+              "end": {
+                "line": 14,
+                "column": 74
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 478,
+              "end": 487,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 55
+                },
+                "end": {
+                  "line": 14,
+                  "column": 64
+                }
+              },
+              "name": "TypeError"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 488,
+              "end": 497,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 65
+                },
+                "end": {
+                  "line": 14,
+                  "column": 74
+                }
+              },
+              "name": "prototype"
+            },
+            "computed": false,
+            "optional": false
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

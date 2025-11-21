@@ -1,0 +1,231 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 898,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 24,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 753,
+      "end": 869,
+      "loc": {
+        "start": {
+          "line": 22,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 116
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 753,
+        "end": 868,
+        "loc": {
+          "start": {
+            "line": 22,
+            "column": 0
+          },
+          "end": {
+            "line": 22,
+            "column": 115
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 753,
+          "end": 769,
+          "loc": {
+            "start": {
+              "line": 22,
+              "column": 0
+            },
+            "end": {
+              "line": 22,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 753,
+            "end": 759,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 0
+              },
+              "end": {
+                "line": 22,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 760,
+            "end": 769,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 7
+              },
+              "end": {
+                "line": 22,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 770,
+            "end": 805,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 17
+              },
+              "end": {
+                "line": 22,
+                "column": 52
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 770,
+              "end": 783,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 17
+                },
+                "end": {
+                  "line": 22,
+                  "column": 30
+                }
+              },
+              "name": "isConstructor"
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 784,
+                "end": 804,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 51
+                  }
+                },
+                "name": "AsyncDisposableStack"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 807,
+            "end": 811,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 54
+              },
+              "end": {
+                "line": 22,
+                "column": 58
+              }
+            },
+            "value": true,
+            "raw": "true"
+          },
+          {
+            "type": "Literal",
+            "start": 813,
+            "end": 867,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 60
+              },
+              "end": {
+                "line": 22,
+                "column": 114
+              }
+            },
+            "value": "isConstructor(AsyncDisposableStack) must return true",
+            "raw": "'isConstructor(AsyncDisposableStack) must return true'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 870,
+      "end": 897,
+      "loc": {
+        "start": {
+          "line": 23,
+          "column": 0
+        },
+        "end": {
+          "line": 23,
+          "column": 27
+        }
+      },
+      "expression": {
+        "type": "NewExpression",
+        "start": 870,
+        "end": 896,
+        "loc": {
+          "start": {
+            "line": 23,
+            "column": 0
+          },
+          "end": {
+            "line": 23,
+            "column": 26
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 874,
+          "end": 894,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 4
+            },
+            "end": {
+              "line": 23,
+              "column": 24
+            }
+          },
+          "name": "AsyncDisposableStack"
+        },
+        "arguments": []
+      }
+    }
+  ],
+  "sourceType": "script"
+}

@@ -1,0 +1,1183 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1464,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 41,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 568,
+      "end": 708,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 20,
+          "column": 59
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 568,
+        "end": 707,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 0
+          },
+          "end": {
+            "line": 20,
+            "column": 58
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 568,
+          "end": 581,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 0
+            },
+            "end": {
+              "line": 18,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 568,
+            "end": 574,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 0
+              },
+              "end": {
+                "line": 18,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 575,
+            "end": 581,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 7
+              },
+              "end": {
+                "line": 18,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 582,
+            "end": 590,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 14
+              },
+              "end": {
+                "line": 18,
+                "column": 22
+              }
+            },
+            "name": "URIError"
+          },
+          {
+            "type": "FunctionExpression",
+            "start": 592,
+            "end": 650,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 24
+              },
+              "end": {
+                "line": 20,
+                "column": 1
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 601,
+              "end": 607,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 33
+                },
+                "end": {
+                  "line": 18,
+                  "column": 39
+                }
+              },
+              "name": "CHECK1"
+            },
+            "expression": false,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "BlockStatement",
+              "start": 610,
+              "end": 650,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 42
+                },
+                "end": {
+                  "line": 20,
+                  "column": 1
+                }
+              },
+              "body": [
+                {
+                  "type": "ExpressionStatement",
+                  "start": 616,
+                  "end": 648,
+                  "loc": {
+                    "start": {
+                      "line": 19,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 19,
+                      "column": 36
+                    }
+                  },
+                  "expression": {
+                    "type": "CallExpression",
+                    "start": 616,
+                    "end": 647,
+                    "loc": {
+                      "start": {
+                        "line": 19,
+                        "column": 4
+                      },
+                      "end": {
+                        "line": 19,
+                        "column": 35
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 616,
+                      "end": 634,
+                      "loc": {
+                        "start": {
+                          "line": 19,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 19,
+                          "column": 22
+                        }
+                      },
+                      "name": "decodeURIComponent"
+                    },
+                    "arguments": [
+                      {
+                        "type": "Literal",
+                        "start": 635,
+                        "end": 646,
+                        "loc": {
+                          "start": {
+                            "line": 19,
+                            "column": 23
+                          },
+                          "end": {
+                            "line": 19,
+                            "column": 34
+                          }
+                        },
+                        "value": "%ED%BF%BF",
+                        "raw": "'%ED%BF%BF'"
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 652,
+            "end": 706,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 3
+              },
+              "end": {
+                "line": 20,
+                "column": 57
+              }
+            },
+            "value": "#1: %ED%BF%BF (surrogate pair) should throw URIError",
+            "raw": "'#1: %ED%BF%BF (surrogate pair) should throw URIError'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 762,
+      "end": 899,
+      "loc": {
+        "start": {
+          "line": 23,
+          "column": 0
+        },
+        "end": {
+          "line": 25,
+          "column": 59
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 762,
+        "end": 898,
+        "loc": {
+          "start": {
+            "line": 23,
+            "column": 0
+          },
+          "end": {
+            "line": 25,
+            "column": 58
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 762,
+          "end": 775,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 0
+            },
+            "end": {
+              "line": 23,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 762,
+            "end": 768,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 0
+              },
+              "end": {
+                "line": 23,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 769,
+            "end": 775,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 7
+              },
+              "end": {
+                "line": 23,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 776,
+            "end": 784,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 14
+              },
+              "end": {
+                "line": 23,
+                "column": 22
+              }
+            },
+            "name": "URIError"
+          },
+          {
+            "type": "FunctionExpression",
+            "start": 786,
+            "end": 841,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 24
+              },
+              "end": {
+                "line": 25,
+                "column": 1
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 795,
+              "end": 801,
+              "loc": {
+                "start": {
+                  "line": 23,
+                  "column": 33
+                },
+                "end": {
+                  "line": 23,
+                  "column": 39
+                }
+              },
+              "name": "CHECK2"
+            },
+            "expression": false,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "BlockStatement",
+              "start": 804,
+              "end": 841,
+              "loc": {
+                "start": {
+                  "line": 23,
+                  "column": 42
+                },
+                "end": {
+                  "line": 25,
+                  "column": 1
+                }
+              },
+              "body": [
+                {
+                  "type": "ExpressionStatement",
+                  "start": 810,
+                  "end": 839,
+                  "loc": {
+                    "start": {
+                      "line": 24,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 24,
+                      "column": 33
+                    }
+                  },
+                  "expression": {
+                    "type": "CallExpression",
+                    "start": 810,
+                    "end": 838,
+                    "loc": {
+                      "start": {
+                        "line": 24,
+                        "column": 4
+                      },
+                      "end": {
+                        "line": 24,
+                        "column": 32
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 810,
+                      "end": 828,
+                      "loc": {
+                        "start": {
+                          "line": 24,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 24,
+                          "column": 22
+                        }
+                      },
+                      "name": "decodeURIComponent"
+                    },
+                    "arguments": [
+                      {
+                        "type": "Literal",
+                        "start": 829,
+                        "end": 837,
+                        "loc": {
+                          "start": {
+                            "line": 24,
+                            "column": 23
+                          },
+                          "end": {
+                            "line": 24,
+                            "column": 31
+                          }
+                        },
+                        "value": "%C0%AF",
+                        "raw": "'%C0%AF'"
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 843,
+            "end": 897,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 3
+              },
+              "end": {
+                "line": 25,
+                "column": 57
+              }
+            },
+            "value": "#2: %C0%AF (overlong encoding) should throw URIError",
+            "raw": "'#2: %C0%AF (overlong encoding) should throw URIError'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 949,
+      "end": 1095,
+      "loc": {
+        "start": {
+          "line": 28,
+          "column": 0
+        },
+        "end": {
+          "line": 30,
+          "column": 65
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 949,
+        "end": 1094,
+        "loc": {
+          "start": {
+            "line": 28,
+            "column": 0
+          },
+          "end": {
+            "line": 30,
+            "column": 64
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 949,
+          "end": 962,
+          "loc": {
+            "start": {
+              "line": 28,
+              "column": 0
+            },
+            "end": {
+              "line": 28,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 949,
+            "end": 955,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 0
+              },
+              "end": {
+                "line": 28,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 956,
+            "end": 962,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 7
+              },
+              "end": {
+                "line": 28,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 963,
+            "end": 971,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 14
+              },
+              "end": {
+                "line": 28,
+                "column": 22
+              }
+            },
+            "name": "URIError"
+          },
+          {
+            "type": "FunctionExpression",
+            "start": 973,
+            "end": 1031,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 24
+              },
+              "end": {
+                "line": 30,
+                "column": 1
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 982,
+              "end": 988,
+              "loc": {
+                "start": {
+                  "line": 28,
+                  "column": 33
+                },
+                "end": {
+                  "line": 28,
+                  "column": 39
+                }
+              },
+              "name": "CHECK3"
+            },
+            "expression": false,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "BlockStatement",
+              "start": 991,
+              "end": 1031,
+              "loc": {
+                "start": {
+                  "line": 28,
+                  "column": 42
+                },
+                "end": {
+                  "line": 30,
+                  "column": 1
+                }
+              },
+              "body": [
+                {
+                  "type": "ExpressionStatement",
+                  "start": 997,
+                  "end": 1029,
+                  "loc": {
+                    "start": {
+                      "line": 29,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 29,
+                      "column": 36
+                    }
+                  },
+                  "expression": {
+                    "type": "CallExpression",
+                    "start": 997,
+                    "end": 1028,
+                    "loc": {
+                      "start": {
+                        "line": 29,
+                        "column": 4
+                      },
+                      "end": {
+                        "line": 29,
+                        "column": 35
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 997,
+                      "end": 1015,
+                      "loc": {
+                        "start": {
+                          "line": 29,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 29,
+                          "column": 22
+                        }
+                      },
+                      "name": "decodeURIComponent"
+                    },
+                    "arguments": [
+                      {
+                        "type": "Literal",
+                        "start": 1016,
+                        "end": 1027,
+                        "loc": {
+                          "start": {
+                            "line": 29,
+                            "column": 23
+                          },
+                          "end": {
+                            "line": 29,
+                            "column": 34
+                          }
+                        },
+                        "value": "%ED%7F%BF",
+                        "raw": "'%ED%7F%BF'"
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 1033,
+            "end": 1093,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 3
+              },
+              "end": {
+                "line": 30,
+                "column": 63
+              }
+            },
+            "value": "#3: %ED%7F%BF (invalid continuation) should throw URIError",
+            "raw": "'#3: %ED%7F%BF (invalid continuation) should throw URIError'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1138,
+      "end": 1277,
+      "loc": {
+        "start": {
+          "line": 33,
+          "column": 0
+        },
+        "end": {
+          "line": 35,
+          "column": 61
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1138,
+        "end": 1276,
+        "loc": {
+          "start": {
+            "line": 33,
+            "column": 0
+          },
+          "end": {
+            "line": 35,
+            "column": 60
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1138,
+          "end": 1151,
+          "loc": {
+            "start": {
+              "line": 33,
+              "column": 0
+            },
+            "end": {
+              "line": 33,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1138,
+            "end": 1144,
+            "loc": {
+              "start": {
+                "line": 33,
+                "column": 0
+              },
+              "end": {
+                "line": 33,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1145,
+            "end": 1151,
+            "loc": {
+              "start": {
+                "line": 33,
+                "column": 7
+              },
+              "end": {
+                "line": 33,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 1152,
+            "end": 1160,
+            "loc": {
+              "start": {
+                "line": 33,
+                "column": 14
+              },
+              "end": {
+                "line": 33,
+                "column": 22
+              }
+            },
+            "name": "URIError"
+          },
+          {
+            "type": "FunctionExpression",
+            "start": 1162,
+            "end": 1217,
+            "loc": {
+              "start": {
+                "line": 33,
+                "column": 24
+              },
+              "end": {
+                "line": 35,
+                "column": 1
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 1171,
+              "end": 1177,
+              "loc": {
+                "start": {
+                  "line": 33,
+                  "column": 33
+                },
+                "end": {
+                  "line": 33,
+                  "column": 39
+                }
+              },
+              "name": "CHECK4"
+            },
+            "expression": false,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "BlockStatement",
+              "start": 1180,
+              "end": 1217,
+              "loc": {
+                "start": {
+                  "line": 33,
+                  "column": 42
+                },
+                "end": {
+                  "line": 35,
+                  "column": 1
+                }
+              },
+              "body": [
+                {
+                  "type": "ExpressionStatement",
+                  "start": 1186,
+                  "end": 1215,
+                  "loc": {
+                    "start": {
+                      "line": 34,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 34,
+                      "column": 33
+                    }
+                  },
+                  "expression": {
+                    "type": "CallExpression",
+                    "start": 1186,
+                    "end": 1214,
+                    "loc": {
+                      "start": {
+                        "line": 34,
+                        "column": 4
+                      },
+                      "end": {
+                        "line": 34,
+                        "column": 32
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 1186,
+                      "end": 1204,
+                      "loc": {
+                        "start": {
+                          "line": 34,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 34,
+                          "column": 22
+                        }
+                      },
+                      "name": "decodeURIComponent"
+                    },
+                    "arguments": [
+                      {
+                        "type": "Literal",
+                        "start": 1205,
+                        "end": 1213,
+                        "loc": {
+                          "start": {
+                            "line": 34,
+                            "column": 23
+                          },
+                          "end": {
+                            "line": 34,
+                            "column": 31
+                          }
+                        },
+                        "value": "%ED%BF",
+                        "raw": "'%ED%BF'"
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 1219,
+            "end": 1275,
+            "loc": {
+              "start": {
+                "line": 35,
+                "column": 3
+              },
+              "end": {
+                "line": 35,
+                "column": 59
+              }
+            },
+            "value": "#4: %ED%BF (incomplete sequence) should throw URIError",
+            "raw": "'#4: %ED%BF (incomplete sequence) should throw URIError'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1320,
+      "end": 1463,
+      "loc": {
+        "start": {
+          "line": 38,
+          "column": 0
+        },
+        "end": {
+          "line": 40,
+          "column": 59
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1320,
+        "end": 1462,
+        "loc": {
+          "start": {
+            "line": 38,
+            "column": 0
+          },
+          "end": {
+            "line": 40,
+            "column": 58
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1320,
+          "end": 1333,
+          "loc": {
+            "start": {
+              "line": 38,
+              "column": 0
+            },
+            "end": {
+              "line": 38,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1320,
+            "end": 1326,
+            "loc": {
+              "start": {
+                "line": 38,
+                "column": 0
+              },
+              "end": {
+                "line": 38,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1327,
+            "end": 1333,
+            "loc": {
+              "start": {
+                "line": 38,
+                "column": 7
+              },
+              "end": {
+                "line": 38,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 1334,
+            "end": 1342,
+            "loc": {
+              "start": {
+                "line": 38,
+                "column": 14
+              },
+              "end": {
+                "line": 38,
+                "column": 22
+              }
+            },
+            "name": "URIError"
+          },
+          {
+            "type": "FunctionExpression",
+            "start": 1344,
+            "end": 1405,
+            "loc": {
+              "start": {
+                "line": 38,
+                "column": 24
+              },
+              "end": {
+                "line": 40,
+                "column": 1
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 1353,
+              "end": 1359,
+              "loc": {
+                "start": {
+                  "line": 38,
+                  "column": 33
+                },
+                "end": {
+                  "line": 38,
+                  "column": 39
+                }
+              },
+              "name": "CHECK5"
+            },
+            "expression": false,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "BlockStatement",
+              "start": 1362,
+              "end": 1405,
+              "loc": {
+                "start": {
+                  "line": 38,
+                  "column": 42
+                },
+                "end": {
+                  "line": 40,
+                  "column": 1
+                }
+              },
+              "body": [
+                {
+                  "type": "ExpressionStatement",
+                  "start": 1368,
+                  "end": 1403,
+                  "loc": {
+                    "start": {
+                      "line": 39,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 39,
+                      "column": 39
+                    }
+                  },
+                  "expression": {
+                    "type": "CallExpression",
+                    "start": 1368,
+                    "end": 1402,
+                    "loc": {
+                      "start": {
+                        "line": 39,
+                        "column": 4
+                      },
+                      "end": {
+                        "line": 39,
+                        "column": 38
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 1368,
+                      "end": 1386,
+                      "loc": {
+                        "start": {
+                          "line": 39,
+                          "column": 4
+                        },
+                        "end": {
+                          "line": 39,
+                          "column": 22
+                        }
+                      },
+                      "name": "decodeURIComponent"
+                    },
+                    "arguments": [
+                      {
+                        "type": "Literal",
+                        "start": 1387,
+                        "end": 1401,
+                        "loc": {
+                          "start": {
+                            "line": 39,
+                            "column": 23
+                          },
+                          "end": {
+                            "line": 39,
+                            "column": 37
+                          }
+                        },
+                        "value": "%F4%90%80%80",
+                        "raw": "'%F4%90%80%80'"
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 1406,
+            "end": 1461,
+            "loc": {
+              "start": {
+                "line": 40,
+                "column": 2
+              },
+              "end": {
+                "line": 40,
+                "column": 57
+              }
+            },
+            "value": "#5: %F4%90%80%80 (out-of-range) should throw URIError",
+            "raw": "'#5: %F4%90%80%80 (out-of-range) should throw URIError'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

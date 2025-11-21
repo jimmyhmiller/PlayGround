@@ -1,0 +1,167 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 388,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 11,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 314,
+      "end": 387,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 73
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 314,
+        "end": 386,
+        "loc": {
+          "start": {
+            "line": 10,
+            "column": 0
+          },
+          "end": {
+            "line": 10,
+            "column": 72
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 314,
+          "end": 330,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 0
+            },
+            "end": {
+              "line": 10,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 314,
+            "end": 320,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 0
+              },
+              "end": {
+                "line": 10,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 321,
+            "end": 330,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 7
+              },
+              "end": {
+                "line": 10,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 331,
+            "end": 341,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 17
+              },
+              "end": {
+                "line": 10,
+                "column": 27
+              }
+            },
+            "operator": "typeof",
+            "prefix": true,
+            "argument": {
+              "type": "Identifier",
+              "start": 338,
+              "end": 341,
+              "loc": {
+                "start": {
+                  "line": 10,
+                  "column": 24
+                },
+                "end": {
+                  "line": 10,
+                  "column": 27
+                }
+              },
+              "name": "Set"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 343,
+            "end": 353,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 29
+              },
+              "end": {
+                "line": 10,
+                "column": 39
+              }
+            },
+            "value": "function",
+            "raw": "\"function\""
+          },
+          {
+            "type": "Literal",
+            "start": 355,
+            "end": 385,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 41
+              },
+              "end": {
+                "line": 10,
+                "column": 71
+              }
+            },
+            "value": "`typeof Set` is `'function'`",
+            "raw": "\"`typeof Set` is `'function'`\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

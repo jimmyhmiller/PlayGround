@@ -1,0 +1,266 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 489,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 12,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 243,
+      "end": 417,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 9,
+          "column": 174
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 247,
+          "end": 416,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 4
+            },
+            "end": {
+              "line": 9,
+              "column": 173
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 247,
+            "end": 261,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 4
+              },
+              "end": {
+                "line": 9,
+                "column": 18
+              }
+            },
+            "name": "whiteSpacesStr"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 264,
+            "end": 416,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 21
+              },
+              "end": {
+                "line": 9,
+                "column": 173
+              }
+            },
+            "value": "\t\n\u000b\f\r                  　﻿",
+            "raw": "\"\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF\""
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 419,
+      "end": 488,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 69
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 419,
+        "end": 487,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 11,
+            "column": 68
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 419,
+          "end": 435,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 0
+            },
+            "end": {
+              "line": 11,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 419,
+            "end": 425,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 0
+              },
+              "end": {
+                "line": 11,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 426,
+            "end": 435,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 7
+              },
+              "end": {
+                "line": 11,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 436,
+            "end": 457,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 17
+              },
+              "end": {
+                "line": 11,
+                "column": 38
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 436,
+              "end": 455,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 17
+                },
+                "end": {
+                  "line": 11,
+                  "column": 36
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 436,
+                "end": 450,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 31
+                  }
+                },
+                "name": "whiteSpacesStr"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 451,
+                "end": 455,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 36
+                  }
+                },
+                "name": "trim"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 459,
+            "end": 461,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 40
+              },
+              "end": {
+                "line": 11,
+                "column": 42
+              }
+            },
+            "value": "",
+            "raw": "\"\""
+          },
+          {
+            "type": "Literal",
+            "start": 463,
+            "end": 486,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 44
+              },
+              "end": {
+                "line": 11,
+                "column": 67
+              }
+            },
+            "value": "whiteSpacesStr.trim()",
+            "raw": "'whiteSpacesStr.trim()'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

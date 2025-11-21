@@ -1,0 +1,166 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 331,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 12,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 203,
+      "end": 330,
+      "loc": {
+        "start": {
+          "line": 8,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 203,
+        "end": 329,
+        "loc": {
+          "start": {
+            "line": 8,
+            "column": 0
+          },
+          "end": {
+            "line": 11,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 203,
+          "end": 209,
+          "loc": {
+            "start": {
+              "line": 8,
+              "column": 0
+            },
+            "end": {
+              "line": 8,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 213,
+            "end": 241,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 2
+              },
+              "end": {
+                "line": 9,
+                "column": 30
+              }
+            },
+            "left": {
+              "type": "Literal",
+              "start": 213,
+              "end": 219,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 2
+                },
+                "end": {
+                  "line": 9,
+                  "column": 8
+                }
+              },
+              "value": "bind",
+              "raw": "'bind'"
+            },
+            "operator": "in",
+            "right": {
+              "type": "MemberExpression",
+              "start": 223,
+              "end": 241,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 12
+                },
+                "end": {
+                  "line": 9,
+                  "column": 30
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 223,
+                "end": 231,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 20
+                  }
+                },
+                "name": "Function"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 232,
+                "end": 241,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 21
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 30
+                  }
+                },
+                "name": "prototype"
+              },
+              "computed": false,
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 245,
+            "end": 327,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 2
+              },
+              "end": {
+                "line": 10,
+                "column": 84
+              }
+            },
+            "value": "The result of evaluating ('bind' in Function.prototype) is expected to be true",
+            "raw": "'The result of evaluating (\\'bind\\' in Function.prototype) is expected to be true'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

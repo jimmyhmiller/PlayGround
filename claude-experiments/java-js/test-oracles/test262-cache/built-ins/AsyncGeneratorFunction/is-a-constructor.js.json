@@ -1,0 +1,331 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1001,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 29,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 756,
+      "end": 841,
+      "loc": {
+        "start": {
+          "line": 22,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 85
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 760,
+          "end": 840,
+          "loc": {
+            "start": {
+              "line": 22,
+              "column": 4
+            },
+            "end": {
+              "line": 22,
+              "column": 84
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 760,
+            "end": 782,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 4
+              },
+              "end": {
+                "line": 22,
+                "column": 26
+              }
+            },
+            "name": "AsyncGeneratorFunction"
+          },
+          "init": {
+            "type": "CallExpression",
+            "start": 785,
+            "end": 840,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 29
+              },
+              "end": {
+                "line": 22,
+                "column": 84
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 785,
+              "end": 812,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 29
+                },
+                "end": {
+                  "line": 22,
+                  "column": 56
+                }
+              },
+              "name": "getWellKnownIntrinsicObject"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 813,
+                "end": 839,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 57
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 83
+                  }
+                },
+                "value": "%AsyncGeneratorFunction%",
+                "raw": "'%AsyncGeneratorFunction%'"
+              }
+            ],
+            "optional": false
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 842,
+      "end": 970,
+      "loc": {
+        "start": {
+          "line": 23,
+          "column": 0
+        },
+        "end": {
+          "line": 27,
+          "column": 2
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 842,
+        "end": 969,
+        "loc": {
+          "start": {
+            "line": 23,
+            "column": 0
+          },
+          "end": {
+            "line": 27,
+            "column": 1
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 842,
+          "end": 858,
+          "loc": {
+            "start": {
+              "line": 23,
+              "column": 0
+            },
+            "end": {
+              "line": 23,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 842,
+            "end": 848,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 0
+              },
+              "end": {
+                "line": 23,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 849,
+            "end": 858,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 7
+              },
+              "end": {
+                "line": 23,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 862,
+            "end": 899,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 2
+              },
+              "end": {
+                "line": 24,
+                "column": 39
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 862,
+              "end": 875,
+              "loc": {
+                "start": {
+                  "line": 24,
+                  "column": 2
+                },
+                "end": {
+                  "line": 24,
+                  "column": 15
+                }
+              },
+              "name": "isConstructor"
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 876,
+                "end": 898,
+                "loc": {
+                  "start": {
+                    "line": 24,
+                    "column": 16
+                  },
+                  "end": {
+                    "line": 24,
+                    "column": 38
+                  }
+                },
+                "name": "AsyncGeneratorFunction"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 903,
+            "end": 907,
+            "loc": {
+              "start": {
+                "line": 25,
+                "column": 2
+              },
+              "end": {
+                "line": 25,
+                "column": 6
+              }
+            },
+            "value": true,
+            "raw": "true"
+          },
+          {
+            "type": "Literal",
+            "start": 911,
+            "end": 967,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 2
+              },
+              "end": {
+                "line": 26,
+                "column": 58
+              }
+            },
+            "value": "isConstructor(AsyncGeneratorFunction) must return true",
+            "raw": "'isConstructor(AsyncGeneratorFunction) must return true'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 971,
+      "end": 1000,
+      "loc": {
+        "start": {
+          "line": 28,
+          "column": 0
+        },
+        "end": {
+          "line": 28,
+          "column": 29
+        }
+      },
+      "expression": {
+        "type": "NewExpression",
+        "start": 971,
+        "end": 999,
+        "loc": {
+          "start": {
+            "line": 28,
+            "column": 0
+          },
+          "end": {
+            "line": 28,
+            "column": 28
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 975,
+          "end": 997,
+          "loc": {
+            "start": {
+              "line": 28,
+              "column": 4
+            },
+            "end": {
+              "line": 28,
+              "column": 26
+            }
+          },
+          "name": "AsyncGeneratorFunction"
+        },
+        "arguments": []
+      }
+    }
+  ],
+  "sourceType": "script"
+}

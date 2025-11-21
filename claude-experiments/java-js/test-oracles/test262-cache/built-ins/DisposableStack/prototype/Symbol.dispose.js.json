@@ -1,0 +1,617 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 802,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 22,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 582,
+      "end": 677,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 95
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 582,
+        "end": 676,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 0
+          },
+          "end": {
+            "line": 16,
+            "column": 94
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 582,
+          "end": 598,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 0
+            },
+            "end": {
+              "line": 16,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 582,
+            "end": 588,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 0
+              },
+              "end": {
+                "line": 16,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 589,
+            "end": 598,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 7
+              },
+              "end": {
+                "line": 16,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 599,
+            "end": 640,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 17
+              },
+              "end": {
+                "line": 16,
+                "column": 58
+              }
+            },
+            "object": {
+              "type": "MemberExpression",
+              "start": 599,
+              "end": 624,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 17
+                },
+                "end": {
+                  "line": 16,
+                  "column": 42
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 599,
+                "end": 614,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 32
+                  }
+                },
+                "name": "DisposableStack"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 615,
+                "end": 624,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 33
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 42
+                  }
+                },
+                "name": "prototype"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "property": {
+              "type": "MemberExpression",
+              "start": 625,
+              "end": 639,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 43
+                },
+                "end": {
+                  "line": 16,
+                  "column": 57
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 625,
+                "end": 631,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 43
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 49
+                  }
+                },
+                "name": "Symbol"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 632,
+                "end": 639,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 50
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 57
+                  }
+                },
+                "name": "dispose"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "computed": true,
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 642,
+            "end": 675,
+            "loc": {
+              "start": {
+                "line": 16,
+                "column": 60
+              },
+              "end": {
+                "line": 16,
+                "column": 93
+              }
+            },
+            "object": {
+              "type": "MemberExpression",
+              "start": 642,
+              "end": 667,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 60
+                },
+                "end": {
+                  "line": 16,
+                  "column": 85
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 642,
+                "end": 657,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 60
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 75
+                  }
+                },
+                "name": "DisposableStack"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 658,
+                "end": 667,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 76
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 85
+                  }
+                },
+                "name": "prototype"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 668,
+              "end": 675,
+              "loc": {
+                "start": {
+                  "line": 16,
+                  "column": 86
+                },
+                "end": {
+                  "line": 16,
+                  "column": 93
+                }
+              },
+              "name": "dispose"
+            },
+            "computed": false,
+            "optional": false
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 678,
+      "end": 801,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 21,
+          "column": 3
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 678,
+        "end": 800,
+        "loc": {
+          "start": {
+            "line": 17,
+            "column": 0
+          },
+          "end": {
+            "line": 21,
+            "column": 2
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 678,
+          "end": 692,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 0
+            },
+            "end": {
+              "line": 17,
+              "column": 14
+            }
+          },
+          "name": "verifyProperty"
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 693,
+            "end": 718,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 15
+              },
+              "end": {
+                "line": 17,
+                "column": 40
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 693,
+              "end": 708,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 15
+                },
+                "end": {
+                  "line": 17,
+                  "column": 30
+                }
+              },
+              "name": "DisposableStack"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 709,
+              "end": 718,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 31
+                },
+                "end": {
+                  "line": 17,
+                  "column": 40
+                }
+              },
+              "name": "prototype"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 720,
+            "end": 734,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 42
+              },
+              "end": {
+                "line": 17,
+                "column": 56
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 720,
+              "end": 726,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 42
+                },
+                "end": {
+                  "line": 17,
+                  "column": 48
+                }
+              },
+              "name": "Symbol"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 727,
+              "end": 734,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 49
+                },
+                "end": {
+                  "line": 17,
+                  "column": 56
+                }
+              },
+              "name": "dispose"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "ObjectExpression",
+            "start": 736,
+            "end": 799,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 58
+              },
+              "end": {
+                "line": 21,
+                "column": 1
+              }
+            },
+            "properties": [
+              {
+                "type": "Property",
+                "start": 740,
+                "end": 757,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 19
+                  }
+                },
+                "method": false,
+                "shorthand": false,
+                "computed": false,
+                "key": {
+                  "type": "Identifier",
+                  "start": 740,
+                  "end": 750,
+                  "loc": {
+                    "start": {
+                      "line": 18,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 18,
+                      "column": 12
+                    }
+                  },
+                  "name": "enumerable"
+                },
+                "value": {
+                  "type": "Literal",
+                  "start": 752,
+                  "end": 757,
+                  "loc": {
+                    "start": {
+                      "line": 18,
+                      "column": 14
+                    },
+                    "end": {
+                      "line": 18,
+                      "column": 19
+                    }
+                  },
+                  "value": false,
+                  "raw": "false"
+                },
+                "kind": "init"
+              },
+              {
+                "type": "Property",
+                "start": 761,
+                "end": 775,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 16
+                  }
+                },
+                "method": false,
+                "shorthand": false,
+                "computed": false,
+                "key": {
+                  "type": "Identifier",
+                  "start": 761,
+                  "end": 769,
+                  "loc": {
+                    "start": {
+                      "line": 19,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 19,
+                      "column": 10
+                    }
+                  },
+                  "name": "writable"
+                },
+                "value": {
+                  "type": "Literal",
+                  "start": 771,
+                  "end": 775,
+                  "loc": {
+                    "start": {
+                      "line": 19,
+                      "column": 12
+                    },
+                    "end": {
+                      "line": 19,
+                      "column": 16
+                    }
+                  },
+                  "value": true,
+                  "raw": "true"
+                },
+                "kind": "init"
+              },
+              {
+                "type": "Property",
+                "start": 779,
+                "end": 797,
+                "loc": {
+                  "start": {
+                    "line": 20,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 20,
+                    "column": 20
+                  }
+                },
+                "method": false,
+                "shorthand": false,
+                "computed": false,
+                "key": {
+                  "type": "Identifier",
+                  "start": 779,
+                  "end": 791,
+                  "loc": {
+                    "start": {
+                      "line": 20,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 20,
+                      "column": 14
+                    }
+                  },
+                  "name": "configurable"
+                },
+                "value": {
+                  "type": "Literal",
+                  "start": 793,
+                  "end": 797,
+                  "loc": {
+                    "start": {
+                      "line": 20,
+                      "column": 16
+                    },
+                    "end": {
+                      "line": 20,
+                      "column": 20
+                    }
+                  },
+                  "value": true,
+                  "raw": "true"
+                },
+                "kind": "init"
+              }
+            ]
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

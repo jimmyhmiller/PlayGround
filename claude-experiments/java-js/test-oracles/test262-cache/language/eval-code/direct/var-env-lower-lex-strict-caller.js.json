@@ -1,0 +1,168 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 398,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 20,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "BlockStatement",
+      "start": 357,
+      "end": 397,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 19,
+          "column": 1
+        }
+      },
+      "body": [
+        {
+          "type": "VariableDeclaration",
+          "start": 361,
+          "end": 367,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 2
+            },
+            "end": {
+              "line": 15,
+              "column": 8
+            }
+          },
+          "declarations": [
+            {
+              "type": "VariableDeclarator",
+              "start": 365,
+              "end": 366,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 6
+                },
+                "end": {
+                  "line": 15,
+                  "column": 7
+                }
+              },
+              "id": {
+                "type": "Identifier",
+                "start": 365,
+                "end": 366,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 6
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 7
+                  }
+                },
+                "name": "x"
+              },
+              "init": null
+            }
+          ],
+          "kind": "let"
+        },
+        {
+          "type": "BlockStatement",
+          "start": 370,
+          "end": 395,
+          "loc": {
+            "start": {
+              "line": 16,
+              "column": 2
+            },
+            "end": {
+              "line": 18,
+              "column": 3
+            }
+          },
+          "body": [
+            {
+              "type": "ExpressionStatement",
+              "start": 376,
+              "end": 391,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 4
+                },
+                "end": {
+                  "line": 17,
+                  "column": 19
+                }
+              },
+              "expression": {
+                "type": "CallExpression",
+                "start": 376,
+                "end": 390,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 4
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 18
+                  }
+                },
+                "callee": {
+                  "type": "Identifier",
+                  "start": 376,
+                  "end": 380,
+                  "loc": {
+                    "start": {
+                      "line": 17,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 8
+                    }
+                  },
+                  "name": "eval"
+                },
+                "arguments": [
+                  {
+                    "type": "Literal",
+                    "start": 381,
+                    "end": 389,
+                    "loc": {
+                      "start": {
+                        "line": 17,
+                        "column": 9
+                      },
+                      "end": {
+                        "line": 17,
+                        "column": 17
+                      }
+                    },
+                    "value": "var x;",
+                    "raw": "'var x;'"
+                  }
+                ],
+                "optional": false
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "sourceType": "script"
+}

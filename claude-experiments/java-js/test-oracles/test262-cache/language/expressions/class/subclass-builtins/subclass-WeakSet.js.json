@@ -1,0 +1,390 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 432,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 16,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 296,
+      "end": 337,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 41
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 302,
+          "end": 337,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 6
+            },
+            "end": {
+              "line": 11,
+              "column": 41
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 302,
+            "end": 310,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 6
+              },
+              "end": {
+                "line": 11,
+                "column": 14
+              }
+            },
+            "name": "Subclass"
+          },
+          "init": {
+            "type": "ClassExpression",
+            "start": 313,
+            "end": 337,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 17
+              },
+              "end": {
+                "line": 11,
+                "column": 41
+              }
+            },
+            "id": null,
+            "superClass": {
+              "type": "Identifier",
+              "start": 327,
+              "end": 334,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 31
+                },
+                "end": {
+                  "line": 11,
+                  "column": 38
+                }
+              },
+              "name": "WeakSet"
+            },
+            "body": {
+              "type": "ClassBody",
+              "start": 335,
+              "end": 337,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 39
+                },
+                "end": {
+                  "line": 11,
+                  "column": 41
+                }
+              },
+              "body": []
+            }
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 339,
+      "end": 366,
+      "loc": {
+        "start": {
+          "line": 13,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 27
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 345,
+          "end": 365,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 6
+            },
+            "end": {
+              "line": 13,
+              "column": 26
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 345,
+            "end": 348,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 6
+              },
+              "end": {
+                "line": 13,
+                "column": 9
+              }
+            },
+            "name": "sub"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 351,
+            "end": 365,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 12
+              },
+              "end": {
+                "line": 13,
+                "column": 26
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 355,
+              "end": 363,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 16
+                },
+                "end": {
+                  "line": 13,
+                  "column": 24
+                }
+              },
+              "name": "Subclass"
+            },
+            "arguments": []
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 367,
+      "end": 399,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 32
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 367,
+        "end": 398,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 31
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 367,
+          "end": 373,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 0
+            },
+            "end": {
+              "line": 14,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 374,
+            "end": 397,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 7
+              },
+              "end": {
+                "line": 14,
+                "column": 30
+              }
+            },
+            "left": {
+              "type": "Identifier",
+              "start": 374,
+              "end": 377,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 7
+                },
+                "end": {
+                  "line": 14,
+                  "column": 10
+                }
+              },
+              "name": "sub"
+            },
+            "operator": "instanceof",
+            "right": {
+              "type": "Identifier",
+              "start": 389,
+              "end": 397,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 22
+                },
+                "end": {
+                  "line": 14,
+                  "column": 30
+                }
+              },
+              "name": "Subclass"
+            }
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 400,
+      "end": 431,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 31
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 400,
+        "end": 430,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 0
+          },
+          "end": {
+            "line": 15,
+            "column": 30
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 400,
+          "end": 406,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 0
+            },
+            "end": {
+              "line": 15,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 407,
+            "end": 429,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 7
+              },
+              "end": {
+                "line": 15,
+                "column": 29
+              }
+            },
+            "left": {
+              "type": "Identifier",
+              "start": 407,
+              "end": 410,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 7
+                },
+                "end": {
+                  "line": 15,
+                  "column": 10
+                }
+              },
+              "name": "sub"
+            },
+            "operator": "instanceof",
+            "right": {
+              "type": "Identifier",
+              "start": 422,
+              "end": 429,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 22
+                },
+                "end": {
+                  "line": 15,
+                  "column": 29
+                }
+              },
+              "name": "WeakSet"
+            }
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

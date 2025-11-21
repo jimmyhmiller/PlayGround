@@ -1,0 +1,456 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 851,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 19,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 685,
+      "end": 750,
+      "loc": {
+        "start": {
+          "line": 17,
+          "column": 0
+        },
+        "end": {
+          "line": 17,
+          "column": 65
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 691,
+          "end": 749,
+          "loc": {
+            "start": {
+              "line": 17,
+              "column": 6
+            },
+            "end": {
+              "line": 17,
+              "column": 64
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 691,
+            "end": 698,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 6
+              },
+              "end": {
+                "line": 17,
+                "column": 13
+              }
+            },
+            "name": "instant"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 701,
+            "end": 749,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 16
+              },
+              "end": {
+                "line": 17,
+                "column": 64
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 705,
+              "end": 721,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 20
+                },
+                "end": {
+                  "line": 17,
+                  "column": 36
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 705,
+                "end": 713,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 20
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 28
+                  }
+                },
+                "name": "Temporal"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 714,
+                "end": 721,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 29
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 36
+                  }
+                },
+                "name": "Instant"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 722,
+                "end": 748,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 37
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 63
+                  }
+                },
+                "value": null,
+                "raw": "1_000_000_000_987_654_321n",
+                "bigint": "1000000000987654321"
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 751,
+      "end": 850,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 99
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 751,
+        "end": 849,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 0
+          },
+          "end": {
+            "line": 18,
+            "column": 98
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 751,
+          "end": 764,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 0
+            },
+            "end": {
+              "line": 18,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 751,
+            "end": 757,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 0
+              },
+              "end": {
+                "line": 18,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 758,
+            "end": 764,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 7
+              },
+              "end": {
+                "line": 18,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 765,
+            "end": 775,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 14
+              },
+              "end": {
+                "line": 18,
+                "column": 24
+              }
+            },
+            "name": "RangeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 777,
+            "end": 848,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 26
+              },
+              "end": {
+                "line": 18,
+                "column": 97
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "CallExpression",
+              "start": 783,
+              "end": 848,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 32
+                },
+                "end": {
+                  "line": 18,
+                  "column": 97
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 783,
+                "end": 796,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 32
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 45
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 783,
+                  "end": 790,
+                  "loc": {
+                    "start": {
+                      "line": 18,
+                      "column": 32
+                    },
+                    "end": {
+                      "line": 18,
+                      "column": 39
+                    }
+                  },
+                  "name": "instant"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 791,
+                  "end": 796,
+                  "loc": {
+                    "start": {
+                      "line": 18,
+                      "column": 40
+                    },
+                    "end": {
+                      "line": 18,
+                      "column": 45
+                    }
+                  },
+                  "name": "round"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "ObjectExpression",
+                  "start": 797,
+                  "end": 847,
+                  "loc": {
+                    "start": {
+                      "line": 18,
+                      "column": 46
+                    },
+                    "end": {
+                      "line": 18,
+                      "column": 96
+                    }
+                  },
+                  "properties": [
+                    {
+                      "type": "Property",
+                      "start": 799,
+                      "end": 821,
+                      "loc": {
+                        "start": {
+                          "line": 18,
+                          "column": 48
+                        },
+                        "end": {
+                          "line": 18,
+                          "column": 70
+                        }
+                      },
+                      "method": false,
+                      "shorthand": false,
+                      "computed": false,
+                      "key": {
+                        "type": "Identifier",
+                        "start": 799,
+                        "end": 811,
+                        "loc": {
+                          "start": {
+                            "line": 18,
+                            "column": 48
+                          },
+                          "end": {
+                            "line": 18,
+                            "column": 60
+                          }
+                        },
+                        "name": "smallestUnit"
+                      },
+                      "value": {
+                        "type": "Literal",
+                        "start": 813,
+                        "end": 821,
+                        "loc": {
+                          "start": {
+                            "line": 18,
+                            "column": 62
+                          },
+                          "end": {
+                            "line": 18,
+                            "column": 70
+                          }
+                        },
+                        "value": "second",
+                        "raw": "'second'"
+                      },
+                      "kind": "init"
+                    },
+                    {
+                      "type": "Property",
+                      "start": 823,
+                      "end": 845,
+                      "loc": {
+                        "start": {
+                          "line": 18,
+                          "column": 72
+                        },
+                        "end": {
+                          "line": 18,
+                          "column": 94
+                        }
+                      },
+                      "method": false,
+                      "shorthand": false,
+                      "computed": false,
+                      "key": {
+                        "type": "Identifier",
+                        "start": 823,
+                        "end": 840,
+                        "loc": {
+                          "start": {
+                            "line": 18,
+                            "column": 72
+                          },
+                          "end": {
+                            "line": 18,
+                            "column": 89
+                          }
+                        },
+                        "name": "roundingIncrement"
+                      },
+                      "value": {
+                        "type": "Identifier",
+                        "start": 842,
+                        "end": 845,
+                        "loc": {
+                          "start": {
+                            "line": 18,
+                            "column": 91
+                          },
+                          "end": {
+                            "line": 18,
+                            "column": 94
+                          }
+                        },
+                        "name": "NaN"
+                      },
+                      "kind": "init"
+                    }
+                  ]
+                }
+              ],
+              "optional": false
+            }
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

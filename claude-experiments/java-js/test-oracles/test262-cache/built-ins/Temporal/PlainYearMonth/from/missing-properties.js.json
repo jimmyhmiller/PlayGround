@@ -1,0 +1,1207 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 842,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 25,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 296,
+      "end": 317,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 21
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 300,
+          "end": 316,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 4
+            },
+            "end": {
+              "line": 10,
+              "column": 20
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 300,
+            "end": 308,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 4
+              },
+              "end": {
+                "line": 10,
+                "column": 12
+              }
+            },
+            "name": "getMonth"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 311,
+            "end": 316,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 15
+              },
+              "end": {
+                "line": 10,
+                "column": 20
+              }
+            },
+            "value": false,
+            "raw": "false"
+          }
+        }
+      ],
+      "kind": "let"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 318,
+      "end": 343,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 25
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 322,
+          "end": 342,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 4
+            },
+            "end": {
+              "line": 11,
+              "column": 24
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 322,
+            "end": 334,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 4
+              },
+              "end": {
+                "line": 11,
+                "column": 16
+              }
+            },
+            "name": "getMonthCode"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 337,
+            "end": 342,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 19
+              },
+              "end": {
+                "line": 11,
+                "column": 24
+              }
+            },
+            "value": false,
+            "raw": "false"
+          }
+        }
+      ],
+      "kind": "let"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 344,
+      "end": 468,
+      "loc": {
+        "start": {
+          "line": 12,
+          "column": 0
+        },
+        "end": {
+          "line": 19,
+          "column": 2
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 350,
+          "end": 467,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 6
+            },
+            "end": {
+              "line": 19,
+              "column": 1
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 350,
+            "end": 369,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 6
+              },
+              "end": {
+                "line": 12,
+                "column": 25
+              }
+            },
+            "name": "missingYearAndMonth"
+          },
+          "init": {
+            "type": "ObjectExpression",
+            "start": 372,
+            "end": 467,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 28
+              },
+              "end": {
+                "line": 19,
+                "column": 1
+              }
+            },
+            "properties": [
+              {
+                "type": "Property",
+                "start": 376,
+                "end": 414,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 3
+                  }
+                },
+                "method": false,
+                "shorthand": false,
+                "computed": false,
+                "key": {
+                  "type": "Identifier",
+                  "start": 380,
+                  "end": 385,
+                  "loc": {
+                    "start": {
+                      "line": 13,
+                      "column": 6
+                    },
+                    "end": {
+                      "line": 13,
+                      "column": 11
+                    }
+                  },
+                  "name": "month"
+                },
+                "value": {
+                  "type": "FunctionExpression",
+                  "start": 385,
+                  "end": 414,
+                  "loc": {
+                    "start": {
+                      "line": 13,
+                      "column": 11
+                    },
+                    "end": {
+                      "line": 15,
+                      "column": 3
+                    }
+                  },
+                  "id": null,
+                  "expression": false,
+                  "generator": false,
+                  "async": false,
+                  "params": [],
+                  "body": {
+                    "type": "BlockStatement",
+                    "start": 388,
+                    "end": 414,
+                    "loc": {
+                      "start": {
+                        "line": 13,
+                        "column": 14
+                      },
+                      "end": {
+                        "line": 15,
+                        "column": 3
+                      }
+                    },
+                    "body": [
+                      {
+                        "type": "ExpressionStatement",
+                        "start": 394,
+                        "end": 410,
+                        "loc": {
+                          "start": {
+                            "line": 14,
+                            "column": 4
+                          },
+                          "end": {
+                            "line": 14,
+                            "column": 20
+                          }
+                        },
+                        "expression": {
+                          "type": "AssignmentExpression",
+                          "start": 394,
+                          "end": 409,
+                          "loc": {
+                            "start": {
+                              "line": 14,
+                              "column": 4
+                            },
+                            "end": {
+                              "line": 14,
+                              "column": 19
+                            }
+                          },
+                          "operator": "=",
+                          "left": {
+                            "type": "Identifier",
+                            "start": 394,
+                            "end": 402,
+                            "loc": {
+                              "start": {
+                                "line": 14,
+                                "column": 4
+                              },
+                              "end": {
+                                "line": 14,
+                                "column": 12
+                              }
+                            },
+                            "name": "getMonth"
+                          },
+                          "right": {
+                            "type": "Literal",
+                            "start": 405,
+                            "end": 409,
+                            "loc": {
+                              "start": {
+                                "line": 14,
+                                "column": 15
+                              },
+                              "end": {
+                                "line": 14,
+                                "column": 19
+                              }
+                            },
+                            "value": true,
+                            "raw": "true"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
+                "kind": "get"
+              },
+              {
+                "type": "Property",
+                "start": 418,
+                "end": 464,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 3
+                  }
+                },
+                "method": false,
+                "shorthand": false,
+                "computed": false,
+                "key": {
+                  "type": "Identifier",
+                  "start": 422,
+                  "end": 431,
+                  "loc": {
+                    "start": {
+                      "line": 16,
+                      "column": 6
+                    },
+                    "end": {
+                      "line": 16,
+                      "column": 15
+                    }
+                  },
+                  "name": "monthCode"
+                },
+                "value": {
+                  "type": "FunctionExpression",
+                  "start": 431,
+                  "end": 464,
+                  "loc": {
+                    "start": {
+                      "line": 16,
+                      "column": 15
+                    },
+                    "end": {
+                      "line": 18,
+                      "column": 3
+                    }
+                  },
+                  "id": null,
+                  "expression": false,
+                  "generator": false,
+                  "async": false,
+                  "params": [],
+                  "body": {
+                    "type": "BlockStatement",
+                    "start": 434,
+                    "end": 464,
+                    "loc": {
+                      "start": {
+                        "line": 16,
+                        "column": 18
+                      },
+                      "end": {
+                        "line": 18,
+                        "column": 3
+                      }
+                    },
+                    "body": [
+                      {
+                        "type": "ExpressionStatement",
+                        "start": 440,
+                        "end": 460,
+                        "loc": {
+                          "start": {
+                            "line": 17,
+                            "column": 4
+                          },
+                          "end": {
+                            "line": 17,
+                            "column": 24
+                          }
+                        },
+                        "expression": {
+                          "type": "AssignmentExpression",
+                          "start": 440,
+                          "end": 459,
+                          "loc": {
+                            "start": {
+                              "line": 17,
+                              "column": 4
+                            },
+                            "end": {
+                              "line": 17,
+                              "column": 23
+                            }
+                          },
+                          "operator": "=",
+                          "left": {
+                            "type": "Identifier",
+                            "start": 440,
+                            "end": 452,
+                            "loc": {
+                              "start": {
+                                "line": 17,
+                                "column": 4
+                              },
+                              "end": {
+                                "line": 17,
+                                "column": 16
+                              }
+                            },
+                            "name": "getMonthCode"
+                          },
+                          "right": {
+                            "type": "Literal",
+                            "start": 455,
+                            "end": 459,
+                            "loc": {
+                              "start": {
+                                "line": 17,
+                                "column": 19
+                              },
+                              "end": {
+                                "line": 17,
+                                "column": 23
+                              }
+                            },
+                            "value": true,
+                            "raw": "true"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
+                "kind": "get"
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 469,
+      "end": 623,
+      "loc": {
+        "start": {
+          "line": 20,
+          "column": 0
+        },
+        "end": {
+          "line": 20,
+          "column": 154
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 469,
+        "end": 622,
+        "loc": {
+          "start": {
+            "line": 20,
+            "column": 0
+          },
+          "end": {
+            "line": 20,
+            "column": 153
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 469,
+          "end": 482,
+          "loc": {
+            "start": {
+              "line": 20,
+              "column": 0
+            },
+            "end": {
+              "line": 20,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 469,
+            "end": 475,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 0
+              },
+              "end": {
+                "line": 20,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 476,
+            "end": 482,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 7
+              },
+              "end": {
+                "line": 20,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 483,
+            "end": 492,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 14
+              },
+              "end": {
+                "line": 20,
+                "column": 23
+              }
+            },
+            "name": "TypeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 494,
+            "end": 549,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 25
+              },
+              "end": {
+                "line": 20,
+                "column": 80
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "CallExpression",
+              "start": 500,
+              "end": 549,
+              "loc": {
+                "start": {
+                  "line": 20,
+                  "column": 31
+                },
+                "end": {
+                  "line": 20,
+                  "column": 80
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 500,
+                "end": 528,
+                "loc": {
+                  "start": {
+                    "line": 20,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 20,
+                    "column": 59
+                  }
+                },
+                "object": {
+                  "type": "MemberExpression",
+                  "start": 500,
+                  "end": 523,
+                  "loc": {
+                    "start": {
+                      "line": 20,
+                      "column": 31
+                    },
+                    "end": {
+                      "line": 20,
+                      "column": 54
+                    }
+                  },
+                  "object": {
+                    "type": "Identifier",
+                    "start": 500,
+                    "end": 508,
+                    "loc": {
+                      "start": {
+                        "line": 20,
+                        "column": 31
+                      },
+                      "end": {
+                        "line": 20,
+                        "column": 39
+                      }
+                    },
+                    "name": "Temporal"
+                  },
+                  "property": {
+                    "type": "Identifier",
+                    "start": 509,
+                    "end": 523,
+                    "loc": {
+                      "start": {
+                        "line": 20,
+                        "column": 40
+                      },
+                      "end": {
+                        "line": 20,
+                        "column": 54
+                      }
+                    },
+                    "name": "PlainYearMonth"
+                  },
+                  "computed": false,
+                  "optional": false
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 524,
+                  "end": 528,
+                  "loc": {
+                    "start": {
+                      "line": 20,
+                      "column": 55
+                    },
+                    "end": {
+                      "line": 20,
+                      "column": 59
+                    }
+                  },
+                  "name": "from"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "Identifier",
+                  "start": 529,
+                  "end": 548,
+                  "loc": {
+                    "start": {
+                      "line": 20,
+                      "column": 60
+                    },
+                    "end": {
+                      "line": 20,
+                      "column": 79
+                    }
+                  },
+                  "name": "missingYearAndMonth"
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 551,
+            "end": 621,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 82
+              },
+              "end": {
+                "line": 20,
+                "column": 152
+              }
+            },
+            "value": "year should be checked after fetching but before resolving the month",
+            "raw": "\"year should be checked after fetching but before resolving the month\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 624,
+      "end": 672,
+      "loc": {
+        "start": {
+          "line": 21,
+          "column": 0
+        },
+        "end": {
+          "line": 21,
+          "column": 48
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 624,
+        "end": 671,
+        "loc": {
+          "start": {
+            "line": 21,
+            "column": 0
+          },
+          "end": {
+            "line": 21,
+            "column": 47
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 624,
+          "end": 630,
+          "loc": {
+            "start": {
+              "line": 21,
+              "column": 0
+            },
+            "end": {
+              "line": 21,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 631,
+            "end": 639,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 7
+              },
+              "end": {
+                "line": 21,
+                "column": 15
+              }
+            },
+            "name": "getMonth"
+          },
+          {
+            "type": "Literal",
+            "start": 641,
+            "end": 670,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 17
+              },
+              "end": {
+                "line": 21,
+                "column": 46
+              }
+            },
+            "value": "year is fetched after month",
+            "raw": "\"year is fetched after month\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 673,
+      "end": 729,
+      "loc": {
+        "start": {
+          "line": 22,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 56
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 673,
+        "end": 728,
+        "loc": {
+          "start": {
+            "line": 22,
+            "column": 0
+          },
+          "end": {
+            "line": 22,
+            "column": 55
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 673,
+          "end": 679,
+          "loc": {
+            "start": {
+              "line": 22,
+              "column": 0
+            },
+            "end": {
+              "line": 22,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 680,
+            "end": 692,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 7
+              },
+              "end": {
+                "line": 22,
+                "column": 19
+              }
+            },
+            "name": "getMonthCode"
+          },
+          {
+            "type": "Literal",
+            "start": 694,
+            "end": 727,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 21
+              },
+              "end": {
+                "line": 22,
+                "column": 54
+              }
+            },
+            "value": "year is fetched after monthCode",
+            "raw": "\"year is fetched after monthCode\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 731,
+      "end": 841,
+      "loc": {
+        "start": {
+          "line": 24,
+          "column": 0
+        },
+        "end": {
+          "line": 24,
+          "column": 110
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 731,
+        "end": 840,
+        "loc": {
+          "start": {
+            "line": 24,
+            "column": 0
+          },
+          "end": {
+            "line": 24,
+            "column": 109
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 731,
+          "end": 744,
+          "loc": {
+            "start": {
+              "line": 24,
+              "column": 0
+            },
+            "end": {
+              "line": 24,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 731,
+            "end": 737,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 0
+              },
+              "end": {
+                "line": 24,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 738,
+            "end": 744,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 7
+              },
+              "end": {
+                "line": 24,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 745,
+            "end": 754,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 14
+              },
+              "end": {
+                "line": 24,
+                "column": 23
+              }
+            },
+            "name": "TypeError"
+          },
+          {
+            "type": "ArrowFunctionExpression",
+            "start": 756,
+            "end": 806,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 25
+              },
+              "end": {
+                "line": 24,
+                "column": 75
+              }
+            },
+            "id": null,
+            "expression": true,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "CallExpression",
+              "start": 762,
+              "end": 806,
+              "loc": {
+                "start": {
+                  "line": 24,
+                  "column": 31
+                },
+                "end": {
+                  "line": 24,
+                  "column": 75
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 762,
+                "end": 790,
+                "loc": {
+                  "start": {
+                    "line": 24,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 24,
+                    "column": 59
+                  }
+                },
+                "object": {
+                  "type": "MemberExpression",
+                  "start": 762,
+                  "end": 785,
+                  "loc": {
+                    "start": {
+                      "line": 24,
+                      "column": 31
+                    },
+                    "end": {
+                      "line": 24,
+                      "column": 54
+                    }
+                  },
+                  "object": {
+                    "type": "Identifier",
+                    "start": 762,
+                    "end": 770,
+                    "loc": {
+                      "start": {
+                        "line": 24,
+                        "column": 31
+                      },
+                      "end": {
+                        "line": 24,
+                        "column": 39
+                      }
+                    },
+                    "name": "Temporal"
+                  },
+                  "property": {
+                    "type": "Identifier",
+                    "start": 771,
+                    "end": 785,
+                    "loc": {
+                      "start": {
+                        "line": 24,
+                        "column": 40
+                      },
+                      "end": {
+                        "line": 24,
+                        "column": 54
+                      }
+                    },
+                    "name": "PlainYearMonth"
+                  },
+                  "computed": false,
+                  "optional": false
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 786,
+                  "end": 790,
+                  "loc": {
+                    "start": {
+                      "line": 24,
+                      "column": 55
+                    },
+                    "end": {
+                      "line": 24,
+                      "column": 59
+                    }
+                  },
+                  "name": "from"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "ObjectExpression",
+                  "start": 791,
+                  "end": 805,
+                  "loc": {
+                    "start": {
+                      "line": 24,
+                      "column": 60
+                    },
+                    "end": {
+                      "line": 24,
+                      "column": 74
+                    }
+                  },
+                  "properties": [
+                    {
+                      "type": "Property",
+                      "start": 793,
+                      "end": 803,
+                      "loc": {
+                        "start": {
+                          "line": 24,
+                          "column": 62
+                        },
+                        "end": {
+                          "line": 24,
+                          "column": 72
+                        }
+                      },
+                      "method": false,
+                      "shorthand": false,
+                      "computed": false,
+                      "key": {
+                        "type": "Identifier",
+                        "start": 793,
+                        "end": 797,
+                        "loc": {
+                          "start": {
+                            "line": 24,
+                            "column": 62
+                          },
+                          "end": {
+                            "line": 24,
+                            "column": 66
+                          }
+                        },
+                        "name": "year"
+                      },
+                      "value": {
+                        "type": "Literal",
+                        "start": 799,
+                        "end": 803,
+                        "loc": {
+                          "start": {
+                            "line": 24,
+                            "column": 68
+                          },
+                          "end": {
+                            "line": 24,
+                            "column": 72
+                          }
+                        },
+                        "value": 2000,
+                        "raw": "2000"
+                      },
+                      "kind": "init"
+                    }
+                  ]
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 808,
+            "end": 839,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 77
+              },
+              "end": {
+                "line": 24,
+                "column": 108
+              }
+            },
+            "value": "month should be resolved last",
+            "raw": "\"month should be resolved last\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

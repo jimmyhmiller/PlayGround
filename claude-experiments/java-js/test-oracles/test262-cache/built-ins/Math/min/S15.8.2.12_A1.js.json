@@ -1,0 +1,216 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 355,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 10,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 278,
+      "end": 354,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 9,
+          "column": 76
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 278,
+        "end": 353,
+        "loc": {
+          "start": {
+            "line": 9,
+            "column": 0
+          },
+          "end": {
+            "line": 9,
+            "column": 75
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 278,
+          "end": 294,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 0
+            },
+            "end": {
+              "line": 9,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 278,
+            "end": 284,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 0
+              },
+              "end": {
+                "line": 9,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 285,
+            "end": 294,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 7
+              },
+              "end": {
+                "line": 9,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 295,
+            "end": 305,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 17
+              },
+              "end": {
+                "line": 9,
+                "column": 27
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 295,
+              "end": 303,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 17
+                },
+                "end": {
+                  "line": 9,
+                  "column": 25
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 295,
+                "end": 299,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 21
+                  }
+                },
+                "name": "Math"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 300,
+                "end": 303,
+                "loc": {
+                  "start": {
+                    "line": 9,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 9,
+                    "column": 25
+                  }
+                },
+                "name": "min"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [],
+            "optional": false
+          },
+          {
+            "type": "UnaryExpression",
+            "start": 307,
+            "end": 316,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 29
+              },
+              "end": {
+                "line": 9,
+                "column": 38
+              }
+            },
+            "operator": "+",
+            "prefix": true,
+            "argument": {
+              "type": "Identifier",
+              "start": 308,
+              "end": 316,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 30
+                },
+                "end": {
+                  "line": 9,
+                  "column": 38
+                }
+              },
+              "name": "Infinity"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 318,
+            "end": 352,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 40
+              },
+              "end": {
+                "line": 9,
+                "column": 74
+              }
+            },
+            "value": "Math.min() must return +Infinity",
+            "raw": "'Math.min() must return +Infinity'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

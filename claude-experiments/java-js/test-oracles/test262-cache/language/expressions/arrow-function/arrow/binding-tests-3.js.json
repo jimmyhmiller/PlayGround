@@ -1,0 +1,321 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 393,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 15,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "FunctionDeclaration",
+      "start": 214,
+      "end": 263,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 12,
+          "column": 2
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 223,
+        "end": 226,
+        "loc": {
+          "start": {
+            "line": 10,
+            "column": 9
+          },
+          "end": {
+            "line": 10,
+            "column": 12
+          }
+        },
+        "name": "foo"
+      },
+      "expression": false,
+      "generator": false,
+      "async": false,
+      "params": [],
+      "body": {
+        "type": "BlockStatement",
+        "start": 228,
+        "end": 263,
+        "loc": {
+          "start": {
+            "line": 10,
+            "column": 14
+          },
+          "end": {
+            "line": 12,
+            "column": 2
+          }
+        },
+        "body": [
+          {
+            "type": "ReturnStatement",
+            "start": 235,
+            "end": 259,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 4
+              },
+              "end": {
+                "line": 11,
+                "column": 28
+              }
+            },
+            "argument": {
+              "type": "ArrowFunctionExpression",
+              "start": 242,
+              "end": 258,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 11
+                },
+                "end": {
+                  "line": 11,
+                  "column": 27
+                }
+              },
+              "id": null,
+              "expression": true,
+              "generator": false,
+              "async": false,
+              "params": [],
+              "body": {
+                "type": "CallExpression",
+                "start": 246,
+                "end": 258,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 15
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 27
+                  }
+                },
+                "callee": {
+                  "type": "Identifier",
+                  "start": 246,
+                  "end": 250,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 15
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 19
+                    }
+                  },
+                  "name": "eval"
+                },
+                "arguments": [
+                  {
+                    "type": "Literal",
+                    "start": 251,
+                    "end": 257,
+                    "loc": {
+                      "start": {
+                        "line": 11,
+                        "column": 20
+                      },
+                      "end": {
+                        "line": 11,
+                        "column": 26
+                      }
+                    },
+                    "value": "this",
+                    "raw": "\"this\""
+                  }
+                ],
+                "optional": false
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 267,
+      "end": 391,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 124
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 267,
+        "end": 390,
+        "loc": {
+          "start": {
+            "line": 14,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 123
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 267,
+          "end": 283,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 0
+            },
+            "end": {
+              "line": 14,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 267,
+            "end": 273,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 0
+              },
+              "end": {
+                "line": 14,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 274,
+            "end": 283,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 7
+              },
+              "end": {
+                "line": 14,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 284,
+            "end": 299,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 17
+              },
+              "end": {
+                "line": 14,
+                "column": 32
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 284,
+              "end": 288,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 17
+                },
+                "end": {
+                  "line": 14,
+                  "column": 21
+                }
+              },
+              "name": "eval"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 289,
+                "end": 298,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 22
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 31
+                  }
+                },
+                "value": "foo()()",
+                "raw": "\"foo()()\""
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "ThisExpression",
+            "start": 301,
+            "end": 305,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 34
+              },
+              "end": {
+                "line": 14,
+                "column": 38
+              }
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 307,
+            "end": 389,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 40
+              },
+              "end": {
+                "line": 14,
+                "column": 122
+              }
+            },
+            "value": "This binding initialization was incorrect for arrow capturing this from closure.",
+            "raw": "\"This binding initialization was incorrect for arrow capturing this from closure.\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

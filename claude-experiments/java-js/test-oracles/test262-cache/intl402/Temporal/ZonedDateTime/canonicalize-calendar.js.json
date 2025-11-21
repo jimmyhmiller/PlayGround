@@ -1,0 +1,350 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 410,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 12,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 237,
+      "end": 323,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 86
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 243,
+          "end": 322,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 6
+            },
+            "end": {
+              "line": 10,
+              "column": 85
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 243,
+            "end": 249,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 6
+              },
+              "end": {
+                "line": 10,
+                "column": 12
+              }
+            },
+            "name": "result"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 252,
+            "end": 322,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 15
+              },
+              "end": {
+                "line": 10,
+                "column": 85
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 256,
+              "end": 278,
+              "loc": {
+                "start": {
+                  "line": 10,
+                  "column": 19
+                },
+                "end": {
+                  "line": 10,
+                  "column": 41
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 256,
+                "end": 264,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 19
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 27
+                  }
+                },
+                "name": "Temporal"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 265,
+                "end": 278,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 28
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 41
+                  }
+                },
+                "name": "ZonedDateTime"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 279,
+                "end": 302,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 42
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 65
+                  }
+                },
+                "value": null,
+                "raw": "1719923640_000_000_000n",
+                "bigint": "1719923640000000000"
+              },
+              {
+                "type": "Literal",
+                "start": 304,
+                "end": 309,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 67
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 72
+                  }
+                },
+                "value": "UTC",
+                "raw": "\"UTC\""
+              },
+              {
+                "type": "Literal",
+                "start": 311,
+                "end": 321,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 74
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 84
+                  }
+                },
+                "value": "islamicc",
+                "raw": "\"islamicc\""
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 324,
+      "end": 409,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 85
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 324,
+        "end": 408,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 11,
+            "column": 84
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 324,
+          "end": 340,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 0
+            },
+            "end": {
+              "line": 11,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 324,
+            "end": 330,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 0
+              },
+              "end": {
+                "line": 11,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 331,
+            "end": 340,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 7
+              },
+              "end": {
+                "line": 11,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 341,
+            "end": 358,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 17
+              },
+              "end": {
+                "line": 11,
+                "column": 34
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 341,
+              "end": 347,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 17
+                },
+                "end": {
+                  "line": 11,
+                  "column": 23
+                }
+              },
+              "name": "result"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 348,
+              "end": 358,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 24
+                },
+                "end": {
+                  "line": 11,
+                  "column": 34
+                }
+              },
+              "name": "calendarId"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 360,
+            "end": 375,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 36
+              },
+              "end": {
+                "line": 11,
+                "column": 51
+              }
+            },
+            "value": "islamic-civil",
+            "raw": "\"islamic-civil\""
+          },
+          {
+            "type": "Literal",
+            "start": 377,
+            "end": 407,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 53
+              },
+              "end": {
+                "line": 11,
+                "column": 83
+              }
+            },
+            "value": "calendar ID is canonicalized",
+            "raw": "\"calendar ID is canonicalized\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

@@ -1,0 +1,698 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1109,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 37,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "IfStatement",
+      "start": 304,
+      "end": 445,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 5
+        }
+      },
+      "test": {
+        "type": "Literal",
+        "start": 307,
+        "end": 311,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 3
+          },
+          "end": {
+            "line": 11,
+            "column": 7
+          }
+        },
+        "value": true,
+        "raw": "true"
+      },
+      "consequent": {
+        "type": "IfStatement",
+        "start": 315,
+        "end": 445,
+        "loc": {
+          "start": {
+            "line": 12,
+            "column": 2
+          },
+          "end": {
+            "line": 15,
+            "column": 5
+          }
+        },
+        "test": {
+          "type": "Literal",
+          "start": 319,
+          "end": 324,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 6
+            },
+            "end": {
+              "line": 12,
+              "column": 11
+            }
+          },
+          "value": false,
+          "raw": "false"
+        },
+        "consequent": {
+          "type": "ThrowStatement",
+          "start": 330,
+          "end": 432,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 4
+            },
+            "end": {
+              "line": 13,
+              "column": 106
+            }
+          },
+          "argument": {
+            "type": "NewExpression",
+            "start": 336,
+            "end": 431,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 10
+              },
+              "end": {
+                "line": 13,
+                "column": 105
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 340,
+              "end": 352,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 14
+                },
+                "end": {
+                  "line": 13,
+                  "column": 26
+                }
+              },
+              "name": "Test262Error"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 353,
+                "end": 430,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 104
+                  }
+                },
+                "value": "#1.1: At embedded \"if/else\" constructions engine must select right branches",
+                "raw": "'#1.1: At embedded \"if/else\" constructions engine must select right branches'"
+              }
+            ]
+          }
+        },
+        "alternate": {
+          "type": "EmptyStatement",
+          "start": 444,
+          "end": 445,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 4
+            },
+            "end": {
+              "line": 15,
+              "column": 5
+            }
+          }
+        }
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 458,
+      "end": 598,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 22,
+          "column": 106
+        }
+      },
+      "test": {
+        "type": "Literal",
+        "start": 461,
+        "end": 465,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 3
+          },
+          "end": {
+            "line": 18,
+            "column": 7
+          }
+        },
+        "value": true,
+        "raw": "true"
+      },
+      "consequent": {
+        "type": "IfStatement",
+        "start": 469,
+        "end": 598,
+        "loc": {
+          "start": {
+            "line": 19,
+            "column": 2
+          },
+          "end": {
+            "line": 22,
+            "column": 106
+          }
+        },
+        "test": {
+          "type": "Literal",
+          "start": 473,
+          "end": 477,
+          "loc": {
+            "start": {
+              "line": 19,
+              "column": 6
+            },
+            "end": {
+              "line": 19,
+              "column": 10
+            }
+          },
+          "value": true,
+          "raw": "true"
+        },
+        "consequent": {
+          "type": "EmptyStatement",
+          "start": 483,
+          "end": 484,
+          "loc": {
+            "start": {
+              "line": 20,
+              "column": 4
+            },
+            "end": {
+              "line": 20,
+              "column": 5
+            }
+          }
+        },
+        "alternate": {
+          "type": "ThrowStatement",
+          "start": 496,
+          "end": 598,
+          "loc": {
+            "start": {
+              "line": 22,
+              "column": 4
+            },
+            "end": {
+              "line": 22,
+              "column": 106
+            }
+          },
+          "argument": {
+            "type": "NewExpression",
+            "start": 502,
+            "end": 597,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 10
+              },
+              "end": {
+                "line": 22,
+                "column": 105
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 506,
+              "end": 518,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 14
+                },
+                "end": {
+                  "line": 22,
+                  "column": 26
+                }
+              },
+              "name": "Test262Error"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 519,
+                "end": 596,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 104
+                  }
+                },
+                "value": "#2.1: At embedded \"if/else\" constructions engine must select right branches",
+                "raw": "'#2.1: At embedded \"if/else\" constructions engine must select right branches'"
+              }
+            ]
+          }
+        }
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 611,
+      "end": 853,
+      "loc": {
+        "start": {
+          "line": 25,
+          "column": 0
+        },
+        "end": {
+          "line": 29,
+          "column": 106
+        }
+      },
+      "test": {
+        "type": "Literal",
+        "start": 614,
+        "end": 619,
+        "loc": {
+          "start": {
+            "line": 25,
+            "column": 3
+          },
+          "end": {
+            "line": 25,
+            "column": 8
+          }
+        },
+        "value": false,
+        "raw": "false"
+      },
+      "consequent": {
+        "type": "IfStatement",
+        "start": 623,
+        "end": 853,
+        "loc": {
+          "start": {
+            "line": 26,
+            "column": 2
+          },
+          "end": {
+            "line": 29,
+            "column": 106
+          }
+        },
+        "test": {
+          "type": "Literal",
+          "start": 627,
+          "end": 631,
+          "loc": {
+            "start": {
+              "line": 26,
+              "column": 6
+            },
+            "end": {
+              "line": 26,
+              "column": 10
+            }
+          },
+          "value": true,
+          "raw": "true"
+        },
+        "consequent": {
+          "type": "ThrowStatement",
+          "start": 637,
+          "end": 739,
+          "loc": {
+            "start": {
+              "line": 27,
+              "column": 4
+            },
+            "end": {
+              "line": 27,
+              "column": 106
+            }
+          },
+          "argument": {
+            "type": "NewExpression",
+            "start": 643,
+            "end": 738,
+            "loc": {
+              "start": {
+                "line": 27,
+                "column": 10
+              },
+              "end": {
+                "line": 27,
+                "column": 105
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 647,
+              "end": 659,
+              "loc": {
+                "start": {
+                  "line": 27,
+                  "column": 14
+                },
+                "end": {
+                  "line": 27,
+                  "column": 26
+                }
+              },
+              "name": "Test262Error"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 660,
+                "end": 737,
+                "loc": {
+                  "start": {
+                    "line": 27,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 27,
+                    "column": 104
+                  }
+                },
+                "value": "#3.1: At embedded \"if/else\" constructions engine must select right branches",
+                "raw": "'#3.1: At embedded \"if/else\" constructions engine must select right branches'"
+              }
+            ]
+          }
+        },
+        "alternate": {
+          "type": "ThrowStatement",
+          "start": 751,
+          "end": 853,
+          "loc": {
+            "start": {
+              "line": 29,
+              "column": 4
+            },
+            "end": {
+              "line": 29,
+              "column": 106
+            }
+          },
+          "argument": {
+            "type": "NewExpression",
+            "start": 757,
+            "end": 852,
+            "loc": {
+              "start": {
+                "line": 29,
+                "column": 10
+              },
+              "end": {
+                "line": 29,
+                "column": 105
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 761,
+              "end": 773,
+              "loc": {
+                "start": {
+                  "line": 29,
+                  "column": 14
+                },
+                "end": {
+                  "line": 29,
+                  "column": 26
+                }
+              },
+              "name": "Test262Error"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 774,
+                "end": 851,
+                "loc": {
+                  "start": {
+                    "line": 29,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 29,
+                    "column": 104
+                  }
+                },
+                "value": "#3.2: At embedded \"if/else\" constructions engine must select right branches",
+                "raw": "'#3.2: At embedded \"if/else\" constructions engine must select right branches'"
+              }
+            ]
+          }
+        }
+      },
+      "alternate": null
+    },
+    {
+      "type": "IfStatement",
+      "start": 866,
+      "end": 1108,
+      "loc": {
+        "start": {
+          "line": 32,
+          "column": 0
+        },
+        "end": {
+          "line": 36,
+          "column": 106
+        }
+      },
+      "test": {
+        "type": "Literal",
+        "start": 869,
+        "end": 874,
+        "loc": {
+          "start": {
+            "line": 32,
+            "column": 3
+          },
+          "end": {
+            "line": 32,
+            "column": 8
+          }
+        },
+        "value": false,
+        "raw": "false"
+      },
+      "consequent": {
+        "type": "IfStatement",
+        "start": 878,
+        "end": 1108,
+        "loc": {
+          "start": {
+            "line": 33,
+            "column": 2
+          },
+          "end": {
+            "line": 36,
+            "column": 106
+          }
+        },
+        "test": {
+          "type": "Literal",
+          "start": 882,
+          "end": 886,
+          "loc": {
+            "start": {
+              "line": 33,
+              "column": 6
+            },
+            "end": {
+              "line": 33,
+              "column": 10
+            }
+          },
+          "value": true,
+          "raw": "true"
+        },
+        "consequent": {
+          "type": "ThrowStatement",
+          "start": 892,
+          "end": 994,
+          "loc": {
+            "start": {
+              "line": 34,
+              "column": 4
+            },
+            "end": {
+              "line": 34,
+              "column": 106
+            }
+          },
+          "argument": {
+            "type": "NewExpression",
+            "start": 898,
+            "end": 993,
+            "loc": {
+              "start": {
+                "line": 34,
+                "column": 10
+              },
+              "end": {
+                "line": 34,
+                "column": 105
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 902,
+              "end": 914,
+              "loc": {
+                "start": {
+                  "line": 34,
+                  "column": 14
+                },
+                "end": {
+                  "line": 34,
+                  "column": 26
+                }
+              },
+              "name": "Test262Error"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 915,
+                "end": 992,
+                "loc": {
+                  "start": {
+                    "line": 34,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 34,
+                    "column": 104
+                  }
+                },
+                "value": "#4.1: At embedded \"if/else\" constructions engine must select right branches",
+                "raw": "'#4.1: At embedded \"if/else\" constructions engine must select right branches'"
+              }
+            ]
+          }
+        },
+        "alternate": {
+          "type": "ThrowStatement",
+          "start": 1006,
+          "end": 1108,
+          "loc": {
+            "start": {
+              "line": 36,
+              "column": 4
+            },
+            "end": {
+              "line": 36,
+              "column": 106
+            }
+          },
+          "argument": {
+            "type": "NewExpression",
+            "start": 1012,
+            "end": 1107,
+            "loc": {
+              "start": {
+                "line": 36,
+                "column": 10
+              },
+              "end": {
+                "line": 36,
+                "column": 105
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 1016,
+              "end": 1028,
+              "loc": {
+                "start": {
+                  "line": 36,
+                  "column": 14
+                },
+                "end": {
+                  "line": 36,
+                  "column": 26
+                }
+              },
+              "name": "Test262Error"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 1029,
+                "end": 1106,
+                "loc": {
+                  "start": {
+                    "line": 36,
+                    "column": 27
+                  },
+                  "end": {
+                    "line": 36,
+                    "column": 104
+                  }
+                },
+                "value": "#4.2: At embedded \"if/else\" constructions engine must select right branches",
+                "raw": "'#4.2: At embedded \"if/else\" constructions engine must select right branches'"
+              }
+            ]
+          }
+        }
+      },
+      "alternate": null
+    }
+  ],
+  "sourceType": "script"
+}

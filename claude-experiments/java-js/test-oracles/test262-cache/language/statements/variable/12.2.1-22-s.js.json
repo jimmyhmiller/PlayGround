@@ -1,0 +1,284 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 384,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 15,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 264,
+      "end": 288,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 4
+        },
+        "end": {
+          "line": 11,
+          "column": 28
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 268,
+          "end": 287,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 8
+            },
+            "end": {
+              "line": 11,
+              "column": 27
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 268,
+            "end": 280,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 8
+              },
+              "end": {
+                "line": 11,
+                "column": 20
+              }
+            },
+            "name": "indirectEval"
+          },
+          "init": {
+            "type": "Identifier",
+            "start": 283,
+            "end": 287,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 23
+              },
+              "end": {
+                "line": 11,
+                "column": 27
+              }
+            },
+            "name": "eval"
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 289,
+      "end": 383,
+      "loc": {
+        "start": {
+          "line": 12,
+          "column": 0
+        },
+        "end": {
+          "line": 14,
+          "column": 3
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 289,
+        "end": 382,
+        "loc": {
+          "start": {
+            "line": 12,
+            "column": 0
+          },
+          "end": {
+            "line": 14,
+            "column": 2
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 289,
+          "end": 302,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 0
+            },
+            "end": {
+              "line": 12,
+              "column": 13
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 289,
+            "end": 295,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 0
+              },
+              "end": {
+                "line": 12,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 296,
+            "end": 302,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 7
+              },
+              "end": {
+                "line": 12,
+                "column": 13
+              }
+            },
+            "name": "throws"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 303,
+            "end": 314,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 14
+              },
+              "end": {
+                "line": 12,
+                "column": 25
+              }
+            },
+            "name": "SyntaxError"
+          },
+          {
+            "type": "FunctionExpression",
+            "start": 316,
+            "end": 381,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 27
+              },
+              "end": {
+                "line": 14,
+                "column": 1
+              }
+            },
+            "id": null,
+            "expression": false,
+            "generator": false,
+            "async": false,
+            "params": [],
+            "body": {
+              "type": "BlockStatement",
+              "start": 327,
+              "end": 381,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 38
+                },
+                "end": {
+                  "line": 14,
+                  "column": 1
+                }
+              },
+              "body": [
+                {
+                  "type": "ExpressionStatement",
+                  "start": 334,
+                  "end": 379,
+                  "loc": {
+                    "start": {
+                      "line": 13,
+                      "column": 5
+                    },
+                    "end": {
+                      "line": 13,
+                      "column": 50
+                    }
+                  },
+                  "expression": {
+                    "type": "CallExpression",
+                    "start": 334,
+                    "end": 378,
+                    "loc": {
+                      "start": {
+                        "line": 13,
+                        "column": 5
+                      },
+                      "end": {
+                        "line": 13,
+                        "column": 49
+                      }
+                    },
+                    "callee": {
+                      "type": "Identifier",
+                      "start": 334,
+                      "end": 346,
+                      "loc": {
+                        "start": {
+                          "line": 13,
+                          "column": 5
+                        },
+                        "end": {
+                          "line": 13,
+                          "column": 17
+                        }
+                      },
+                      "name": "indirectEval"
+                    },
+                    "arguments": [
+                      {
+                        "type": "Literal",
+                        "start": 347,
+                        "end": 377,
+                        "loc": {
+                          "start": {
+                            "line": 13,
+                            "column": 18
+                          },
+                          "end": {
+                            "line": 13,
+                            "column": 48
+                          }
+                        },
+                        "value": "'use strict'; var arguments;",
+                        "raw": "\"'use strict'; var arguments;\""
+                      }
+                    ],
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

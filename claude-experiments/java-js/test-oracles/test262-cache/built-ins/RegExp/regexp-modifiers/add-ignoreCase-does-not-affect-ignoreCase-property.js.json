@@ -1,0 +1,884 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 2602,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 53,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 2169,
+      "end": 2187,
+      "loc": {
+        "start": {
+          "line": 42,
+          "column": 0
+        },
+        "end": {
+          "line": 42,
+          "column": 18
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 2173,
+          "end": 2186,
+          "loc": {
+            "start": {
+              "line": 42,
+              "column": 4
+            },
+            "end": {
+              "line": 42,
+              "column": 17
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 2173,
+            "end": 2176,
+            "loc": {
+              "start": {
+                "line": 42,
+                "column": 4
+              },
+              "end": {
+                "line": 42,
+                "column": 7
+              }
+            },
+            "name": "re1"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 2179,
+            "end": 2186,
+            "loc": {
+              "start": {
+                "line": 42,
+                "column": 10
+              },
+              "end": {
+                "line": 42,
+                "column": 17
+              }
+            },
+            "value": null,
+            "raw": "/(?i:)/",
+            "regex": {
+              "pattern": "(?i:)",
+              "flags": ""
+            }
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2188,
+      "end": 2269,
+      "loc": {
+        "start": {
+          "line": 43,
+          "column": 0
+        },
+        "end": {
+          "line": 43,
+          "column": 81
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2188,
+        "end": 2268,
+        "loc": {
+          "start": {
+            "line": 43,
+            "column": 0
+          },
+          "end": {
+            "line": 43,
+            "column": 80
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 2188,
+          "end": 2194,
+          "loc": {
+            "start": {
+              "line": 43,
+              "column": 0
+            },
+            "end": {
+              "line": 43,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 2195,
+            "end": 2210,
+            "loc": {
+              "start": {
+                "line": 43,
+                "column": 7
+              },
+              "end": {
+                "line": 43,
+                "column": 22
+              }
+            },
+            "operator": "!",
+            "prefix": true,
+            "argument": {
+              "type": "MemberExpression",
+              "start": 2196,
+              "end": 2210,
+              "loc": {
+                "start": {
+                  "line": 43,
+                  "column": 8
+                },
+                "end": {
+                  "line": 43,
+                  "column": 22
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 2196,
+                "end": 2199,
+                "loc": {
+                  "start": {
+                    "line": 43,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 43,
+                    "column": 11
+                  }
+                },
+                "name": "re1"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 2200,
+                "end": 2210,
+                "loc": {
+                  "start": {
+                    "line": 43,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 43,
+                    "column": 22
+                  }
+                },
+                "name": "ignoreCase"
+              },
+              "computed": false,
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 2212,
+            "end": 2267,
+            "loc": {
+              "start": {
+                "line": 43,
+                "column": 24
+              },
+              "end": {
+                "line": 43,
+                "column": 79
+              }
+            },
+            "value": "RegExp instance ignoreCase property should not be set",
+            "raw": "\"RegExp instance ignoreCase property should not be set\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 2271,
+      "end": 2301,
+      "loc": {
+        "start": {
+          "line": 45,
+          "column": 0
+        },
+        "end": {
+          "line": 45,
+          "column": 30
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 2275,
+          "end": 2300,
+          "loc": {
+            "start": {
+              "line": 45,
+              "column": 4
+            },
+            "end": {
+              "line": 45,
+              "column": 29
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 2275,
+            "end": 2278,
+            "loc": {
+              "start": {
+                "line": 45,
+                "column": 4
+              },
+              "end": {
+                "line": 45,
+                "column": 7
+              }
+            },
+            "name": "re2"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 2281,
+            "end": 2300,
+            "loc": {
+              "start": {
+                "line": 45,
+                "column": 10
+              },
+              "end": {
+                "line": 45,
+                "column": 29
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 2285,
+              "end": 2291,
+              "loc": {
+                "start": {
+                  "line": 45,
+                  "column": 14
+                },
+                "end": {
+                  "line": 45,
+                  "column": 20
+                }
+              },
+              "name": "RegExp"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 2292,
+                "end": 2299,
+                "loc": {
+                  "start": {
+                    "line": 45,
+                    "column": 21
+                  },
+                  "end": {
+                    "line": 45,
+                    "column": 28
+                  }
+                },
+                "value": "(?i:)",
+                "raw": "\"(?i:)\""
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2302,
+      "end": 2383,
+      "loc": {
+        "start": {
+          "line": 46,
+          "column": 0
+        },
+        "end": {
+          "line": 46,
+          "column": 81
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2302,
+        "end": 2382,
+        "loc": {
+          "start": {
+            "line": 46,
+            "column": 0
+          },
+          "end": {
+            "line": 46,
+            "column": 80
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 2302,
+          "end": 2308,
+          "loc": {
+            "start": {
+              "line": 46,
+              "column": 0
+            },
+            "end": {
+              "line": 46,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 2309,
+            "end": 2324,
+            "loc": {
+              "start": {
+                "line": 46,
+                "column": 7
+              },
+              "end": {
+                "line": 46,
+                "column": 22
+              }
+            },
+            "operator": "!",
+            "prefix": true,
+            "argument": {
+              "type": "MemberExpression",
+              "start": 2310,
+              "end": 2324,
+              "loc": {
+                "start": {
+                  "line": 46,
+                  "column": 8
+                },
+                "end": {
+                  "line": 46,
+                  "column": 22
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 2310,
+                "end": 2313,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 11
+                  }
+                },
+                "name": "re2"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 2314,
+                "end": 2324,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 22
+                  }
+                },
+                "name": "ignoreCase"
+              },
+              "computed": false,
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 2326,
+            "end": 2381,
+            "loc": {
+              "start": {
+                "line": 46,
+                "column": 24
+              },
+              "end": {
+                "line": 46,
+                "column": 79
+              }
+            },
+            "value": "RegExp instance ignoreCase property should not be set",
+            "raw": "\"RegExp instance ignoreCase property should not be set\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 2385,
+      "end": 2404,
+      "loc": {
+        "start": {
+          "line": 48,
+          "column": 0
+        },
+        "end": {
+          "line": 48,
+          "column": 19
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 2389,
+          "end": 2403,
+          "loc": {
+            "start": {
+              "line": 48,
+              "column": 4
+            },
+            "end": {
+              "line": 48,
+              "column": 18
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 2389,
+            "end": 2392,
+            "loc": {
+              "start": {
+                "line": 48,
+                "column": 4
+              },
+              "end": {
+                "line": 48,
+                "column": 7
+              }
+            },
+            "name": "re3"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 2395,
+            "end": 2403,
+            "loc": {
+              "start": {
+                "line": 48,
+                "column": 10
+              },
+              "end": {
+                "line": 48,
+                "column": 18
+              }
+            },
+            "value": null,
+            "raw": "/(?i-:)/",
+            "regex": {
+              "pattern": "(?i-:)",
+              "flags": ""
+            }
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2405,
+      "end": 2486,
+      "loc": {
+        "start": {
+          "line": 49,
+          "column": 0
+        },
+        "end": {
+          "line": 49,
+          "column": 81
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2405,
+        "end": 2485,
+        "loc": {
+          "start": {
+            "line": 49,
+            "column": 0
+          },
+          "end": {
+            "line": 49,
+            "column": 80
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 2405,
+          "end": 2411,
+          "loc": {
+            "start": {
+              "line": 49,
+              "column": 0
+            },
+            "end": {
+              "line": 49,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 2412,
+            "end": 2427,
+            "loc": {
+              "start": {
+                "line": 49,
+                "column": 7
+              },
+              "end": {
+                "line": 49,
+                "column": 22
+              }
+            },
+            "operator": "!",
+            "prefix": true,
+            "argument": {
+              "type": "MemberExpression",
+              "start": 2413,
+              "end": 2427,
+              "loc": {
+                "start": {
+                  "line": 49,
+                  "column": 8
+                },
+                "end": {
+                  "line": 49,
+                  "column": 22
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 2413,
+                "end": 2416,
+                "loc": {
+                  "start": {
+                    "line": 49,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 49,
+                    "column": 11
+                  }
+                },
+                "name": "re3"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 2417,
+                "end": 2427,
+                "loc": {
+                  "start": {
+                    "line": 49,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 49,
+                    "column": 22
+                  }
+                },
+                "name": "ignoreCase"
+              },
+              "computed": false,
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 2429,
+            "end": 2484,
+            "loc": {
+              "start": {
+                "line": 49,
+                "column": 24
+              },
+              "end": {
+                "line": 49,
+                "column": 79
+              }
+            },
+            "value": "RegExp instance ignoreCase property should not be set",
+            "raw": "\"RegExp instance ignoreCase property should not be set\""
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 2488,
+      "end": 2519,
+      "loc": {
+        "start": {
+          "line": 51,
+          "column": 0
+        },
+        "end": {
+          "line": 51,
+          "column": 31
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 2492,
+          "end": 2518,
+          "loc": {
+            "start": {
+              "line": 51,
+              "column": 4
+            },
+            "end": {
+              "line": 51,
+              "column": 30
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 2492,
+            "end": 2495,
+            "loc": {
+              "start": {
+                "line": 51,
+                "column": 4
+              },
+              "end": {
+                "line": 51,
+                "column": 7
+              }
+            },
+            "name": "re4"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 2498,
+            "end": 2518,
+            "loc": {
+              "start": {
+                "line": 51,
+                "column": 10
+              },
+              "end": {
+                "line": 51,
+                "column": 30
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 2502,
+              "end": 2508,
+              "loc": {
+                "start": {
+                  "line": 51,
+                  "column": 14
+                },
+                "end": {
+                  "line": 51,
+                  "column": 20
+                }
+              },
+              "name": "RegExp"
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 2509,
+                "end": 2517,
+                "loc": {
+                  "start": {
+                    "line": 51,
+                    "column": 21
+                  },
+                  "end": {
+                    "line": 51,
+                    "column": 29
+                  }
+                },
+                "value": "(?i-:)",
+                "raw": "\"(?i-:)\""
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 2520,
+      "end": 2601,
+      "loc": {
+        "start": {
+          "line": 52,
+          "column": 0
+        },
+        "end": {
+          "line": 52,
+          "column": 81
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 2520,
+        "end": 2600,
+        "loc": {
+          "start": {
+            "line": 52,
+            "column": 0
+          },
+          "end": {
+            "line": 52,
+            "column": 80
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 2520,
+          "end": 2526,
+          "loc": {
+            "start": {
+              "line": 52,
+              "column": 0
+            },
+            "end": {
+              "line": 52,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "UnaryExpression",
+            "start": 2527,
+            "end": 2542,
+            "loc": {
+              "start": {
+                "line": 52,
+                "column": 7
+              },
+              "end": {
+                "line": 52,
+                "column": 22
+              }
+            },
+            "operator": "!",
+            "prefix": true,
+            "argument": {
+              "type": "MemberExpression",
+              "start": 2528,
+              "end": 2542,
+              "loc": {
+                "start": {
+                  "line": 52,
+                  "column": 8
+                },
+                "end": {
+                  "line": 52,
+                  "column": 22
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 2528,
+                "end": 2531,
+                "loc": {
+                  "start": {
+                    "line": 52,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 52,
+                    "column": 11
+                  }
+                },
+                "name": "re4"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 2532,
+                "end": 2542,
+                "loc": {
+                  "start": {
+                    "line": 52,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 52,
+                    "column": 22
+                  }
+                },
+                "name": "ignoreCase"
+              },
+              "computed": false,
+              "optional": false
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 2544,
+            "end": 2599,
+            "loc": {
+              "start": {
+                "line": 52,
+                "column": 24
+              },
+              "end": {
+                "line": 52,
+                "column": 79
+              }
+            },
+            "value": "RegExp instance ignoreCase property should not be set",
+            "raw": "\"RegExp instance ignoreCase property should not be set\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

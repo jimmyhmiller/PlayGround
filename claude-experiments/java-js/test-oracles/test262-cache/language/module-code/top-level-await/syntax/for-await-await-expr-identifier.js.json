@@ -1,0 +1,679 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 2266,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 69,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 1610,
+      "end": 1622,
+      "loc": {
+        "start": {
+          "line": 47,
+          "column": 0
+        },
+        "end": {
+          "line": 47,
+          "column": 12
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 1614,
+          "end": 1621,
+          "loc": {
+            "start": {
+              "line": 47,
+              "column": 4
+            },
+            "end": {
+              "line": 47,
+              "column": 11
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 1614,
+            "end": 1617,
+            "loc": {
+              "start": {
+                "line": 47,
+                "column": 4
+              },
+              "end": {
+                "line": 47,
+                "column": 7
+              }
+            },
+            "name": "foo"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 1620,
+            "end": 1621,
+            "loc": {
+              "start": {
+                "line": 47,
+                "column": 10
+              },
+              "end": {
+                "line": 47,
+                "column": 11
+              }
+            },
+            "value": 1,
+            "raw": "1"
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 1625,
+      "end": 1637,
+      "loc": {
+        "start": {
+          "line": 50,
+          "column": 0
+        },
+        "end": {
+          "line": 50,
+          "column": 12
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 1629,
+          "end": 1636,
+          "loc": {
+            "start": {
+              "line": 50,
+              "column": 4
+            },
+            "end": {
+              "line": 50,
+              "column": 11
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 1629,
+            "end": 1636,
+            "loc": {
+              "start": {
+                "line": 50,
+                "column": 4
+              },
+              "end": {
+                "line": 50,
+                "column": 11
+              }
+            },
+            "name": "binding"
+          },
+          "init": null
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ForOfStatement",
+      "start": 1801,
+      "end": 1861,
+      "loc": {
+        "start": {
+          "line": 53,
+          "column": 0
+        },
+        "end": {
+          "line": 56,
+          "column": 1
+        }
+      },
+      "await": true,
+      "left": {
+        "type": "Identifier",
+        "start": 1812,
+        "end": 1819,
+        "loc": {
+          "start": {
+            "line": 53,
+            "column": 11
+          },
+          "end": {
+            "line": 53,
+            "column": 18
+          }
+        },
+        "name": "binding"
+      },
+      "right": {
+        "type": "ArrayExpression",
+        "start": 1823,
+        "end": 1834,
+        "loc": {
+          "start": {
+            "line": 53,
+            "column": 22
+          },
+          "end": {
+            "line": 53,
+            "column": 33
+          }
+        },
+        "elements": [
+          {
+            "type": "AwaitExpression",
+            "start": 1824,
+            "end": 1833,
+            "loc": {
+              "start": {
+                "line": 53,
+                "column": 23
+              },
+              "end": {
+                "line": 53,
+                "column": 32
+              }
+            },
+            "argument": {
+              "type": "Identifier",
+              "start": 1830,
+              "end": 1833,
+              "loc": {
+                "start": {
+                  "line": 53,
+                  "column": 29
+                },
+                "end": {
+                  "line": 53,
+                  "column": 32
+                }
+              },
+              "name": "foo"
+            }
+          }
+        ]
+      },
+      "body": {
+        "type": "BlockStatement",
+        "start": 1836,
+        "end": 1861,
+        "loc": {
+          "start": {
+            "line": 53,
+            "column": 35
+          },
+          "end": {
+            "line": 56,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ExpressionStatement",
+            "start": 1840,
+            "end": 1850,
+            "loc": {
+              "start": {
+                "line": 54,
+                "column": 2
+              },
+              "end": {
+                "line": 54,
+                "column": 12
+              }
+            },
+            "expression": {
+              "type": "AwaitExpression",
+              "start": 1840,
+              "end": 1849,
+              "loc": {
+                "start": {
+                  "line": 54,
+                  "column": 2
+                },
+                "end": {
+                  "line": 54,
+                  "column": 11
+                }
+              },
+              "argument": {
+                "type": "Identifier",
+                "start": 1846,
+                "end": 1849,
+                "loc": {
+                  "start": {
+                    "line": 54,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 54,
+                    "column": 11
+                  }
+                },
+                "name": "foo"
+              }
+            }
+          },
+          {
+            "type": "BreakStatement",
+            "start": 1853,
+            "end": 1859,
+            "loc": {
+              "start": {
+                "line": 55,
+                "column": 2
+              },
+              "end": {
+                "line": 55,
+                "column": 8
+              }
+            },
+            "label": null
+          }
+        ]
+      }
+    },
+    {
+      "type": "ForOfStatement",
+      "start": 1999,
+      "end": 2063,
+      "loc": {
+        "start": {
+          "line": 59,
+          "column": 0
+        },
+        "end": {
+          "line": 62,
+          "column": 1
+        }
+      },
+      "await": true,
+      "left": {
+        "type": "VariableDeclaration",
+        "start": 2010,
+        "end": 2021,
+        "loc": {
+          "start": {
+            "line": 59,
+            "column": 11
+          },
+          "end": {
+            "line": 59,
+            "column": 22
+          }
+        },
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "start": 2014,
+            "end": 2021,
+            "loc": {
+              "start": {
+                "line": 59,
+                "column": 15
+              },
+              "end": {
+                "line": 59,
+                "column": 22
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 2014,
+              "end": 2021,
+              "loc": {
+                "start": {
+                  "line": 59,
+                  "column": 15
+                },
+                "end": {
+                  "line": 59,
+                  "column": 22
+                }
+              },
+              "name": "binding"
+            },
+            "init": null
+          }
+        ],
+        "kind": "var"
+      },
+      "right": {
+        "type": "ArrayExpression",
+        "start": 2025,
+        "end": 2036,
+        "loc": {
+          "start": {
+            "line": 59,
+            "column": 26
+          },
+          "end": {
+            "line": 59,
+            "column": 37
+          }
+        },
+        "elements": [
+          {
+            "type": "AwaitExpression",
+            "start": 2026,
+            "end": 2035,
+            "loc": {
+              "start": {
+                "line": 59,
+                "column": 27
+              },
+              "end": {
+                "line": 59,
+                "column": 36
+              }
+            },
+            "argument": {
+              "type": "Identifier",
+              "start": 2032,
+              "end": 2035,
+              "loc": {
+                "start": {
+                  "line": 59,
+                  "column": 33
+                },
+                "end": {
+                  "line": 59,
+                  "column": 36
+                }
+              },
+              "name": "foo"
+            }
+          }
+        ]
+      },
+      "body": {
+        "type": "BlockStatement",
+        "start": 2038,
+        "end": 2063,
+        "loc": {
+          "start": {
+            "line": 59,
+            "column": 39
+          },
+          "end": {
+            "line": 62,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ExpressionStatement",
+            "start": 2042,
+            "end": 2052,
+            "loc": {
+              "start": {
+                "line": 60,
+                "column": 2
+              },
+              "end": {
+                "line": 60,
+                "column": 12
+              }
+            },
+            "expression": {
+              "type": "AwaitExpression",
+              "start": 2042,
+              "end": 2051,
+              "loc": {
+                "start": {
+                  "line": 60,
+                  "column": 2
+                },
+                "end": {
+                  "line": 60,
+                  "column": 11
+                }
+              },
+              "argument": {
+                "type": "Identifier",
+                "start": 2048,
+                "end": 2051,
+                "loc": {
+                  "start": {
+                    "line": 60,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 60,
+                    "column": 11
+                  }
+                },
+                "name": "foo"
+              }
+            }
+          },
+          {
+            "type": "BreakStatement",
+            "start": 2055,
+            "end": 2061,
+            "loc": {
+              "start": {
+                "line": 61,
+                "column": 2
+              },
+              "end": {
+                "line": 61,
+                "column": 8
+              }
+            },
+            "label": null
+          }
+        ]
+      }
+    },
+    {
+      "type": "ForOfStatement",
+      "start": 2201,
+      "end": 2265,
+      "loc": {
+        "start": {
+          "line": 65,
+          "column": 0
+        },
+        "end": {
+          "line": 68,
+          "column": 1
+        }
+      },
+      "await": true,
+      "left": {
+        "type": "VariableDeclaration",
+        "start": 2212,
+        "end": 2223,
+        "loc": {
+          "start": {
+            "line": 65,
+            "column": 11
+          },
+          "end": {
+            "line": 65,
+            "column": 22
+          }
+        },
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "start": 2216,
+            "end": 2223,
+            "loc": {
+              "start": {
+                "line": 65,
+                "column": 15
+              },
+              "end": {
+                "line": 65,
+                "column": 22
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 2216,
+              "end": 2223,
+              "loc": {
+                "start": {
+                  "line": 65,
+                  "column": 15
+                },
+                "end": {
+                  "line": 65,
+                  "column": 22
+                }
+              },
+              "name": "binding"
+            },
+            "init": null
+          }
+        ],
+        "kind": "let"
+      },
+      "right": {
+        "type": "ArrayExpression",
+        "start": 2227,
+        "end": 2238,
+        "loc": {
+          "start": {
+            "line": 65,
+            "column": 26
+          },
+          "end": {
+            "line": 65,
+            "column": 37
+          }
+        },
+        "elements": [
+          {
+            "type": "AwaitExpression",
+            "start": 2228,
+            "end": 2237,
+            "loc": {
+              "start": {
+                "line": 65,
+                "column": 27
+              },
+              "end": {
+                "line": 65,
+                "column": 36
+              }
+            },
+            "argument": {
+              "type": "Identifier",
+              "start": 2234,
+              "end": 2237,
+              "loc": {
+                "start": {
+                  "line": 65,
+                  "column": 33
+                },
+                "end": {
+                  "line": 65,
+                  "column": 36
+                }
+              },
+              "name": "foo"
+            }
+          }
+        ]
+      },
+      "body": {
+        "type": "BlockStatement",
+        "start": 2240,
+        "end": 2265,
+        "loc": {
+          "start": {
+            "line": 65,
+            "column": 39
+          },
+          "end": {
+            "line": 68,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ExpressionStatement",
+            "start": 2244,
+            "end": 2254,
+            "loc": {
+              "start": {
+                "line": 66,
+                "column": 2
+              },
+              "end": {
+                "line": 66,
+                "column": 12
+              }
+            },
+            "expression": {
+              "type": "AwaitExpression",
+              "start": 2244,
+              "end": 2253,
+              "loc": {
+                "start": {
+                  "line": 66,
+                  "column": 2
+                },
+                "end": {
+                  "line": 66,
+                  "column": 11
+                }
+              },
+              "argument": {
+                "type": "Identifier",
+                "start": 2250,
+                "end": 2253,
+                "loc": {
+                  "start": {
+                    "line": 66,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 66,
+                    "column": 11
+                  }
+                },
+                "name": "foo"
+              }
+            }
+          },
+          {
+            "type": "BreakStatement",
+            "start": 2257,
+            "end": 2263,
+            "loc": {
+              "start": {
+                "line": 67,
+                "column": 2
+              },
+              "end": {
+                "line": 67,
+                "column": 8
+              }
+            },
+            "label": null
+          }
+        ]
+      }
+    }
+  ],
+  "sourceType": "module"
+}

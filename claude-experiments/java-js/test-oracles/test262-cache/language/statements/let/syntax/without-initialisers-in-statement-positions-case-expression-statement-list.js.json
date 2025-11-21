@@ -1,0 +1,136 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 315,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 10,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "SwitchStatement",
+      "start": 279,
+      "end": 314,
+      "loc": {
+        "start": {
+          "line": 9,
+          "column": 0
+        },
+        "end": {
+          "line": 9,
+          "column": 35
+        }
+      },
+      "discriminant": {
+        "type": "Literal",
+        "start": 287,
+        "end": 291,
+        "loc": {
+          "start": {
+            "line": 9,
+            "column": 8
+          },
+          "end": {
+            "line": 9,
+            "column": 12
+          }
+        },
+        "value": true,
+        "raw": "true"
+      },
+      "cases": [
+        {
+          "type": "SwitchCase",
+          "start": 295,
+          "end": 312,
+          "loc": {
+            "start": {
+              "line": 9,
+              "column": 16
+            },
+            "end": {
+              "line": 9,
+              "column": 33
+            }
+          },
+          "consequent": [
+            {
+              "type": "VariableDeclaration",
+              "start": 306,
+              "end": 312,
+              "loc": {
+                "start": {
+                  "line": 9,
+                  "column": 27
+                },
+                "end": {
+                  "line": 9,
+                  "column": 33
+                }
+              },
+              "declarations": [
+                {
+                  "type": "VariableDeclarator",
+                  "start": 310,
+                  "end": 311,
+                  "loc": {
+                    "start": {
+                      "line": 9,
+                      "column": 31
+                    },
+                    "end": {
+                      "line": 9,
+                      "column": 32
+                    }
+                  },
+                  "id": {
+                    "type": "Identifier",
+                    "start": 310,
+                    "end": 311,
+                    "loc": {
+                      "start": {
+                        "line": 9,
+                        "column": 31
+                      },
+                      "end": {
+                        "line": 9,
+                        "column": 32
+                      }
+                    },
+                    "name": "x"
+                  },
+                  "init": null
+                }
+              ],
+              "kind": "let"
+            }
+          ],
+          "test": {
+            "type": "Literal",
+            "start": 300,
+            "end": 304,
+            "loc": {
+              "start": {
+                "line": 9,
+                "column": 21
+              },
+              "end": {
+                "line": 9,
+                "column": 25
+              }
+            },
+            "value": true,
+            "raw": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "sourceType": "script"
+}

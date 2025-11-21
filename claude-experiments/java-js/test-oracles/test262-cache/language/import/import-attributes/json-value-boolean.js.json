@@ -1,0 +1,248 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 707,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 21,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ImportDeclaration",
+      "start": 598,
+      "end": 674,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 76
+        }
+      },
+      "specifiers": [
+        {
+          "type": "ImportDefaultSpecifier",
+          "start": 605,
+          "end": 610,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 7
+            },
+            "end": {
+              "line": 18,
+              "column": 12
+            }
+          },
+          "local": {
+            "type": "Identifier",
+            "start": 605,
+            "end": 610,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 7
+              },
+              "end": {
+                "line": 18,
+                "column": 12
+              }
+            },
+            "name": "value"
+          }
+        }
+      ],
+      "source": {
+        "type": "Literal",
+        "start": 616,
+        "end": 651,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 18
+          },
+          "end": {
+            "line": 18,
+            "column": 53
+          }
+        },
+        "value": "./json-value-boolean_FIXTURE.json",
+        "raw": "'./json-value-boolean_FIXTURE.json'"
+      },
+      "attributes": [
+        {
+          "type": "ImportAttribute",
+          "start": 659,
+          "end": 671,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 61
+            },
+            "end": {
+              "line": 18,
+              "column": 73
+            }
+          },
+          "key": {
+            "type": "Identifier",
+            "start": 659,
+            "end": 663,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 61
+              },
+              "end": {
+                "line": 18,
+                "column": 65
+              }
+            },
+            "name": "type"
+          },
+          "value": {
+            "type": "Literal",
+            "start": 665,
+            "end": 671,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 67
+              },
+              "end": {
+                "line": 18,
+                "column": 73
+              }
+            },
+            "value": "json",
+            "raw": "'json'"
+          }
+        }
+      ]
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 676,
+      "end": 706,
+      "loc": {
+        "start": {
+          "line": 20,
+          "column": 0
+        },
+        "end": {
+          "line": 20,
+          "column": 30
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 676,
+        "end": 705,
+        "loc": {
+          "start": {
+            "line": 20,
+            "column": 0
+          },
+          "end": {
+            "line": 20,
+            "column": 29
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 676,
+          "end": 692,
+          "loc": {
+            "start": {
+              "line": 20,
+              "column": 0
+            },
+            "end": {
+              "line": 20,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 676,
+            "end": 682,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 0
+              },
+              "end": {
+                "line": 20,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 683,
+            "end": 692,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 7
+              },
+              "end": {
+                "line": 20,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 693,
+            "end": 698,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 17
+              },
+              "end": {
+                "line": 20,
+                "column": 22
+              }
+            },
+            "name": "value"
+          },
+          {
+            "type": "Literal",
+            "start": 700,
+            "end": 704,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 24
+              },
+              "end": {
+                "line": 20,
+                "column": 28
+              }
+            },
+            "value": true,
+            "raw": "true"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "module"
+}

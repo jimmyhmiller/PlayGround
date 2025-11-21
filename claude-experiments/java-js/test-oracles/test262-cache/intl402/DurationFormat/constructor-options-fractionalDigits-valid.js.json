@@ -1,0 +1,739 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 768,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 26,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 463,
+      "end": 520,
+      "loc": {
+        "start": {
+          "line": 14,
+          "column": 0
+        },
+        "end": {
+          "line": 20,
+          "column": 2
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 469,
+          "end": 519,
+          "loc": {
+            "start": {
+              "line": 14,
+              "column": 6
+            },
+            "end": {
+              "line": 20,
+              "column": 1
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 469,
+            "end": 481,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 6
+              },
+              "end": {
+                "line": 14,
+                "column": 18
+              }
+            },
+            "name": "validOptions"
+          },
+          "init": {
+            "type": "ArrayExpression",
+            "start": 484,
+            "end": 519,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 21
+              },
+              "end": {
+                "line": 20,
+                "column": 1
+              }
+            },
+            "elements": [
+              {
+                "type": "Literal",
+                "start": 488,
+                "end": 489,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 3
+                  }
+                },
+                "value": 0,
+                "raw": "0"
+              },
+              {
+                "type": "Literal",
+                "start": 493,
+                "end": 494,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 3
+                  }
+                },
+                "value": 1,
+                "raw": "1"
+              },
+              {
+                "type": "Literal",
+                "start": 498,
+                "end": 499,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 3
+                  }
+                },
+                "value": 5,
+                "raw": "5"
+              },
+              {
+                "type": "Literal",
+                "start": 503,
+                "end": 504,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 3
+                  }
+                },
+                "value": 9,
+                "raw": "9"
+              },
+              {
+                "type": "Identifier",
+                "start": 508,
+                "end": 517,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 11
+                  }
+                },
+                "name": "undefined"
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ForOfStatement",
+      "start": 522,
+      "end": 767,
+      "loc": {
+        "start": {
+          "line": 22,
+          "column": 0
+        },
+        "end": {
+          "line": 25,
+          "column": 1
+        }
+      },
+      "await": false,
+      "left": {
+        "type": "VariableDeclaration",
+        "start": 527,
+        "end": 549,
+        "loc": {
+          "start": {
+            "line": 22,
+            "column": 5
+          },
+          "end": {
+            "line": 22,
+            "column": 27
+          }
+        },
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "start": 533,
+            "end": 549,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 11
+              },
+              "end": {
+                "line": 22,
+                "column": 27
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 533,
+              "end": 549,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 11
+                },
+                "end": {
+                  "line": 22,
+                  "column": 27
+                }
+              },
+              "name": "fractionalDigits"
+            },
+            "init": null
+          }
+        ],
+        "kind": "const"
+      },
+      "right": {
+        "type": "Identifier",
+        "start": 553,
+        "end": 565,
+        "loc": {
+          "start": {
+            "line": 22,
+            "column": 31
+          },
+          "end": {
+            "line": 22,
+            "column": 43
+          }
+        },
+        "name": "validOptions"
+      },
+      "body": {
+        "type": "BlockStatement",
+        "start": 567,
+        "end": 767,
+        "loc": {
+          "start": {
+            "line": 22,
+            "column": 45
+          },
+          "end": {
+            "line": 25,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "VariableDeclaration",
+            "start": 571,
+            "end": 633,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 2
+              },
+              "end": {
+                "line": 23,
+                "column": 64
+              }
+            },
+            "declarations": [
+              {
+                "type": "VariableDeclarator",
+                "start": 577,
+                "end": 632,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 63
+                  }
+                },
+                "id": {
+                  "type": "Identifier",
+                  "start": 577,
+                  "end": 580,
+                  "loc": {
+                    "start": {
+                      "line": 23,
+                      "column": 8
+                    },
+                    "end": {
+                      "line": 23,
+                      "column": 11
+                    }
+                  },
+                  "name": "obj"
+                },
+                "init": {
+                  "type": "NewExpression",
+                  "start": 583,
+                  "end": 632,
+                  "loc": {
+                    "start": {
+                      "line": 23,
+                      "column": 14
+                    },
+                    "end": {
+                      "line": 23,
+                      "column": 63
+                    }
+                  },
+                  "callee": {
+                    "type": "MemberExpression",
+                    "start": 587,
+                    "end": 606,
+                    "loc": {
+                      "start": {
+                        "line": 23,
+                        "column": 18
+                      },
+                      "end": {
+                        "line": 23,
+                        "column": 37
+                      }
+                    },
+                    "object": {
+                      "type": "Identifier",
+                      "start": 587,
+                      "end": 591,
+                      "loc": {
+                        "start": {
+                          "line": 23,
+                          "column": 18
+                        },
+                        "end": {
+                          "line": 23,
+                          "column": 22
+                        }
+                      },
+                      "name": "Intl"
+                    },
+                    "property": {
+                      "type": "Identifier",
+                      "start": 592,
+                      "end": 606,
+                      "loc": {
+                        "start": {
+                          "line": 23,
+                          "column": 23
+                        },
+                        "end": {
+                          "line": 23,
+                          "column": 37
+                        }
+                      },
+                      "name": "DurationFormat"
+                    },
+                    "computed": false,
+                    "optional": false
+                  },
+                  "arguments": [
+                    {
+                      "type": "Literal",
+                      "start": 607,
+                      "end": 611,
+                      "loc": {
+                        "start": {
+                          "line": 23,
+                          "column": 38
+                        },
+                        "end": {
+                          "line": 23,
+                          "column": 42
+                        }
+                      },
+                      "value": "en",
+                      "raw": "\"en\""
+                    },
+                    {
+                      "type": "ObjectExpression",
+                      "start": 613,
+                      "end": 631,
+                      "loc": {
+                        "start": {
+                          "line": 23,
+                          "column": 44
+                        },
+                        "end": {
+                          "line": 23,
+                          "column": 62
+                        }
+                      },
+                      "properties": [
+                        {
+                          "type": "Property",
+                          "start": 614,
+                          "end": 630,
+                          "loc": {
+                            "start": {
+                              "line": 23,
+                              "column": 45
+                            },
+                            "end": {
+                              "line": 23,
+                              "column": 61
+                            }
+                          },
+                          "method": false,
+                          "shorthand": true,
+                          "computed": false,
+                          "key": {
+                            "type": "Identifier",
+                            "start": 614,
+                            "end": 630,
+                            "loc": {
+                              "start": {
+                                "line": 23,
+                                "column": 45
+                              },
+                              "end": {
+                                "line": 23,
+                                "column": 61
+                              }
+                            },
+                            "name": "fractionalDigits"
+                          },
+                          "value": {
+                            "type": "Identifier",
+                            "start": 614,
+                            "end": 630,
+                            "loc": {
+                              "start": {
+                                "line": 23,
+                                "column": 45
+                              },
+                              "end": {
+                                "line": 23,
+                                "column": 61
+                              }
+                            },
+                            "name": "fractionalDigits"
+                          },
+                          "kind": "init"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ],
+            "kind": "const"
+          },
+          {
+            "type": "ExpressionStatement",
+            "start": 636,
+            "end": 765,
+            "loc": {
+              "start": {
+                "line": 24,
+                "column": 2
+              },
+              "end": {
+                "line": 24,
+                "column": 131
+              }
+            },
+            "expression": {
+              "type": "CallExpression",
+              "start": 636,
+              "end": 764,
+              "loc": {
+                "start": {
+                  "line": 24,
+                  "column": 2
+                },
+                "end": {
+                  "line": 24,
+                  "column": 130
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 636,
+                "end": 652,
+                "loc": {
+                  "start": {
+                    "line": 24,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 24,
+                    "column": 18
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 636,
+                  "end": 642,
+                  "loc": {
+                    "start": {
+                      "line": 24,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 24,
+                      "column": 8
+                    }
+                  },
+                  "name": "assert"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 643,
+                  "end": 652,
+                  "loc": {
+                    "start": {
+                      "line": 24,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 24,
+                      "column": 18
+                    }
+                  },
+                  "name": "sameValue"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "MemberExpression",
+                  "start": 653,
+                  "end": 691,
+                  "loc": {
+                    "start": {
+                      "line": 24,
+                      "column": 19
+                    },
+                    "end": {
+                      "line": 24,
+                      "column": 57
+                    }
+                  },
+                  "object": {
+                    "type": "CallExpression",
+                    "start": 653,
+                    "end": 674,
+                    "loc": {
+                      "start": {
+                        "line": 24,
+                        "column": 19
+                      },
+                      "end": {
+                        "line": 24,
+                        "column": 40
+                      }
+                    },
+                    "callee": {
+                      "type": "MemberExpression",
+                      "start": 653,
+                      "end": 672,
+                      "loc": {
+                        "start": {
+                          "line": 24,
+                          "column": 19
+                        },
+                        "end": {
+                          "line": 24,
+                          "column": 38
+                        }
+                      },
+                      "object": {
+                        "type": "Identifier",
+                        "start": 653,
+                        "end": 656,
+                        "loc": {
+                          "start": {
+                            "line": 24,
+                            "column": 19
+                          },
+                          "end": {
+                            "line": 24,
+                            "column": 22
+                          }
+                        },
+                        "name": "obj"
+                      },
+                      "property": {
+                        "type": "Identifier",
+                        "start": 657,
+                        "end": 672,
+                        "loc": {
+                          "start": {
+                            "line": 24,
+                            "column": 23
+                          },
+                          "end": {
+                            "line": 24,
+                            "column": 38
+                          }
+                        },
+                        "name": "resolvedOptions"
+                      },
+                      "computed": false,
+                      "optional": false
+                    },
+                    "arguments": [],
+                    "optional": false
+                  },
+                  "property": {
+                    "type": "Identifier",
+                    "start": 675,
+                    "end": 691,
+                    "loc": {
+                      "start": {
+                        "line": 24,
+                        "column": 41
+                      },
+                      "end": {
+                        "line": 24,
+                        "column": 57
+                      }
+                    },
+                    "name": "fractionalDigits"
+                  },
+                  "computed": false,
+                  "optional": false
+                },
+                {
+                  "type": "Identifier",
+                  "start": 693,
+                  "end": 709,
+                  "loc": {
+                    "start": {
+                      "line": 24,
+                      "column": 59
+                    },
+                    "end": {
+                      "line": 24,
+                      "column": 75
+                    }
+                  },
+                  "name": "fractionalDigits"
+                },
+                {
+                  "type": "TemplateLiteral",
+                  "start": 711,
+                  "end": 763,
+                  "loc": {
+                    "start": {
+                      "line": 24,
+                      "column": 77
+                    },
+                    "end": {
+                      "line": 24,
+                      "column": 129
+                    }
+                  },
+                  "expressions": [
+                    {
+                      "type": "Identifier",
+                      "start": 714,
+                      "end": 730,
+                      "loc": {
+                        "start": {
+                          "line": 24,
+                          "column": 80
+                        },
+                        "end": {
+                          "line": 24,
+                          "column": 96
+                        }
+                      },
+                      "name": "fractionalDigits"
+                    }
+                  ],
+                  "quasis": [
+                    {
+                      "type": "TemplateElement",
+                      "start": 712,
+                      "end": 712,
+                      "loc": {
+                        "start": {
+                          "line": 24,
+                          "column": 78
+                        },
+                        "end": {
+                          "line": 24,
+                          "column": 78
+                        }
+                      },
+                      "value": {
+                        "raw": "",
+                        "cooked": ""
+                      },
+                      "tail": false
+                    },
+                    {
+                      "type": "TemplateElement",
+                      "start": 731,
+                      "end": 762,
+                      "loc": {
+                        "start": {
+                          "line": 24,
+                          "column": 97
+                        },
+                        "end": {
+                          "line": 24,
+                          "column": 128
+                        }
+                      },
+                      "value": {
+                        "raw": " is supported by DurationFormat",
+                        "cooked": " is supported by DurationFormat"
+                      },
+                      "tail": true
+                    }
+                  ]
+                }
+              ],
+              "optional": false
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "sourceType": "script"
+}

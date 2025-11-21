@@ -1,0 +1,262 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 390,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 14,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "IfStatement",
+      "start": 261,
+      "end": 389,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 265,
+        "end": 293,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 4
+          },
+          "end": {
+            "line": 11,
+            "column": 32
+          }
+        },
+        "left": {
+          "type": "MemberExpression",
+          "start": 265,
+          "end": 279,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 4
+            },
+            "end": {
+              "line": 11,
+              "column": 18
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 265,
+            "end": 269,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 4
+              },
+              "end": {
+                "line": 11,
+                "column": 8
+              }
+            },
+            "name": "eval"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 270,
+            "end": 279,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 9
+              },
+              "end": {
+                "line": 11,
+                "column": 18
+              }
+            },
+            "name": "prototype"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "operator": "!==",
+        "right": {
+          "type": "Identifier",
+          "start": 284,
+          "end": 293,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 23
+            },
+            "end": {
+              "line": 11,
+              "column": 32
+            }
+          },
+          "name": "undefined"
+        }
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 295,
+        "end": 389,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 34
+          },
+          "end": {
+            "line": 13,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ThrowStatement",
+            "start": 299,
+            "end": 387,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 2
+              },
+              "end": {
+                "line": 12,
+                "column": 90
+              }
+            },
+            "argument": {
+              "type": "NewExpression",
+              "start": 305,
+              "end": 386,
+              "loc": {
+                "start": {
+                  "line": 12,
+                  "column": 8
+                },
+                "end": {
+                  "line": 12,
+                  "column": 89
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 309,
+                "end": 321,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 12
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 24
+                  }
+                },
+                "name": "Test262Error"
+              },
+              "arguments": [
+                {
+                  "type": "BinaryExpression",
+                  "start": 322,
+                  "end": 385,
+                  "loc": {
+                    "start": {
+                      "line": 12,
+                      "column": 25
+                    },
+                    "end": {
+                      "line": 12,
+                      "column": 88
+                    }
+                  },
+                  "left": {
+                    "type": "Literal",
+                    "start": 322,
+                    "end": 366,
+                    "loc": {
+                      "start": {
+                        "line": 12,
+                        "column": 25
+                      },
+                      "end": {
+                        "line": 12,
+                        "column": 69
+                      }
+                    },
+                    "value": "#1: eval.prototype === undefined. Actual: ",
+                    "raw": "'#1: eval.prototype === undefined. Actual: '"
+                  },
+                  "operator": "+",
+                  "right": {
+                    "type": "MemberExpression",
+                    "start": 370,
+                    "end": 384,
+                    "loc": {
+                      "start": {
+                        "line": 12,
+                        "column": 73
+                      },
+                      "end": {
+                        "line": 12,
+                        "column": 87
+                      }
+                    },
+                    "object": {
+                      "type": "Identifier",
+                      "start": 370,
+                      "end": 374,
+                      "loc": {
+                        "start": {
+                          "line": 12,
+                          "column": 73
+                        },
+                        "end": {
+                          "line": 12,
+                          "column": 77
+                        }
+                      },
+                      "name": "eval"
+                    },
+                    "property": {
+                      "type": "Identifier",
+                      "start": 375,
+                      "end": 384,
+                      "loc": {
+                        "start": {
+                          "line": 12,
+                          "column": 78
+                        },
+                        "end": {
+                          "line": 12,
+                          "column": 87
+                        }
+                      },
+                      "name": "prototype"
+                    },
+                    "computed": false,
+                    "optional": false
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "alternate": null
+    }
+  ],
+  "sourceType": "script"
+}

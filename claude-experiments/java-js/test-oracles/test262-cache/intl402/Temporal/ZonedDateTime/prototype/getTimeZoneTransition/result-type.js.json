@@ -1,0 +1,1694 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1141,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 25,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 318,
+      "end": 382,
+      "loc": {
+        "start": {
+          "line": 10,
+          "column": 0
+        },
+        "end": {
+          "line": 10,
+          "column": 64
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 322,
+          "end": 381,
+          "loc": {
+            "start": {
+              "line": 10,
+              "column": 4
+            },
+            "end": {
+              "line": 10,
+              "column": 63
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 322,
+            "end": 325,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 4
+              },
+              "end": {
+                "line": 10,
+                "column": 7
+              }
+            },
+            "name": "zdt"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 328,
+            "end": 381,
+            "loc": {
+              "start": {
+                "line": 10,
+                "column": 10
+              },
+              "end": {
+                "line": 10,
+                "column": 63
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 332,
+              "end": 354,
+              "loc": {
+                "start": {
+                  "line": 10,
+                  "column": 14
+                },
+                "end": {
+                  "line": 10,
+                  "column": 36
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 332,
+                "end": 340,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 14
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 22
+                  }
+                },
+                "name": "Temporal"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 341,
+                "end": 354,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 23
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 36
+                  }
+                },
+                "name": "ZonedDateTime"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 355,
+                "end": 357,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 37
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 39
+                  }
+                },
+                "value": null,
+                "raw": "0n",
+                "bigint": "0"
+              },
+              {
+                "type": "Literal",
+                "start": 359,
+                "end": 380,
+                "loc": {
+                  "start": {
+                    "line": 10,
+                    "column": 41
+                  },
+                  "end": {
+                    "line": 10,
+                    "column": 62
+                  }
+                },
+                "value": "America/Los_Angeles",
+                "raw": "\"America/Los_Angeles\""
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "let"
+    },
+    {
+      "type": "ForStatement",
+      "start": 383,
+      "end": 712,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 16,
+          "column": 1
+        }
+      },
+      "init": {
+        "type": "VariableDeclaration",
+        "start": 388,
+        "end": 401,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 5
+          },
+          "end": {
+            "line": 11,
+            "column": 18
+          }
+        },
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "start": 392,
+            "end": 401,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 9
+              },
+              "end": {
+                "line": 11,
+                "column": 18
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 392,
+              "end": 397,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 9
+                },
+                "end": {
+                  "line": 11,
+                  "column": 14
+                }
+              },
+              "name": "count"
+            },
+            "init": {
+              "type": "Literal",
+              "start": 400,
+              "end": 401,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 17
+                },
+                "end": {
+                  "line": 11,
+                  "column": 18
+                }
+              },
+              "value": 0,
+              "raw": "0"
+            }
+          }
+        ],
+        "kind": "let"
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 403,
+        "end": 412,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 20
+          },
+          "end": {
+            "line": 11,
+            "column": 29
+          }
+        },
+        "left": {
+          "type": "Identifier",
+          "start": 403,
+          "end": 408,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 20
+            },
+            "end": {
+              "line": 11,
+              "column": 25
+            }
+          },
+          "name": "count"
+        },
+        "operator": "<",
+        "right": {
+          "type": "Literal",
+          "start": 411,
+          "end": 412,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 28
+            },
+            "end": {
+              "line": 11,
+              "column": 29
+            }
+          },
+          "value": 4,
+          "raw": "4"
+        }
+      },
+      "update": {
+        "type": "UpdateExpression",
+        "start": 414,
+        "end": 421,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 31
+          },
+          "end": {
+            "line": 11,
+            "column": 38
+          }
+        },
+        "operator": "++",
+        "prefix": false,
+        "argument": {
+          "type": "Identifier",
+          "start": 414,
+          "end": 419,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 31
+            },
+            "end": {
+              "line": 11,
+              "column": 36
+            }
+          },
+          "name": "count"
+        }
+      },
+      "body": {
+        "type": "BlockStatement",
+        "start": 423,
+        "end": 712,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 40
+          },
+          "end": {
+            "line": 16,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "VariableDeclaration",
+            "start": 427,
+            "end": 480,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 2
+              },
+              "end": {
+                "line": 12,
+                "column": 55
+              }
+            },
+            "declarations": [
+              {
+                "type": "VariableDeclarator",
+                "start": 433,
+                "end": 479,
+                "loc": {
+                  "start": {
+                    "line": 12,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 12,
+                    "column": 54
+                  }
+                },
+                "id": {
+                  "type": "Identifier",
+                  "start": 433,
+                  "end": 443,
+                  "loc": {
+                    "start": {
+                      "line": 12,
+                      "column": 8
+                    },
+                    "end": {
+                      "line": 12,
+                      "column": 18
+                    }
+                  },
+                  "name": "transition"
+                },
+                "init": {
+                  "type": "CallExpression",
+                  "start": 446,
+                  "end": 479,
+                  "loc": {
+                    "start": {
+                      "line": 12,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 12,
+                      "column": 54
+                    }
+                  },
+                  "callee": {
+                    "type": "MemberExpression",
+                    "start": 446,
+                    "end": 471,
+                    "loc": {
+                      "start": {
+                        "line": 12,
+                        "column": 21
+                      },
+                      "end": {
+                        "line": 12,
+                        "column": 46
+                      }
+                    },
+                    "object": {
+                      "type": "Identifier",
+                      "start": 446,
+                      "end": 449,
+                      "loc": {
+                        "start": {
+                          "line": 12,
+                          "column": 21
+                        },
+                        "end": {
+                          "line": 12,
+                          "column": 24
+                        }
+                      },
+                      "name": "zdt"
+                    },
+                    "property": {
+                      "type": "Identifier",
+                      "start": 450,
+                      "end": 471,
+                      "loc": {
+                        "start": {
+                          "line": 12,
+                          "column": 25
+                        },
+                        "end": {
+                          "line": 12,
+                          "column": 46
+                        }
+                      },
+                      "name": "getTimeZoneTransition"
+                    },
+                    "computed": false,
+                    "optional": false
+                  },
+                  "arguments": [
+                    {
+                      "type": "Literal",
+                      "start": 472,
+                      "end": 478,
+                      "loc": {
+                        "start": {
+                          "line": 12,
+                          "column": 47
+                        },
+                        "end": {
+                          "line": 12,
+                          "column": 53
+                        }
+                      },
+                      "value": "next",
+                      "raw": "\"next\""
+                    }
+                  ],
+                  "optional": false
+                }
+              }
+            ],
+            "kind": "const"
+          },
+          {
+            "type": "ExpressionStatement",
+            "start": 483,
+            "end": 598,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 2
+              },
+              "end": {
+                "line": 13,
+                "column": 117
+              }
+            },
+            "expression": {
+              "type": "CallExpression",
+              "start": 483,
+              "end": 597,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 2
+                },
+                "end": {
+                  "line": 13,
+                  "column": 116
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 483,
+                "end": 489,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 8
+                  }
+                },
+                "name": "assert"
+              },
+              "arguments": [
+                {
+                  "type": "BinaryExpression",
+                  "start": 490,
+                  "end": 534,
+                  "loc": {
+                    "start": {
+                      "line": 13,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 13,
+                      "column": 53
+                    }
+                  },
+                  "left": {
+                    "type": "Identifier",
+                    "start": 490,
+                    "end": 500,
+                    "loc": {
+                      "start": {
+                        "line": 13,
+                        "column": 9
+                      },
+                      "end": {
+                        "line": 13,
+                        "column": 19
+                      }
+                    },
+                    "name": "transition"
+                  },
+                  "operator": "instanceof",
+                  "right": {
+                    "type": "MemberExpression",
+                    "start": 512,
+                    "end": 534,
+                    "loc": {
+                      "start": {
+                        "line": 13,
+                        "column": 31
+                      },
+                      "end": {
+                        "line": 13,
+                        "column": 53
+                      }
+                    },
+                    "object": {
+                      "type": "Identifier",
+                      "start": 512,
+                      "end": 520,
+                      "loc": {
+                        "start": {
+                          "line": 13,
+                          "column": 31
+                        },
+                        "end": {
+                          "line": 13,
+                          "column": 39
+                        }
+                      },
+                      "name": "Temporal"
+                    },
+                    "property": {
+                      "type": "Identifier",
+                      "start": 521,
+                      "end": 534,
+                      "loc": {
+                        "start": {
+                          "line": 13,
+                          "column": 40
+                        },
+                        "end": {
+                          "line": 13,
+                          "column": 53
+                        }
+                      },
+                      "name": "ZonedDateTime"
+                    },
+                    "computed": false,
+                    "optional": false
+                  }
+                },
+                {
+                  "type": "Literal",
+                  "start": 536,
+                  "end": 596,
+                  "loc": {
+                    "start": {
+                      "line": 13,
+                      "column": 55
+                    },
+                    "end": {
+                      "line": 13,
+                      "column": 115
+                    }
+                  },
+                  "value": "getTimeZoneTransition(next) returns Temporal.ZonedDateTime",
+                  "raw": "\"getTimeZoneTransition(next) returns Temporal.ZonedDateTime\""
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "ExpressionStatement",
+            "start": 601,
+            "end": 690,
+            "loc": {
+              "start": {
+                "line": 14,
+                "column": 2
+              },
+              "end": {
+                "line": 14,
+                "column": 91
+              }
+            },
+            "expression": {
+              "type": "CallExpression",
+              "start": 601,
+              "end": 689,
+              "loc": {
+                "start": {
+                  "line": 14,
+                  "column": 2
+                },
+                "end": {
+                  "line": 14,
+                  "column": 90
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 601,
+                "end": 607,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 8
+                  }
+                },
+                "name": "assert"
+              },
+              "arguments": [
+                {
+                  "type": "UnaryExpression",
+                  "start": 608,
+                  "end": 631,
+                  "loc": {
+                    "start": {
+                      "line": 14,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 14,
+                      "column": 32
+                    }
+                  },
+                  "operator": "!",
+                  "prefix": true,
+                  "argument": {
+                    "type": "CallExpression",
+                    "start": 609,
+                    "end": 631,
+                    "loc": {
+                      "start": {
+                        "line": 14,
+                        "column": 10
+                      },
+                      "end": {
+                        "line": 14,
+                        "column": 32
+                      }
+                    },
+                    "callee": {
+                      "type": "MemberExpression",
+                      "start": 609,
+                      "end": 626,
+                      "loc": {
+                        "start": {
+                          "line": 14,
+                          "column": 10
+                        },
+                        "end": {
+                          "line": 14,
+                          "column": 27
+                        }
+                      },
+                      "object": {
+                        "type": "Identifier",
+                        "start": 609,
+                        "end": 619,
+                        "loc": {
+                          "start": {
+                            "line": 14,
+                            "column": 10
+                          },
+                          "end": {
+                            "line": 14,
+                            "column": 20
+                          }
+                        },
+                        "name": "transition"
+                      },
+                      "property": {
+                        "type": "Identifier",
+                        "start": 620,
+                        "end": 626,
+                        "loc": {
+                          "start": {
+                            "line": 14,
+                            "column": 21
+                          },
+                          "end": {
+                            "line": 14,
+                            "column": 27
+                          }
+                        },
+                        "name": "equals"
+                      },
+                      "computed": false,
+                      "optional": false
+                    },
+                    "arguments": [
+                      {
+                        "type": "Identifier",
+                        "start": 627,
+                        "end": 630,
+                        "loc": {
+                          "start": {
+                            "line": 14,
+                            "column": 28
+                          },
+                          "end": {
+                            "line": 14,
+                            "column": 31
+                          }
+                        },
+                        "name": "zdt"
+                      }
+                    ],
+                    "optional": false
+                  }
+                },
+                {
+                  "type": "Literal",
+                  "start": 633,
+                  "end": 688,
+                  "loc": {
+                    "start": {
+                      "line": 14,
+                      "column": 34
+                    },
+                    "end": {
+                      "line": 14,
+                      "column": 89
+                    }
+                  },
+                  "value": "getTimeZoneTransition(next) does not return its input",
+                  "raw": "\"getTimeZoneTransition(next) does not return its input\""
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "ExpressionStatement",
+            "start": 693,
+            "end": 710,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 2
+              },
+              "end": {
+                "line": 15,
+                "column": 19
+              }
+            },
+            "expression": {
+              "type": "AssignmentExpression",
+              "start": 693,
+              "end": 709,
+              "loc": {
+                "start": {
+                  "line": 15,
+                  "column": 2
+                },
+                "end": {
+                  "line": 15,
+                  "column": 18
+                }
+              },
+              "operator": "=",
+              "left": {
+                "type": "Identifier",
+                "start": 693,
+                "end": 696,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 5
+                  }
+                },
+                "name": "zdt"
+              },
+              "right": {
+                "type": "Identifier",
+                "start": 699,
+                "end": 709,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 18
+                  }
+                },
+                "name": "transition"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 714,
+      "end": 798,
+      "loc": {
+        "start": {
+          "line": 18,
+          "column": 0
+        },
+        "end": {
+          "line": 18,
+          "column": 84
+        }
+      },
+      "expression": {
+        "type": "AssignmentExpression",
+        "start": 714,
+        "end": 797,
+        "loc": {
+          "start": {
+            "line": 18,
+            "column": 0
+          },
+          "end": {
+            "line": 18,
+            "column": 83
+          }
+        },
+        "operator": "=",
+        "left": {
+          "type": "Identifier",
+          "start": 714,
+          "end": 717,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 0
+            },
+            "end": {
+              "line": 18,
+              "column": 3
+            }
+          },
+          "name": "zdt"
+        },
+        "right": {
+          "type": "NewExpression",
+          "start": 720,
+          "end": 797,
+          "loc": {
+            "start": {
+              "line": 18,
+              "column": 6
+            },
+            "end": {
+              "line": 18,
+              "column": 83
+            }
+          },
+          "callee": {
+            "type": "MemberExpression",
+            "start": 724,
+            "end": 746,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 10
+              },
+              "end": {
+                "line": 18,
+                "column": 32
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 724,
+              "end": 732,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 10
+                },
+                "end": {
+                  "line": 18,
+                  "column": 18
+                }
+              },
+              "name": "Temporal"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 733,
+              "end": 746,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 19
+                },
+                "end": {
+                  "line": 18,
+                  "column": 32
+                }
+              },
+              "name": "ZonedDateTime"
+            },
+            "computed": false,
+            "optional": false
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "start": 747,
+              "end": 773,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 33
+                },
+                "end": {
+                  "line": 18,
+                  "column": 59
+                }
+              },
+              "value": null,
+              "raw": "1_000_000_000_000_000_000n",
+              "bigint": "1000000000000000000"
+            },
+            {
+              "type": "Literal",
+              "start": 775,
+              "end": 796,
+              "loc": {
+                "start": {
+                  "line": 18,
+                  "column": 61
+                },
+                "end": {
+                  "line": 18,
+                  "column": 82
+                }
+              },
+              "value": "America/Los_Angeles",
+              "raw": "\"America/Los_Angeles\""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "ForStatement",
+      "start": 799,
+      "end": 1140,
+      "loc": {
+        "start": {
+          "line": 19,
+          "column": 0
+        },
+        "end": {
+          "line": 24,
+          "column": 1
+        }
+      },
+      "init": {
+        "type": "VariableDeclaration",
+        "start": 804,
+        "end": 817,
+        "loc": {
+          "start": {
+            "line": 19,
+            "column": 5
+          },
+          "end": {
+            "line": 19,
+            "column": 18
+          }
+        },
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "start": 808,
+            "end": 817,
+            "loc": {
+              "start": {
+                "line": 19,
+                "column": 9
+              },
+              "end": {
+                "line": 19,
+                "column": 18
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 808,
+              "end": 813,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 9
+                },
+                "end": {
+                  "line": 19,
+                  "column": 14
+                }
+              },
+              "name": "count"
+            },
+            "init": {
+              "type": "Literal",
+              "start": 816,
+              "end": 817,
+              "loc": {
+                "start": {
+                  "line": 19,
+                  "column": 17
+                },
+                "end": {
+                  "line": 19,
+                  "column": 18
+                }
+              },
+              "value": 0,
+              "raw": "0"
+            }
+          }
+        ],
+        "kind": "let"
+      },
+      "test": {
+        "type": "BinaryExpression",
+        "start": 819,
+        "end": 828,
+        "loc": {
+          "start": {
+            "line": 19,
+            "column": 20
+          },
+          "end": {
+            "line": 19,
+            "column": 29
+          }
+        },
+        "left": {
+          "type": "Identifier",
+          "start": 819,
+          "end": 824,
+          "loc": {
+            "start": {
+              "line": 19,
+              "column": 20
+            },
+            "end": {
+              "line": 19,
+              "column": 25
+            }
+          },
+          "name": "count"
+        },
+        "operator": "<",
+        "right": {
+          "type": "Literal",
+          "start": 827,
+          "end": 828,
+          "loc": {
+            "start": {
+              "line": 19,
+              "column": 28
+            },
+            "end": {
+              "line": 19,
+              "column": 29
+            }
+          },
+          "value": 4,
+          "raw": "4"
+        }
+      },
+      "update": {
+        "type": "UpdateExpression",
+        "start": 830,
+        "end": 837,
+        "loc": {
+          "start": {
+            "line": 19,
+            "column": 31
+          },
+          "end": {
+            "line": 19,
+            "column": 38
+          }
+        },
+        "operator": "++",
+        "prefix": false,
+        "argument": {
+          "type": "Identifier",
+          "start": 830,
+          "end": 835,
+          "loc": {
+            "start": {
+              "line": 19,
+              "column": 31
+            },
+            "end": {
+              "line": 19,
+              "column": 36
+            }
+          },
+          "name": "count"
+        }
+      },
+      "body": {
+        "type": "BlockStatement",
+        "start": 839,
+        "end": 1140,
+        "loc": {
+          "start": {
+            "line": 19,
+            "column": 40
+          },
+          "end": {
+            "line": 24,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "VariableDeclaration",
+            "start": 843,
+            "end": 900,
+            "loc": {
+              "start": {
+                "line": 20,
+                "column": 2
+              },
+              "end": {
+                "line": 20,
+                "column": 59
+              }
+            },
+            "declarations": [
+              {
+                "type": "VariableDeclarator",
+                "start": 849,
+                "end": 899,
+                "loc": {
+                  "start": {
+                    "line": 20,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 20,
+                    "column": 58
+                  }
+                },
+                "id": {
+                  "type": "Identifier",
+                  "start": 849,
+                  "end": 859,
+                  "loc": {
+                    "start": {
+                      "line": 20,
+                      "column": 8
+                    },
+                    "end": {
+                      "line": 20,
+                      "column": 18
+                    }
+                  },
+                  "name": "transition"
+                },
+                "init": {
+                  "type": "CallExpression",
+                  "start": 862,
+                  "end": 899,
+                  "loc": {
+                    "start": {
+                      "line": 20,
+                      "column": 21
+                    },
+                    "end": {
+                      "line": 20,
+                      "column": 58
+                    }
+                  },
+                  "callee": {
+                    "type": "MemberExpression",
+                    "start": 862,
+                    "end": 887,
+                    "loc": {
+                      "start": {
+                        "line": 20,
+                        "column": 21
+                      },
+                      "end": {
+                        "line": 20,
+                        "column": 46
+                      }
+                    },
+                    "object": {
+                      "type": "Identifier",
+                      "start": 862,
+                      "end": 865,
+                      "loc": {
+                        "start": {
+                          "line": 20,
+                          "column": 21
+                        },
+                        "end": {
+                          "line": 20,
+                          "column": 24
+                        }
+                      },
+                      "name": "zdt"
+                    },
+                    "property": {
+                      "type": "Identifier",
+                      "start": 866,
+                      "end": 887,
+                      "loc": {
+                        "start": {
+                          "line": 20,
+                          "column": 25
+                        },
+                        "end": {
+                          "line": 20,
+                          "column": 46
+                        }
+                      },
+                      "name": "getTimeZoneTransition"
+                    },
+                    "computed": false,
+                    "optional": false
+                  },
+                  "arguments": [
+                    {
+                      "type": "Literal",
+                      "start": 888,
+                      "end": 898,
+                      "loc": {
+                        "start": {
+                          "line": 20,
+                          "column": 47
+                        },
+                        "end": {
+                          "line": 20,
+                          "column": 57
+                        }
+                      },
+                      "value": "previous",
+                      "raw": "\"previous\""
+                    }
+                  ],
+                  "optional": false
+                }
+              }
+            ],
+            "kind": "const"
+          },
+          {
+            "type": "ExpressionStatement",
+            "start": 903,
+            "end": 1022,
+            "loc": {
+              "start": {
+                "line": 21,
+                "column": 2
+              },
+              "end": {
+                "line": 21,
+                "column": 121
+              }
+            },
+            "expression": {
+              "type": "CallExpression",
+              "start": 903,
+              "end": 1021,
+              "loc": {
+                "start": {
+                  "line": 21,
+                  "column": 2
+                },
+                "end": {
+                  "line": 21,
+                  "column": 120
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 903,
+                "end": 909,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 8
+                  }
+                },
+                "name": "assert"
+              },
+              "arguments": [
+                {
+                  "type": "BinaryExpression",
+                  "start": 910,
+                  "end": 954,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 53
+                    }
+                  },
+                  "left": {
+                    "type": "Identifier",
+                    "start": 910,
+                    "end": 920,
+                    "loc": {
+                      "start": {
+                        "line": 21,
+                        "column": 9
+                      },
+                      "end": {
+                        "line": 21,
+                        "column": 19
+                      }
+                    },
+                    "name": "transition"
+                  },
+                  "operator": "instanceof",
+                  "right": {
+                    "type": "MemberExpression",
+                    "start": 932,
+                    "end": 954,
+                    "loc": {
+                      "start": {
+                        "line": 21,
+                        "column": 31
+                      },
+                      "end": {
+                        "line": 21,
+                        "column": 53
+                      }
+                    },
+                    "object": {
+                      "type": "Identifier",
+                      "start": 932,
+                      "end": 940,
+                      "loc": {
+                        "start": {
+                          "line": 21,
+                          "column": 31
+                        },
+                        "end": {
+                          "line": 21,
+                          "column": 39
+                        }
+                      },
+                      "name": "Temporal"
+                    },
+                    "property": {
+                      "type": "Identifier",
+                      "start": 941,
+                      "end": 954,
+                      "loc": {
+                        "start": {
+                          "line": 21,
+                          "column": 40
+                        },
+                        "end": {
+                          "line": 21,
+                          "column": 53
+                        }
+                      },
+                      "name": "ZonedDateTime"
+                    },
+                    "computed": false,
+                    "optional": false
+                  }
+                },
+                {
+                  "type": "Literal",
+                  "start": 956,
+                  "end": 1020,
+                  "loc": {
+                    "start": {
+                      "line": 21,
+                      "column": 55
+                    },
+                    "end": {
+                      "line": 21,
+                      "column": 119
+                    }
+                  },
+                  "value": "getTimeZoneTransition(previous) returns Temporal.ZonedDateTime",
+                  "raw": "\"getTimeZoneTransition(previous) returns Temporal.ZonedDateTime\""
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "ExpressionStatement",
+            "start": 1025,
+            "end": 1118,
+            "loc": {
+              "start": {
+                "line": 22,
+                "column": 2
+              },
+              "end": {
+                "line": 22,
+                "column": 95
+              }
+            },
+            "expression": {
+              "type": "CallExpression",
+              "start": 1025,
+              "end": 1117,
+              "loc": {
+                "start": {
+                  "line": 22,
+                  "column": 2
+                },
+                "end": {
+                  "line": 22,
+                  "column": 94
+                }
+              },
+              "callee": {
+                "type": "Identifier",
+                "start": 1025,
+                "end": 1031,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 8
+                  }
+                },
+                "name": "assert"
+              },
+              "arguments": [
+                {
+                  "type": "UnaryExpression",
+                  "start": 1032,
+                  "end": 1055,
+                  "loc": {
+                    "start": {
+                      "line": 22,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 22,
+                      "column": 32
+                    }
+                  },
+                  "operator": "!",
+                  "prefix": true,
+                  "argument": {
+                    "type": "CallExpression",
+                    "start": 1033,
+                    "end": 1055,
+                    "loc": {
+                      "start": {
+                        "line": 22,
+                        "column": 10
+                      },
+                      "end": {
+                        "line": 22,
+                        "column": 32
+                      }
+                    },
+                    "callee": {
+                      "type": "MemberExpression",
+                      "start": 1033,
+                      "end": 1050,
+                      "loc": {
+                        "start": {
+                          "line": 22,
+                          "column": 10
+                        },
+                        "end": {
+                          "line": 22,
+                          "column": 27
+                        }
+                      },
+                      "object": {
+                        "type": "Identifier",
+                        "start": 1033,
+                        "end": 1043,
+                        "loc": {
+                          "start": {
+                            "line": 22,
+                            "column": 10
+                          },
+                          "end": {
+                            "line": 22,
+                            "column": 20
+                          }
+                        },
+                        "name": "transition"
+                      },
+                      "property": {
+                        "type": "Identifier",
+                        "start": 1044,
+                        "end": 1050,
+                        "loc": {
+                          "start": {
+                            "line": 22,
+                            "column": 21
+                          },
+                          "end": {
+                            "line": 22,
+                            "column": 27
+                          }
+                        },
+                        "name": "equals"
+                      },
+                      "computed": false,
+                      "optional": false
+                    },
+                    "arguments": [
+                      {
+                        "type": "Identifier",
+                        "start": 1051,
+                        "end": 1054,
+                        "loc": {
+                          "start": {
+                            "line": 22,
+                            "column": 28
+                          },
+                          "end": {
+                            "line": 22,
+                            "column": 31
+                          }
+                        },
+                        "name": "zdt"
+                      }
+                    ],
+                    "optional": false
+                  }
+                },
+                {
+                  "type": "Literal",
+                  "start": 1057,
+                  "end": 1116,
+                  "loc": {
+                    "start": {
+                      "line": 22,
+                      "column": 34
+                    },
+                    "end": {
+                      "line": 22,
+                      "column": 93
+                    }
+                  },
+                  "value": "getTimeZoneTransition(previous) does not return its input",
+                  "raw": "\"getTimeZoneTransition(previous) does not return its input\""
+                }
+              ],
+              "optional": false
+            }
+          },
+          {
+            "type": "ExpressionStatement",
+            "start": 1121,
+            "end": 1138,
+            "loc": {
+              "start": {
+                "line": 23,
+                "column": 2
+              },
+              "end": {
+                "line": 23,
+                "column": 19
+              }
+            },
+            "expression": {
+              "type": "AssignmentExpression",
+              "start": 1121,
+              "end": 1137,
+              "loc": {
+                "start": {
+                  "line": 23,
+                  "column": 2
+                },
+                "end": {
+                  "line": 23,
+                  "column": 18
+                }
+              },
+              "operator": "=",
+              "left": {
+                "type": "Identifier",
+                "start": 1121,
+                "end": 1124,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 5
+                  }
+                },
+                "name": "zdt"
+              },
+              "right": {
+                "type": "Identifier",
+                "start": 1127,
+                "end": 1137,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 8
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 18
+                  }
+                },
+                "name": "transition"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "sourceType": "script"
+}

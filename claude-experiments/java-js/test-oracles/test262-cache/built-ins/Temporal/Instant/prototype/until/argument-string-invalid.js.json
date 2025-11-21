@@ -1,0 +1,1306 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1804,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 69,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 362,
+      "end": 1589,
+      "loc": {
+        "start": {
+          "line": 12,
+          "column": 0
+        },
+        "end": {
+          "line": 59,
+          "column": 2
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 368,
+          "end": 1588,
+          "loc": {
+            "start": {
+              "line": 12,
+              "column": 6
+            },
+            "end": {
+              "line": 59,
+              "column": 1
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 368,
+            "end": 382,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 6
+              },
+              "end": {
+                "line": 12,
+                "column": 20
+              }
+            },
+            "name": "invalidStrings"
+          },
+          "init": {
+            "type": "ArrayExpression",
+            "start": 385,
+            "end": 1588,
+            "loc": {
+              "start": {
+                "line": 12,
+                "column": 23
+              },
+              "end": {
+                "line": 59,
+                "column": 1
+              }
+            },
+            "elements": [
+              {
+                "type": "Literal",
+                "start": 415,
+                "end": 417,
+                "loc": {
+                  "start": {
+                    "line": 14,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 14,
+                    "column": 4
+                  }
+                },
+                "value": "",
+                "raw": "\"\""
+              },
+              {
+                "type": "Literal",
+                "start": 421,
+                "end": 438,
+                "loc": {
+                  "start": {
+                    "line": 15,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 19
+                  }
+                },
+                "value": "invalid iso8601",
+                "raw": "\"invalid iso8601\""
+              },
+              {
+                "type": "Literal",
+                "start": 442,
+                "end": 461,
+                "loc": {
+                  "start": {
+                    "line": 16,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 16,
+                    "column": 21
+                  }
+                },
+                "value": "2020-01-00T00:00Z",
+                "raw": "\"2020-01-00T00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 465,
+                "end": 484,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 21
+                  }
+                },
+                "value": "2020-01-32T00:00Z",
+                "raw": "\"2020-01-32T00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 488,
+                "end": 507,
+                "loc": {
+                  "start": {
+                    "line": 18,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 18,
+                    "column": 21
+                  }
+                },
+                "value": "2020-02-30T00:00Z",
+                "raw": "\"2020-02-30T00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 511,
+                "end": 530,
+                "loc": {
+                  "start": {
+                    "line": 19,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 19,
+                    "column": 21
+                  }
+                },
+                "value": "2021-02-29T00:00Z",
+                "raw": "\"2021-02-29T00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 534,
+                "end": 553,
+                "loc": {
+                  "start": {
+                    "line": 20,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 20,
+                    "column": 21
+                  }
+                },
+                "value": "2020-00-01T00:00Z",
+                "raw": "\"2020-00-01T00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 557,
+                "end": 576,
+                "loc": {
+                  "start": {
+                    "line": 21,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 21,
+                    "column": 21
+                  }
+                },
+                "value": "2020-13-01T00:00Z",
+                "raw": "\"2020-13-01T00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 580,
+                "end": 594,
+                "loc": {
+                  "start": {
+                    "line": 22,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 16
+                  }
+                },
+                "value": "2020-01-01TZ",
+                "raw": "\"2020-01-01TZ\""
+              },
+              {
+                "type": "Literal",
+                "start": 598,
+                "end": 620,
+                "loc": {
+                  "start": {
+                    "line": 23,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 23,
+                    "column": 24
+                  }
+                },
+                "value": "2020-01-01T25:00:00Z",
+                "raw": "\"2020-01-01T25:00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 624,
+                "end": 646,
+                "loc": {
+                  "start": {
+                    "line": 24,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 24,
+                    "column": 24
+                  }
+                },
+                "value": "2020-01-01T01:60:00Z",
+                "raw": "\"2020-01-01T01:60:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 650,
+                "end": 672,
+                "loc": {
+                  "start": {
+                    "line": 25,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 25,
+                    "column": 24
+                  }
+                },
+                "value": "2020-01-01T01:60:61Z",
+                "raw": "\"2020-01-01T01:60:61Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 676,
+                "end": 699,
+                "loc": {
+                  "start": {
+                    "line": 26,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 26,
+                    "column": 25
+                  }
+                },
+                "value": "2020-01-01T00:00Zjunk",
+                "raw": "\"2020-01-01T00:00Zjunk\""
+              },
+              {
+                "type": "Literal",
+                "start": 703,
+                "end": 729,
+                "loc": {
+                  "start": {
+                    "line": 27,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 27,
+                    "column": 28
+                  }
+                },
+                "value": "2020-01-01T00:00:00Zjunk",
+                "raw": "\"2020-01-01T00:00:00Zjunk\""
+              },
+              {
+                "type": "Literal",
+                "start": 733,
+                "end": 769,
+                "loc": {
+                  "start": {
+                    "line": 28,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 28,
+                    "column": 38
+                  }
+                },
+                "value": "2020-01-01T00:00:00.000000000Zjunk",
+                "raw": "\"2020-01-01T00:00:00.000000000Zjunk\""
+              },
+              {
+                "type": "Literal",
+                "start": 773,
+                "end": 804,
+                "loc": {
+                  "start": {
+                    "line": 29,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 29,
+                    "column": 33
+                  }
+                },
+                "value": "2020-01-01T00:00:00+00:00junk",
+                "raw": "\"2020-01-01T00:00:00+00:00junk\""
+              },
+              {
+                "type": "Literal",
+                "start": 808,
+                "end": 844,
+                "loc": {
+                  "start": {
+                    "line": 30,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 30,
+                    "column": 38
+                  }
+                },
+                "value": "2020-01-01T00:00:00+00:00[UTC]junk",
+                "raw": "\"2020-01-01T00:00:00+00:00[UTC]junk\""
+              },
+              {
+                "type": "Literal",
+                "start": 848,
+                "end": 898,
+                "loc": {
+                  "start": {
+                    "line": 31,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 31,
+                    "column": 52
+                  }
+                },
+                "value": "2020-01-01T00:00:00+00:00[UTC][u-ca=iso8601]junk",
+                "raw": "\"2020-01-01T00:00:00+00:00[UTC][u-ca=iso8601]junk\""
+              },
+              {
+                "type": "Literal",
+                "start": 902,
+                "end": 922,
+                "loc": {
+                  "start": {
+                    "line": 32,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 32,
+                    "column": 22
+                  }
+                },
+                "value": "02020-01-01T00:00Z",
+                "raw": "\"02020-01-01T00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 926,
+                "end": 946,
+                "loc": {
+                  "start": {
+                    "line": 33,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 33,
+                    "column": 22
+                  }
+                },
+                "value": "2020-001-01T00:00Z",
+                "raw": "\"2020-001-01T00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 950,
+                "end": 970,
+                "loc": {
+                  "start": {
+                    "line": 34,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 34,
+                    "column": 22
+                  }
+                },
+                "value": "2020-01-001T00:00Z",
+                "raw": "\"2020-01-001T00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 974,
+                "end": 991,
+                "loc": {
+                  "start": {
+                    "line": 35,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 35,
+                    "column": 19
+                  }
+                },
+                "value": "2020-01-01T001Z",
+                "raw": "\"2020-01-01T001Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 995,
+                "end": 1015,
+                "loc": {
+                  "start": {
+                    "line": 36,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 36,
+                    "column": 22
+                  }
+                },
+                "value": "2020-01-01T01:001Z",
+                "raw": "\"2020-01-01T01:001Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 1019,
+                "end": 1042,
+                "loc": {
+                  "start": {
+                    "line": 37,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 37,
+                    "column": 25
+                  }
+                },
+                "value": "2020-01-01T01:01:001Z",
+                "raw": "\"2020-01-01T01:01:001Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 1046,
+                "end": 1070,
+                "loc": {
+                  "start": {
+                    "line": 38,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 38,
+                    "column": 26
+                  }
+                },
+                "value": "2020-01-01T00:00-24:00",
+                "raw": "\"2020-01-01T00:00-24:00\""
+              },
+              {
+                "type": "Literal",
+                "start": 1074,
+                "end": 1098,
+                "loc": {
+                  "start": {
+                    "line": 39,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 39,
+                    "column": 26
+                  }
+                },
+                "value": "2020-01-01T00:00+24:00",
+                "raw": "\"2020-01-01T00:00+24:00\""
+              },
+              {
+                "type": "Literal",
+                "start": 1151,
+                "end": 1170,
+                "loc": {
+                  "start": {
+                    "line": 41,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 41,
+                    "column": 21
+                  }
+                },
+                "value": "2020-W01-1T00:00Z",
+                "raw": "\"2020-W01-1T00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 1174,
+                "end": 1191,
+                "loc": {
+                  "start": {
+                    "line": 42,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 42,
+                    "column": 19
+                  }
+                },
+                "value": "2020-001T00:00Z",
+                "raw": "\"2020-001T00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 1195,
+                "end": 1218,
+                "loc": {
+                  "start": {
+                    "line": 43,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 43,
+                    "column": 25
+                  }
+                },
+                "value": "+0002020-01-01T00:00Z",
+                "raw": "\"+0002020-01-01T00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 1301,
+                "end": 1310,
+                "loc": {
+                  "start": {
+                    "line": 45,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 45,
+                    "column": 11
+                  }
+                },
+                "value": "2020-01",
+                "raw": "\"2020-01\""
+              },
+              {
+                "type": "Literal",
+                "start": 1314,
+                "end": 1326,
+                "loc": {
+                  "start": {
+                    "line": 46,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 46,
+                    "column": 14
+                  }
+                },
+                "value": "+002020-01",
+                "raw": "\"+002020-01\""
+              },
+              {
+                "type": "Literal",
+                "start": 1330,
+                "end": 1337,
+                "loc": {
+                  "start": {
+                    "line": 47,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 47,
+                    "column": 9
+                  }
+                },
+                "value": "01-01",
+                "raw": "\"01-01\""
+              },
+              {
+                "type": "Literal",
+                "start": 1341,
+                "end": 1351,
+                "loc": {
+                  "start": {
+                    "line": 48,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 48,
+                    "column": 12
+                  }
+                },
+                "value": "2020-W01",
+                "raw": "\"2020-W01\""
+              },
+              {
+                "type": "Literal",
+                "start": 1355,
+                "end": 1360,
+                "loc": {
+                  "start": {
+                    "line": 49,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 49,
+                    "column": 7
+                  }
+                },
+                "value": "P1Y",
+                "raw": "\"P1Y\""
+              },
+              {
+                "type": "Literal",
+                "start": 1364,
+                "end": 1371,
+                "loc": {
+                  "start": {
+                    "line": 50,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 50,
+                    "column": 9
+                  }
+                },
+                "value": "-P12Y",
+                "raw": "\"-P12Y\""
+              },
+              {
+                "type": "Literal",
+                "start": 1375,
+                "end": 1387,
+                "loc": {
+                  "start": {
+                    "line": 51,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 51,
+                    "column": 14
+                  }
+                },
+                "value": "2020-01-01",
+                "raw": "\"2020-01-01\""
+              },
+              {
+                "type": "Literal",
+                "start": 1391,
+                "end": 1406,
+                "loc": {
+                  "start": {
+                    "line": 52,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 52,
+                    "column": 17
+                  }
+                },
+                "value": "2020-01-01T00",
+                "raw": "\"2020-01-01T00\""
+              },
+              {
+                "type": "Literal",
+                "start": 1410,
+                "end": 1428,
+                "loc": {
+                  "start": {
+                    "line": 53,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 53,
+                    "column": 20
+                  }
+                },
+                "value": "2020-01-01T00:00",
+                "raw": "\"2020-01-01T00:00\""
+              },
+              {
+                "type": "Literal",
+                "start": 1432,
+                "end": 1453,
+                "loc": {
+                  "start": {
+                    "line": 54,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 54,
+                    "column": 23
+                  }
+                },
+                "value": "2020-01-01T00:00:00",
+                "raw": "\"2020-01-01T00:00:00\""
+              },
+              {
+                "type": "Literal",
+                "start": 1457,
+                "end": 1488,
+                "loc": {
+                  "start": {
+                    "line": 55,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 55,
+                    "column": 33
+                  }
+                },
+                "value": "2020-01-01T00:00:00.000000000",
+                "raw": "\"2020-01-01T00:00:00.000000000\""
+              },
+              {
+                "type": "Literal",
+                "start": 1537,
+                "end": 1559,
+                "loc": {
+                  "start": {
+                    "line": 57,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 57,
+                    "column": 24
+                  }
+                },
+                "value": "-999999-01-01T00:00Z",
+                "raw": "\"-999999-01-01T00:00Z\""
+              },
+              {
+                "type": "Literal",
+                "start": 1563,
+                "end": 1585,
+                "loc": {
+                  "start": {
+                    "line": 58,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 58,
+                    "column": 24
+                  }
+                },
+                "value": "+999999-01-01T00:00Z",
+                "raw": "\"+999999-01-01T00:00Z\""
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "VariableDeclaration",
+      "start": 1591,
+      "end": 1633,
+      "loc": {
+        "start": {
+          "line": 61,
+          "column": 0
+        },
+        "end": {
+          "line": 61,
+          "column": 42
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 1597,
+          "end": 1632,
+          "loc": {
+            "start": {
+              "line": 61,
+              "column": 6
+            },
+            "end": {
+              "line": 61,
+              "column": 41
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 1597,
+            "end": 1605,
+            "loc": {
+              "start": {
+                "line": 61,
+                "column": 6
+              },
+              "end": {
+                "line": 61,
+                "column": 14
+              }
+            },
+            "name": "instance"
+          },
+          "init": {
+            "type": "NewExpression",
+            "start": 1608,
+            "end": 1632,
+            "loc": {
+              "start": {
+                "line": 61,
+                "column": 17
+              },
+              "end": {
+                "line": 61,
+                "column": 41
+              }
+            },
+            "callee": {
+              "type": "MemberExpression",
+              "start": 1612,
+              "end": 1628,
+              "loc": {
+                "start": {
+                  "line": 61,
+                  "column": 21
+                },
+                "end": {
+                  "line": 61,
+                  "column": 37
+                }
+              },
+              "object": {
+                "type": "Identifier",
+                "start": 1612,
+                "end": 1620,
+                "loc": {
+                  "start": {
+                    "line": 61,
+                    "column": 21
+                  },
+                  "end": {
+                    "line": 61,
+                    "column": 29
+                  }
+                },
+                "name": "Temporal"
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 1621,
+                "end": 1628,
+                "loc": {
+                  "start": {
+                    "line": 61,
+                    "column": 30
+                  },
+                  "end": {
+                    "line": 61,
+                    "column": 37
+                  }
+                },
+                "name": "Instant"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "arguments": [
+              {
+                "type": "Literal",
+                "start": 1629,
+                "end": 1631,
+                "loc": {
+                  "start": {
+                    "line": 61,
+                    "column": 38
+                  },
+                  "end": {
+                    "line": 61,
+                    "column": 40
+                  }
+                },
+                "value": null,
+                "raw": "0n",
+                "bigint": "0"
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "const"
+    },
+    {
+      "type": "ForOfStatement",
+      "start": 1634,
+      "end": 1803,
+      "loc": {
+        "start": {
+          "line": 62,
+          "column": 0
+        },
+        "end": {
+          "line": 68,
+          "column": 1
+        }
+      },
+      "await": false,
+      "left": {
+        "type": "VariableDeclaration",
+        "start": 1639,
+        "end": 1648,
+        "loc": {
+          "start": {
+            "line": 62,
+            "column": 5
+          },
+          "end": {
+            "line": 62,
+            "column": 14
+          }
+        },
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "start": 1645,
+            "end": 1648,
+            "loc": {
+              "start": {
+                "line": 62,
+                "column": 11
+              },
+              "end": {
+                "line": 62,
+                "column": 14
+              }
+            },
+            "id": {
+              "type": "Identifier",
+              "start": 1645,
+              "end": 1648,
+              "loc": {
+                "start": {
+                  "line": 62,
+                  "column": 11
+                },
+                "end": {
+                  "line": 62,
+                  "column": 14
+                }
+              },
+              "name": "arg"
+            },
+            "init": null
+          }
+        ],
+        "kind": "const"
+      },
+      "right": {
+        "type": "Identifier",
+        "start": 1652,
+        "end": 1666,
+        "loc": {
+          "start": {
+            "line": 62,
+            "column": 18
+          },
+          "end": {
+            "line": 62,
+            "column": 32
+          }
+        },
+        "name": "invalidStrings"
+      },
+      "body": {
+        "type": "BlockStatement",
+        "start": 1668,
+        "end": 1803,
+        "loc": {
+          "start": {
+            "line": 62,
+            "column": 34
+          },
+          "end": {
+            "line": 68,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ExpressionStatement",
+            "start": 1672,
+            "end": 1801,
+            "loc": {
+              "start": {
+                "line": 63,
+                "column": 2
+              },
+              "end": {
+                "line": 67,
+                "column": 4
+              }
+            },
+            "expression": {
+              "type": "CallExpression",
+              "start": 1672,
+              "end": 1800,
+              "loc": {
+                "start": {
+                  "line": 63,
+                  "column": 2
+                },
+                "end": {
+                  "line": 67,
+                  "column": 3
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 1672,
+                "end": 1685,
+                "loc": {
+                  "start": {
+                    "line": 63,
+                    "column": 2
+                  },
+                  "end": {
+                    "line": 63,
+                    "column": 15
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 1672,
+                  "end": 1678,
+                  "loc": {
+                    "start": {
+                      "line": 63,
+                      "column": 2
+                    },
+                    "end": {
+                      "line": 63,
+                      "column": 8
+                    }
+                  },
+                  "name": "assert"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 1679,
+                  "end": 1685,
+                  "loc": {
+                    "start": {
+                      "line": 63,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 63,
+                      "column": 15
+                    }
+                  },
+                  "name": "throws"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "Identifier",
+                  "start": 1691,
+                  "end": 1701,
+                  "loc": {
+                    "start": {
+                      "line": 64,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 64,
+                      "column": 14
+                    }
+                  },
+                  "name": "RangeError"
+                },
+                {
+                  "type": "ArrowFunctionExpression",
+                  "start": 1707,
+                  "end": 1732,
+                  "loc": {
+                    "start": {
+                      "line": 65,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 65,
+                      "column": 29
+                    }
+                  },
+                  "id": null,
+                  "expression": true,
+                  "generator": false,
+                  "async": false,
+                  "params": [],
+                  "body": {
+                    "type": "CallExpression",
+                    "start": 1713,
+                    "end": 1732,
+                    "loc": {
+                      "start": {
+                        "line": 65,
+                        "column": 10
+                      },
+                      "end": {
+                        "line": 65,
+                        "column": 29
+                      }
+                    },
+                    "callee": {
+                      "type": "MemberExpression",
+                      "start": 1713,
+                      "end": 1727,
+                      "loc": {
+                        "start": {
+                          "line": 65,
+                          "column": 10
+                        },
+                        "end": {
+                          "line": 65,
+                          "column": 24
+                        }
+                      },
+                      "object": {
+                        "type": "Identifier",
+                        "start": 1713,
+                        "end": 1721,
+                        "loc": {
+                          "start": {
+                            "line": 65,
+                            "column": 10
+                          },
+                          "end": {
+                            "line": 65,
+                            "column": 18
+                          }
+                        },
+                        "name": "instance"
+                      },
+                      "property": {
+                        "type": "Identifier",
+                        "start": 1722,
+                        "end": 1727,
+                        "loc": {
+                          "start": {
+                            "line": 65,
+                            "column": 19
+                          },
+                          "end": {
+                            "line": 65,
+                            "column": 24
+                          }
+                        },
+                        "name": "until"
+                      },
+                      "computed": false,
+                      "optional": false
+                    },
+                    "arguments": [
+                      {
+                        "type": "Identifier",
+                        "start": 1728,
+                        "end": 1731,
+                        "loc": {
+                          "start": {
+                            "line": 65,
+                            "column": 25
+                          },
+                          "end": {
+                            "line": 65,
+                            "column": 28
+                          }
+                        },
+                        "name": "arg"
+                      }
+                    ],
+                    "optional": false
+                  }
+                },
+                {
+                  "type": "TemplateLiteral",
+                  "start": 1738,
+                  "end": 1796,
+                  "loc": {
+                    "start": {
+                      "line": 66,
+                      "column": 4
+                    },
+                    "end": {
+                      "line": 66,
+                      "column": 62
+                    }
+                  },
+                  "expressions": [
+                    {
+                      "type": "Identifier",
+                      "start": 1742,
+                      "end": 1745,
+                      "loc": {
+                        "start": {
+                          "line": 66,
+                          "column": 8
+                        },
+                        "end": {
+                          "line": 66,
+                          "column": 11
+                        }
+                      },
+                      "name": "arg"
+                    }
+                  ],
+                  "quasis": [
+                    {
+                      "type": "TemplateElement",
+                      "start": 1739,
+                      "end": 1740,
+                      "loc": {
+                        "start": {
+                          "line": 66,
+                          "column": 5
+                        },
+                        "end": {
+                          "line": 66,
+                          "column": 6
+                        }
+                      },
+                      "value": {
+                        "raw": "\"",
+                        "cooked": "\""
+                      },
+                      "tail": false
+                    },
+                    {
+                      "type": "TemplateElement",
+                      "start": 1746,
+                      "end": 1795,
+                      "loc": {
+                        "start": {
+                          "line": 66,
+                          "column": 12
+                        },
+                        "end": {
+                          "line": 66,
+                          "column": 61
+                        }
+                      },
+                      "value": {
+                        "raw": "\" should not be a valid ISO string for an Instant",
+                        "cooked": "\" should not be a valid ISO string for an Instant"
+                      },
+                      "tail": true
+                    }
+                  ]
+                }
+              ],
+              "optional": false
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "sourceType": "script"
+}

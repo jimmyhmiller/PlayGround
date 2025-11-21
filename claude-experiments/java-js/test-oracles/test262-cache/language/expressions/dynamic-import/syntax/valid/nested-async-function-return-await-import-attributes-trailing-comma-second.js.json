@@ -1,0 +1,148 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1384,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 34,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "FunctionDeclaration",
+      "start": 1310,
+      "end": 1382,
+      "loc": {
+        "start": {
+          "line": 30,
+          "column": 0
+        },
+        "end": {
+          "line": 32,
+          "column": 1
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 1325,
+        "end": 1326,
+        "loc": {
+          "start": {
+            "line": 30,
+            "column": 15
+          },
+          "end": {
+            "line": 30,
+            "column": 16
+          }
+        },
+        "name": "f"
+      },
+      "expression": false,
+      "generator": false,
+      "async": true,
+      "params": [],
+      "body": {
+        "type": "BlockStatement",
+        "start": 1329,
+        "end": 1382,
+        "loc": {
+          "start": {
+            "line": 30,
+            "column": 19
+          },
+          "end": {
+            "line": 32,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "ReturnStatement",
+            "start": 1333,
+            "end": 1380,
+            "loc": {
+              "start": {
+                "line": 31,
+                "column": 2
+              },
+              "end": {
+                "line": 31,
+                "column": 49
+              }
+            },
+            "argument": {
+              "type": "AwaitExpression",
+              "start": 1340,
+              "end": 1379,
+              "loc": {
+                "start": {
+                  "line": 31,
+                  "column": 9
+                },
+                "end": {
+                  "line": 31,
+                  "column": 48
+                }
+              },
+              "argument": {
+                "type": "ImportExpression",
+                "start": 1346,
+                "end": 1379,
+                "loc": {
+                  "start": {
+                    "line": 31,
+                    "column": 15
+                  },
+                  "end": {
+                    "line": 31,
+                    "column": 48
+                  }
+                },
+                "source": {
+                  "type": "Literal",
+                  "start": 1353,
+                  "end": 1373,
+                  "loc": {
+                    "start": {
+                      "line": 31,
+                      "column": 22
+                    },
+                    "end": {
+                      "line": 31,
+                      "column": 42
+                    }
+                  },
+                  "value": "./empty_FIXTURE.js",
+                  "raw": "'./empty_FIXTURE.js'"
+                },
+                "options": {
+                  "type": "ObjectExpression",
+                  "start": 1375,
+                  "end": 1377,
+                  "loc": {
+                    "start": {
+                      "line": 31,
+                      "column": 44
+                    },
+                    "end": {
+                      "line": 31,
+                      "column": 46
+                    }
+                  },
+                  "properties": []
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "sourceType": "script"
+}

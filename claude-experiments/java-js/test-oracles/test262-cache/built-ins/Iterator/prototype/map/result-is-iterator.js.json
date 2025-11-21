@@ -1,0 +1,257 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 484,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 12,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 366,
+      "end": 483,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 117
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 366,
+        "end": 482,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 11,
+            "column": 116
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 366,
+          "end": 372,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 0
+            },
+            "end": {
+              "line": 11,
+              "column": 6
+            }
+          },
+          "name": "assert"
+        },
+        "arguments": [
+          {
+            "type": "BinaryExpression",
+            "start": 373,
+            "end": 425,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 7
+              },
+              "end": {
+                "line": 11,
+                "column": 59
+              }
+            },
+            "left": {
+              "type": "CallExpression",
+              "start": 373,
+              "end": 405,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 7
+                },
+                "end": {
+                  "line": 11,
+                  "column": 39
+                }
+              },
+              "callee": {
+                "type": "MemberExpression",
+                "start": 373,
+                "end": 396,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 7
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 30
+                  }
+                },
+                "object": {
+                  "type": "CallExpression",
+                  "start": 373,
+                  "end": 392,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 7
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 26
+                    }
+                  },
+                  "callee": {
+                    "type": "FunctionExpression",
+                    "start": 374,
+                    "end": 389,
+                    "loc": {
+                      "start": {
+                        "line": 11,
+                        "column": 8
+                      },
+                      "end": {
+                        "line": 11,
+                        "column": 23
+                      }
+                    },
+                    "id": null,
+                    "expression": false,
+                    "generator": true,
+                    "async": false,
+                    "params": [],
+                    "body": {
+                      "type": "BlockStatement",
+                      "start": 387,
+                      "end": 389,
+                      "loc": {
+                        "start": {
+                          "line": 11,
+                          "column": 21
+                        },
+                        "end": {
+                          "line": 11,
+                          "column": 23
+                        }
+                      },
+                      "body": []
+                    }
+                  },
+                  "arguments": [],
+                  "optional": false
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 393,
+                  "end": 396,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 27
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 30
+                    }
+                  },
+                  "name": "map"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "ArrowFunctionExpression",
+                  "start": 397,
+                  "end": 404,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 31
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 38
+                    }
+                  },
+                  "id": null,
+                  "expression": true,
+                  "generator": false,
+                  "async": false,
+                  "params": [],
+                  "body": {
+                    "type": "Literal",
+                    "start": 403,
+                    "end": 404,
+                    "loc": {
+                      "start": {
+                        "line": 11,
+                        "column": 37
+                      },
+                      "end": {
+                        "line": 11,
+                        "column": 38
+                      }
+                    },
+                    "value": 0,
+                    "raw": "0"
+                  }
+                }
+              ],
+              "optional": false
+            },
+            "operator": "instanceof",
+            "right": {
+              "type": "Identifier",
+              "start": 417,
+              "end": 425,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 51
+                },
+                "end": {
+                  "line": 11,
+                  "column": 59
+                }
+              },
+              "name": "Iterator"
+            }
+          },
+          {
+            "type": "Literal",
+            "start": 427,
+            "end": 481,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 61
+              },
+              "end": {
+                "line": 11,
+                "column": 115
+              }
+            },
+            "value": "function*(){}().map(() => 0) must return an Iterator",
+            "raw": "'function*(){}().map(() => 0) must return an Iterator'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

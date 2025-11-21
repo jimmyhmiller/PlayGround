@@ -1,0 +1,709 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 1346,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 31,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "VariableDeclaration",
+      "start": 848,
+      "end": 887,
+      "loc": {
+        "start": {
+          "line": 26,
+          "column": 0
+        },
+        "end": {
+          "line": 26,
+          "column": 39
+        }
+      },
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "start": 852,
+          "end": 886,
+          "loc": {
+            "start": {
+              "line": 26,
+              "column": 4
+            },
+            "end": {
+              "line": 26,
+              "column": 38
+            }
+          },
+          "id": {
+            "type": "Identifier",
+            "start": 852,
+            "end": 875,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 4
+              },
+              "end": {
+                "line": 26,
+                "column": 27
+              }
+            },
+            "name": "mongolianVowelSeparator"
+          },
+          "init": {
+            "type": "Literal",
+            "start": 878,
+            "end": 886,
+            "loc": {
+              "start": {
+                "line": 26,
+                "column": 30
+              },
+              "end": {
+                "line": 26,
+                "column": 38
+              }
+            },
+            "value": "᠎",
+            "raw": "\"\\u180E\""
+          }
+        }
+      ],
+      "kind": "var"
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 889,
+      "end": 1011,
+      "loc": {
+        "start": {
+          "line": 28,
+          "column": 0
+        },
+        "end": {
+          "line": 28,
+          "column": 122
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 889,
+        "end": 1010,
+        "loc": {
+          "start": {
+            "line": 28,
+            "column": 0
+          },
+          "end": {
+            "line": 28,
+            "column": 121
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 889,
+          "end": 905,
+          "loc": {
+            "start": {
+              "line": 28,
+              "column": 0
+            },
+            "end": {
+              "line": 28,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 889,
+            "end": 895,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 0
+              },
+              "end": {
+                "line": 28,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 896,
+            "end": 905,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 7
+              },
+              "end": {
+                "line": 28,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 906,
+            "end": 945,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 17
+              },
+              "end": {
+                "line": 28,
+                "column": 56
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 906,
+              "end": 914,
+              "loc": {
+                "start": {
+                  "line": 28,
+                  "column": 17
+                },
+                "end": {
+                  "line": 28,
+                  "column": 25
+                }
+              },
+              "name": "parseInt"
+            },
+            "arguments": [
+              {
+                "type": "BinaryExpression",
+                "start": 915,
+                "end": 944,
+                "loc": {
+                  "start": {
+                    "line": 28,
+                    "column": 26
+                  },
+                  "end": {
+                    "line": 28,
+                    "column": 55
+                  }
+                },
+                "left": {
+                  "type": "Identifier",
+                  "start": 915,
+                  "end": 938,
+                  "loc": {
+                    "start": {
+                      "line": 28,
+                      "column": 26
+                    },
+                    "end": {
+                      "line": 28,
+                      "column": 49
+                    }
+                  },
+                  "name": "mongolianVowelSeparator"
+                },
+                "operator": "+",
+                "right": {
+                  "type": "Literal",
+                  "start": 941,
+                  "end": 944,
+                  "loc": {
+                    "start": {
+                      "line": 28,
+                      "column": 52
+                    },
+                    "end": {
+                      "line": 28,
+                      "column": 55
+                    }
+                  },
+                  "value": "1",
+                  "raw": "\"1\""
+                }
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Identifier",
+            "start": 947,
+            "end": 950,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 58
+              },
+              "end": {
+                "line": 28,
+                "column": 61
+              }
+            },
+            "name": "NaN"
+          },
+          {
+            "type": "Literal",
+            "start": 952,
+            "end": 1009,
+            "loc": {
+              "start": {
+                "line": 28,
+                "column": 63
+              },
+              "end": {
+                "line": 28,
+                "column": 120
+              }
+            },
+            "value": "parseInt(mongolianVowelSeparator + \"1\") must return NaN",
+            "raw": "'parseInt(mongolianVowelSeparator + \"1\") must return NaN'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1012,
+      "end": 1240,
+      "loc": {
+        "start": {
+          "line": 29,
+          "column": 0
+        },
+        "end": {
+          "line": 29,
+          "column": 228
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1012,
+        "end": 1239,
+        "loc": {
+          "start": {
+            "line": 29,
+            "column": 0
+          },
+          "end": {
+            "line": 29,
+            "column": 227
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1012,
+          "end": 1028,
+          "loc": {
+            "start": {
+              "line": 29,
+              "column": 0
+            },
+            "end": {
+              "line": 29,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1012,
+            "end": 1018,
+            "loc": {
+              "start": {
+                "line": 29,
+                "column": 0
+              },
+              "end": {
+                "line": 29,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1019,
+            "end": 1028,
+            "loc": {
+              "start": {
+                "line": 29,
+                "column": 7
+              },
+              "end": {
+                "line": 29,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 1029,
+            "end": 1120,
+            "loc": {
+              "start": {
+                "line": 29,
+                "column": 17
+              },
+              "end": {
+                "line": 29,
+                "column": 108
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 1029,
+              "end": 1037,
+              "loc": {
+                "start": {
+                  "line": 29,
+                  "column": 17
+                },
+                "end": {
+                  "line": 29,
+                  "column": 25
+                }
+              },
+              "name": "parseInt"
+            },
+            "arguments": [
+              {
+                "type": "BinaryExpression",
+                "start": 1038,
+                "end": 1119,
+                "loc": {
+                  "start": {
+                    "line": 29,
+                    "column": 26
+                  },
+                  "end": {
+                    "line": 29,
+                    "column": 107
+                  }
+                },
+                "left": {
+                  "type": "BinaryExpression",
+                  "start": 1038,
+                  "end": 1113,
+                  "loc": {
+                    "start": {
+                      "line": 29,
+                      "column": 26
+                    },
+                    "end": {
+                      "line": 29,
+                      "column": 101
+                    }
+                  },
+                  "left": {
+                    "type": "BinaryExpression",
+                    "start": 1038,
+                    "end": 1087,
+                    "loc": {
+                      "start": {
+                        "line": 29,
+                        "column": 26
+                      },
+                      "end": {
+                        "line": 29,
+                        "column": 75
+                      }
+                    },
+                    "left": {
+                      "type": "Identifier",
+                      "start": 1038,
+                      "end": 1061,
+                      "loc": {
+                        "start": {
+                          "line": 29,
+                          "column": 26
+                        },
+                        "end": {
+                          "line": 29,
+                          "column": 49
+                        }
+                      },
+                      "name": "mongolianVowelSeparator"
+                    },
+                    "operator": "+",
+                    "right": {
+                      "type": "Identifier",
+                      "start": 1064,
+                      "end": 1087,
+                      "loc": {
+                        "start": {
+                          "line": 29,
+                          "column": 52
+                        },
+                        "end": {
+                          "line": 29,
+                          "column": 75
+                        }
+                      },
+                      "name": "mongolianVowelSeparator"
+                    }
+                  },
+                  "operator": "+",
+                  "right": {
+                    "type": "Identifier",
+                    "start": 1090,
+                    "end": 1113,
+                    "loc": {
+                      "start": {
+                        "line": 29,
+                        "column": 78
+                      },
+                      "end": {
+                        "line": 29,
+                        "column": 101
+                      }
+                    },
+                    "name": "mongolianVowelSeparator"
+                  }
+                },
+                "operator": "+",
+                "right": {
+                  "type": "Literal",
+                  "start": 1116,
+                  "end": 1119,
+                  "loc": {
+                    "start": {
+                      "line": 29,
+                      "column": 104
+                    },
+                    "end": {
+                      "line": 29,
+                      "column": 107
+                    }
+                  },
+                  "value": "1",
+                  "raw": "\"1\""
+                }
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Identifier",
+            "start": 1122,
+            "end": 1125,
+            "loc": {
+              "start": {
+                "line": 29,
+                "column": 110
+              },
+              "end": {
+                "line": 29,
+                "column": 113
+              }
+            },
+            "name": "NaN"
+          },
+          {
+            "type": "Literal",
+            "start": 1127,
+            "end": 1238,
+            "loc": {
+              "start": {
+                "line": 29,
+                "column": 115
+              },
+              "end": {
+                "line": 29,
+                "column": 226
+              }
+            },
+            "value": "parseInt( mongolianVowelSeparator + mongolianVowelSeparator + mongolianVowelSeparator + \"1\" ) must return NaN",
+            "raw": "'parseInt( mongolianVowelSeparator + mongolianVowelSeparator + mongolianVowelSeparator + \"1\" ) must return NaN'"
+          }
+        ],
+        "optional": false
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 1241,
+      "end": 1345,
+      "loc": {
+        "start": {
+          "line": 30,
+          "column": 0
+        },
+        "end": {
+          "line": 30,
+          "column": 104
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 1241,
+        "end": 1344,
+        "loc": {
+          "start": {
+            "line": 30,
+            "column": 0
+          },
+          "end": {
+            "line": 30,
+            "column": 103
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 1241,
+          "end": 1257,
+          "loc": {
+            "start": {
+              "line": 30,
+              "column": 0
+            },
+            "end": {
+              "line": 30,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 1241,
+            "end": 1247,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 0
+              },
+              "end": {
+                "line": 30,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 1248,
+            "end": 1257,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 7
+              },
+              "end": {
+                "line": 30,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "CallExpression",
+            "start": 1258,
+            "end": 1291,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 17
+              },
+              "end": {
+                "line": 30,
+                "column": 50
+              }
+            },
+            "callee": {
+              "type": "Identifier",
+              "start": 1258,
+              "end": 1266,
+              "loc": {
+                "start": {
+                  "line": 30,
+                  "column": 17
+                },
+                "end": {
+                  "line": 30,
+                  "column": 25
+                }
+              },
+              "name": "parseInt"
+            },
+            "arguments": [
+              {
+                "type": "Identifier",
+                "start": 1267,
+                "end": 1290,
+                "loc": {
+                  "start": {
+                    "line": 30,
+                    "column": 26
+                  },
+                  "end": {
+                    "line": 30,
+                    "column": 49
+                  }
+                },
+                "name": "mongolianVowelSeparator"
+              }
+            ],
+            "optional": false
+          },
+          {
+            "type": "Identifier",
+            "start": 1293,
+            "end": 1296,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 52
+              },
+              "end": {
+                "line": 30,
+                "column": 55
+              }
+            },
+            "name": "NaN"
+          },
+          {
+            "type": "Literal",
+            "start": 1298,
+            "end": 1343,
+            "loc": {
+              "start": {
+                "line": 30,
+                "column": 57
+              },
+              "end": {
+                "line": 30,
+                "column": 102
+              }
+            },
+            "value": "parseInt(\"\\\"\\\\u180E\\\"\") must return NaN",
+            "raw": "'parseInt(\"\\\\\"\\\\\\\\u180E\\\\\"\") must return NaN'"
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

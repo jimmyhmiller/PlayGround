@@ -1,0 +1,281 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 385,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 12,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "ExpressionStatement",
+      "start": 243,
+      "end": 384,
+      "loc": {
+        "start": {
+          "line": 11,
+          "column": 0
+        },
+        "end": {
+          "line": 11,
+          "column": 141
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 243,
+        "end": 383,
+        "loc": {
+          "start": {
+            "line": 11,
+            "column": 0
+          },
+          "end": {
+            "line": 11,
+            "column": 140
+          }
+        },
+        "callee": {
+          "type": "MemberExpression",
+          "start": 243,
+          "end": 259,
+          "loc": {
+            "start": {
+              "line": 11,
+              "column": 0
+            },
+            "end": {
+              "line": 11,
+              "column": 16
+            }
+          },
+          "object": {
+            "type": "Identifier",
+            "start": 243,
+            "end": 249,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 0
+              },
+              "end": {
+                "line": 11,
+                "column": 6
+              }
+            },
+            "name": "assert"
+          },
+          "property": {
+            "type": "Identifier",
+            "start": 250,
+            "end": 259,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 7
+              },
+              "end": {
+                "line": 11,
+                "column": 16
+              }
+            },
+            "name": "sameValue"
+          },
+          "computed": false,
+          "optional": false
+        },
+        "arguments": [
+          {
+            "type": "MemberExpression",
+            "start": 260,
+            "end": 295,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 17
+              },
+              "end": {
+                "line": 11,
+                "column": 52
+              }
+            },
+            "object": {
+              "type": "MemberExpression",
+              "start": 260,
+              "end": 283,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 17
+                },
+                "end": {
+                  "line": 11,
+                  "column": 40
+                }
+              },
+              "object": {
+                "type": "MemberExpression",
+                "start": 260,
+                "end": 273,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 17
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 30
+                  }
+                },
+                "object": {
+                  "type": "Identifier",
+                  "start": 260,
+                  "end": 264,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 17
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 21
+                    }
+                  },
+                  "name": "Intl"
+                },
+                "property": {
+                  "type": "Identifier",
+                  "start": 265,
+                  "end": 273,
+                  "loc": {
+                    "start": {
+                      "line": 11,
+                      "column": 22
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 30
+                    }
+                  },
+                  "name": "Collator"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "property": {
+                "type": "Identifier",
+                "start": 274,
+                "end": 283,
+                "loc": {
+                  "start": {
+                    "line": 11,
+                    "column": 31
+                  },
+                  "end": {
+                    "line": 11,
+                    "column": 40
+                  }
+                },
+                "name": "prototype"
+              },
+              "computed": false,
+              "optional": false
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 284,
+              "end": 295,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 41
+                },
+                "end": {
+                  "line": 11,
+                  "column": 52
+                }
+              },
+              "name": "constructor"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "MemberExpression",
+            "start": 297,
+            "end": 310,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 54
+              },
+              "end": {
+                "line": 11,
+                "column": 67
+              }
+            },
+            "object": {
+              "type": "Identifier",
+              "start": 297,
+              "end": 301,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 54
+                },
+                "end": {
+                  "line": 11,
+                  "column": 58
+                }
+              },
+              "name": "Intl"
+            },
+            "property": {
+              "type": "Identifier",
+              "start": 302,
+              "end": 310,
+              "loc": {
+                "start": {
+                  "line": 11,
+                  "column": 59
+                },
+                "end": {
+                  "line": 11,
+                  "column": 67
+                }
+              },
+              "name": "Collator"
+            },
+            "computed": false,
+            "optional": false
+          },
+          {
+            "type": "Literal",
+            "start": 312,
+            "end": 382,
+            "loc": {
+              "start": {
+                "line": 11,
+                "column": 69
+              },
+              "end": {
+                "line": 11,
+                "column": 139
+              }
+            },
+            "value": "Intl.Collator.prototype.constructor is not the same as Intl.Collator",
+            "raw": "\"Intl.Collator.prototype.constructor is not the same as Intl.Collator\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}

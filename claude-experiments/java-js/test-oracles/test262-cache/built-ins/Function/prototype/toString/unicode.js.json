@@ -1,0 +1,279 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 629,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 16,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "FunctionDeclaration",
+      "start": 453,
+      "end": 518,
+      "loc": {
+        "start": {
+          "line": 13,
+          "column": 0
+        },
+        "end": {
+          "line": 13,
+          "column": 65
+        }
+      },
+      "id": {
+        "type": "Identifier",
+        "start": 462,
+        "end": 468,
+        "loc": {
+          "start": {
+            "line": 13,
+            "column": 9
+          },
+          "end": {
+            "line": 13,
+            "column": 15
+          }
+        },
+        "name": "a"
+      },
+      "expression": false,
+      "generator": false,
+      "async": false,
+      "params": [
+        {
+          "type": "Identifier",
+          "start": 469,
+          "end": 475,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 16
+            },
+            "end": {
+              "line": 13,
+              "column": 22
+            }
+          },
+          "name": "b"
+        },
+        {
+          "type": "Identifier",
+          "start": 477,
+          "end": 483,
+          "loc": {
+            "start": {
+              "line": 13,
+              "column": 24
+            },
+            "end": {
+              "line": 13,
+              "column": 30
+            }
+          },
+          "name": "c"
+        }
+      ],
+      "body": {
+        "type": "BlockStatement",
+        "start": 485,
+        "end": 518,
+        "loc": {
+          "start": {
+            "line": 13,
+            "column": 32
+          },
+          "end": {
+            "line": 13,
+            "column": 65
+          }
+        },
+        "body": [
+          {
+            "type": "ExpressionStatement",
+            "start": 487,
+            "end": 506,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 34
+              },
+              "end": {
+                "line": 13,
+                "column": 53
+              }
+            },
+            "expression": {
+              "type": "AssignmentExpression",
+              "start": 487,
+              "end": 505,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 34
+                },
+                "end": {
+                  "line": 13,
+                  "column": 52
+                }
+              },
+              "operator": "=",
+              "left": {
+                "type": "Identifier",
+                "start": 487,
+                "end": 493,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 34
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 40
+                  }
+                },
+                "name": "b"
+              },
+              "right": {
+                "type": "Identifier",
+                "start": 496,
+                "end": 505,
+                "loc": {
+                  "start": {
+                    "line": 13,
+                    "column": 43
+                  },
+                  "end": {
+                    "line": 13,
+                    "column": 52
+                  }
+                },
+                "name": "c"
+              }
+            }
+          },
+          {
+            "type": "ReturnStatement",
+            "start": 507,
+            "end": 516,
+            "loc": {
+              "start": {
+                "line": 13,
+                "column": 54
+              },
+              "end": {
+                "line": 13,
+                "column": 63
+              }
+            },
+            "argument": {
+              "type": "Identifier",
+              "start": 514,
+              "end": 515,
+              "loc": {
+                "start": {
+                  "line": 13,
+                  "column": 61
+                },
+                "end": {
+                  "line": 13,
+                  "column": 62
+                }
+              },
+              "name": "b"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "ExpressionStatement",
+      "start": 520,
+      "end": 628,
+      "loc": {
+        "start": {
+          "line": 15,
+          "column": 0
+        },
+        "end": {
+          "line": 15,
+          "column": 108
+        }
+      },
+      "expression": {
+        "type": "CallExpression",
+        "start": 520,
+        "end": 627,
+        "loc": {
+          "start": {
+            "line": 15,
+            "column": 0
+          },
+          "end": {
+            "line": 15,
+            "column": 107
+          }
+        },
+        "callee": {
+          "type": "Identifier",
+          "start": 520,
+          "end": 550,
+          "loc": {
+            "start": {
+              "line": 15,
+              "column": 0
+            },
+            "end": {
+              "line": 15,
+              "column": 30
+            }
+          },
+          "name": "assertToStringOrNativeFunction"
+        },
+        "arguments": [
+          {
+            "type": "Identifier",
+            "start": 551,
+            "end": 552,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 31
+              },
+              "end": {
+                "line": 15,
+                "column": 32
+              }
+            },
+            "name": "a"
+          },
+          {
+            "type": "Literal",
+            "start": 554,
+            "end": 626,
+            "loc": {
+              "start": {
+                "line": 15,
+                "column": 34
+              },
+              "end": {
+                "line": 15,
+                "column": 106
+              }
+            },
+            "value": "function \\u0061(\\u{62}, \\u0063) { \\u0062 = \\u{00063}; return b; }",
+            "raw": "\"function \\\\u0061(\\\\u{62}, \\\\u0063) { \\\\u0062 = \\\\u{00063}; return b; }\""
+          }
+        ],
+        "optional": false
+      }
+    }
+  ],
+  "sourceType": "script"
+}
