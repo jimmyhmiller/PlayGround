@@ -635,7 +635,7 @@ public class Parser {
         consume(TokenType.RPAREN, "Expected ')' after parameters");
 
         // Parse body (context already set above)
-        BlockStatement body = parseBlockStatement();
+        BlockStatement body = parseBlockStatement(true); // Function body
 
         // Restore context
         inGenerator = savedInGenerator;
@@ -742,9 +742,24 @@ public class Parser {
             String kind = "method";
             if (check(TokenType.IDENTIFIER) && (peek().lexeme().equals("get") || peek().lexeme().equals("set"))) {
                 // Look ahead to see if this is "get()" / "set()" (method names) or "get something" / "set something" (accessor)
-                if (current + 1 < tokens.size() && tokens.get(current + 1).type() != TokenType.LPAREN) {
-                    kind = peek().lexeme(); // "get" or "set"
-                    advance(); // consume get/set keyword
+                if (current + 1 < tokens.size()) {
+                    Token currentToken = peek();
+                    Token nextToken = tokens.get(current + 1);
+                    TokenType nextType = nextToken.type();
+
+                    // If next token is LPAREN, this is a method named "get" or "set"
+                    // If next token is ASSIGN or SEMICOLON, this is a field named "get" or "set"
+                    // Otherwise, check for ASI and potentially treat as accessor
+                    if (nextType != TokenType.LPAREN && nextType != TokenType.ASSIGN && nextType != TokenType.SEMICOLON) {
+                        // Check for ASI: if there's a line break between "get"/"set" and the next token,
+                        // it's a field, not an accessor
+                        boolean hasLineBreak = nextToken.line() > currentToken.line();
+
+                        if (!hasLineBreak) {
+                            kind = peek().lexeme(); // "get" or "set"
+                            advance(); // consume get/set keyword
+                        }
+                    }
                 }
             }
 
@@ -837,8 +852,8 @@ public class Parser {
                 double value = Double.parseDouble(lexeme);
                 SourceLocation keyLoc = createLocation(dotToken, numToken);
                 key = new Literal(getStart(dotToken), getEnd(numToken), keyLoc, value, lexeme);
-            } else if (check(TokenType.IDENTIFIER) || isKeyword(peek())) {
-                // Regular identifier or keyword as property name
+            } else if (check(TokenType.IDENTIFIER) || check(TokenType.GET) || check(TokenType.SET) || isKeyword(peek())) {
+                // Regular identifier, get/set, or keyword as property name
                 advance();
                 SourceLocation keyLoc = createLocation(keyToken, keyToken);
                 key = new Identifier(getStart(keyToken), getEnd(keyToken), keyLoc, keyToken.lexeme());
@@ -879,7 +894,7 @@ public class Parser {
                 boolean savedInAsyncContext = inAsyncContext;
                 inGenerator = isGenerator;
                 inAsyncContext = isAsync;
-                BlockStatement body = parseBlockStatement();
+                BlockStatement body = parseBlockStatement(true); // Method body
                 inGenerator = savedInGenerator;
                 inAsyncContext = savedInAsyncContext;
 
@@ -1299,6 +1314,10 @@ public class Parser {
             declaration = parseFunctionDeclaration(false);
         } else if (check(TokenType.CLASS)) {
             declaration = parseClassDeclaration();
+        } else if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("async")) {
+            // export async function
+            // Don't consume 'async' - let parseFunctionDeclaration handle it
+            declaration = parseFunctionDeclaration(true); // pass true for async
         } else {
             throw new UnexpectedTokenException(peek(), "export keyword", "export statement");
         }
@@ -1308,20 +1327,34 @@ public class Parser {
     }
 
     private BlockStatement parseBlockStatement() {
+        return parseBlockStatement(false);
+    }
+
+    private BlockStatement parseBlockStatement(boolean isFunctionBody) {
         Token startToken = peek();
         consume(TokenType.LBRACE, "Expected '{'");
+
+        // Temporarily allow 'in' inside blocks
+        boolean oldAllowIn = allowIn;
+        allowIn = true;
 
         List<Statement> statements = new ArrayList<>();
         while (!check(TokenType.RBRACE) && !isAtEnd()) {
             statements.add(parseStatement());
         }
 
-        // Process directive prologue
-        statements = processDirectives(statements);
+        // Process directive prologue only for function bodies
+        if (isFunctionBody) {
+            statements = processDirectives(statements);
+        }
 
         consume(TokenType.RBRACE, "Expected '}'");
         Token endToken = previous();
         SourceLocation loc = createLocation(startToken, endToken);
+
+        // Restore allowIn
+        allowIn = oldAllowIn;
+
         return new BlockStatement(getStart(startToken), getEnd(endToken), loc, statements);
     }
 
@@ -1477,11 +1510,45 @@ public class Parser {
                 // Literal key (string or numeric)
                 Token keyToken = advance();
                 SourceLocation keyLoc = createLocation(keyToken, keyToken);
-                Object literalValue = keyToken.literal();
-                if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
-                    literalValue = null;
+                String keyLexeme = keyToken.lexeme();
+
+                // Check if this is a BigInt literal (ends with 'n')
+                if (keyLexeme.endsWith("n")) {
+                    // BigInt literal: value is null, bigint field has the numeric part
+                    String bigintValue = keyLexeme.substring(0, keyLexeme.length() - 1).replace("_", "");
+
+                    // Convert hex/octal/binary to decimal for the bigint field
+                    if (bigintValue.startsWith("0x") || bigintValue.startsWith("0X")) {
+                        try {
+                            java.math.BigInteger bi = new java.math.BigInteger(bigintValue.substring(2), 16);
+                            bigintValue = bi.toString();
+                        } catch (NumberFormatException e) {
+                            // Keep original if conversion fails
+                        }
+                    } else if (bigintValue.startsWith("0o") || bigintValue.startsWith("0O")) {
+                        try {
+                            java.math.BigInteger bi = new java.math.BigInteger(bigintValue.substring(2), 8);
+                            bigintValue = bi.toString();
+                        } catch (NumberFormatException e) {
+                            // Keep original if conversion fails
+                        }
+                    } else if (bigintValue.startsWith("0b") || bigintValue.startsWith("0B")) {
+                        try {
+                            java.math.BigInteger bi = new java.math.BigInteger(bigintValue.substring(2), 2);
+                            bigintValue = bi.toString();
+                        } catch (NumberFormatException e) {
+                            // Keep original if conversion fails
+                        }
+                    }
+
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyLoc, null, keyLexeme, null, bigintValue);
+                } else {
+                    Object literalValue = keyToken.literal();
+                    if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
+                        literalValue = null;
+                    }
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyLoc, literalValue, keyLexeme);
                 }
-                key = new Literal(getStart(keyToken), getEnd(keyToken), keyLoc, literalValue, keyToken.lexeme());
             } else {
                 if (!check(TokenType.IDENTIFIER) && !isKeyword(peek())) {
                     throw new ExpectedTokenException("property name", peek());
@@ -1903,7 +1970,7 @@ public class Parser {
             // Arrow function body can be an expression or block statement
             if (check(TokenType.LBRACE)) {
                 // Block body: () => { statements }
-                BlockStatement body = parseBlockStatement();
+                BlockStatement body = parseBlockStatement(true); // Arrow function body
                 Token endToken = previous();
                 SourceLocation loc = createLocation(startToken, endToken);
                 return new ArrowFunctionExpression(getStart(startToken), getEnd(endToken), loc, null, false, false, isAsync, params, body);
@@ -1944,7 +2011,8 @@ public class Parser {
             List<TemplateElement> quasis = new ArrayList<>();
 
             // Create the single quasi
-            String raw = startToken.lexeme();
+            // Use the raw value from the token (already processed by lexer)
+            String raw = startToken.raw();
             String cooked = (String) startToken.literal();
             int elemStart = getStart(startToken) + 1; // +1 to skip opening `
             int elemEnd = getEnd(startToken) - 1; // -1 to exclude closing `
@@ -1972,7 +2040,8 @@ public class Parser {
             List<TemplateElement> quasis = new ArrayList<>();
 
             // Add the head quasi
-            String raw = startToken.lexeme();
+            // Use the raw value from the token (already processed by lexer)
+            String raw = startToken.raw();
             String cooked = (String) startToken.literal();
             int elemStart = templateStart + 1; // +1 for opening `
             int elemEnd = elemStart + raw.length();
@@ -1999,7 +2068,8 @@ public class Parser {
 
                 if (quasiType == TokenType.TEMPLATE_MIDDLE) {
                     advance();
-                    String quasiRaw = quasiToken.lexeme();
+                    // Use the raw value from the token (already processed by lexer)
+                    String quasiRaw = quasiToken.raw();
                     String quasiCooked = (String) quasiToken.literal();
                     int quasiStart = getStart(quasiToken) + 1; // +1 to skip }
                     int quasiEnd = quasiStart + quasiRaw.length();
@@ -2016,7 +2086,8 @@ public class Parser {
                 } else if (quasiType == TokenType.TEMPLATE_TAIL) {
                     Token endToken = quasiToken;
                     advance();
-                    String quasiRaw = quasiToken.lexeme();
+                    // Use the raw value from the token (already processed by lexer)
+                    String quasiRaw = quasiToken.raw();
                     String quasiCooked = (String) quasiToken.literal();
                     int quasiStart = getStart(quasiToken) + 1; // +1 to skip }
                     int quasiEnd = quasiStart + quasiRaw.length();
@@ -2645,7 +2716,7 @@ public class Parser {
                     boolean savedInAsyncContext = inAsyncContext;
                     inGenerator = isGenerator;
                     inAsyncContext = true; // async function expression
-                    BlockStatement body = parseBlockStatement();
+                    BlockStatement body = parseBlockStatement(true); // Function expression body
                     inGenerator = savedInGenerator;
                     inAsyncContext = savedInAsyncContext;
 
@@ -2741,6 +2812,11 @@ public class Parser {
             case LPAREN -> {
                 advance(); // consume '('
                 Token firstExprStart = peek();
+
+                // Temporarily allow 'in' inside parentheses
+                boolean oldAllowIn = allowIn;
+                allowIn = true;
+
                 Expression expr = parseAssignment();
 
                 // Check for sequence expression (comma operator)
@@ -2761,10 +2837,12 @@ public class Parser {
                         new SourceLocation.Position(firstExprStart.line(), firstExprStart.column()),
                         new SourceLocation.Position(lastExpr.loc().end().line(), lastExpr.loc().end().column())
                     );
+                    allowIn = oldAllowIn; // Restore allowIn
                     yield new SequenceExpression(expr.start(), lastExpr.end(), loc, expressions);
                 }
 
                 consume(TokenType.RPAREN, "Expected ')' after expression");
+                allowIn = oldAllowIn; // Restore allowIn
                 yield expr;
             }
             case LBRACKET -> {
@@ -2990,7 +3068,7 @@ public class Parser {
                         boolean savedInAsyncContext = inAsyncContext;
                         inGenerator = isGenerator;
                         inAsyncContext = isAsync;
-                        BlockStatement body = parseBlockStatement();
+                        BlockStatement body = parseBlockStatement(true); // Object method body
                         inGenerator = savedInGenerator;
                         inAsyncContext = savedInAsyncContext;
 
@@ -3186,7 +3264,7 @@ public class Parser {
                 consume(TokenType.RPAREN, "Expected ')' after parameters");
 
                 // Parse body (context already set above)
-                BlockStatement body = parseBlockStatement();
+                BlockStatement body = parseBlockStatement(true); // Function expression body
 
                 // Restore context
                 inGenerator = savedInGenerator;

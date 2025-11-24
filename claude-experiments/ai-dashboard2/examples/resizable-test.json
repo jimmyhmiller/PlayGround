@@ -21,7 +21,8 @@
     "rows": "1fr",
     "areas": "\".\" ",
     "gridSize": 20,
-    "widgetGap": 10
+    "widgetGap": 16,
+    "buffer": 7
   },
   "widgets": [
     {
@@ -29,20 +30,20 @@
       "type": "stat",
       "label": "CPU Usage",
       "value": "42%",
-      "width": "160px",
-      "height": "120px",
+      "width": 164,
+      "height": 128,
       "x": 0,
-      "y": 0
+      "y": 180
     },
     {
       "id": "stat2",
       "type": "stat",
       "label": "Memory",
       "value": "8.2GB",
-      "width": "180px",
-      "height": "120px",
-      "x": 160,
-      "y": 0
+      "width": 200,
+      "height": 128,
+      "x": 180,
+      "y": 180
     },
     {
       "id": "chart1",
@@ -51,10 +52,50 @@
         "Network Traffic",
         "LIVE"
       ],
-      "width": "540px",
-      "height": "260px",
-      "x": -120,
-      "y": -120
+      "data": [
+        85,
+        92,
+        78,
+        65,
+        88,
+        95,
+        72,
+        80,
+        90,
+        75,
+        83,
+        88,
+        70,
+        93,
+        86,
+        79,
+        91,
+        84,
+        77,
+        89,
+        82,
+        94,
+        76,
+        87,
+        81,
+        95,
+        73,
+        85,
+        90,
+        78
+      ],
+      "width": 632,
+      "height": 308,
+      "x": 396,
+      "y": 0
+    },
+    {
+      "id": "settings1",
+      "type": "layoutSettings",
+      "width": 380,
+      "height": 164,
+      "x": 0,
+      "y": 0
     }
   ],
   "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/examples/resizable-test.json"

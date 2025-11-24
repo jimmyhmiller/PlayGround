@@ -23,40 +23,78 @@
     }
   },
   "layout": {
-    "columns": "auto auto 320px 1fr",
-    "rows": "100px auto auto 1fr",
-    "areas": "\"chart chart chat .\" \"stat diff chat .\" \". . chat .\" \". . chat .\""
+    "columns": "1fr",
+    "rows": "1fr",
+    "areas": "\".\"",
+    "gridSize": 20,
+    "widgetGap": 10,
+    "buffer": 10
   },
   "widgets": [
     {
       "id": "chart",
       "type": "barChart",
-      "area": "chart",
-      "label": ["Packet Flow", "LIVE"]
-    },
-    {
-      "id": "chat",
-      "type": "chat",
-      "area": "chat",
-      "label": "Terminal",
-      "messages": [
-        { "from": "user", "text": "`deploy --force`" },
-        { "from": "assistant", "text": "```bash\n[OK] DEPLOYED TO 4096 NODES\n[OK] Latency: 1ms\n[OK] Status: RUNNING\n```" }
-      ]
+      "label": [
+        "Packet Flow",
+        "LIVE"
+      ],
+      "dataSource": "network-data.json",
+      "width": 500,
+      "height": 200,
+      "x": 0,
+      "y": 0
     },
     {
       "id": "stat",
       "type": "stat",
-      "area": "stat",
       "label": "Ping",
-      "value": "1ms"
+      "value": "1ms",
+      "width": 200,
+      "height": 150,
+      "x": 0,
+      "y": 220
     },
     {
       "id": "diff",
       "type": "diffList",
-      "area": "diff",
       "label": "Deployments",
-      "items": [["MAIN.exe", 512, 89], ["NET.dll", 34, 201], ["BOOT.bat", 8, 15]]
+      "items": [
+        [
+          "MAIN.exe",
+          512,
+          89
+        ],
+        [
+          "NET.dll",
+          34,
+          201
+        ],
+        [
+          "BOOT.bat",
+          8,
+          15
+        ]
+      ],
+      "width": 280,
+      "height": 200,
+      "x": 220,
+      "y": 220
+    },
+    {
+      "id": "chat",
+      "type": "chat",
+      "label": "Terminal",
+      "backend": "claude",
+      "messages": [],
+      "claudeOptions": {
+        "model": "claude-sonnet-4-5-20250929",
+        "permissionMode": "acceptEdits"
+      },
+      "width": 400,
+      "height": 600,
+      "x": 520,
+      "y": 0
     }
-  ]
+  ],
+  "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/examples/grid.json"
 }

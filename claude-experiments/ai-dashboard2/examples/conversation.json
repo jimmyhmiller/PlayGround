@@ -22,59 +22,134 @@
     }
   },
   "layout": {
-    "columns": "320px 220px auto 1fr",
-    "rows": "auto auto auto 1fr",
-    "areas": "\"chat stats files .\" \"chat stats todos .\" \"chat . todos .\" \"chat . . .\""
+    "columns": "1fr",
+    "rows": "1fr",
+    "areas": "\".\"",
+    "gridSize": 16,
+    "widgetGap": 12,
+    "buffer": 10
   },
   "widgets": [
     {
       "id": "chat",
       "type": "chat",
-      "area": "chat",
       "label": "Conversation",
       "backend": "claude",
       "messages": [],
       "claudeOptions": {
         "model": "claude-sonnet-4-5-20250929",
         "permissionMode": "acceptEdits"
-      }
+      },
+      "width": 380,
+      "height": 604,
+      "x": 0,
+      "y": 0
     },
     {
       "id": "stats",
       "type": "keyValue",
-      "area": "stats",
       "label": "Session",
       "items": [
-        { "key": "Model", "value": "Sonnet 4.5" },
-        { "key": "Tokens", "value": "120k / 200k" },
-        { "key": "Duration", "value": "45 min" }
-      ]
+        {
+          "key": "Model",
+          "value": "Sonnet 4.5"
+        },
+        {
+          "key": "Tokens",
+          "value": "120k / 200k"
+        },
+        {
+          "key": "Duration",
+          "value": "45 min"
+        }
+      ],
+      "width": 240,
+      "height": 128,
+      "x": 392,
+      "y": 0
     },
     {
       "id": "files",
       "type": "fileList",
-      "area": "files",
       "label": "Files Changed",
       "files": [
-        { "name": "src/App.jsx", "status": "modified" },
-        { "name": "src/dashboards.js", "status": "created" },
-        { "name": "src/themes.js", "status": "created" },
-        { "name": "src/styles.css", "status": "modified" },
-        { "name": "main.js", "status": "created" }
-      ]
+        {
+          "name": "examples/botanist.json",
+          "status": "modified"
+        },
+        {
+          "name": "examples/claude-agent.json",
+          "status": "modified"
+        },
+        {
+          "name": "examples/conversation.json",
+          "status": "modified"
+        },
+        {
+          "name": "examples/dream.json",
+          "status": "modified"
+        },
+        {
+          "name": "examples/grid.json",
+          "status": "modified"
+        },
+        {
+          "name": "examples/resizable-test.json",
+          "status": "modified"
+        },
+        {
+          "name": "main.js",
+          "status": "modified"
+        },
+        {
+          "name": "preload.js",
+          "status": "modified"
+        },
+        {
+          "name": "src/App.jsx",
+          "status": "modified"
+        },
+        {
+          "name": "src/styles.css",
+          "status": "modified"
+        }
+      ],
+      "width": 436,
+      "height": 352,
+      "x": 644,
+      "y": 0
     },
     {
       "id": "todos",
       "type": "todoList",
-      "area": "todos",
       "label": "Tasks",
       "items": [
-        { "text": "Set up Electron + React", "done": true },
-        { "text": "Create theme system", "done": true },
-        { "text": "Add chat with markdown", "done": true },
-        { "text": "Make layouts configurable", "done": true },
-        { "text": "Add new widget types", "done": false }
-      ]
+        {
+          "text": "Set up Electron + React",
+          "done": true
+        },
+        {
+          "text": "Create theme system",
+          "done": true
+        },
+        {
+          "text": "Add chat with markdown",
+          "done": true
+        },
+        {
+          "text": "Make layouts configurable",
+          "done": true
+        },
+        {
+          "text": "Add new widget types",
+          "done": false
+        }
+      ],
+      "width": 240,
+      "height": 296,
+      "x": 392,
+      "y": 140
     }
-  ]
+  ],
+  "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/examples/conversation.json"
 }

@@ -72,7 +72,7 @@
                 "column": 24
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/(?-i:[ab])c/i",
             "regex": {
               "pattern": "(?-i:[ab])c",
@@ -776,7 +776,7 @@
                 "column": 25
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/(?-i:[^ab])c/i",
             "regex": {
               "pattern": "(?-i:[^ab])c",
@@ -1422,5 +1422,11 @@
       }
     }
   ],
-  "sourceType": "script"
+  "sourceType": "script",
+  "_metadata": {
+    "sourceHash": "5a2c806c8ee4be1a6a09387d4d18fa2d3c3a5f87e55362e33c520b81f9d8d756",
+    "generatedAt": "2025-11-24T18:07:16.116Z",
+    "acornVersion": "8.15.0",
+    "sourceFile": "built-ins/RegExp/regexp-modifiers/remove-ignoreCase-affects-characterClasses.js"
+  }
 }

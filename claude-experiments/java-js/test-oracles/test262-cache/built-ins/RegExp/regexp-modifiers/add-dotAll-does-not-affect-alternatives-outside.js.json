@@ -72,7 +72,7 @@
                 "column": 36
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/a.a|b.b|(?s:c.c)|d.d|e.e/",
             "regex": {
               "pattern": "a.a|b.b|(?s:c.c)|d.d|e.e",
@@ -960,7 +960,7 @@
                 "column": 48
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/(a.a)|(?:b.b)|(?s:c.c)|(?:d.d)|(e.e)/",
             "regex": {
               "pattern": "(a.a)|(?:b.b)|(?s:c.c)|(?:d.d)|(e.e)",
@@ -1790,5 +1790,11 @@
       }
     }
   ],
-  "sourceType": "script"
+  "sourceType": "script",
+  "_metadata": {
+    "sourceHash": "a4706aef5daa12a9e04c70b9b94801229c18261b8b204d90c8f28e189a69bef9",
+    "generatedAt": "2025-11-24T18:07:16.098Z",
+    "acornVersion": "8.15.0",
+    "sourceFile": "built-ins/RegExp/regexp-modifiers/add-dotAll-does-not-affect-alternatives-outside.js"
+  }
 }

@@ -72,7 +72,7 @@
                 "column": 63
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/(?:(?<x>a)|(?<y>a)(?<x>b))(?:(?<z>c)|(?<z>d))/",
             "regex": {
               "pattern": "(?:(?<x>a)|(?<y>a)(?<x>b))(?:(?<z>c)|(?<z>d))",
@@ -2161,7 +2161,7 @@
                 "column": 59
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/(?:(?:(?<x>a)|(?<x>b)|c)\\k<x>){2}/",
             "regex": {
               "pattern": "(?:(?:(?<x>a)|(?<x>b)|c)\\k<x>){2}",
@@ -2503,5 +2503,11 @@
       }
     }
   ],
-  "sourceType": "script"
+  "sourceType": "script",
+  "_metadata": {
+    "sourceHash": "9365db9059f5043ee533f5ace2b0a43e2e9d8cc93dea3893423843132c8e21c9",
+    "generatedAt": "2025-11-24T18:07:16.456Z",
+    "acornVersion": "8.15.0",
+    "sourceFile": "built-ins/String/prototype/match/duplicate-named-groups-properties.js"
+  }
 }

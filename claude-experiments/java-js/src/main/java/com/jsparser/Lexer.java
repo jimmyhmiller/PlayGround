@@ -14,8 +14,15 @@ public class Lexer {
     private TokenType lastTokenType = null;
     private boolean atLineStart = true;
 
+    // Context stack for tracking statement vs expression contexts
+    private Stack<LexerContext> contextStack = new Stack<>();
+    // Whether an expression is allowed at the current position
+    private boolean exprAllowed = true;
+
     public Lexer(String source) {
         this.source = source;
+        // Initialize with statement context
+        contextStack.push(LexerContext.B_STAT);
     }
 
     public List<Token> tokenize() {
@@ -64,6 +71,7 @@ public class Lexer {
             Token token = nextToken();
             if (token != null) {
                 tokens.add(token);
+                updateContext(lastTokenType, token.type());
                 lastTokenType = token.type();
                 atLineStart = false;
             }
@@ -73,47 +81,144 @@ public class Lexer {
         return tokens;
     }
 
-    private boolean shouldParseRegex() {
-        // After these tokens, / starts a regex literal, not division
-        return lastTokenType == null ||
-               lastTokenType == TokenType.ASSIGN ||
-               lastTokenType == TokenType.LPAREN ||
-               lastTokenType == TokenType.LBRACKET ||
-               lastTokenType == TokenType.COMMA ||
-               lastTokenType == TokenType.LBRACE ||
-               lastTokenType == TokenType.COLON ||
-               lastTokenType == TokenType.SEMICOLON ||
-               lastTokenType == TokenType.RETURN ||
-               lastTokenType == TokenType.IF ||
-               lastTokenType == TokenType.WHILE ||
-               lastTokenType == TokenType.FOR ||
-               lastTokenType == TokenType.BANG ||
-               lastTokenType == TokenType.EQ ||
-               lastTokenType == TokenType.NE ||
-               lastTokenType == TokenType.EQ_STRICT ||
-               lastTokenType == TokenType.NE_STRICT ||
-               lastTokenType == TokenType.LT ||
-               lastTokenType == TokenType.LE ||
-               lastTokenType == TokenType.GT ||
-               lastTokenType == TokenType.GE ||
-               lastTokenType == TokenType.AND ||
-               lastTokenType == TokenType.OR ||
-               lastTokenType == TokenType.QUESTION ||
-               lastTokenType == TokenType.PLUS ||
-               lastTokenType == TokenType.MINUS ||
-               lastTokenType == TokenType.STAR ||
-               lastTokenType == TokenType.PERCENT ||
-               lastTokenType == TokenType.BIT_AND ||
-               lastTokenType == TokenType.BIT_OR ||
-               lastTokenType == TokenType.BIT_XOR ||
-               lastTokenType == TokenType.LEFT_SHIFT ||
-               lastTokenType == TokenType.RIGHT_SHIFT ||
-               lastTokenType == TokenType.UNSIGNED_RIGHT_SHIFT ||
-               lastTokenType == TokenType.PLUS_ASSIGN ||
-               lastTokenType == TokenType.MINUS_ASSIGN ||
-               lastTokenType == TokenType.STAR_ASSIGN ||
-               lastTokenType == TokenType.SLASH_ASSIGN ||
-               lastTokenType == TokenType.PERCENT_ASSIGN;
+    /**
+     * Updates the context stack and exprAllowed flag after reading a token.
+     * Based on Acorn's updateContext approach.
+     */
+    private void updateContext(TokenType prevType, TokenType currentType) {
+        // Handle specific token types that need custom context updates
+        switch (currentType) {
+            case RPAREN, RBRACE -> {
+                // Pop context when closing delimiters
+                if (contextStack.size() > 1) {
+                    LexerContext out = contextStack.pop();
+                    // Special case: if we close a block and parent is function, pop function too
+                    if (out == LexerContext.B_STAT && !contextStack.isEmpty() &&
+                        contextStack.peek().getToken().equals("function")) {
+                        out = contextStack.pop();
+                    }
+                    exprAllowed = !out.isExpr();
+                } else {
+                    exprAllowed = true;
+                }
+            }
+            case LBRACE -> {
+                // Determine if { starts a block statement or object expression
+                boolean isBlock = braceIsBlock(prevType);
+                contextStack.push(isBlock ? LexerContext.B_STAT : LexerContext.B_EXPR);
+                exprAllowed = true;
+            }
+            case LPAREN -> {
+                // Determine if ( is for statement (if, while, for) or expression
+                boolean isStatementParen = prevType == TokenType.IF ||
+                                          prevType == TokenType.FOR ||
+                                          prevType == TokenType.WHILE ||
+                                          prevType == TokenType.WITH;
+                contextStack.push(isStatementParen ? LexerContext.P_STAT : LexerContext.P_EXPR);
+                exprAllowed = true;
+            }
+            case FUNCTION, CLASS -> {
+                // Determine if function/class is declaration or expression
+                boolean isExpr = prevType != null && TokenTypeProperties.beforeExpr(prevType) &&
+                                prevType != TokenType.ELSE &&
+                                !(prevType == TokenType.SEMICOLON && !contextStack.isEmpty() &&
+                                  contextStack.peek() == LexerContext.P_STAT) &&
+                                !(prevType == TokenType.RETURN && atLineStart) &&
+                                !((prevType == TokenType.COLON || prevType == TokenType.LBRACE) &&
+                                  !contextStack.isEmpty() && contextStack.peek() == LexerContext.B_STAT);
+                contextStack.push(isExpr ? LexerContext.F_EXPR : LexerContext.F_STAT);
+                exprAllowed = false;
+            }
+            case COLON -> {
+                // Pop function context if present
+                if (!contextStack.isEmpty() && contextStack.peek().getToken().equals("function")) {
+                    contextStack.pop();
+                }
+                exprAllowed = true;
+            }
+            case TEMPLATE_LITERAL -> {
+                // Handle template literal context (backtick)
+                if (!contextStack.isEmpty() && contextStack.peek() == LexerContext.Q_TMPL) {
+                    contextStack.pop();
+                } else {
+                    contextStack.push(LexerContext.Q_TMPL);
+                }
+                exprAllowed = false;
+            }
+            case INCREMENT, DECREMENT -> {
+                // ++ and -- don't change exprAllowed
+            }
+            default -> {
+                // For all other tokens, set exprAllowed based on beforeExpr property
+                if (isKeyword(currentType) && prevType == TokenType.DOT) {
+                    // Keywords after dot are property names, not keywords
+                    exprAllowed = false;
+                } else {
+                    exprAllowed = TokenTypeProperties.beforeExpr(currentType);
+                }
+            }
+        }
+    }
+
+    /**
+     * Determines if a { should be treated as a block statement or object expression.
+     * Based on Acorn's braceIsBlock logic.
+     */
+    private boolean braceIsBlock(TokenType prevType) {
+        if (contextStack.isEmpty()) {
+            return true;
+        }
+
+        LexerContext parent = contextStack.peek();
+
+        // After function keyword, { is always a block
+        if (parent == LexerContext.F_EXPR || parent == LexerContext.F_STAT) {
+            return true;
+        }
+
+        // After colon in a block or object, check if the parent is expression
+        if (prevType == TokenType.COLON && (parent == LexerContext.B_STAT || parent == LexerContext.B_EXPR)) {
+            return !parent.isExpr();
+        }
+
+        // After return or name (like 'of', 'yield') with line break
+        if (prevType == TokenType.RETURN || (prevType == TokenType.IDENTIFIER && exprAllowed)) {
+            // In real implementation, would check for line break here
+            // For now, assume no line break
+            return false;
+        }
+
+        // After else, semicolon, EOF, closing paren, arrow
+        if (prevType == TokenType.ELSE || prevType == TokenType.SEMICOLON ||
+            prevType == null || prevType == TokenType.RPAREN || prevType == TokenType.ARROW) {
+            return true;
+        }
+
+        // After opening brace, check parent context
+        if (prevType == TokenType.LBRACE) {
+            return parent == LexerContext.B_STAT;
+        }
+
+        // After var, const, name
+        if (prevType == TokenType.VAR || prevType == TokenType.CONST || prevType == TokenType.IDENTIFIER) {
+            return false;
+        }
+
+        // Default: if expressions not allowed, it's a block
+        return !exprAllowed;
+    }
+
+    /**
+     * Check if a TokenType is a keyword.
+     */
+    private boolean isKeyword(TokenType type) {
+        return switch (type) {
+            case VAR, LET, CONST, FUNCTION, CLASS, ASYNC, AWAIT, RETURN, IF, ELSE,
+                 FOR, WHILE, DO, BREAK, CONTINUE, SWITCH, CASE, DEFAULT, TRY, CATCH,
+                 FINALLY, THROW, NEW, TYPEOF, VOID, DELETE, THIS, SUPER, IN, OF,
+                 INSTANCEOF, GET, SET, YIELD, IMPORT, EXPORT, WITH, DEBUGGER -> true;
+            default -> false;
+        };
     }
 
     private Token nextToken() {
@@ -138,6 +243,10 @@ public class Lexer {
             case '#' -> {
                 advance();
                 yield new Token(TokenType.HASH, "#", startLine, startColumn, startPos);
+            }
+            case '@' -> {
+                advance();
+                yield new Token(TokenType.AT, "@", startLine, startColumn, startPos);
             }
             case '?' -> {
                 advance();
@@ -270,11 +379,11 @@ public class Lexer {
                         // Handle line terminators: LF, CR, LS, PS
                         if (ch == '\n') {
                             line++;
-                            column = 0;
+                            column = -1;  // Will be incremented to 0 by advance()
                             containsLineTerminator = true;
                         } else if (ch == '\r') {
                             line++;
-                            column = 0;
+                            column = -1;  // Will be incremented to 0 by advance()
                             containsLineTerminator = true;
                             // Handle CRLF as a single line terminator
                             if (peekNext() == '\n') {
@@ -284,7 +393,7 @@ public class Lexer {
                         } else if (ch == '\u2028' || ch == '\u2029') {
                             // Line Separator (LS) and Paragraph Separator (PS)
                             line++;
-                            column = 0;
+                            column = -1;  // Will be incremented to 0 by advance()
                             containsLineTerminator = true;
                         }
                         advance();
@@ -294,8 +403,8 @@ public class Lexer {
                         atLineStart = true;
                     }
                     yield null; // Skip the comment
-                } else if (shouldParseRegex()) {
-                    // Check if this should be a regex literal
+                } else if (exprAllowed) {
+                    // When expressions are allowed, / starts a regex literal
                     yield scanRegex(startLine, startColumn, startPos);
                 } else {
                     advance();
@@ -425,7 +534,7 @@ public class Lexer {
                 if (peekNext() == 'u') {
                     yield scanIdentifier(startLine, startColumn, startPos);
                 }
-                throw new RuntimeException(String.format("Unexpected character: %c (U+%04X)", c, (int)c));
+                throw new RuntimeException(String.format("Unexpected character: %c (U+%04X) at position=%d, line=%d, column=%d", c, (int)c, position, line, column));
             }
             default -> {
                 if (isDigit(c)) {
@@ -756,16 +865,18 @@ public class Lexer {
             double doubleValue = Double.parseDouble(numberStr);
             // If the double value is a whole number that fits in a long without losing precision
             if (doubleValue == Math.floor(doubleValue) && !Double.isInfinite(doubleValue)) {
-                long longValue = (long) doubleValue;
-                // Check if converting to long loses precision
-                if ((double) longValue == doubleValue) {
+                // Try to parse the original string as a long to see if it's in range
+                // This avoids floating point precision issues when checking bounds
+                try {
+                    long longValue = Long.parseLong(numberStr);
+                    // Successfully parsed as long, check if it fits in int
                     if (longValue >= Integer.MIN_VALUE && longValue <= Integer.MAX_VALUE) {
                         literal = (int) longValue;
                     } else {
                         literal = longValue;
                     }
-                } else {
-                    // Conversion loses precision, keep as double
+                } catch (NumberFormatException e) {
+                    // Number is outside long range or has decimal point, keep as double
                     literal = doubleValue;
                 }
             } else {
@@ -1211,8 +1322,12 @@ public class Lexer {
 
                 // For tagged templates with invalid escapes, cooked should be null
                 String cookedValue = hasInvalidEscape ? null : cooked.toString();
+                // Lexeme should be the actual source text from startPos to current position
+                String lexeme = source.substring(startPos, position);
+                // Raw value is the processed string with normalized line continuations
+                String rawValue = raw.toString();
                 // endPosition should be current position (after the closing `)
-                return new Token(type, raw.toString(), cookedValue, startLine, startColumn, startPos, position);
+                return new Token(type, lexeme, cookedValue, startLine, startColumn, startPos, position, rawValue);
             } else if (c == '$' && peekNext() == '{') {
                 // Start of interpolation
                 advance(); // consume $
@@ -1228,8 +1343,12 @@ public class Lexer {
 
                 // For tagged templates with invalid escapes, cooked should be null
                 String cookedValue = hasInvalidEscape ? null : cooked.toString();
+                // Lexeme should be the actual source text from startPos to current position
+                String lexeme = source.substring(startPos, position);
+                // Raw value is the processed string with normalized line continuations
+                String rawValue = raw.toString();
                 // endPosition should be current position (after the ${)
-                return new Token(type, raw.toString(), cookedValue, startLine, startColumn, startPos, position);
+                return new Token(type, lexeme, cookedValue, startLine, startColumn, startPos, position, rawValue);
             } else if (c == '\\') {
                 // Escape sequence
                 raw.append(c);

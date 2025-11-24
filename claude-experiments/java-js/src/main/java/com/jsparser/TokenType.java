@@ -67,6 +67,7 @@ public enum TokenType {
     DOT,            // .
     DOT_DOT_DOT,    // ...
     HASH,           // #
+    AT,             // @
     COLON,          // :
     QUESTION,       // ?
     QUESTION_DOT,   // ?.

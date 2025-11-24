@@ -23,20 +23,26 @@
   "layout": {
     "columns": "1fr",
     "rows": "1fr",
-    "areas": "\"chat\""
+    "areas": "\".\"",
+    "gridSize": 16,
+    "widgetGap": 10,
+    "buffer": 10
   },
   "widgets": [
     {
       "id": "claude-chat",
       "type": "chat",
-      "area": "chat",
       "label": "Claude Agent",
       "backend": "claude",
       "messages": [],
       "claudeOptions": {
         "model": "claude-sonnet-4-5-20250929",
         "permissionMode": "acceptEdits"
-      }
+      },
+      "width": 600,
+      "height": 600,
+      "x": 0,
+      "y": 0
     }
   ]
 }

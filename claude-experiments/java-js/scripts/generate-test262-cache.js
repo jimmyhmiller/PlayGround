@@ -2,17 +2,47 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
-const { Worker } = require('worker_threads');
+const crypto = require('crypto');
+const acorn = require('acorn');
 const os = require('os');
 
 const TEST262_DIR = path.join(__dirname, '..', 'test-oracles', 'test262', 'test');
 const CACHE_DIR = path.join(__dirname, '..', 'test-oracles', 'test262-cache');
 const NUM_WORKERS = os.cpus().length;
+const FORCE_REGENERATE = process.argv.includes('--force');
 
 // Ensure cache directory exists
 if (!fs.existsSync(CACHE_DIR)) {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
+}
+
+// Calculate SHA-256 hash of file content
+function getFileHash(filePath) {
+    const content = fs.readFileSync(filePath);
+    return crypto.createHash('sha256').update(content).digest('hex');
+}
+
+// Check if cache is valid for a file
+function isCacheValid(sourceFile, cacheFile) {
+    if (!fs.existsSync(cacheFile)) {
+        return false;
+    }
+
+    try {
+        const cacheContent = fs.readFileSync(cacheFile, 'utf-8');
+        const cache = JSON.parse(cacheContent);
+
+        // Check if cache has hash metadata
+        if (!cache._metadata || !cache._metadata.sourceHash) {
+            return false;
+        }
+
+        // Compare hash with current file
+        const currentHash = getFileHash(sourceFile);
+        return cache._metadata.sourceHash === currentHash;
+    } catch (e) {
+        return false;
+    }
 }
 
 function shouldSkip(filePath) {
@@ -119,39 +149,70 @@ function shouldSkipNegativeTest(filePath) {
     }
 }
 
+// Serialize AST to JSON exactly like Acorn CLI does
+function serializeAST(ast) {
+    // Match Acorn CLI's JSON.stringify behavior:
+    // BigInt values in the AST are converted to null
+    // (The bigint field already contains the string representation)
+    return JSON.stringify(ast, function(_, value) {
+        return typeof value === "bigint" ? null : value;
+    }, 2);
+}
+
 // Process a single file
 function processFile(filePath) {
+    const relativePath = path.relative(TEST262_DIR, filePath);
+    const cacheFilePath = path.join(CACHE_DIR, relativePath + '.json');
+
+    // Check if cache is valid and not forcing regeneration
+    if (!FORCE_REGENERATE && isCacheValid(filePath, cacheFilePath)) {
+        return { success: true, cached: true };
+    }
+
     try {
-        const moduleFlag = shouldUseModuleMode(filePath) ? '--module' : '';
-        // Use ecma2025 to support all modern JavaScript features
-        const command = `acorn --ecma2025 --locations ${moduleFlag} "${filePath}"`;
+        const source = fs.readFileSync(filePath, 'utf-8');
 
-        const output = execSync(command, {
-            encoding: 'utf-8',
-            maxBuffer: 10 * 1024 * 1024,
-            stdio: ['pipe', 'pipe', 'pipe']
-        });
+        // Parse with Acorn using same options as CLI
+        const options = {
+            ecmaVersion: 2025,
+            locations: true,
+            sourceType: shouldUseModuleMode(filePath) ? 'module' : 'script'
+        };
 
-        const relativePath = path.relative(TEST262_DIR, filePath);
-        const cacheFilePath = path.join(CACHE_DIR, relativePath + '.json');
+        const ast = acorn.parse(source, options);
+
         const cacheFileDir = path.dirname(cacheFilePath);
 
         if (!fs.existsSync(cacheFileDir)) {
             fs.mkdirSync(cacheFileDir, { recursive: true });
         }
 
-        fs.writeFileSync(cacheFilePath, output.trim(), 'utf8');
-        return { success: true };
+        // Add metadata before serialization
+        ast._metadata = {
+            sourceHash: getFileHash(filePath),
+            generatedAt: new Date().toISOString(),
+            acornVersion: acorn.version,
+            sourceFile: relativePath
+        };
+
+        // Serialize using exact same method as Acorn CLI
+        const jsonOutput = serializeAST(ast);
+
+        fs.writeFileSync(cacheFilePath, jsonOutput, 'utf8');
+        return { success: true, cached: false };
     } catch (e) {
-        const errorMsg = e.stderr ? e.stderr.toString().split('\n')[0] : e.message;
-        return { success: false, error: errorMsg };
+        return { success: false, error: e.message };
     }
 }
 
 console.log('Generating test262 acorn cache...');
 console.log('Scanning:', TEST262_DIR);
 console.log('Cache directory:', CACHE_DIR);
-console.log(`Using ${NUM_WORKERS} workers`);
+if (FORCE_REGENERATE) {
+    console.log('Mode: FORCE REGENERATE (ignoring existing cache)');
+} else {
+    console.log('Mode: Incremental (using cached files with valid hashes)');
+}
 
 // Collect all files
 const allFiles = collectFiles(TEST262_DIR);
@@ -161,6 +222,8 @@ console.log(`Found ${allFiles.length} files to process`);
 const BATCH_SIZE = 100;
 let processed = 0;
 let successful = 0;
+let cached = 0;
+let regenerated = 0;
 let failed = 0;
 const failedFiles = [];
 
@@ -173,6 +236,11 @@ for (let i = 0; i < allFiles.length; i += BATCH_SIZE) {
 
         if (result.success) {
             successful++;
+            if (result.cached) {
+                cached++;
+            } else {
+                regenerated++;
+            }
         } else {
             failed++;
             if (failedFiles.length < 20) {
@@ -181,12 +249,14 @@ for (let i = 0; i < allFiles.length; i += BATCH_SIZE) {
         }
     }
 
-    console.log(`Progress: ${processed}/${allFiles.length} files processed, ${successful} cached, ${failed} failed`);
+    console.log(`Progress: ${processed}/${allFiles.length} files, ${cached} cached, ${regenerated} regenerated, ${failed} failed`);
 }
 
 console.log('\n=== Cache Generation Results ===');
 console.log(`Total files: ${allFiles.length}`);
-console.log(`Successfully cached: ${successful} (${(successful * 100 / allFiles.length).toFixed(2)}%)`);
+console.log(`Successfully processed: ${successful} (${(successful * 100 / allFiles.length).toFixed(2)}%)`);
+console.log(`  - Used existing cache: ${cached}`);
+console.log(`  - Regenerated: ${regenerated}`);
 console.log(`Failed to parse: ${failed} (${(failed * 100 / allFiles.length).toFixed(2)}%)`);
 
 if (failedFiles.length > 0) {
@@ -195,3 +265,7 @@ if (failedFiles.length > 0) {
 }
 
 console.log('\nCache generation complete!');
+if (!FORCE_REGENERATE && regenerated > 0) {
+    console.log(`\nNote: ${regenerated} files were regenerated due to hash mismatches.`);
+    console.log('To force regeneration of all files, run with --force flag.');
+}

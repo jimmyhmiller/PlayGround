@@ -33,18 +33,56 @@ A modern, ESTree-compliant JavaScript parser built in Java 25 using modern langu
 
 ### Build & Test
 ```bash
-# Install dependencies
+# Install dependencies (required for oracle validation)
 npm install esprima
 
 # Run all tests
 ./mvnw test
 
 # Run specific feature tests
-./mvnw test -Dtest=FunctionDeclarationTest
+./mvnw test -Dtest=FunctionExpressionTest
+./mvnw test -Dtest=ObjectTest
+./mvnw test -Dtest=WhileStatementTest
+./mvnw test -Dtest=TemplateLiteralTest
 
-# Measure test262 coverage
+# Measure test262 coverage (runs entire ECMAScript test suite)
 ./mvnw test -Dtest=Test262Runner
+
+# Run with verbose output
+./mvnw test -X
+
+# Clean and rebuild
+./mvnw clean test
 ```
+
+### Test Organization
+
+The project uses multiple test approaches:
+
+1. **Unit Tests** (`src/test/java/com/jsparser/*Test.java`)
+   - Feature-specific tests with JUnit 5
+   - Parameterized tests for comprehensive coverage
+   - Oracle validation against esprima for AST accuracy
+
+2. **Test262 Suite** (`Test262Runner.java`)
+   - Runs against official ECMAScript conformance suite
+   - 33,698 cached test files from test262
+   - Measures exact AST matches and parse success rate
+   - Located in `test-oracles/test262/`
+
+3. **Additional Test Files** (`tests/` directory)
+   - Edge case examples
+   - Debugging snippets
+   - Number literal test cases
+   - Oracle comparison fixtures
+
+### Understanding Test Results
+
+- **Exact Match**: JSON output matches esprima exactly
+- **Parse Success**: Code parses without errors (AST may differ)
+- **Parse Failure**: Syntax error or unsupported feature
+
+For detailed testing methodology, see [TESTING.md](agent_docs/TESTING.md).
 
 ### Usage
 ```java
@@ -58,10 +96,12 @@ Program ast = Parser.parse(source);
 
 ## 📚 Documentation
 
-- **[FEATURES.md](FEATURES.md)** - Complete feature list and implementation guide
-- **[NEXT_STEPS.md](NEXT_STEPS.md)** - Detailed guide for next feature (function expressions)
-- **[ROADMAP.md](ROADMAP.md)** - 10-phase plan to complete JavaScript support
-- **[summary.txt](/tmp/summary.txt)** - Current status snapshot
+- **[FEATURES.md](agent_docs/FEATURES.md)** - Complete feature list and implementation guide
+- **[NEXT_STEPS.md](agent_docs/NEXT_STEPS.md)** - Detailed guide for next feature (function expressions)
+- **[ROADMAP.md](agent_docs/ROADMAP.md)** - 10-phase plan to complete JavaScript support
+- **[TESTING.md](agent_docs/TESTING.md)** - Testing philosophy and guidelines
+- **[CHANGELOG.md](agent_docs/CHANGELOG.md)** - Version history and changes
+- **[Error Analysis](docs/analysis/)** - Detailed failure categorization and statistics
 
 ## 🏗️ Architecture
 
@@ -94,23 +134,30 @@ src/main/java/com/jsparser/
     └── ...
 
 src/test/java/com/jsparser/
-├── FunctionDeclarationTest.java
-├── ForStatementTest.java
-├── FeatureTest.java      # Feature coverage tests
+├── FunctionExpressionTest.java
+├── WhileStatementTest.java
+├── ObjectTest.java
+├── TemplateLiteralTest.java
 ├── Test262Runner.java    # Full test262 suite
 └── OracleParser.java     # Esprima integration
 
+agent_docs/               # All project documentation (markdown files)
+docs/analysis/            # Error analysis and failure reports
+tests/                    # Additional test files and fixtures
 test-oracles/test262/     # ECMAScript test suite (51,350 files)
+scripts/                  # Build and analysis scripts
+build-tools/              # Maven wrapper and build utilities
 ```
 
 ## 🧪 Testing Philosophy
 
-1. **Oracle-Based Testing**: Every feature is validated against esprima
-2. **100% Accuracy Required**: AST JSON must match exactly
-3. **Parameterized Tests**: Multiple test cases per feature
+1. **Oracle-Based Testing**: Every feature is validated against esprima (reference parser)
+2. **100% Accuracy Required**: AST JSON must match exactly (structural deep equality)
+3. **Parameterized Tests**: Multiple test cases per feature for comprehensive coverage
 4. **Real-World Validation**: test262 suite measures actual JavaScript support
 
-Example test:
+### Example Test
+
 ```java
 @ParameterizedTest
 @ValueSource(strings = {
@@ -120,13 +167,30 @@ Example test:
 void testFunctionDeclarations(String source) throws Exception {
     Program expected = OracleParser.parse(source);  // esprima
     Program actual = Parser.parse(source);          // our parser
-    
+
     assertEquals(
         mapper.writeValueAsString(expected),
         mapper.writeValueAsString(actual)
     );
 }
 ```
+
+### Running Analysis Scripts
+
+The `scripts/` directory contains utilities for analyzing test failures:
+
+```bash
+# Generate test262 cache (pre-parse all test files with esprima)
+./scripts/generate-test262-cache.js
+
+# Analyze current failures and categorize errors
+./scripts/analyze_failures.sh
+
+# Generate detailed error reports
+node scripts/generate_complete_errors.js
+```
+
+See [TESTING.md](agent_docs/TESTING.md) for complete testing documentation.
 
 ## 📈 Progress Tracking
 
@@ -169,14 +233,15 @@ Function expressions are already working! Focus next on:
 
 ## 🤝 Contributing
 
-This is a learning/research project demonstrating modern Java for parser implementation. 
+This is a learning/research project demonstrating modern Java for parser implementation.
 
 When adding features:
-1. Follow the 7-step process in FEATURES.md
-2. Ensure 100% oracle validation
-3. Update documentation
+1. Follow the 7-step process in [FEATURES.md](agent_docs/FEATURES.md)
+2. Ensure 100% oracle validation with esprima
+3. Update documentation in `agent_docs/`
 4. Run full test suite (`./mvnw test`)
-5. Measure test262 impact
+5. Measure test262 impact (`./mvnw test -Dtest=Test262Runner`)
+6. Update error analysis if needed
 
 ## 📊 Benchmarks
 

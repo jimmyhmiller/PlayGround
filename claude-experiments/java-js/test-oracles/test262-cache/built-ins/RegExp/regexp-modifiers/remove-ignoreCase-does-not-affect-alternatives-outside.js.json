@@ -72,7 +72,7 @@
                 "column": 28
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/a|b|(?-i:c)|d|e/i",
             "regex": {
               "pattern": "a|b|(?-i:c)|d|e",
@@ -909,7 +909,7 @@
                 "column": 40
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/(a)|(?:b)|(?-i:c)|(?:d)|(e)/i",
             "regex": {
               "pattern": "(a)|(?:b)|(?-i:c)|(?:d)|(e)",
@@ -1688,5 +1688,11 @@
       }
     }
   ],
-  "sourceType": "script"
+  "sourceType": "script",
+  "_metadata": {
+    "sourceHash": "7f6cfd33935c1aef1e5dae5f7706fca400f0c453082b49c932e4acdc7b3d5ec8",
+    "generatedAt": "2025-11-24T18:07:16.118Z",
+    "acornVersion": "8.15.0",
+    "sourceFile": "built-ins/RegExp/regexp-modifiers/remove-ignoreCase-does-not-affect-alternatives-outside.js"
+  }
 }

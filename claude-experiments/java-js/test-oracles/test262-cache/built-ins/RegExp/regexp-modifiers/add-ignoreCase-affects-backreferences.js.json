@@ -72,7 +72,7 @@
                 "column": 22
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/(a)(?i:\\1)/",
             "regex": {
               "pattern": "(a)(?i:\\1)",
@@ -776,7 +776,7 @@
                 "column": 23
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/(a)(?i-:\\1)/",
             "regex": {
               "pattern": "(a)(?i-:\\1)",
@@ -1422,5 +1422,11 @@
       }
     }
   ],
-  "sourceType": "script"
+  "sourceType": "script",
+  "_metadata": {
+    "sourceHash": "24b85bc5d386f76f1fb817ca245ec45aa24566bd1105de344da7e8358cf95586",
+    "generatedAt": "2025-11-24T18:07:16.101Z",
+    "acornVersion": "8.15.0",
+    "sourceFile": "built-ins/RegExp/regexp-modifiers/add-ignoreCase-affects-backreferences.js"
+  }
 }

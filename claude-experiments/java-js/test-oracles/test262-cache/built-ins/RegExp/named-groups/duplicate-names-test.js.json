@@ -100,7 +100,7 @@
                     "column": 24
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?<x>a)|(?<x>b)/",
                 "regex": {
                   "pattern": "(?<x>a)|(?<x>b)",
@@ -238,7 +238,7 @@
                     "column": 24
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?<x>b)|(?<x>a)/",
                 "regex": {
                   "pattern": "(?<x>b)|(?<x>a)",
@@ -376,7 +376,7 @@
                     "column": 33
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?:(?<x>a)|(?<x>b))\\k<x>/",
                 "regex": {
                   "pattern": "(?:(?<x>a)|(?<x>b))\\k<x>",
@@ -514,7 +514,7 @@
                     "column": 33
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?:(?<x>a)|(?<x>b))\\k<x>/",
                 "regex": {
                   "pattern": "(?:(?<x>a)|(?<x>b))\\k<x>",
@@ -652,7 +652,7 @@
                     "column": 51
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}/",
                 "regex": {
                   "pattern": "(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}",
@@ -855,7 +855,7 @@
                     "column": 50
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}/",
                 "regex": {
                   "pattern": "(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}",
@@ -1022,5 +1022,11 @@
       }
     }
   ],
-  "sourceType": "script"
+  "sourceType": "script",
+  "_metadata": {
+    "sourceHash": "4ad68724f5edd183e73b0209fa226d2799fb2489a57d69bd6b4e94aeb1c95734",
+    "generatedAt": "2025-11-24T18:07:15.503Z",
+    "acornVersion": "8.15.0",
+    "sourceFile": "built-ins/RegExp/named-groups/duplicate-names-test.js"
+  }
 }

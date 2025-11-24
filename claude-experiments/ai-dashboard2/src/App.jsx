@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo, Suspense } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { Rnd } from 'react-rnd';
+import { Grid, GridItem } from './components';
 import './styles.css';
 
 const icons = {
@@ -35,19 +35,107 @@ const icons = {
   circle: <svg viewBox="0 0 60 60"><circle cx="30" cy="30" r="20" /></svg>,
 };
 
+// Hook to load widget data from inline or file reference
+function useWidgetData(config, reloadTrigger) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    // If data is provided inline, use it directly
+    if (config.data !== undefined) {
+      setData(config.data);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
+    // If dataSource is provided, load from file
+    if (config.dataSource) {
+      setLoading(true);
+      setError(null);
+
+      // Use the dashboard API to load the file
+      if (window.dashboardAPI && window.dashboardAPI.loadDataFile) {
+        window.dashboardAPI.loadDataFile(config.dataSource)
+          .then(loadedData => {
+            setData(loadedData);
+            setLoading(false);
+          })
+          .catch(err => {
+            console.error('[useWidgetData] Failed to load data from', config.dataSource, err);
+            setError(err.message || 'Failed to load data');
+            setLoading(false);
+          });
+      } else {
+        // Fallback: try to fetch as a relative URL
+        fetch(config.dataSource)
+          .then(response => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response.json();
+          })
+          .then(loadedData => {
+            setData(loadedData);
+            setLoading(false);
+          })
+          .catch(err => {
+            console.error('[useWidgetData] Failed to fetch data from', config.dataSource, err);
+            setError(err.message || 'Failed to load data');
+            setLoading(false);
+          });
+      }
+    }
+  }, [config.data, config.dataSource, reloadTrigger]);
+
+  return { data, loading, error };
+}
+
 // Widget Components
-function BarChart({ theme, config }) {
-  const bars = useMemo(() => Array.from({ length: 30 }, () => Math.floor(Math.random() * 80 + 20)), []);
+function BarChart({ theme, config, reloadTrigger }) {
+  const { data, loading, error } = useWidgetData(config, reloadTrigger);
+
+  // Generate random data as fallback
+  const randomBars = useMemo(() => Array.from({ length: 30 }, () => Math.floor(Math.random() * 80 + 20)), []);
+
+  // Use loaded data if available, otherwise fall back to random data
+  const bars = useMemo(() => {
+    if (data) {
+      // Support different data formats:
+      // 1. Array of numbers: [20, 45, 60, ...]
+      // 2. Array of objects: [{value: 20}, {value: 45}, ...]
+      // 3. Object with values array: {values: [20, 45, 60, ...]}
+      if (Array.isArray(data)) {
+        return data.map(item => typeof item === 'number' ? item : item.value);
+      } else if (data.values && Array.isArray(data.values)) {
+        return data.values;
+      }
+    }
+    return randomBars;
+  }, [data, randomBars]);
+
   return (
     <>
       <div className="widget-label" style={{ fontFamily: theme.textBody }}>
-        <span>{config.label[0]}</span><span>{config.label[1]}</span>
+        <span>{Array.isArray(config.label) ? config.label[0] : config.label}</span>
+        {Array.isArray(config.label) && config.label[1] && <span>{config.label[1]}</span>}
       </div>
-      <div className="chart-container">
-        {bars.map((h, i) => (
-          <div key={i} className="bar" style={{ height: `${h}%`, backgroundColor: theme.accent, borderRadius: theme.chartRadius }} />
-        ))}
-      </div>
+      {loading && (
+        <div style={{ fontFamily: theme.textBody, color: theme.textColor, padding: '20px' }}>
+          Loading data...
+        </div>
+      )}
+      {error && (
+        <div style={{ fontFamily: theme.textBody, color: theme.negative, padding: '20px' }}>
+          Error: {error}
+        </div>
+      )}
+      {!loading && !error && (
+        <div className="chart-container">
+          {bars.map((h, i) => (
+            <div key={i} className="bar" style={{ height: `${h}%`, backgroundColor: theme.accent, borderRadius: theme.chartRadius }} />
+          ))}
+        </div>
+      )}
     </>
   );
 }
@@ -109,11 +197,12 @@ function FileList({ theme, config }) {
 }
 
 function TodoList({ theme, config }) {
+  const items = config.items || [];
   return (
     <>
       <div className="widget-label" style={{ fontFamily: theme.textBody }}>{config.label}</div>
       <div className="todo-list">
-        {config.items.map((item, i) => (
+        {items.map((item, i) => (
           <div key={i} className="todo-item" style={{ fontFamily: theme.textBody, color: theme.textColor }}>
             <span className="todo-check" style={{ color: item.done ? theme.positive : theme.accent }}>
               {item.done ? '✓' : '○'}
@@ -121,6 +210,133 @@ function TodoList({ theme, config }) {
             <span className={item.done ? 'todo-done' : ''}>{item.text}</span>
           </div>
         ))}
+      </div>
+    </>
+  );
+}
+
+function ClaudeTodoList({ theme, config, dashboardId, widgetConversations }) {
+  const [todos, setTodos] = useState([]);
+
+  // Resolve conversation ID from linked chat widget
+  // Support both chatWidgetKey (full key) and chatWidgetId (partial, needs dashboardId)
+  let conversationId = null;
+
+  if (config.chatWidgetKey) {
+    // Use full key directly
+    conversationId = widgetConversations[config.chatWidgetKey];
+  } else if (config.chatWidgetId) {
+    // First try using chatWidgetId directly as a full key
+    conversationId = widgetConversations[config.chatWidgetId];
+
+    // If not found, try with dashboard prefix
+    if (!conversationId) {
+      const widgetKey = `${dashboardId}-${config.chatWidgetId}`;
+      conversationId = widgetConversations[widgetKey];
+    }
+
+    // If still not found, search all widget conversations for a key ending with the chatWidgetId
+    if (!conversationId) {
+      const matchingKey = Object.keys(widgetConversations).find(key =>
+        key.endsWith(config.chatWidgetId) || key.endsWith(`-${config.chatWidgetId}`)
+      );
+      if (matchingKey) {
+        conversationId = widgetConversations[matchingKey];
+        console.log('[ClaudeTodoList] Found matching key via search:', matchingKey);
+      }
+    }
+  }
+
+  console.log('[ClaudeTodoList] Dashboard ID:', dashboardId);
+  console.log('[ClaudeTodoList] Config chatWidgetId:', config.chatWidgetId);
+  console.log('[ClaudeTodoList] Config chatWidgetKey:', config.chatWidgetKey);
+  console.log('[ClaudeTodoList] All widget conversation keys:', Object.keys(widgetConversations));
+  console.log('[ClaudeTodoList] Resolved conversation ID:', conversationId);
+
+  // Load initial todos and listen for updates
+  useEffect(() => {
+    console.log('[ClaudeTodoList] useEffect running!', { conversationId, hasAPI: !!window.claudeAPI });
+
+    if (!conversationId || !window.claudeAPI) {
+      console.log('[ClaudeTodoList] Missing conversationId or claudeAPI:', { conversationId, hasAPI: !!window.claudeAPI });
+      return;
+    }
+
+    console.log('[ClaudeTodoList] Setting up listeners for conversation:', conversationId);
+
+    // Load initial todos
+    window.claudeAPI.getTodos(conversationId).then(result => {
+      console.log('[ClaudeTodoList] Initial todos loaded:', result);
+      if (result.success) {
+        setTodos(result.todos || []);
+      }
+    });
+
+    // Listen for real-time updates
+    const handler = window.claudeAPI.onTodoUpdate((data) => {
+      console.log('[ClaudeTodoList] Received todo update:', data);
+      console.log('[ClaudeTodoList] Comparing chatId:', data.chatId, 'with conversationId:', conversationId);
+      if (data.chatId === conversationId) {
+        console.log('[ClaudeTodoList] Match! Updating todos:', data.todos);
+        setTodos(data.todos || []);
+      } else {
+        console.log('[ClaudeTodoList] No match, ignoring update');
+      }
+    });
+
+    return () => {
+      console.log('[ClaudeTodoList] Cleaning up listeners');
+      window.claudeAPI.offTodoUpdate(handler);
+    };
+  }, [conversationId]);
+
+  // Helper to get status icon and color
+  const getStatusDisplay = (status) => {
+    switch (status) {
+      case 'completed':
+        return { icon: '✓', color: theme.positive };
+      case 'in_progress':
+        return { icon: '⋯', color: theme.accent };
+      default: // pending
+        return { icon: '○', color: theme.textColor };
+    }
+  };
+
+  return (
+    <>
+      <div className="widget-label" style={{ fontFamily: theme.textBody }}>
+        {config.label || 'Agent Tasks'}
+      </div>
+      <div className="todo-list">
+        {todos.length === 0 ? (
+          <div style={{
+            fontFamily: theme.textBody,
+            color: theme.textColor,
+            opacity: 0.5,
+            fontSize: '0.85rem',
+            padding: '8px 0'
+          }}>
+            No active tasks
+          </div>
+        ) : (
+          todos.map((todo, i) => {
+            const { icon, color } = getStatusDisplay(todo.status);
+            const displayText = todo.status === 'in_progress' && todo.activeForm
+              ? todo.activeForm
+              : todo.content;
+
+            return (
+              <div key={i} className="todo-item" style={{ fontFamily: theme.textBody, color: theme.textColor }}>
+                <span className="todo-check" style={{ color }}>
+                  {icon}
+                </span>
+                <span className={todo.status === 'completed' ? 'todo-done' : ''}>
+                  {displayText}
+                </span>
+              </div>
+            );
+          })
+        )}
       </div>
     </>
   );
@@ -140,6 +356,95 @@ function KeyValue({ theme, config }) {
       </div>
     </>
   );
+}
+
+function LayoutSettings({ theme, config, dashboardId, layout }) {
+  const [widgetGap, setWidgetGap] = useState(layout?.widgetGap ?? 10);
+  const [buffer, setBuffer] = useState(layout?.buffer ?? 20);
+
+  const handleGapChange = (e) => {
+    const value = parseInt(e.target.value);
+    setWidgetGap(value);
+    if (window.dashboardAPI && dashboardId) {
+      window.dashboardAPI.updateLayoutSettings(dashboardId, { widgetGap: value });
+    }
+  };
+
+  const handleBufferChange = (e) => {
+    const value = parseInt(e.target.value);
+    setBuffer(value);
+    if (window.dashboardAPI && dashboardId) {
+      window.dashboardAPI.updateLayoutSettings(dashboardId, { buffer: value });
+    }
+  };
+
+  return (
+    <>
+      <div className="widget-label" style={{ fontFamily: theme.textBody }}>Layout Settings</div>
+      <div style={{ fontFamily: theme.textBody, fontSize: '0.85rem', color: theme.textColor }}>
+        <div style={{ marginBottom: 15 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+            <label>Widget Gap</label>
+            <span style={{ color: theme.accent }}>{widgetGap}px</span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="40"
+            value={widgetGap}
+            onChange={handleGapChange}
+            style={{ width: '100%', accentColor: theme.accent }}
+          />
+        </div>
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+            <label>Min Size Buffer</label>
+            <span style={{ color: theme.accent }}>{buffer}px</span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="50"
+            value={buffer}
+            onChange={handleBufferChange}
+            style={{ width: '100%', accentColor: theme.accent }}
+          />
+        </div>
+      </div>
+    </>
+  );
+}
+
+// Format tool call descriptions with relevant details
+function formatToolDescription(toolName, input) {
+  if (!input) return toolName;
+
+  switch (toolName) {
+    case 'Read':
+      return `Read ${input.file_path?.split('/').pop() || input.file_path || ''}`;
+    case 'Write':
+      return `Write ${input.file_path?.split('/').pop() || input.file_path || ''}`;
+    case 'Edit':
+      return `Edit ${input.file_path?.split('/').pop() || input.file_path || ''}`;
+    case 'Bash':
+      const cmd = input.command || '';
+      const shortCmd = cmd.length > 40 ? cmd.substring(0, 40) + '...' : cmd;
+      return `Run: ${shortCmd}`;
+    case 'Grep':
+      return `Search for "${input.pattern || ''}"`;
+    case 'Glob':
+      return `Find files: ${input.pattern || ''}`;
+    case 'Task':
+      return `${input.description || 'Start task'}`;
+    case 'WebFetch':
+      const url = input.url || '';
+      const domain = url.replace(/^https?:\/\//, '').split('/')[0];
+      return `Fetch ${domain}`;
+    case 'WebSearch':
+      return `Search: ${input.query || ''}`;
+    default:
+      return toolName;
+  }
 }
 
 function ChatMessage({ msg, theme }) {
@@ -163,44 +468,224 @@ function ChatMessage({ msg, theme }) {
   };
 
   return (
-    <div className={`chat-bubble ${msg.from}`} style={{
-      fontFamily: theme.textBody,
-      backgroundColor: msg.from === 'user' ? 'rgba(255,255,255,0.1)' : `${theme.accent}22`,
-      borderColor: msg.from === 'assistant' ? theme.accent : 'transparent',
-    }}>
-      <ReactMarkdown components={components}>{msg.text}</ReactMarkdown>
-    </div>
+    <>
+      {msg.toolCalls && msg.toolCalls.length > 0 && (
+        <div style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: '6px',
+          marginBottom: '8px'
+        }}>
+          {msg.toolCalls.map((tool, idx) => (
+            <div
+              key={idx}
+              style={{
+                fontFamily: theme.textBody,
+                fontSize: '0.7rem',
+                padding: '4px 8px',
+                backgroundColor: `${theme.accent}22`,
+                border: `1px solid ${theme.accent}44`,
+                borderRadius: '4px',
+                color: theme.accent,
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px'
+              }}
+            >
+              <span style={{ opacity: 0.6 }}>🔧</span>
+              {tool.description || tool.name}
+            </div>
+          ))}
+        </div>
+      )}
+      <div className={`chat-bubble ${msg.from}`} style={{
+        fontFamily: theme.textBody,
+        backgroundColor: msg.from === 'user' ? 'rgba(255,255,255,0.1)' : `${theme.accent}22`,
+        borderColor: msg.from === 'assistant' ? theme.accent : 'transparent',
+      }}>
+        <ReactMarkdown components={components}>{msg.text}</ReactMarkdown>
+      </div>
+    </>
   );
 }
 
-function Chat({ theme, config }) {
-  const [messages, setMessages] = useState(config.messages || []);
+function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConversationId, setCurrentConversationId }) {
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
+  const [currentStreamText, setCurrentStreamText] = useState(''); // Temporary state for streaming display
+  const [currentToolCalls, setCurrentToolCalls] = useState([]); // Track active tool calls
+  const [isLoading, setIsLoading] = useState(true);
+  const [conversations, setConversations] = useState([]);
+  const [showConversations, setShowConversations] = useState(false);
+  const [permissionMode, setPermissionMode] = useState('bypassPermissions'); // 'plan' or 'bypassPermissions', default to bypassPermissions
   const messagesEndRef = useRef(null);
-  const chatIdRef = useRef(config.id || `chat-${Date.now()}`);
   const processedTextsRef = useRef(new Set()); // Track processed text content to avoid duplicates
-  const currentAssistantMessageRef = useRef(null); // Track the current assistant message being built
+  const processedToolsRef = useRef(new Set()); // Track processed tool calls to avoid duplicates
+  const currentStreamTextRef = useRef(''); // Track stream text for saving (ref to avoid closure issues)
+  const currentToolCallsRef = useRef([]); // Track tool calls for saving (ref to avoid closure issues)
+  const hasInitializedRef = useRef(false); // Track if we've already loaded conversations
+  const previousMessageCountRef = useRef(0); // Track previous message count to detect new messages
+  const hasLoadedInitialMessagesRef = useRef(false); // Track if we've loaded the initial messages
+
+  // Capture dashboard context once at mount - use latest value when needed but don't cause re-renders
+  const dashboardContextRef = useRef(null);
+  if (dashboard && !dashboardContextRef.current) {
+    dashboardContextRef.current = {
+      filePath: dashboard._sourcePath,
+      id: dashboard.id,
+      title: dashboard.title,
+      config: dashboard
+    };
+  }
 
   // Determine backend type: 'claude' for Claude Agent SDK, 'mock' for demo, or custom handler
   const backend = config.backend || 'mock';
 
+  // Load conversations on mount ONLY - runs once per widget instance
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    // Skip if already initialized (prevents re-initialization on remount)
+    if (hasInitializedRef.current) return;
+
+    const loadConversations = async () => {
+      if (backend !== 'claude' || !window.claudeAPI) return;
+
+      hasInitializedRef.current = true; // Mark as initialized
+
+      try {
+        const result = await window.claudeAPI.listConversations(widgetKey);
+        if (result.success) {
+          setConversations(result.conversations);
+
+          // Only set conversation if not already set from parent
+          if (!currentConversationId) {
+            // If no conversations exist, create a default one
+            if (result.conversations.length === 0) {
+              const createResult = await window.claudeAPI.createConversation(widgetKey, 'New Conversation');
+              if (createResult.success) {
+                setConversations([createResult.conversation]);
+                setCurrentConversationId(createResult.conversation.id);
+              }
+            } else {
+              // Load most recent conversation
+              setCurrentConversationId(result.conversations[0].id);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[Chat UI] Error loading conversations:', error);
+      }
+    };
+
+    loadConversations();
+  }, []); // Empty deps - but protected by hasInitializedRef
+
+  // Function to reload messages from backend (single source of truth)
+  const reloadMessages = async () => {
+    if (!currentConversationId) {
+      setMessages([]);
+      setIsStreaming(false);
+      return;
+    }
+
+    if (backend === 'claude' && window.claudeAPI) {
+      try {
+        const result = await window.claudeAPI.getMessages(currentConversationId);
+        if (result.success && result.messages) {
+          console.log(`[Chat UI] Loaded ${result.messages.length} messages for ${currentConversationId}, streaming: ${result.isStreaming}`);
+          console.log('[Chat UI] Messages from backend:', JSON.stringify(result.messages, null, 2));
+
+          // Check if any messages have toolCalls
+          const messagesWithTools = result.messages.filter(m => m.toolCalls && m.toolCalls.length > 0);
+          console.log(`[Chat UI] Messages with toolCalls: ${messagesWithTools.length}`);
+
+          setMessages(result.messages);
+          // Sync streaming state from backend
+          setIsStreaming(result.isStreaming || false);
+        } else {
+          setMessages([]);
+          setIsStreaming(false);
+        }
+      } catch (error) {
+        console.error('[Chat UI] Error loading messages:', error);
+        setMessages([]);
+        setIsStreaming(false);
+      }
+    } else {
+      // For non-Claude backends, use config messages
+      setMessages(config.messages || []);
+      setIsStreaming(false);
+    }
+  };
+
+  // Load messages when conversation changes
+  useEffect(() => {
+    const loadMessages = async () => {
+      setIsLoading(true);
+      hasLoadedInitialMessagesRef.current = false; // Reset flag before loading
+      await reloadMessages();
+      setIsLoading(false);
+      hasLoadedInitialMessagesRef.current = true; // Mark as loaded after initial load
+    };
+
+    loadMessages();
+  }, [backend, config.messages, currentConversationId]);
+
+  // Only scroll when new messages are added or when streaming (not on initial load)
+  useEffect(() => {
+    const currentCount = messages.length;
+    const previousCount = previousMessageCountRef.current;
+
+    // Scroll if: (we've loaded initial messages AND count increased) OR we're streaming
+    // Don't scroll on initial load (hasLoadedInitialMessagesRef.current is false during first load)
+    if ((hasLoadedInitialMessagesRef.current && currentCount > previousCount) || isStreaming) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    // Update the ref for next comparison
+    previousMessageCountRef.current = currentCount;
+  }, [messages, isStreaming]);
+
+  // Handle Esc key to interrupt streaming and Shift+Tab to toggle mode
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Esc to interrupt streaming
+      if (e.key === 'Escape' && isStreaming && backend === 'claude' && currentConversationId) {
+        console.log('[Chat UI] Interrupting stream...');
+        if (window.claudeAPI) {
+          window.claudeAPI.interrupt(currentConversationId).then(() => {
+            console.log('[Chat UI] Stream interrupted');
+            setIsStreaming(false);
+            setCurrentStreamText('');
+            setCurrentToolCalls([]);
+            currentStreamTextRef.current = '';
+            currentToolCallsRef.current = [];
+          }).catch(err => {
+            console.error('[Chat UI] Error interrupting:', err);
+          });
+        }
+      }
+
+      // Shift+Tab to toggle permission mode
+      if (e.key === 'Tab' && e.shiftKey && backend === 'claude') {
+        e.preventDefault();
+        setPermissionMode(mode => mode === 'plan' ? 'bypassPermissions' : 'plan');
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isStreaming, currentConversationId, backend]);
 
   // Set up Claude API listeners for streaming responses
   useEffect(() => {
-    if (backend !== 'claude' || !window.claudeAPI) return;
+    if (backend !== 'claude' || !window.claudeAPI || !currentConversationId) return;
 
-    console.log('[Chat UI] Setting up event listeners for chatId:', chatIdRef.current);
-
-    // Clean up any existing listeners first
-    window.claudeAPI.removeAllListeners();
+    console.log('[Chat UI] Setting up event listeners for conversationId:', currentConversationId);
 
     // Listen for message chunks
     const handleMessage = (data) => {
-      if (data.chatId !== chatIdRef.current) return;
+      if (data.chatId !== currentConversationId) return;
 
       console.log('[Chat UI] Received message type:', data.message?.type);
 
@@ -215,38 +700,45 @@ function Chat({ theme, config }) {
         const content = data.message.message?.content;
 
         if (Array.isArray(content)) {
-          // Extract only text blocks and check if we've seen this exact text before
+          // Extract text blocks and tool calls
           content.forEach((block) => {
             if (block.type === 'text' && block.text) {
               // Use the actual text content as the key to avoid duplicates
               const textHash = block.text.trim();
 
               if (!processedTextsRef.current.has(textHash)) {
-                console.log('[Chat UI] NEW text block, adding to messages. First 50 chars:', textHash.substring(0, 50));
+                console.log('[Chat UI] NEW text block, appending to stream. First 50 chars:', textHash.substring(0, 50));
                 processedTextsRef.current.add(textHash);
 
-                // Add as a new message or append to the current assistant message
-                setMessages(msgs => {
-                  // Check if the last message is from assistant and not finalized
-                  const lastMsg = msgs[msgs.length - 1];
-                  if (lastMsg && lastMsg.from === 'assistant' && !lastMsg.finalized) {
-                    // Append to existing message
-                    const updatedMsg = {
-                      ...lastMsg,
-                      text: lastMsg.text + (lastMsg.text.endsWith(' ') || lastMsg.text.endsWith('\n') ? '' : ' ') + block.text
-                    };
-                    return [...msgs.slice(0, -1), updatedMsg];
-                  } else {
-                    // Create new assistant message
-                    return [...msgs, {
-                      from: 'assistant',
-                      text: block.text,
-                      finalized: false
-                    }];
-                  }
+                // Append to currentStreamText for display during streaming
+                setCurrentStreamText(prev => {
+                  const needsSpace = prev && !prev.endsWith(' ') && !prev.endsWith('\n');
+                  const newText = prev + (needsSpace ? ' ' : '') + block.text;
+                  currentStreamTextRef.current = newText; // Also update ref for saving
+                  return newText;
                 });
               } else {
                 console.log('[Chat UI] DUPLICATE text block detected, skipping. First 50 chars:', textHash.substring(0, 50));
+              }
+            } else if (block.type === 'tool_use' && block.name) {
+              // Track tool calls with their inputs
+              const toolId = block.id || block.name;
+              if (!processedToolsRef.current.has(toolId)) {
+                console.log('[Chat UI] NEW tool call:', block.name, block.input);
+                processedToolsRef.current.add(toolId);
+
+                // Format tool description with details
+                const description = formatToolDescription(block.name, block.input);
+                const toolCall = {
+                  name: block.name,
+                  id: toolId,
+                  description,
+                  input: block.input
+                };
+
+                // Update both state (for display) and ref (for saving)
+                setCurrentToolCalls(prev => [...prev, toolCall]);
+                currentToolCallsRef.current = [...currentToolCallsRef.current, toolCall];
               }
             }
           });
@@ -254,64 +746,163 @@ function Chat({ theme, config }) {
       }
     };
 
-    const handleComplete = (data) => {
-      if (data.chatId !== chatIdRef.current) return;
+    const handleComplete = async (data) => {
+      if (data.chatId !== currentConversationId) return;
 
-      console.log('[Chat UI] Stream complete - marking message as finalized');
+      console.log('[Chat UI] Stream complete - saving final message and reloading');
+      console.log('[Chat UI] Current stream text length (ref):', currentStreamTextRef.current?.length);
+      console.log('[Chat UI] Current stream text (ref):', currentStreamTextRef.current);
+      console.log('[Chat UI] Tool calls (ref):', currentToolCallsRef.current);
 
-      // Mark the last assistant message as finalized
-      setMessages(msgs => {
-        const lastMsg = msgs[msgs.length - 1];
-        if (lastMsg && lastMsg.from === 'assistant' && !lastMsg.finalized) {
-          return [...msgs.slice(0, -1), { ...lastMsg, finalized: true }];
+      // Save the current stream text as the final assistant message with tool calls
+      if (currentStreamTextRef.current || currentToolCallsRef.current.length > 0) {
+        console.log('[Chat UI] Saving assistant message to backend...');
+        const messageToSave = {
+          from: 'assistant',
+          text: currentStreamTextRef.current || ''
+        };
+
+        // Include tool calls if any were made
+        if (currentToolCallsRef.current.length > 0) {
+          console.log('[Chat UI] Adding toolCalls to message:', currentToolCallsRef.current.length, 'tool calls');
+          messageToSave.toolCalls = currentToolCallsRef.current.map(({ name, description, input }) => ({
+            name,
+            description,
+            input
+          }));
+          console.log('[Chat UI] Message with toolCalls:', JSON.stringify(messageToSave, null, 2));
         }
-        return msgs;
-      });
+
+        await saveMessageToBackend(messageToSave);
+        console.log('[Chat UI] Assistant message saved');
+      } else {
+        console.warn('[Chat UI] No stream text or tool calls to save!');
+      }
+
+      // Reload messages from backend (single source of truth)
+      console.log('[Chat UI] Reloading messages from backend...');
+      await reloadMessages();
+
       setIsStreaming(false);
+      setCurrentStreamText('');
+      setCurrentToolCalls([]); // Clear tool calls
+      currentStreamTextRef.current = ''; // Reset ref
+      currentToolCallsRef.current = []; // Reset tool calls ref
     };
 
-    const handleError = (data) => {
-      if (data.chatId !== chatIdRef.current) return;
+    const handleError = async (data) => {
+      if (data.chatId !== currentConversationId) return;
 
       console.error('[Chat UI] Error:', data.error);
 
-      setMessages(prev => [...prev, {
+      const errorMessage = {
         from: 'assistant',
         text: `Error: ${data.error}`
-      }]);
+      };
+      await saveMessageToBackend(errorMessage);
+      await reloadMessages();
       setCurrentStreamText('');
+      setCurrentToolCalls([]);
+      currentStreamTextRef.current = '';
+      currentToolCallsRef.current = [];
       setIsStreaming(false);
     };
 
-    window.claudeAPI.onMessage(handleMessage);
-    window.claudeAPI.onComplete(handleComplete);
-    window.claudeAPI.onError(handleError);
+    const messageHandler = window.claudeAPI.onMessage(handleMessage);
+    const completeHandler = window.claudeAPI.onComplete(handleComplete);
+    const errorHandler = window.claudeAPI.onError(handleError);
 
     return () => {
-      console.log('[Chat UI] Cleaning up event listeners for chatId:', chatIdRef.current);
-      window.claudeAPI.removeAllListeners();
+      console.log('[Chat UI] Cleaning up event listeners for conversationId:', currentConversationId);
+      // Remove only this instance's listeners
+      window.claudeAPI.offMessage(messageHandler);
+      window.claudeAPI.offComplete(completeHandler);
+      window.claudeAPI.offError(errorHandler);
     };
-  }, [backend]);
+  }, [backend, currentConversationId]);
+
+  // Helper to save a message to backend
+  const saveMessageToBackend = async (message) => {
+    if (backend === 'claude' && window.claudeAPI && currentConversationId) {
+      try {
+        // Remove UI-only fields before saving
+        const { finalized, ...messageToSave } = message;
+        await window.claudeAPI.saveMessage(currentConversationId, messageToSave);
+
+        // Update conversation's lastMessageAt
+        await window.claudeAPI.updateConversation(widgetKey, currentConversationId, {
+          lastMessageAt: new Date().toISOString()
+        });
+      } catch (error) {
+        console.error('[Chat UI] Error saving message:', error);
+      }
+    }
+  };
+
+  // Create a new conversation
+  const handleNewConversation = async () => {
+    if (backend !== 'claude' || !window.claudeAPI) return;
+
+    try {
+      const result = await window.claudeAPI.createConversation(widgetKey, 'New Conversation');
+      if (result.success) {
+        setConversations(prev => [result.conversation, ...prev]);
+        setCurrentConversationId(result.conversation.id);
+        setMessages([]);
+      }
+    } catch (error) {
+      console.error('[Chat UI] Error creating conversation:', error);
+    }
+  };
+
+  // Switch to a different conversation
+  const handleSwitchConversation = (conversationId) => {
+    setCurrentConversationId(conversationId);
+    setShowConversations(false);
+  };
 
   const handleSend = async () => {
     if (!input.trim()) return;
 
     const userMessage = { from: 'user', text: input };
-    setMessages(prev => [...prev, userMessage]);
+
+    // Save user message to backend immediately
+    await saveMessageToBackend(userMessage);
+
+    // Reload messages to show user message (backend is single source of truth)
+    await reloadMessages();
+
     const messageToSend = input;
     setInput('');
     setIsStreaming(true);
+    setCurrentStreamText(''); // Reset stream text
+    setCurrentToolCalls([]); // Reset tool calls
+    currentStreamTextRef.current = ''; // Reset text ref
+    currentToolCallsRef.current = []; // Reset tool calls ref
     processedTextsRef.current.clear(); // Reset for new message
+    processedToolsRef.current.clear(); // Reset for new message
 
     if (backend === 'claude' && window.claudeAPI) {
       try {
         console.log('[Chat UI] Sending message to Claude...');
 
+        // Prepare options with dashboard context for system prompt
+        const options = {
+          ...(config.claudeOptions || {}),
+          permissionMode: permissionMode === 'plan' ? 'plan' : 'bypassPermissions',
+          dashboardContext: dashboard ? {
+            filePath: dashboard._sourcePath,
+            id: dashboard.id,
+            title: dashboard.title,
+            config: dashboard
+          } : null
+        };
+
         // Send to Claude Agent SDK - response will come via event listeners
         const result = await window.claudeAPI.sendMessage(
-          chatIdRef.current,
+          currentConversationId,
           messageToSend,
-          config.claudeOptions || {}
+          options
         );
 
         if (!result.success) {
@@ -322,10 +913,12 @@ function Chat({ theme, config }) {
         // Streaming and completion are handled by event listeners
       } catch (error) {
         console.error('[Chat UI] Send error:', error);
-        setMessages(prev => [...prev, {
+        const errorMessage = {
           from: 'assistant',
           text: `Error: ${error.message}`
-        }]);
+        };
+        await saveMessageToBackend(errorMessage);
+        await reloadMessages();
         setIsStreaming(false);
         setCurrentStreamText('');
       }
@@ -363,37 +956,140 @@ function Chat({ theme, config }) {
     }
   };
 
+  const currentConvo = conversations.find(c => c.id === currentConversationId);
+
   return (
     <>
-      <div className="widget-label" style={{ fontFamily: theme.textBody }}>
-        {config.label}
-        {backend === 'claude' && <span style={{ marginLeft: 8, opacity: 0.5 }}>• Claude</span>}
+      <div className="widget-label" style={{ fontFamily: theme.textBody, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          {config.label}
+          {backend === 'claude' && <span style={{ marginLeft: 8, opacity: 0.5 }}>• Claude</span>}
+        </div>
+        {backend === 'claude' && (
+          <div style={{ display: 'flex', gap: 8, fontSize: '0.7rem' }}>
+            <button
+              onClick={handleNewConversation}
+              style={{
+                background: theme.accent,
+                border: 'none',
+                borderRadius: 4,
+                padding: '4px 8px',
+                color: '#000',
+                cursor: 'pointer',
+                fontSize: '0.7rem'
+              }}
+            >
+              + New
+            </button>
+            {conversations.length > 1 && (
+              <button
+                onClick={() => setShowConversations(!showConversations)}
+                style={{
+                  background: 'rgba(255,255,255,0.1)',
+                  border: `1px solid ${theme.accent}44`,
+                  borderRadius: 4,
+                  padding: '4px 8px',
+                  color: theme.textColor,
+                  cursor: 'pointer',
+                  fontSize: '0.7rem'
+                }}
+              >
+                {conversations.length} conversations
+              </button>
+            )}
+          </div>
+        )}
       </div>
+      {showConversations && conversations.length > 0 && (
+        <div style={{
+          maxHeight: 150,
+          overflowY: 'auto',
+          background: 'rgba(0,0,0,0.3)',
+          borderRadius: 4,
+          marginBottom: 8,
+          padding: 4
+        }}>
+          {conversations.map(convo => (
+            <div
+              key={convo.id}
+              onClick={() => handleSwitchConversation(convo.id)}
+              style={{
+                padding: '6px 8px',
+                cursor: 'pointer',
+                background: convo.id === currentConversationId ? theme.accent + '22' : 'transparent',
+                borderLeft: convo.id === currentConversationId ? `2px solid ${theme.accent}` : '2px solid transparent',
+                fontSize: '0.7rem',
+                marginBottom: 2,
+                borderRadius: 2
+              }}
+            >
+              <div style={{ fontWeight: convo.id === currentConversationId ? 'bold' : 'normal' }}>
+                {convo.title}
+              </div>
+              <div style={{ opacity: 0.5, fontSize: '0.65rem' }}>
+                {new Date(convo.lastMessageAt).toLocaleString()}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="chat-messages">
         {messages.map((msg, i) => (
           <ChatMessage key={i} msg={msg} theme={theme} />
         ))}
-        {isStreaming && messages.length > 0 && messages[messages.length - 1]?.from === 'user' && (
+        {isStreaming && (currentToolCalls.length > 0 || currentStreamText) && (
+          <ChatMessage
+            msg={{
+              from: 'assistant',
+              text: currentStreamText,
+              toolCalls: currentToolCalls
+            }}
+            theme={theme}
+          />
+        )}
+        {isStreaming && !currentStreamText && currentToolCalls.length === 0 && (
           <div className="chat-bubble assistant" style={{
             fontFamily: theme.textBody,
             backgroundColor: `${theme.accent}22`,
             borderColor: theme.accent,
-            opacity: 0.3,
             minHeight: '32px'
           }}>
           </div>
         )}
         <div ref={messagesEndRef} />
       </div>
+      {backend === 'claude' && (
+        <div style={{
+          fontSize: '0.65rem',
+          color: theme.accent,
+          padding: '4px 8px',
+          opacity: 0.7,
+          fontFamily: theme.textBody
+        }}>
+          {permissionMode === 'bypassPermissions' ? 'Bypass permissions: On' : 'Plan mode: On'} (Shift+Tab to toggle)
+        </div>
+      )}
       <div className="chat-input-row">
-        <input
-          type="text"
+        <textarea
           className="chat-input"
-          style={{ fontFamily: theme.textBody, borderColor: `${theme.accent}44` }}
+          style={{
+            fontFamily: theme.textBody,
+            borderColor: `${theme.accent}44`,
+            resize: 'none',
+            minHeight: '28px',
+            maxHeight: '150px',
+            overflow: 'auto'
+          }}
           placeholder="Type a message..."
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value);
+            // Auto-resize textarea
+            e.target.style.height = 'auto';
+            e.target.style.height = Math.min(e.target.scrollHeight, 150) + 'px';
+          }}
           onKeyDown={handleKeyDown}
+          rows={1}
         />
         <button
           className="chat-send"
@@ -416,146 +1112,27 @@ const widgetComponents = {
   chat: Chat,
   fileList: FileList,
   todoList: TodoList,
+  claudeTodos: ClaudeTodoList,
   keyValue: KeyValue,
+  layoutSettings: LayoutSettings,
 };
 
-function Widget({ theme, config, clipPath, onResize, dashboardId, layout, allWidgets }) {
+function Widget({ theme, config, clipPath, onResize, dashboardId, dashboard, layout, allWidgets, widgetConversations, setWidgetConversations, reloadTrigger }) {
   const Component = widgetComponents[config.type];
   if (!Component) return null;
 
   const isChat = config.type === 'chat';
-  const gap = layout?.widgetGap || 10; // Default 10px gap between widgets
+  const widgetKey = `${dashboardId}-${config.id}`;
 
-  // Determine minimum sizes based on widget type
-  const getMinSize = () => {
-    switch (config.type) {
-      case 'chat':
-        return { width: 280, height: 300 };
-      case 'barChart':
-        return { width: 200, height: 150 };
-      case 'stat':
-        return { width: 150, height: 100 };
-      case 'diffList':
-      case 'fileList':
-      case 'todoList':
-      case 'keyValue':
-        return { width: 200, height: 150 };
-      case 'progress':
-        return { width: 200, height: 80 };
-      default:
-        return { width: 150, height: 100 };
+  const handleDrag = ({ x, y }) => {
+    if (onResize && dashboardId) {
+      onResize(dashboardId, config.id, { x, y });
     }
   };
 
-  const minSize = getMinSize();
-
-  // Use explicit dimensions if provided, otherwise default to grid sizing
-  const size = {
-    width: config.width || 'auto',
-    height: config.height || 'auto'
-  };
-
-  // Use position if provided
-  const position = {
-    x: config.x || 0,
-    y: config.y || 0
-  };
-
-  const handleResizeStop = (e, direction, ref, delta, position) => {
-    const newWidth = ref.style.width;
-    const newHeight = ref.style.height;
-
+  const handleResizeEnd = ({ width, height }) => {
     if (onResize && dashboardId) {
-      // Check if the new size causes collision
-      const hasCollision = (x, y, w, h) => {
-        if (!allWidgets) return false;
-
-        const width = parseInt(w) || 200;
-        const height = parseInt(h) || 150;
-
-        return allWidgets.some(widget => {
-          if (widget.id === config.id) return false; // Skip self
-          if (!widget.x || !widget.y || !widget.width || !widget.height) return false;
-
-          const otherX = widget.x;
-          const otherY = widget.y;
-          const otherWidth = parseInt(widget.width) || 200;
-          const otherHeight = parseInt(widget.height) || 150;
-
-          // Check if rectangles overlap with gap
-          return !(
-            x + width + gap <= otherX ||
-            x >= otherX + otherWidth + gap ||
-            y + height + gap <= otherY ||
-            y >= otherY + otherHeight + gap
-          );
-        });
-      };
-
-      // If collision, revert to original size
-      let finalWidth = newWidth;
-      let finalHeight = newHeight;
-
-      if (hasCollision(position.x, position.y, newWidth, newHeight)) {
-        finalWidth = config.width;
-        finalHeight = config.height;
-      }
-
-      onResize(dashboardId, config.id, {
-        width: finalWidth,
-        height: finalHeight,
-        x: position.x,
-        y: position.y
-      });
-    }
-  };
-
-  const handleDragStop = (e, d) => {
-    if (onResize && dashboardId) {
-      const gridSize = layout?.gridSize || 0;
-
-      // Snap to grid on release if grid is enabled
-      let snappedX = gridSize > 0 ? Math.round(d.x / gridSize) * gridSize : d.x;
-      let snappedY = gridSize > 0 ? Math.round(d.y / gridSize) * gridSize : d.y;
-
-      // Get current widget dimensions
-      const currentWidth = parseInt(config.width) || 200;
-      const currentHeight = parseInt(config.height) || 150;
-
-      // Check for collisions with other widgets
-      const hasCollision = (x, y) => {
-        if (!allWidgets) return false;
-
-        return allWidgets.some(w => {
-          if (w.id === config.id) return false; // Skip self
-          if (!w.x || !w.y || !w.width || !w.height) return false; // Skip non-positioned widgets
-
-          const otherX = w.x;
-          const otherY = w.y;
-          const otherWidth = parseInt(w.width) || 200;
-          const otherHeight = parseInt(w.height) || 150;
-
-          // Check if rectangles overlap with gap
-          return !(
-            x + currentWidth + gap <= otherX ||
-            x >= otherX + otherWidth + gap ||
-            y + currentHeight + gap <= otherY ||
-            y >= otherY + otherHeight + gap
-          );
-        });
-      };
-
-      // If there's a collision, try to find nearest non-colliding position
-      if (hasCollision(snappedX, snappedY)) {
-        // Revert to original position
-        snappedX = config.x || 0;
-        snappedY = config.y || 0;
-      }
-
-      onResize(dashboardId, config.id, {
-        x: snappedX,
-        y: snappedY
-      });
+      onResize(dashboardId, config.id, { width, height });
     }
   };
 
@@ -571,51 +1148,49 @@ function Widget({ theme, config, clipPath, onResize, dashboardId, layout, allWid
         height: '100%',
       }}
     >
-      <Component theme={theme} config={config} />
+      <Component
+        theme={theme}
+        config={config}
+        dashboardId={dashboardId}
+        dashboard={dashboard}
+        layout={layout}
+        widgetKey={widgetKey}
+        currentConversationId={widgetConversations[widgetKey] || null}
+        setCurrentConversationId={(id) => setWidgetConversations(prev => ({ ...prev, [widgetKey]: id }))}
+        widgetConversations={widgetConversations}
+        reloadTrigger={reloadTrigger}
+      />
     </div>
   );
 
-  // If we have explicit dimensions, make it resizable
+  // If we have explicit dimensions, make it resizable and draggable with GridItem
   if (config.width || config.height) {
-    // Check if grid snapping is enabled
-    const gridSize = layout?.gridSize || 0; // 0 means freeform, >0 means snap to grid
+    // Parse width/height - they might be strings like "200px" or numbers
+    const parseSize = (size) => {
+      if (typeof size === 'string') {
+        return parseInt(size.replace('px', ''));
+      }
+      return size;
+    };
 
     return (
-      <Rnd
-        size={size}
-        position={position}
-        onResizeStop={handleResizeStop}
-        onDragStop={handleDragStop}
-        bounds={{
-          left: 0,
-          top: 0,
-          right: typeof window !== 'undefined' ? window.innerWidth - parseInt(size.width) - 160 : 0,
-          bottom: typeof window !== 'undefined' ? window.innerHeight - parseInt(size.height) - 105 : 0
-        }}
-        minWidth={minSize.width}
-        minHeight={minSize.height}
-        resizeGrid={gridSize > 0 ? [gridSize, gridSize] : undefined}
-        style={{
-          gridArea: config.area,
-          padding: `${gap / 2}px`,
-        }}
-        enableResizing={{
-          top: true,
-          right: true,
-          bottom: true,
-          left: true,
-          topRight: true,
-          bottomRight: true,
-          bottomLeft: true,
-          topLeft: true
-        }}
+      <GridItem
+        x={config.x || 0}
+        y={config.y || 0}
+        width={parseSize(config.width)}
+        height={parseSize(config.height)}
+        resizable={true}
+        draggable={true}
+        onDrag={handleDrag}
+        onDragEnd={handleDrag}
+        onResize={handleResizeEnd}
       >
         {widgetContent}
-      </Rnd>
+      </GridItem>
     );
   }
 
-  // Otherwise use standard grid positioning
+  // Otherwise use standard grid positioning (for CSS grid-based layouts)
   return (
     <div style={{ gridArea: config.area }}>
       {widgetContent}
@@ -657,17 +1232,26 @@ const defaultTheme = {
   bgLayer: {},
 };
 
-function Dashboard({ dashboard, allDashboards, onSelect, onWidgetResize }) {
+function Dashboard({ dashboard, allDashboards, onSelect, onWidgetResize, widgetConversations, setWidgetConversations, dashboardVersion }) {
   const theme = dashboard.theme && typeof dashboard.theme === 'object'
     ? { ...defaultTheme, ...dashboard.theme }
     : defaultTheme;
   const { layout } = dashboard;
+
+  // Use dashboardVersion as the reload trigger - this increments whenever any dashboard file changes
+  // This will force widgets to reload their data from files
+  const reloadTrigger = dashboardVersion;
 
   const gridStyle = {
     gridTemplateColumns: layout.columns,
     gridTemplateRows: layout.rows,
     gridTemplateAreas: layout.areas,
   };
+
+  // Get grid settings from layout
+  const cellSize = layout?.gridSize || 16;
+  const gapX = layout?.widgetGap || 10;
+  const gapY = layout?.widgetGap || 10;
 
   return (
     <div className="window-frame" style={{ '--accent': theme.accent }}>
@@ -696,19 +1280,41 @@ function Dashboard({ dashboard, allDashboards, onSelect, onWidgetResize }) {
           <p style={{ fontFamily: theme.textBody, color: theme.accent }}>{dashboard.subtitle}</p>
         </div>
         <div className="grid" style={gridStyle}>
-          {dashboard.widgets.map((widget) => (
+          {dashboard.widgets.filter(w => !w.width && !w.height).map((widget) => (
             <Widget
-              key={widget.id}
+              key={`${dashboard.id}-${widget.id}`}
               theme={theme}
               config={widget}
               clipPath={theme.clipPath}
               onResize={onWidgetResize}
               dashboardId={dashboard.id}
+              dashboard={dashboard}
               layout={layout}
               allWidgets={dashboard.widgets}
+              widgetConversations={widgetConversations}
+              setWidgetConversations={setWidgetConversations}
+              reloadTrigger={reloadTrigger}
             />
           ))}
         </div>
+        <Grid cellSize={cellSize} gapX={gapX} gapY={gapY} width="100%" height="calc(100% - 80px)">
+          {dashboard.widgets.filter(w => w.width || w.height).map((widget) => (
+            <Widget
+              key={`${dashboard.id}-${widget.id}`}
+              theme={theme}
+              config={widget}
+              clipPath={theme.clipPath}
+              onResize={onWidgetResize}
+              dashboardId={dashboard.id}
+              dashboard={dashboard}
+              layout={layout}
+              allWidgets={dashboard.widgets}
+              widgetConversations={widgetConversations}
+              setWidgetConversations={setWidgetConversations}
+              reloadTrigger={reloadTrigger}
+            />
+          ))}
+        </Grid>
       </div>
     </div>
   );
@@ -747,6 +1353,10 @@ export default function App() {
   const [dashboards, setDashboards] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const debounceTimers = useRef(new Map());
+  const [dashboardVersion, setDashboardVersion] = useState(0);
+
+  // Conversation state: Map of widgetKey -> currentConversationId
+  const [widgetConversations, setWidgetConversations] = useState({});
 
   // Load dashboards and set up listener
   useEffect(() => {
@@ -761,9 +1371,15 @@ export default function App() {
 
       window.dashboardAPI.onDashboardUpdate((updated) => {
         setDashboards(updated);
-        if (updated.length > 0 && !activeId) {
-          setActiveId(updated[0].id);
-        }
+        // Increment version to force reload of all widgets
+        setDashboardVersion(v => v + 1);
+        // Only set activeId if it's not already set
+        setActiveId(prev => {
+          if (!prev && updated.length > 0) {
+            return updated[0].id;
+          }
+          return prev;
+        });
       });
     }
   }, []);
@@ -842,6 +1458,9 @@ export default function App() {
         allDashboards={dashboards}
         onSelect={setActiveId}
         onWidgetResize={handleWidgetResize}
+        widgetConversations={widgetConversations}
+        setWidgetConversations={setWidgetConversations}
+        dashboardVersion={dashboardVersion}
       />
     </div>
   );

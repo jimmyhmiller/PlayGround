@@ -72,7 +72,7 @@
                 "column": 70
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/^a$|(?-m:^b$|(?m:^c$)|^d$|(?-m:^e$)|^f$)|^g$|(?m:^h$)|^k$/m",
             "regex": {
               "pattern": "^a$|(?-m:^b$|(?m:^c$)|^d$|(?-m:^e$)|^f$)|^g$|(?m:^h$)|^k$",
@@ -1560,7 +1560,7 @@
                 "column": 69
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/^a$|(?m:^b$|(?-m:^c$)|^d$|(?m:^e$)|^f$)|^g$|(?-m:^h$)|^k$/",
             "regex": {
               "pattern": "^a$|(?m:^b$|(?-m:^c$)|^d$|(?m:^e$)|^f$)|^g$|(?-m:^h$)|^k$",
@@ -3007,5 +3007,11 @@
       }
     }
   ],
-  "sourceType": "script"
+  "sourceType": "script",
+  "_metadata": {
+    "sourceHash": "ea4fa3952b6354f6e34c5fc690ca8194a01eac5e91f343bbd55cc2af067218e3",
+    "generatedAt": "2025-11-24T18:07:16.111Z",
+    "acornVersion": "8.15.0",
+    "sourceFile": "built-ins/RegExp/regexp-modifiers/nesting-multiline-does-not-affect-alternatives-outside.js"
+  }
 }

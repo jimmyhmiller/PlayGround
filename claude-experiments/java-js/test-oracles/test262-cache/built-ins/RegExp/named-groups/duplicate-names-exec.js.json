@@ -133,7 +133,7 @@
                     "column": 37
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?<x>a)|(?<x>b)/",
                 "regex": {
                   "pattern": "(?<x>a)|(?<x>b)",
@@ -371,7 +371,7 @@
                     "column": 37
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?<x>b)|(?<x>a)/",
                 "regex": {
                   "pattern": "(?<x>b)|(?<x>a)",
@@ -609,7 +609,7 @@
                     "column": 46
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?:(?<x>a)|(?<x>b))\\k<x>/",
                 "regex": {
                   "pattern": "(?:(?<x>a)|(?<x>b))\\k<x>",
@@ -847,7 +847,7 @@
                     "column": 46
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?:(?<x>a)|(?<x>b))\\k<x>/",
                 "regex": {
                   "pattern": "(?:(?<x>a)|(?<x>b))\\k<x>",
@@ -1052,7 +1052,7 @@
                     "column": 51
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}/",
                 "regex": {
                   "pattern": "(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}",
@@ -1569,7 +1569,7 @@
                     "column": 50
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}/",
                 "regex": {
                   "pattern": "(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}",
@@ -1757,7 +1757,7 @@
                     "column": 43
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?:(?<x>a)|(?<x>b))\\k<x>/",
                 "regex": {
                   "pattern": "(?:(?<x>a)|(?<x>b))\\k<x>",
@@ -1945,7 +1945,7 @@
                     "column": 43
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?:(?<x>a)|(?<x>b))\\k<x>/",
                 "regex": {
                   "pattern": "(?:(?<x>a)|(?<x>b))\\k<x>",
@@ -2133,7 +2133,7 @@
                     "column": 50
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/^(?:(?<a>x)|(?<a>y)|z)\\k<a>$/",
                 "regex": {
                   "pattern": "^(?:(?<a>x)|(?<a>y)|z)\\k<a>$",
@@ -2371,7 +2371,7 @@
                     "column": 50
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/^(?:(?<a>x)|(?<a>y)|z)\\k<a>$/",
                 "regex": {
                   "pattern": "^(?:(?<a>x)|(?<a>y)|z)\\k<a>$",
@@ -2608,7 +2608,7 @@
                     "column": 47
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/^(?:(?<a>x)|(?<a>y)|z)\\k<a>$/",
                 "regex": {
                   "pattern": "^(?:(?<a>x)|(?<a>y)|z)\\k<a>$",
@@ -3017,7 +3017,7 @@
                     "column": 53
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$/",
                 "regex": {
                   "pattern": "^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$",
@@ -3254,7 +3254,7 @@
                     "column": 53
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$/",
                 "regex": {
                   "pattern": "^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$",
@@ -3491,7 +3491,7 @@
                     "column": 50
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$/",
                 "regex": {
                   "pattern": "^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$",
@@ -3679,7 +3679,7 @@
                     "column": 50
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$/",
                 "regex": {
                   "pattern": "^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$",
@@ -3748,5 +3748,11 @@
       }
     }
   ],
-  "sourceType": "script"
+  "sourceType": "script",
+  "_metadata": {
+    "sourceHash": "c02a89c619d75530f239f574e8c2a0098c4b9e2189ec7567723abc32f0d8d207",
+    "generatedAt": "2025-11-24T18:07:15.500Z",
+    "acornVersion": "8.15.0",
+    "sourceFile": "built-ins/RegExp/named-groups/duplicate-names-exec.js"
+  }
 }

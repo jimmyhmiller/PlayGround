@@ -21,34 +21,85 @@
     }
   },
   "layout": {
-    "columns": "320px auto 1fr",
-    "rows": "auto auto 1fr",
-    "areas": "\"chat stat .\" \"chat diff .\" \"chat . .\""
+    "columns": "1fr",
+    "rows": "1fr",
+    "areas": "\".\"",
+    "gridSize": 16,
+    "widgetGap": 16,
+    "buffer": 10
   },
   "widgets": [
     {
       "id": "chat",
       "type": "chat",
-      "area": "chat",
       "label": "Muse",
-      "messages": [
-        { "from": "user", "text": "Create something beautiful" },
-        { "from": "assistant", "text": "*Rendering your dreams...*\n\nI'm generating:\n- Ocean waves at sunset\n- Cosmic nebula clouds\n- Abstract fluid motion" }
-      ]
+      "backend": "claude",
+      "messages": [],
+      "claudeOptions": {
+        "model": "claude-sonnet-4-5-20250929",
+        "permissionMode": "acceptEdits"
+      },
+      "width": 400,
+      "height": 500,
+      "x": 0,
+      "y": 0
     },
     {
       "id": "stat",
       "type": "stat",
-      "area": "stat",
       "label": "Fluidity",
-      "value": "100%"
+      "value": "100%",
+      "width": 200,
+      "height": 150,
+      "x": 420,
+      "y": 0
     },
     {
       "id": "diff",
       "type": "diffList",
-      "area": "diff",
-      "label": "Asset Changes",
-      "items": [["Ocean.png", 0, 0], ["Sky.svg", 234, 12], ["Void.mp4", 1024, 512]]
+      "label": "Code Changed",
+      "items": [
+        [
+          "src/App.jsx",
+          1137,
+          412
+        ],
+        [
+          "main.js",
+          627,
+          89
+        ],
+        [
+          "src/components/GridItem.jsx",
+          368,
+          156
+        ],
+        [
+          "examples/conversation.json",
+          154,
+          31
+        ],
+        [
+          "src/components/Grid.jsx",
+          121,
+          48
+        ],
+        [
+          "preload.js",
+          118,
+          22
+        ],
+        [
+          "examples/botanist.json",
+          103,
+          19
+        ]
+      ],
+      "width": 304,
+      "height": 240,
+      "x": 416,
+      "y": 160
     }
-  ]
+  ],
+  "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/examples/dream.json"
 }

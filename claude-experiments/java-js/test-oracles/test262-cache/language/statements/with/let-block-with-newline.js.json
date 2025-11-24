@@ -1,0 +1,152 @@
+{
+  "type": "Program",
+  "start": 0,
+  "end": 561,
+  "loc": {
+    "start": {
+      "line": 1,
+      "column": 0
+    },
+    "end": {
+      "line": 20,
+      "column": 0
+    }
+  },
+  "body": [
+    {
+      "type": "IfStatement",
+      "start": 514,
+      "end": 560,
+      "loc": {
+        "start": {
+          "line": 16,
+          "column": 0
+        },
+        "end": {
+          "line": 19,
+          "column": 1
+        }
+      },
+      "test": {
+        "type": "Literal",
+        "start": 518,
+        "end": 523,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 4
+          },
+          "end": {
+            "line": 16,
+            "column": 9
+          }
+        },
+        "value": false,
+        "raw": "false"
+      },
+      "consequent": {
+        "type": "BlockStatement",
+        "start": 525,
+        "end": 560,
+        "loc": {
+          "start": {
+            "line": 16,
+            "column": 11
+          },
+          "end": {
+            "line": 19,
+            "column": 1
+          }
+        },
+        "body": [
+          {
+            "type": "WithStatement",
+            "start": 531,
+            "end": 544,
+            "loc": {
+              "start": {
+                "line": 17,
+                "column": 4
+              },
+              "end": {
+                "line": 17,
+                "column": 17
+              }
+            },
+            "object": {
+              "type": "ObjectExpression",
+              "start": 537,
+              "end": 539,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 10
+                },
+                "end": {
+                  "line": 17,
+                  "column": 12
+                }
+              },
+              "properties": []
+            },
+            "body": {
+              "type": "ExpressionStatement",
+              "start": 541,
+              "end": 544,
+              "loc": {
+                "start": {
+                  "line": 17,
+                  "column": 14
+                },
+                "end": {
+                  "line": 17,
+                  "column": 17
+                }
+              },
+              "expression": {
+                "type": "Identifier",
+                "start": 541,
+                "end": 544,
+                "loc": {
+                  "start": {
+                    "line": 17,
+                    "column": 14
+                  },
+                  "end": {
+                    "line": 17,
+                    "column": 17
+                  }
+                },
+                "name": "let"
+              }
+            }
+          },
+          {
+            "type": "BlockStatement",
+            "start": 556,
+            "end": 558,
+            "loc": {
+              "start": {
+                "line": 18,
+                "column": 4
+              },
+              "end": {
+                "line": 18,
+                "column": 6
+              }
+            },
+            "body": []
+          }
+        ]
+      },
+      "alternate": null
+    }
+  ],
+  "sourceType": "script",
+  "_metadata": {
+    "sourceHash": "8512c63aea09a2efba3f229854d90641db3d280423712f59b4bd459c8d0b646a",
+    "generatedAt": "2025-11-24T18:07:30.615Z",
+    "acornVersion": "8.15.0",
+    "sourceFile": "language/statements/with/let-block-with-newline.js"
+  }
+}

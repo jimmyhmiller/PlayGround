@@ -83,8 +83,8 @@ body {
 .dashboard {
   flex: 1;
   z-index: 5;
+  margin-left: 80px;
   padding: 40px;
-  padding-left: 120px;
   display: flex;
   flex-direction: column;
   gap: 25px;
@@ -127,12 +127,15 @@ body {
   display: grid;
   gap: 15px;
   flex: 1;
+  position: relative;
 }
 
 .chat-widget {
   overflow: hidden;
   min-height: 200px;
-  max-height: 400px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .widget {
@@ -196,7 +199,7 @@ body {
   gap: 10px;
   overflow-y: auto;
   min-height: 0;
-  padding: 8px 0;
+  padding: 8px 20px 8px 0;
 }
 .chat-bubble {
   padding: 8px 12px;

@@ -72,7 +72,7 @@
                 "column": 52
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/a|(?-i:b|(?i:c)|d|(?-i:e)|f)|g|(?i:h)|k/i",
             "regex": {
               "pattern": "a|(?-i:b|(?i:c)|d|(?-i:e)|f)|g|(?i:h)|k",
@@ -1560,7 +1560,7 @@
                 "column": 51
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/a|(?i:b|(?-i:c)|d|(?i:e)|f)|g|(?-i:h)|k/",
             "regex": {
               "pattern": "a|(?i:b|(?-i:c)|d|(?i:e)|f)|g|(?-i:h)|k",
@@ -3007,5 +3007,11 @@
       }
     }
   ],
-  "sourceType": "script"
+  "sourceType": "script",
+  "_metadata": {
+    "sourceHash": "f6696a10c804d23a4b97ea2e6734fba09f932e9710b4954efedbb2179b2dcc5e",
+    "generatedAt": "2025-11-24T18:07:16.111Z",
+    "acornVersion": "8.15.0",
+    "sourceFile": "built-ins/RegExp/regexp-modifiers/nesting-ignoreCase-does-not-affect-alternatives-outside.js"
+  }
 }

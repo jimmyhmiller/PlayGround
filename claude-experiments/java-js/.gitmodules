@@ -1,3 +1,6 @@
 [submodule "test-oracles/test262"]
 	path = test-oracles/test262
 	url = https://github.com/tc39/test262.git
+	# Pinned to specific commit to ensure cache consistency
+	# Update TEST262_COMMIT in scripts/generate-test262-cache.js when updating this
+	branch = main

@@ -72,7 +72,7 @@
                 "column": 36
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/^a$|^b$|(?m:^c$)|^d$|^e$/",
             "regex": {
               "pattern": "^a$|^b$|(?m:^c$)|^d$|^e$",
@@ -960,7 +960,7 @@
                 "column": 48
               }
             },
-            "value": null,
+            "value": {},
             "raw": "/(^a$)|(?:^b$)|(?m:^c$)|(?:^d$)|(^e$)/",
             "regex": {
               "pattern": "(^a$)|(?:^b$)|(?m:^c$)|(?:^d$)|(^e$)",
@@ -1790,5 +1790,11 @@
       }
     }
   ],
-  "sourceType": "script"
+  "sourceType": "script",
+  "_metadata": {
+    "sourceHash": "55a86420215db82c3cea2f32e6be1a16109541511320960234e0416ce2bdfd41",
+    "generatedAt": "2025-11-24T18:07:16.106Z",
+    "acornVersion": "8.15.0",
+    "sourceFile": "built-ins/RegExp/regexp-modifiers/add-multiline-does-not-affect-alternatives-outside.js"
+  }
 }

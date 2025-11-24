@@ -22,35 +22,93 @@
     }
   },
   "layout": {
-    "columns": "auto 320px 1fr",
-    "rows": "100px auto 1fr",
-    "areas": "\"chart chat .\" \"stat chat .\" \". chat .\""
+    "columns": "1fr",
+    "rows": "1fr",
+    "areas": "\".\"",
+    "gridSize": 16,
+    "widgetGap": 12,
+    "buffer": 10
   },
   "widgets": [
     {
       "id": "chart",
       "type": "barChart",
-      "area": "chart",
-      "label": ["Response Time", "24H"]
+      "label": [
+        "Response Time",
+        "24H"
+      ],
+      "data": [
+        50,
+        72,
+        58,
+        83,
+        65,
+        88,
+        54,
+        78,
+        62,
+        94,
+        68,
+        76,
+        60,
+        87,
+        73,
+        80,
+        64,
+        96,
+        69,
+        82,
+        58,
+        90,
+        75,
+        67,
+        84,
+        61,
+        93,
+        71,
+        79,
+        65
+      ],
+      "width": 400,
+      "height": 200,
+      "x": 0,
+      "y": 0
     },
     {
       "id": "stat",
       "type": "stat",
-      "area": "stat",
       "label": "Uptime",
-      "value": "99.9%"
+      "value": "99%",
+      "width": 200,
+      "height": 150,
+      "x": 0,
+      "y": 224
     },
     {
       "id": "chat",
       "type": "chat",
-      "area": "chat",
       "label": "Assistant",
       "backend": "claude",
       "messages": [],
       "claudeOptions": {
         "model": "claude-sonnet-4-5-20250929",
         "permissionMode": "acceptEdits"
-      }
+      },
+      "width": 632,
+      "height": 604,
+      "x": 420,
+      "y": 0
+    },
+    {
+      "id": "agent-tasks",
+      "type": "claudeTodos",
+      "x": 0,
+      "y": 392,
+      "width": 400,
+      "height": 300,
+      "label": "Agent Tasks",
+      "chatWidgetId": "architect-chat"
     }
-  ]
+  ],
+  "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/examples/botanist.json"
 }

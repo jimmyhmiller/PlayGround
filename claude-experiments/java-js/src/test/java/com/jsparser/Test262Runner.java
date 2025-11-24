@@ -95,8 +95,16 @@ public class Test262Runner {
                          Object expectedObj = mapper.readValue(expectedJson, Object.class);
                          Object actualObj = mapper.readValue(actualJson, Object.class);
 
+                         // Remove _metadata field from expected (added by cache generator for hash validation)
+                         if (expectedObj instanceof Map) {
+                             ((Map<?, ?>)expectedObj).remove("_metadata");
+                         }
+
                          // Normalize regex value differences (null vs {} when JS can't compile regex)
                          normalizeRegexValues(expectedObj, actualObj);
+
+                         // Normalize bigint value differences (bigint field as string vs number)
+                         normalizeBigIntValues(expectedObj, actualObj);
 
                          // Compare structurally using equals (Jackson's Maps and Lists implement equals)
                          if (Objects.deepEquals(expectedObj, actualObj)) {
@@ -329,6 +337,57 @@ public class Test262Runner {
             List<Object> actList = (List<Object>) actual;
             for (int i = 0; i < Math.min(expList.size(), actList.size()); i++) {
                 normalizeRegexValues(expList.get(i), actList.get(i));
+            }
+        }
+    }
+
+    /**
+     * Normalize bigint literal value differences between expected and actual ASTs.
+     * The bigint field should be a string representation of the numeric value.
+     * This method ensures both expected and actual have consistent string representations.
+     */
+    @SuppressWarnings("unchecked")
+    private void normalizeBigIntValues(Object expected, Object actual) {
+        if (expected instanceof Map && actual instanceof Map) {
+            Map<String, Object> expMap = (Map<String, Object>) expected;
+            Map<String, Object> actMap = (Map<String, Object>) actual;
+
+            // Check if this is a Literal node with bigint
+            if ("Literal".equals(expMap.get("type")) && expMap.containsKey("bigint")) {
+                Object expBigint = expMap.get("bigint");
+                Object actBigint = actMap.get("bigint");
+
+                // Convert both to strings for comparison
+                if (expBigint != null && actBigint != null) {
+                    String expStr = expBigint.toString();
+                    String actStr = actBigint.toString();
+
+                    // If they're numerically equal, normalize to the same string
+                    if (!expStr.equals(actStr)) {
+                        try {
+                            java.math.BigInteger expBI = new java.math.BigInteger(expStr);
+                            java.math.BigInteger actBI = new java.math.BigInteger(actStr);
+                            if (expBI.equals(actBI)) {
+                                actMap.put("bigint", expStr);
+                            }
+                        } catch (NumberFormatException e) {
+                            // If can't parse, leave as is
+                        }
+                    }
+                }
+            }
+
+            // Recurse into all fields
+            for (String key : expMap.keySet()) {
+                if (actMap.containsKey(key)) {
+                    normalizeBigIntValues(expMap.get(key), actMap.get(key));
+                }
+            }
+        } else if (expected instanceof List && actual instanceof List) {
+            List<Object> expList = (List<Object>) expected;
+            List<Object> actList = (List<Object>) actual;
+            for (int i = 0; i < Math.min(expList.size(), actList.size()); i++) {
+                normalizeBigIntValues(expList.get(i), actList.get(i));
             }
         }
     }

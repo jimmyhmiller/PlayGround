@@ -23,7 +23,9 @@ function shouldUseModuleMode(filePath) {
 
 try {
     const moduleFlag = shouldUseModuleMode(sourceFile) ? '--module' : '';
-    const command = `acorn --ecma2020 --locations ${moduleFlag} "${sourceFile}"`;
+    // Use npx to run the local acorn installation
+    // Use ecma2022 to support private class fields (#) and other ES2022 features
+    const command = `npx acorn --ecma2022 --locations ${moduleFlag} "${sourceFile}"`;
 
     const output = execSync(command, { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
     console.log(output);

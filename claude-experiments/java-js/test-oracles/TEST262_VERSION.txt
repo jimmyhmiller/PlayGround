@@ -1,0 +1,13 @@
+# Test262 Version Lock
+# This file pins the exact commit of test262 used for cache generation
+
+COMMIT=3aa75310772673da078ca1d96fe3b75da0e21bd0
+DATE=2025-11-13
+MESSAGE=Temporal: Split up old Chinese and Dangi calendar tests; remove out-of-normal-range dates
+
+# To update:
+# 1. cd test-oracles/test262
+# 2. git pull origin main
+# 3. git log -1 --format="%H %ad %s" --date=short
+# 4. Update this file with the new commit hash
+# 5. Run: npm run generate-cache

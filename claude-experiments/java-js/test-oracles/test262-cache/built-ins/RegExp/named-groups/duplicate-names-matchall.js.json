@@ -592,7 +592,7 @@
                     "column": 49
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?<x>a)|(?<x>b)/g",
                 "regex": {
                   "pattern": "(?<x>a)|(?<x>b)",
@@ -948,7 +948,7 @@
                     "column": 49
                   }
                 },
-                "value": null,
+                "value": {},
                 "raw": "/(?<x>b)|(?<x>a)/g",
                 "regex": {
                   "pattern": "(?<x>b)|(?<x>a)",
@@ -1181,5 +1181,11 @@
       }
     }
   ],
-  "sourceType": "script"
+  "sourceType": "script",
+  "_metadata": {
+    "sourceHash": "f0333e5675c41b697d8af551516cd995388a6fada229815f62b898e1bd7438b5",
+    "generatedAt": "2025-11-24T18:07:15.502Z",
+    "acornVersion": "8.15.0",
+    "sourceFile": "built-ins/RegExp/named-groups/duplicate-names-matchall.js"
+  }
 }
