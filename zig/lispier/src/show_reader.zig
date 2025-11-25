@@ -3,6 +3,7 @@ const main_module = @import("main.zig");
 const reader_types = main_module.reader_types;
 const tokenizer = main_module.tokenizer;
 const reader = main_module.reader;
+const mlir_integration = main_module.mlir_integration;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -19,6 +20,10 @@ pub fn main() !void {
     }
 
     const source = args[1];
+
+    // Create dialect registry for operation validation
+    var dialect_registry = try mlir_integration.DialectRegistry.init(allocator);
+    defer dialect_registry.deinit();
 
     // Tokenize
     var tok = tokenizer.Tokenizer.init(allocator, source);
@@ -39,8 +44,8 @@ pub fn main() !void {
         std.debug.print("\n", .{});
     }
 
-    // Read
-    var rdr = reader.Reader.init(allocator, tokens.items);
+    // Read (with dialect registry for operation validation)
+    var rdr = reader.Reader.initWithRegistry(allocator, tokens.items, &dialect_registry);
     defer rdr.deinit();
 
     var values = try rdr.read();
@@ -74,9 +79,12 @@ fn printValue(value: *reader_types.Value, indent: usize) !void {
                 } else if (sym.uses_alias) {
                     std.debug.print("{s}/{s}", .{ ns.name, sym.name });
                 } else {
-                    std.debug.print("{s}", .{sym.name});
+                    // Has namespace but no explicit notation (from use-dialect or default user namespace)
+                    // Display with dot notation to show the resolved namespace
+                    std.debug.print("{s}.{s}", .{ ns.name, sym.name });
                 }
             } else {
+                // Shouldn't happen anymore since we always have at least the user namespace
                 std.debug.print("{s}", .{sym.name});
             }
         },

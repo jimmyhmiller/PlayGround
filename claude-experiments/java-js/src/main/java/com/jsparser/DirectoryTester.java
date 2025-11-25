@@ -123,20 +123,14 @@ public class DirectoryTester {
             processed.incrementAndGet();
 
             if (processed.get() % 100 == 0) {
-                System.out.printf("Progress: %d/%d (%d matched, %d mismatched, %d Java failed)%n",
-                    processed.get(), jsFiles.size(), matched.get(), mismatched.get(), javaFailed.get());
+                System.out.printf("Progress: %d/%d (%d matched, %d mismatched, %d Java failed, %d Acorn failed)%n",
+                    processed.get(), jsFiles.size(), matched.get(), mismatched.get(), javaFailed.get(), acornFailed.get());
             }
 
             String relativePath = targetDir.relativize(file).toString();
 
             try {
                 String source = Files.readString(file);
-
-                // Skip very large files (> 500KB)
-                if (source.length() > 500000) {
-                    skipped.incrementAndGet();
-                    continue;
-                }
 
                 // Parse with Acorn
                 AcornResult acornResult = parseWithAcorn(source, file);
@@ -189,10 +183,6 @@ public class DirectoryTester {
                 normalizeRegexValues(acornObj, javaObj);
                 normalizeBigIntValues(acornObj, javaObj);
 
-                // Sort keys for comparison (handles different serialization order)
-                acornObj = sortMapKeys(acornObj);
-                javaObj = sortMapKeys(javaObj);
-
                 if (Objects.deepEquals(acornObj, javaObj)) {
                     matched.incrementAndGet();
                 } else {
@@ -204,7 +194,7 @@ public class DirectoryTester {
             } catch (Exception e) {
                 javaFailed.incrementAndGet();
                 if (failedFiles.size() < 50) {
-                    failedFiles.add(relativePath + ": " + e.getMessage());
+                    failedFiles.add(relativePath + ": [Comparison error] " + e.getMessage());
                 }
             }
         }
@@ -212,7 +202,7 @@ public class DirectoryTester {
         // Print results
         System.out.println("\n=== Results ===");
         System.out.printf("Total files: %d%n", jsFiles.size());
-        System.out.printf("Skipped (too large or Acorn failed): %d%n", skipped.get());
+        System.out.printf("Skipped (Acorn failed): %d%n", skipped.get());
         System.out.println("\nAcorn results:");
         System.out.printf("  ✓ Successfully parsed: %d (%.2f%%)%n",
             acornSuccess.get(), (acornSuccess.get() * 100.0 / jsFiles.size()));
@@ -355,26 +345,6 @@ public class DirectoryTester {
                 normalizeRegexValues(expList.get(i), actList.get(i));
             }
         }
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Object sortMapKeys(Object obj) {
-        if (obj instanceof Map) {
-            Map<String, Object> map = (Map<String, Object>) obj;
-            Map<String, Object> sortedMap = new java.util.TreeMap<>();
-            for (Map.Entry<String, Object> entry : map.entrySet()) {
-                sortedMap.put(entry.getKey(), sortMapKeys(entry.getValue()));
-            }
-            return sortedMap;
-        } else if (obj instanceof List) {
-            List<Object> list = (List<Object>) obj;
-            List<Object> sortedList = new ArrayList<>();
-            for (Object item : list) {
-                sortedList.add(sortMapKeys(item));
-            }
-            return sortedList;
-        }
-        return obj;
     }
 
     @SuppressWarnings("unchecked")

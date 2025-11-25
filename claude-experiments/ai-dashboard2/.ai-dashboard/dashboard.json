@@ -1,0 +1,226 @@
+{
+  "id": "project-1764037874443-ad24e9b9-main",
+  "title": "ai-dashboard2",
+  "subtitle": "Project Dashboard",
+  "icon": "📊",
+  "theme": {
+    "background": "#1a1a1a",
+    "textColor": "#e0e0e0",
+    "textBody": "system-ui, sans-serif",
+    "textCode": "Menlo, Monaco, monospace",
+    "accent": "#4a9eff",
+    "positive": "#4caf50",
+    "negative": "#f44336",
+    "neutral": "#9e9e9e"
+  },
+  "layout": {
+    "columns": "1fr 1fr",
+    "rows": "auto 1fr",
+    "areas": "\". .\" \". .\"",
+    "gridSize": 16,
+    "widgetGap": 12,
+    "buffer": 12
+  },
+  "widgets": [
+    {
+      "id": "chat",
+      "type": "chat",
+      "label": "Project Assistant",
+      "backend": "claude",
+      "claudeOptions": {
+        "model": "claude-sonnet-4-5-20250929"
+      },
+      "x": 0,
+      "y": 0,
+      "width": 380,
+      "height": 520,
+      "subtitle": "AI-powered dashboard management and widget generation"
+    },
+    {
+      "id": "component-types",
+      "type": "keyValue",
+      "x": 392,
+      "y": 0,
+      "width": 380,
+      "height": 492,
+      "label": "Available Component Types",
+      "items": [
+        {
+          "key": "stat",
+          "value": "Single statistic display"
+        },
+        {
+          "key": "barChart",
+          "value": "Animated bar chart"
+        },
+        {
+          "key": "progress",
+          "value": "Progress bar (0-100)"
+        },
+        {
+          "key": "chat",
+          "value": "AI chat with Claude"
+        },
+        {
+          "key": "claudeTodos",
+          "value": "AI agent task list"
+        },
+        {
+          "key": "todoList",
+          "value": "Simple todo list"
+        },
+        {
+          "key": "fileList",
+          "value": "File list with status"
+        },
+        {
+          "key": "keyValue",
+          "value": "Key-value pairs"
+        },
+        {
+          "key": "diffList",
+          "value": "Git-style diff view"
+        },
+        {
+          "key": "layoutSettings",
+          "value": "Grid layout controls"
+        },
+        {
+          "key": "commandRunner",
+          "value": "Run shell commands"
+        },
+        {
+          "key": "webView",
+          "value": "Embedded browser"
+        }
+      ]
+    },
+    {
+      "id": "project-todos",
+      "type": "todoList",
+      "x": 784,
+      "y": 0,
+      "width": 380,
+      "height": 884,
+      "label": "Project TODOs",
+      "items": [
+        {
+          "text": "Build file-backed todo widget (reads/writes todo.md)",
+          "done": false
+        },
+        {
+          "text": "Add data persistence layer for widgets",
+          "done": false
+        },
+        {
+          "text": "Support markdown parsing for todo items",
+          "done": false
+        },
+        {
+          "text": "Add file watcher for auto-refresh",
+          "done": false
+        },
+        {
+          "text": "Add more graphing capabilities (line charts, pie charts, scatter plots)",
+          "done": false
+        },
+        {
+          "text": "Make todo widget editable (add/remove/edit items from UI)",
+          "done": false
+        },
+        {
+          "text": "Make projects reorderable by command drag",
+          "done": false
+        },
+        {
+          "text": "Add \"flip over\" feature to widgets to view and edit their JSON configuration",
+          "done": false
+        },
+        {
+          "text": "Change initial dashboard setup to be WAY cleaner, no modal, take you straight there and start generating things",
+          "done": false
+        },
+        {
+          "text": "Support dragging images to chat widgets",
+          "done": false
+        },
+        {
+          "text": "By default have the project generate a subtitle automatically",
+          "done": false
+        },
+        {
+          "text": "Add JSON collapsible widget for displaying/editing nested data structures",
+          "done": false
+        },
+        {
+          "text": "Support custom widgets defined by AI",
+          "done": false
+        },
+        {
+          "text": "Add schema validation for widget configurations",
+          "done": false
+        },
+        {
+          "text": "Convert to TypeScript",
+          "done": false
+        },
+        {
+          "text": "Make todo widget type scroll when content overflows",
+          "done": false
+        },
+        {
+          "text": "Make canvas draggable to pan around the dashboard",
+          "done": false
+        },
+        {
+          "text": "Allow AI to inspect and interact with content in webView widgets",
+          "done": false
+        },
+        {
+          "text": "Add whiteboard-like functionality with send to chat",
+          "done": false
+        },
+        {
+          "text": "Add markdown widget for rendering markdown content",
+          "done": false
+        },
+        {
+          "text": "Add code widget for syntax-highlighted code display",
+          "done": false
+        },
+        {
+          "text": "Enhance diff widget with better visualization and inline editing",
+          "done": false
+        },
+        {
+          "text": "Make webView background default to dashboard color scheme",
+          "done": false
+        }
+      ]
+    },
+    {
+      "id": "bugs-list",
+      "type": "todoList",
+      "x": 0,
+      "y": 532,
+      "width": 380,
+      "height": 296,
+      "label": "Bugs",
+      "items": [
+        {
+          "text": "Sometimes replies from claude disappear if we are on a different dashboard when received",
+          "done": false
+        },
+        {
+          "text": "Sizes of components and location should be in terms of the grid, not pixels",
+          "done": false
+        },
+        {
+          "text": "Scroll of chat should be at the bottom by default",
+          "done": false
+        }
+      ]
+    }
+  ],
+  "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/.ai-dashboard/dashboard.json"
+}

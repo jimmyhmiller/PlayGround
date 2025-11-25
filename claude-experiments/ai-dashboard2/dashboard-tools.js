@@ -273,6 +273,65 @@ function createDashboardTools(dashboardContext, watchedPaths, broadcastCallback)
         )
       );
     }
+
+    // Tool for regenerating widget data (if widget has regenerateCommand or regenerateScript)
+    if (widget.regenerateCommand || widget.regenerateScript) {
+      tools.push(
+        tool(
+          `regenerate_${widgetId}`,
+          `Regenerate data for "${widgetLabel}" by running its configured command`,
+          {},
+          async () => {
+            try {
+              // Call the IPC handler via electron (need to access ipcRenderer from renderer process)
+              // Since MCP tools run in main process, we need to use the IPC mechanism directly
+              const { ipcMain } = require('electron');
+
+              // Get the regenerate-widget handler
+              const handlers = ipcMain._events['regenerate-widget'];
+              if (!handlers || handlers.length === 0) {
+                return {
+                  content: [{
+                    type: 'text',
+                    text: 'Regenerate handler not available'
+                  }],
+                  isError: true
+                };
+              }
+
+              // Call the handler
+              const handler = Array.isArray(handlers) ? handlers[0] : handlers;
+              const result = await handler(null, {
+                dashboardId: config.id,
+                widgetId: widgetId
+              });
+
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: result.success
+                      ? `Successfully regenerated "${widgetLabel}"`
+                      : `Failed to regenerate "${widgetLabel}": ${result.error}`
+                  }
+                ],
+                isError: !result.success
+              };
+            } catch (error) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: `Error regenerating "${widgetLabel}": ${error.message}`
+                  }
+                ],
+                isError: true
+              };
+            }
+          }
+        )
+      );
+    }
   });
 
   // Generic tool to update any widget property
@@ -383,6 +442,82 @@ function createDashboardTools(dashboardContext, watchedPaths, broadcastCallback)
           ],
           isError: !!result.error
         };
+      }
+    )
+  );
+
+  // Global tool to regenerate all widgets with commands
+  tools.push(
+    tool(
+      'regenerate_all_widgets',
+      'Regenerate all widgets in this dashboard that have regenerate commands configured',
+      {},
+      async () => {
+        try {
+          const { ipcMain } = require('electron');
+
+          // Get the regenerate-all-widgets handler
+          const handlers = ipcMain._events['regenerate-all-widgets'];
+          if (!handlers || handlers.length === 0) {
+            return {
+              content: [{
+                type: 'text',
+                text: 'Regenerate-all handler not available'
+              }],
+              isError: true
+            };
+          }
+
+          // Call the handler
+          const handler = Array.isArray(handlers) ? handlers[0] : handlers;
+          const result = await handler(null, {
+            dashboardId: config.id
+          });
+
+          if (!result.success) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `Failed to regenerate widgets: ${result.error}`
+                }
+              ],
+              isError: true
+            };
+          }
+
+          // Format results
+          const successResults = result.results.filter(r => r.success);
+          const failureResults = result.results.filter(r => !r.success);
+
+          let message = `Regenerated ${successResults.length} widget(s)`;
+          if (failureResults.length > 0) {
+            message += `\nFailed: ${failureResults.length} widget(s)`;
+            failureResults.forEach(r => {
+              message += `\n  - ${r.label || r.widgetId}: ${r.error}`;
+            });
+          }
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: message
+              }
+            ],
+            isError: failureResults.length > 0
+          };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error regenerating widgets: ${error.message}`
+              }
+            ],
+            isError: true
+          };
+        }
       }
     )
   );

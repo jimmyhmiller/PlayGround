@@ -30,8 +30,8 @@ pub const Compiler = struct {
         var tokens = try tok.tokenize();
         errdefer tokens.deinit(self.allocator);
 
-        // Read
-        var rdr = reader.Reader.init(self.allocator, tokens.items);
+        // Read (with dialect registry for operation validation)
+        var rdr = reader.Reader.initWithRegistry(self.allocator, tokens.items, &self.dialect_registry);
         defer rdr.deinit();
 
         var values = try rdr.read();

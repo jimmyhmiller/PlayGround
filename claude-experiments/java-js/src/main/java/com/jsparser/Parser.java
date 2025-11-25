@@ -10,6 +10,8 @@ public class Parser {
     private final int sourceLength;
     private final Lexer lexer;
     private final String source;
+    private final char[] sourceBuf;
+    private final int[] lineOffsets; // Starting byte offset of each line
     private int current = 0;
     private boolean allowIn = true;
     private boolean inGenerator = false;
@@ -22,10 +24,12 @@ public class Parser {
 
     public Parser(String source, boolean forceModuleMode) {
         this.source = source;
-        this.sourceLength = source.length();
+        this.sourceBuf = source.toCharArray();
+        this.sourceLength = sourceBuf.length;
         this.lexer = new Lexer(source);
         this.tokens = lexer.tokenize();
         this.forceModuleMode = forceModuleMode;
+        this.lineOffsets = buildLineOffsetIndex();
     }
 
     public Program parse() {
@@ -1550,7 +1554,9 @@ public class Parser {
                     key = new Literal(getStart(keyToken), getEnd(keyToken), keyLoc, literalValue, keyLexeme);
                 }
             } else {
-                if (!check(TokenType.IDENTIFIER) && !isKeyword(peek())) {
+                // Allow identifiers, keywords, and boolean/null literals as property names
+                if (!check(TokenType.IDENTIFIER) && !isKeyword(peek()) &&
+                    !check(TokenType.TRUE) && !check(TokenType.FALSE) && !check(TokenType.NULL)) {
                     throw new ExpectedTokenException("property name", peek());
                 }
                 Token keyToken = advance();
@@ -2811,7 +2817,7 @@ public class Parser {
             }
             case LPAREN -> {
                 advance(); // consume '('
-                Token firstExprStart = peek();
+                Token startAfterParen = peek();  // Save the position after the '('
 
                 // Temporarily allow 'in' inside parentheses
                 boolean oldAllowIn = allowIn;
@@ -2828,17 +2834,44 @@ public class Parser {
                         expressions.add(parseAssignment());
                     }
 
-                    consume(TokenType.RPAREN, "Expected ')' after expression");
-                    Token lastExprEnd = previous(); // This is the ')' token, but we want the position before it
-                    // SequenceExpression position should exclude parentheses
-                    // Use the positions from the first and last expressions
+                    // Determine the end position for the SequenceExpression
+                    // Acorn includes any RPAREN tokens between the last expression and the outer RPAREN
                     Expression lastExpr = expressions.get(expressions.size() - 1);
+                    int seqEnd = lastExpr.end();
+                    SourceLocation.Position seqEndPos = lastExpr.loc().end();
+
+                    // Look backwards from current position to find RPARENs that were consumed
+                    // while parsing the last expression. These should be included in the sequence.
+                    // We stop at the last expression's start position.
+                    int checkPos = current - 1;
+                    Token lastRparen = null;
+                    while (checkPos >= 0) {
+                        Token t = tokens.get(checkPos);
+                        if (getStart(t) < lastExpr.start()) {
+                            // Went too far back
+                            break;
+                        }
+                        if (t.type() == TokenType.RPAREN && getStart(t) >= lastExpr.end()) {
+                            // This RPAREN comes after the last expression ended
+                            lastRparen = t;
+                        }
+                        checkPos--;
+                    }
+
+                    // If we found RPARENs after the last expression, include the last one
+                    if (lastRparen != null) {
+                        seqEnd = getEnd(lastRparen);
+                        seqEndPos = new SourceLocation.Position(lastRparen.line(), lastRparen.column() + 1);
+                    }
+
+                    consume(TokenType.RPAREN, "Expected ')' after expression");
+
                     SourceLocation loc = new SourceLocation(
-                        new SourceLocation.Position(firstExprStart.line(), firstExprStart.column()),
-                        new SourceLocation.Position(lastExpr.loc().end().line(), lastExpr.loc().end().column())
+                        new SourceLocation.Position(startAfterParen.line(), startAfterParen.column()),
+                        seqEndPos
                     );
                     allowIn = oldAllowIn; // Restore allowIn
-                    yield new SequenceExpression(expr.start(), lastExpr.end(), loc, expressions);
+                    yield new SequenceExpression(getStart(startAfterParen), seqEnd, loc, expressions);
                 }
 
                 consume(TokenType.RPAREN, "Expected ')' after expression");
@@ -3158,7 +3191,8 @@ public class Parser {
                         callee = new MemberExpression(getStart(calleeStartToken), getEnd(memberEnd), memberLoc, callee, property, false, false);
                     } else {
                         Token propertyToken = peek();
-                        if (!check(TokenType.IDENTIFIER) && !isKeyword(propertyToken)) {
+                        if (!check(TokenType.IDENTIFIER) && !isKeyword(propertyToken) &&
+                            !check(TokenType.TRUE) && !check(TokenType.FALSE) && !check(TokenType.NULL)) {
                             throw new ExpectedTokenException("property name", peek());
                         }
                         advance();
@@ -3341,31 +3375,55 @@ public class Parser {
         return token.endPosition();
     }
 
-    // Helper method to compute line and column from a position in source
-    private SourceLocation.Position getPositionFromOffset(int offset) {
-        int line = 1;
-        int column = 0;
-        for (int i = 0; i < offset && i < source.length(); i++) {
-            char ch = source.charAt(i);
+    // Build line offset index once during construction (O(n) operation)
+    private int[] buildLineOffsetIndex() {
+        List<Integer> offsets = new ArrayList<>();
+        offsets.add(0); // Line 1 starts at offset 0
+
+        for (int i = 0; i < sourceLength; i++) {
+            char ch = sourceBuf[i];
             // Handle all line terminators: LF, CR, CRLF, LS, PS
             if (ch == '\n') {
-                line++;
-                column = 0;
+                offsets.add(i + 1);
             } else if (ch == '\r') {
                 // Check for CRLF (skip the LF if present)
-                if (i + 1 < source.length() && source.charAt(i + 1) == '\n') {
+                if (i + 1 < sourceLength && sourceBuf[i + 1] == '\n') {
                     i++; // Skip the LF
                 }
-                line++;
-                column = 0;
+                offsets.add(i + 1);
             } else if (ch == '\u2028' || ch == '\u2029') {
                 // Line Separator (LS) and Paragraph Separator (PS)
-                line++;
-                column = 0;
-            } else {
-                column++;
+                offsets.add(i + 1);
             }
         }
+
+        return offsets.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    // Helper method to compute line and column from a position in source (O(log n) operation)
+    private SourceLocation.Position getPositionFromOffset(int offset) {
+        // Clamp offset to valid range
+        offset = Math.max(0, Math.min(offset, sourceLength));
+
+        // Binary search to find the line
+        int low = 0;
+        int high = lineOffsets.length - 1;
+        int line = 1;
+
+        while (low <= high) {
+            int mid = (low + high) / 2;
+            if (lineOffsets[mid] <= offset) {
+                line = mid + 1; // Lines are 1-indexed
+                low = mid + 1;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        // Calculate column as offset from start of line
+        int lineStartOffset = lineOffsets[line - 1];
+        int column = offset - lineStartOffset;
+
         return new SourceLocation.Position(line, column);
     }
 

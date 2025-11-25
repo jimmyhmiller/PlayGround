@@ -4,6 +4,7 @@ const ast = main_module.ast;
 const tokenizer = main_module.tokenizer;
 const reader = main_module.reader;
 const parser = main_module.parser;
+const mlir_integration = main_module.mlir_integration;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -21,13 +22,17 @@ pub fn main() !void {
 
     const source = args[1];
 
+    // Create dialect registry for operation validation
+    var dialect_registry = try mlir_integration.DialectRegistry.init(allocator);
+    defer dialect_registry.deinit();
+
     // Tokenize
     var tok = tokenizer.Tokenizer.init(allocator, source);
     var tokens = try tok.tokenize();
     defer tokens.deinit(allocator);
 
-    // Read
-    var rdr = reader.Reader.init(allocator, tokens.items);
+    // Read (with dialect registry for operation validation)
+    var rdr = reader.Reader.initWithRegistry(allocator, tokens.items, &dialect_registry);
     defer rdr.deinit();
 
     var values = try rdr.read();

@@ -17,6 +17,18 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
   updateWidgetDimensions: (dashboardId, widgetId, dimensions) =>
     ipcRenderer.invoke('update-widget-dimensions', { dashboardId, widgetId, dimensions }),
 
+  // Delete a widget from the dashboard
+  deleteWidget: (dashboardId, widgetId) =>
+    ipcRenderer.invoke('delete-widget', { dashboardId, widgetId }),
+
+  // Regenerate widget data by running its command
+  regenerateWidget: (dashboardId, widgetId) =>
+    ipcRenderer.invoke('regenerate-widget', { dashboardId, widgetId }),
+
+  // Regenerate all widgets with commands in a dashboard
+  regenerateAllWidgets: (dashboardId) =>
+    ipcRenderer.invoke('regenerate-all-widgets', { dashboardId }),
+
   // Update layout settings (gap, buffer, etc.)
   updateLayoutSettings: (dashboardId, settings) =>
     ipcRenderer.invoke('update-layout-settings', { dashboardId, settings }),
@@ -39,6 +51,49 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
     }
     return result.data;
   },
+});
+
+contextBridge.exposeInMainWorld('commandAPI', {
+  // Run a command and get the output (waits for completion)
+  runCommand: (command, cwd) => ipcRenderer.invoke('run-command', { command, cwd }),
+
+  // Start a long-running command with streaming output
+  startStreaming: (widgetId, command, cwd) =>
+    ipcRenderer.invoke('start-streaming-command', { widgetId, command, cwd }),
+
+  // Stop a running command
+  stopStreaming: (widgetId) =>
+    ipcRenderer.invoke('stop-streaming-command', { widgetId }),
+
+  // Check if command is running
+  isRunning: (widgetId) =>
+    ipcRenderer.invoke('is-command-running', { widgetId }),
+
+  // Listen for command output
+  onOutput: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('command-output', handler);
+    return handler;
+  },
+
+  // Listen for command exit
+  onExit: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('command-exit', handler);
+    return handler;
+  },
+
+  // Listen for command errors
+  onError: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('command-error', handler);
+    return handler;
+  },
+
+  // Remove listeners
+  offOutput: (handler) => ipcRenderer.off('command-output', handler),
+  offExit: (handler) => ipcRenderer.off('command-exit', handler),
+  offError: (handler) => ipcRenderer.off('command-error', handler),
 });
 
 contextBridge.exposeInMainWorld('claudeAPI', {
@@ -132,4 +187,81 @@ contextBridge.exposeInMainWorld('claudeAPI', {
     ipcRenderer.removeAllListeners('claude-chat-error');
     ipcRenderer.removeAllListeners('todo-update');
   }
+});
+
+contextBridge.exposeInMainWorld('webContentsViewAPI', {
+  // Create a WebContentsView for a widget
+  create: (widgetId, url, bounds) =>
+    ipcRenderer.invoke('create-webcontentsview', { widgetId, url, bounds }),
+
+  // Navigate to a URL
+  navigate: (widgetId, url) =>
+    ipcRenderer.invoke('navigate-webcontentsview', { widgetId, url }),
+
+  // Go back
+  goBack: (widgetId) =>
+    ipcRenderer.invoke('webcontentsview-go-back', { widgetId }),
+
+  // Go forward
+  goForward: (widgetId) =>
+    ipcRenderer.invoke('webcontentsview-go-forward', { widgetId }),
+
+  // Reload
+  reload: (widgetId) =>
+    ipcRenderer.invoke('webcontentsview-reload', { widgetId }),
+
+  // Update bounds
+  updateBounds: (widgetId, bounds) =>
+    ipcRenderer.invoke('update-webcontentsview-bounds', { widgetId, bounds }),
+
+  // Destroy view
+  destroy: (widgetId) =>
+    ipcRenderer.invoke('destroy-webcontentsview', { widgetId }),
+
+  // Listen for navigation events
+  onNavigated: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('webcontentsview-navigated', handler);
+    return handler;
+  },
+
+  // Remove listener
+  offNavigated: (handler) =>
+    ipcRenderer.off('webcontentsview-navigated', handler),
+});
+
+contextBridge.exposeInMainWorld('projectAPI', {
+  // List all projects
+  listProjects: () => ipcRenderer.invoke('project-list'),
+
+  // Get a specific project by ID
+  getProject: (projectId) => ipcRenderer.invoke('project-get', { projectId }),
+
+  // Add a project from an existing folder
+  addProject: (projectPath, type, name, description) =>
+    ipcRenderer.invoke('project-add', { projectPath, type, name, description }),
+
+  // Remove a project from the registry
+  removeProject: (projectId) =>
+    ipcRenderer.invoke('project-remove', { projectId }),
+
+  // Initialize .ai-dashboard structure in an existing folder
+  initProject: (projectPath, name, description) =>
+    ipcRenderer.invoke('project-init', { projectPath, name, description }),
+
+  // Open project folder in file explorer
+  openProjectFolder: (projectId) =>
+    ipcRenderer.invoke('project-open-folder', { projectId }),
+
+  // Show folder picker dialog
+  selectFolder: () =>
+    ipcRenderer.invoke('project-select-folder'),
+
+  // Generate AI-powered icon and theme for a project
+  generateDesign: (projectName) =>
+    ipcRenderer.invoke('project-generate-design', { projectName }),
+
+  // Update a project's properties
+  updateProject: (projectId, updates) =>
+    ipcRenderer.invoke('project-update', { projectId, updates }),
 });

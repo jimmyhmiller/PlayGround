@@ -7,6 +7,8 @@ import java.util.Stack;
 
 public class Lexer {
     private final String source;
+    private final char[] buf;
+    private final int length;
     private int position = 0;
     private int line = 1;
     private int column = 0;
@@ -21,6 +23,8 @@ public class Lexer {
 
     public Lexer(String source) {
         this.source = source;
+        this.buf = source.toCharArray();
+        this.length = buf.length;
         // Initialize with statement context
         contextStack.push(LexerContext.B_STAT);
     }
@@ -379,24 +383,27 @@ public class Lexer {
                         // Handle line terminators: LF, CR, LS, PS
                         if (ch == '\n') {
                             line++;
-                            column = -1;  // Will be incremented to 0 by advance()
+                            column = 0;
                             containsLineTerminator = true;
+                            position++; // consume \n without incrementing column
                         } else if (ch == '\r') {
                             line++;
-                            column = -1;  // Will be incremented to 0 by advance()
+                            column = 0;
                             containsLineTerminator = true;
+                            position++; // consume \r without incrementing column
                             // Handle CRLF as a single line terminator
-                            if (peekNext() == '\n') {
-                                advance(); // consume the \r
-                                // The \n will be consumed by the next iteration
+                            if (peek() == '\n') {
+                                position++; // consume the \n too without incrementing column
                             }
                         } else if (ch == '\u2028' || ch == '\u2029') {
                             // Line Separator (LS) and Paragraph Separator (PS)
                             line++;
-                            column = -1;  // Will be incremented to 0 by advance()
+                            column = 0;
                             containsLineTerminator = true;
+                            position++; // consume line separator without incrementing column
+                        } else {
+                            advance(); // consume regular character in comment
                         }
-                        advance();
                     }
                     // If comment contains line terminator, treat it as being at line start
                     if (containsLineTerminator) {
@@ -618,9 +625,9 @@ public class Lexer {
                                 } else {
                                     value.append(escaped);
                                 }
-                            } else if (position + 4 <= source.length()) {
+                            } else if (position + 4 <= length) {
                                 // Fixed 4-digit unicode: \\uXXXX
-                                String hex = source.substring(position, position + 4);
+                                String hex = new String(buf, position, 4);
                                 try {
                                     int codePoint = Integer.parseInt(hex, 16);
                                     value.append((char) codePoint);
@@ -635,8 +642,8 @@ public class Lexer {
                         }
                         case 'x' -> {
                             // Hex escape: \xXX
-                            if (position + 2 <= source.length()) {
-                                String hex = source.substring(position, position + 2);
+                            if (position + 2 <= length) {
+                                String hex = new String(buf, position, 2);
                                 try {
                                     int codePoint = Integer.parseInt(hex, 16);
                                     value.append((char) codePoint);
@@ -710,10 +717,20 @@ public class Lexer {
                 literal = Integer.parseInt(hexPart, 16);
             } catch (NumberFormatException e1) {
                 try {
-                    literal = Long.parseLong(hexPart, 16);
+                    long longValue = Long.parseLong(hexPart, 16);
+                    // JavaScript's Number.MAX_SAFE_INTEGER is 2^53 - 1 = 9007199254740991
+                    // Beyond this, IEEE-754 doubles lose precision
+                    if (longValue > 9007199254740991L || longValue < -9007199254740991L) {
+                        // Convert to double to match JavaScript's precision loss
+                        literal = (double) longValue;
+                    } else {
+                        literal = longValue;
+                    }
                 } catch (NumberFormatException e2) {
-                    // Number too large for Long, convert to double
-                    literal = (double) Long.parseUnsignedLong(hexPart, 16);
+                    // Number too large for Long - use BigInteger then convert to double
+                    // to match JavaScript's IEEE-754 behavior
+                    java.math.BigInteger bi = new java.math.BigInteger(hexPart, 16);
+                    literal = bi.doubleValue();
                 }
             }
             return new Token(TokenType.NUMBER, lexeme, literal, startLine, startColumn, startPos);
@@ -738,10 +755,17 @@ public class Lexer {
                 literal = Integer.parseInt(octalPart, 8);
             } catch (NumberFormatException e1) {
                 try {
-                    literal = Long.parseLong(octalPart, 8);
+                    long longValue = Long.parseLong(octalPart, 8);
+                    // JavaScript's Number.MAX_SAFE_INTEGER is 2^53 - 1
+                    if (longValue > 9007199254740991L || longValue < -9007199254740991L) {
+                        literal = (double) longValue;
+                    } else {
+                        literal = longValue;
+                    }
                 } catch (NumberFormatException e2) {
-                    // Number too large for Long, convert to double
-                    literal = (double) Long.parseUnsignedLong(octalPart, 8);
+                    // Number too large for Long
+                    java.math.BigInteger bi = new java.math.BigInteger(octalPart, 8);
+                    literal = bi.doubleValue();
                 }
             }
             return new Token(TokenType.NUMBER, lexeme, literal, startLine, startColumn, startPos);
@@ -807,10 +831,17 @@ public class Lexer {
                 literal = Integer.parseInt(binaryPart, 2);
             } catch (NumberFormatException e1) {
                 try {
-                    literal = Long.parseLong(binaryPart, 2);
+                    long longValue = Long.parseLong(binaryPart, 2);
+                    // JavaScript's Number.MAX_SAFE_INTEGER is 2^53 - 1
+                    if (longValue > 9007199254740991L || longValue < -9007199254740991L) {
+                        literal = (double) longValue;
+                    } else {
+                        literal = longValue;
+                    }
                 } catch (NumberFormatException e2) {
-                    // Number too large for Long, convert to double
-                    literal = (double) Long.parseUnsignedLong(binaryPart, 2);
+                    // Number too large for Long
+                    java.math.BigInteger bi = new java.math.BigInteger(binaryPart, 2);
+                    literal = bi.doubleValue();
                 }
             }
             return new Token(TokenType.NUMBER, lexeme, literal, startLine, startColumn, startPos);
@@ -1142,7 +1173,7 @@ public class Lexer {
         line = 1;
         column = 0;
         for (int i = 0; i < pos; i++) {
-            if (source.charAt(i) == '\n') {
+            if (buf[i] == '\n') {
                 line++;
                 column = 0;
             } else {
@@ -1215,21 +1246,21 @@ public class Lexer {
 
     private char peek() {
         if (isAtEnd()) return '\0';
-        return source.charAt(position);
+        return buf[position];
     }
 
     private char peekNext() {
-        if (position + 1 >= source.length()) return '\0';
-        return source.charAt(position + 1);
+        if (position + 1 >= length) return '\0';
+        return buf[position + 1];
     }
 
     private char advance() {
         column++;
-        return source.charAt(position++);
+        return buf[position++];
     }
 
     private boolean isAtEnd() {
-        return position >= source.length();
+        return position >= length;
     }
 
     private boolean isLineTerminator(char c) {
@@ -1425,13 +1456,13 @@ public class Lexer {
                                     // No closing }, invalid escape
                                     hasInvalidEscape = true;
                                 }
-                            } else if (position + 4 <= source.length()) {
+                            } else if (position + 4 <= length) {
                                 // Fixed 4-digit unicode: backslash-u followed by 4 hex digits
-                                String hex = source.substring(position, position + 4);
                                 // Check if all 4 characters are valid hex digits
-                                boolean isValidHex = hex.length() == 4 &&
-                                    isHexDigit(hex.charAt(0)) && isHexDigit(hex.charAt(1)) &&
-                                    isHexDigit(hex.charAt(2)) && isHexDigit(hex.charAt(3));
+                                boolean isValidHex = position + 4 <= length &&
+                                    isHexDigit(buf[position]) && isHexDigit(buf[position + 1]) &&
+                                    isHexDigit(buf[position + 2]) && isHexDigit(buf[position + 3]);
+                                String hex = new String(buf, position, 4);
 
                                 if (isValidHex) {
                                     raw.append(hex);
@@ -1450,11 +1481,11 @@ public class Lexer {
                         }
                         case 'x' -> {
                             // Hex escape in template: backslash-x followed by 2 hex digits
-                            if (position + 2 <= source.length()) {
-                                String hex = source.substring(position, position + 2);
+                            if (position + 2 <= length) {
                                 // Check if both characters are valid hex digits
-                                boolean isValidHex = hex.length() == 2 &&
-                                    isHexDigit(hex.charAt(0)) && isHexDigit(hex.charAt(1));
+                                boolean isValidHex = position + 2 <= length &&
+                                    isHexDigit(buf[position]) && isHexDigit(buf[position + 1]);
+                                String hex = new String(buf, position, 2);
 
                                 if (isValidHex) {
                                     raw.append(hex);
@@ -1482,14 +1513,14 @@ public class Lexer {
 
                             // Update line tracking
                             line++;
-                            column = -1;
+                            column = 0;  // We're at the start of the new line
 
                             // Handle CRLF as single line terminator
                             if (escaped == '\r' && !isAtEnd() && peek() == '\n') {
                                 // CRLF: normalize to \n in raw
                                 raw.append('\n');
                                 advance(); // consume the \n
-                                column = -1;
+                                column = 0;  // Still at start of new line
                             } else if (escaped == '\r') {
                                 // Bare \r: normalize to \n in raw
                                 raw.append('\n');
@@ -1519,13 +1550,13 @@ public class Lexer {
                         cooked.append('\n');
                     }
                     line++;
-                    column = -1;
+                    column = -1;  // Will be incremented to 0 by advance()
                 } else if (c == '\n' || c == '\u2028' || c == '\u2029') {
                     // LF, LS, PS: keep as-is
                     raw.append(c);
                     cooked.append(c);
                     line++;
-                    column = -1;
+                    column = -1;  // Will be incremented to 0 by advance()
                     advance();
                 } else {
                     // Regular character

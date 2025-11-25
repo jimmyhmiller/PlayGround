@@ -1,6 +1,7 @@
 const std = @import("std");
 const tokenizer = @import("tokenizer.zig");
 const reader_types = @import("reader_types.zig");
+const mlir_integration = @import("mlir_integration.zig");
 
 const Token = tokenizer.Token;
 const TokenType = tokenizer.TokenType;
@@ -17,6 +18,7 @@ pub const ReaderError = error{
     MapMissingValue,
     OutOfMemory,
     InvalidCharacter,
+    AmbiguousSymbol,
 };
 
 /// Namespace scope for tracking imports
@@ -26,12 +28,25 @@ pub const NamespaceScope = struct {
     /// Used dialects (for unqualified access)
     used: std.ArrayList(*Namespace),
     allocator: std.mem.Allocator,
+    /// Optional dialect registry for operation validation
+    dialect_registry: ?*mlir_integration.DialectRegistry,
+    /// Default namespace for unresolved symbols
+    user_namespace: *Namespace,
 
     pub fn init(allocator: std.mem.Allocator) NamespaceScope {
+        return NamespaceScope.initWithRegistry(allocator, null);
+    }
+
+    pub fn initWithRegistry(allocator: std.mem.Allocator, registry: ?*mlir_integration.DialectRegistry) NamespaceScope {
+        // Create the default 'user' namespace
+        const user_ns = Namespace.init(allocator, "user", null) catch unreachable;
+
         return .{
             .required = std.StringHashMap(*Namespace).init(allocator),
             .used = std.ArrayList(*Namespace){},
             .allocator = allocator,
+            .dialect_registry = registry,
+            .user_namespace = user_ns,
         };
     }
 
@@ -47,6 +62,9 @@ pub const NamespaceScope = struct {
             ns.deinit(self.allocator);
         }
         self.used.deinit(self.allocator);
+
+        // Free the user namespace
+        self.user_namespace.deinit(self.allocator);
     }
 
     /// Add a required dialect (require-dialect)
@@ -64,7 +82,8 @@ pub const NamespaceScope = struct {
 
     /// Resolve a symbol to its namespace
     /// Handles: alias/name, namespace.name, and bare names
-    pub fn resolveSymbol(self: *NamespaceScope, symbol_text: []const u8) !?*Namespace {
+    /// Returns the user namespace for local/unresolved symbols
+    pub fn resolveSymbol(self: *NamespaceScope, symbol_text: []const u8) !*Namespace {
         // Check for slash notation: alias/name
         if (std.mem.indexOf(u8, symbol_text, "/")) |slash_pos| {
             const alias = symbol_text[0..slash_pos];
@@ -78,23 +97,75 @@ pub const NamespaceScope = struct {
                     }
                 }
             }
-            return null; // Alias not found
+            // Alias not found - treat as user namespace symbol
+            return self.user_namespace;
         }
 
         // Check for dot notation: namespace.name
         if (std.mem.indexOf(u8, symbol_text, ".")) |dot_pos| {
             const namespace_name = symbol_text[0..dot_pos];
-            // Find namespace with this name
+
+            // Check if already in required
             if (self.required.get(namespace_name)) |ns| {
                 return ns;
             }
-            return null; // Namespace not found
+
+            // Check if in used (from use-dialect)
+            for (self.used.items) |ns| {
+                if (std.mem.eql(u8, ns.name, namespace_name)) {
+                    return ns;
+                }
+            }
+
+            // Not found anywhere - create namespace on-the-fly
+            // Dot notation always implies a namespace, even if not explicitly loaded
+            const ns = try Namespace.init(self.allocator, namespace_name, null);
+            const key = try self.allocator.dupe(u8, namespace_name);
+            try self.required.put(key, ns);
+            return ns;
         }
 
         // Bare name - search used dialects
-        // For now, we don't resolve bare names to a specific namespace
-        // This will be done during parsing/validation
-        return null;
+        // Check which dialect actually contains this operation
+        if (self.used.items.len > 0) {
+            if (self.dialect_registry) |registry| {
+                // Try to find which dialect contains this operation
+                var found_namespaces = std.ArrayList(*Namespace){};
+                defer found_namespaces.deinit(self.allocator);
+
+                for (self.used.items) |ns| {
+                    const has_op = registry.validateOperation(ns.name, symbol_text) catch false;
+                    if (has_op) {
+                        try found_namespaces.append(self.allocator, ns);
+                    }
+                }
+
+                // If found in exactly one dialect, return it
+                if (found_namespaces.items.len == 1) {
+                    return found_namespaces.items[0];
+                }
+
+                // If found in multiple dialects, this is an error
+                if (found_namespaces.items.len > 1) {
+                    std.debug.print("ERROR: Symbol '{s}' is ambiguous - found in dialects: ", .{symbol_text});
+                    for (found_namespaces.items, 0..) |ns, i| {
+                        if (i > 0) std.debug.print(", ", .{});
+                        std.debug.print("{s}", .{ns.name});
+                    }
+                    std.debug.print("\n", .{});
+                    return ReaderError.AmbiguousSymbol;
+                }
+
+                // Not found in any dialect - treat as local symbol
+                return self.user_namespace;
+            } else {
+                // No registry available - can't validate, treat as local symbol
+                return self.user_namespace;
+            }
+        }
+
+        // No used dialects - treat as local symbol
+        return self.user_namespace;
     }
 
     /// Get the unqualified part of a symbol (after / or .)
@@ -117,11 +188,15 @@ pub const Reader = struct {
     namespace_scope: NamespaceScope,
 
     pub fn init(allocator: std.mem.Allocator, tokens: []const Token) Reader {
+        return Reader.initWithRegistry(allocator, tokens, null);
+    }
+
+    pub fn initWithRegistry(allocator: std.mem.Allocator, tokens: []const Token, registry: ?*mlir_integration.DialectRegistry) Reader {
         return .{
             .tokens = tokens,
             .current = 0,
             .allocator = allocator,
-            .namespace_scope = NamespaceScope.init(allocator),
+            .namespace_scope = NamespaceScope.initWithRegistry(allocator, registry),
         };
     }
 

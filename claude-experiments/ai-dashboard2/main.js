@@ -1,21 +1,25 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, WebContentsView } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const util = require('util');
 const { query } = require('@anthropic-ai/claude-agent-sdk');
 const { createDashboardTools } = require('./dashboard-tools');
+const projectUtils = require('./project-utils');
 
 const isDev = process.env.NODE_ENV === 'development';
 
 let mainWindow = null;
-const watchedPaths = new Map(); // path -> { watcher, dashboard, lastWriteTime }
+const watchedPaths = new Map(); // path -> { watcher, dashboard, lastWriteTime, projectId? }
 const configFilePath = path.join(app.getPath('userData'), 'dashboard-paths.json');
+const projectsPath = path.join(app.getPath('userData'), 'projects.json');
 const chatStoragePath = path.join(app.getPath('userData'), 'chat-history.json');
 const conversationsPath = path.join(app.getPath('userData'), 'conversations.json');
+const projects = new Map(); // projectId -> project metadata
 const chatMessages = new Map(); // chatId -> array of messages
 const sessionIds = new Map(); // chatId -> SDK session ID for resuming
 const conversations = new Map(); // widgetId -> array of conversation metadata
 const conversationTodos = new Map(); // conversationId -> array of todos from SDK
+const webContentsViews = new Map(); // widgetId -> { view, history, historyIndex }
 
 // Load saved config paths
 function loadSavedPaths() {
@@ -104,6 +108,34 @@ function saveConversations() {
   }
 }
 
+// Load projects from disk
+function loadProjects() {
+  try {
+    if (fs.existsSync(projectsPath)) {
+      const data = JSON.parse(fs.readFileSync(projectsPath, 'utf-8'));
+      // Convert object back to Map
+      Object.entries(data).forEach(([projectId, project]) => {
+        projects.set(projectId, project);
+      });
+      console.log(`[Projects] Loaded ${projects.size} projects`);
+    }
+  } catch (e) {
+    console.error('Error loading projects:', e);
+  }
+}
+
+// Save projects to disk
+function saveProjects() {
+  try {
+    // Convert Map to object for JSON serialization
+    const data = Object.fromEntries(projects);
+    fs.writeFileSync(projectsPath, JSON.stringify(data, null, 2));
+    console.log(`[Projects] Saved ${projects.size} projects`);
+  } catch (e) {
+    console.error('Error saving projects:', e);
+  }
+}
+
 // Parse a dashboard JSON file
 function parseDashboardFile(filePath) {
   try {
@@ -167,7 +199,29 @@ function unwatchFile(filePath) {
 // Get all loaded dashboards
 function getAllDashboards() {
   return Array.from(watchedPaths.values())
-    .map(entry => entry.dashboard)
+    .map(entry => {
+      if (!entry.dashboard) return null;
+      // Add projectId to dashboard if it's associated with a project
+      const dashboard = { ...entry.dashboard };
+      if (entry.projectId) {
+        dashboard._projectId = entry.projectId;
+
+        // Merge project icon and theme into dashboard
+        const project = projects.get(entry.projectId);
+        if (project) {
+          if (project.icon) {
+            dashboard.icon = project.icon;
+          }
+          if (project.theme) {
+            dashboard.theme = project.theme;
+          }
+          if (project.rootPath) {
+            dashboard._projectRoot = project.rootPath;
+          }
+        }
+      }
+      return dashboard;
+    })
     .filter(Boolean);
 }
 
@@ -273,6 +327,43 @@ ipcMain.handle('update-widget-dimensions', async (event, { dashboardId, widgetId
     return { success: true };
   } catch (error) {
     console.error('Error updating widget dimensions:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('delete-widget', async (event, { dashboardId, widgetId }) => {
+  try {
+    // Find the dashboard in memory
+    let targetPath = null;
+    let entry = null;
+    for (const [path, e] of watchedPaths.entries()) {
+      if (e.dashboard.id === dashboardId) {
+        targetPath = path;
+        entry = e;
+        break;
+      }
+    }
+
+    if (!targetPath || !entry) {
+      return { success: false, error: 'Dashboard not found' };
+    }
+
+    // Remove the widget from the in-memory dashboard
+    entry.dashboard.widgets = entry.dashboard.widgets.filter(w => w.id !== widgetId);
+
+    // Record the time of this write so we can ignore the file watcher event
+    entry.lastWriteTime = Date.now();
+
+    // Write the updated in-memory dashboard to file
+    fs.writeFileSync(targetPath, JSON.stringify(entry.dashboard, null, 2), 'utf-8');
+
+    // Broadcast the change to update the UI
+    broadcastDashboards();
+
+    console.log(`[Dashboard] Deleted widget ${widgetId} from dashboard ${dashboardId}`);
+    return { success: true };
+  } catch (error) {
+    console.error('Error deleting widget:', error);
     return { success: false, error: error.message };
   }
 });
@@ -386,6 +477,46 @@ ${JSON.stringify(ctx.config, null, 2)}
 
 You can help edit this dashboard by providing instructions or generating updated JSON configurations.
 
+## Available Widget Types
+
+When adding widgets, these types are available:
+
+1. **stat** - Display a single statistic
+   - Config: { label: "Label", value: "Value" }
+
+2. **barChart** - Animated bar chart
+   - Config: { label: "Label" or ["Label", "Sublabel"], data: [numbers] or dataSource: "file.json" }
+
+3. **progress** - Progress bar
+   - Config: { label: "Label", value: 0-100, text: "Optional text" }
+
+4. **chat** - AI chat interface with Claude
+   - Config: { label: "Label", backend: "claude", claudeOptions: {model: "claude-sonnet-4-5-20250929"} }
+
+5. **claudeTodos** - Display AI agent tasks
+   - Config: { label: "Agent Tasks", chatWidgetId: "chat-widget-id" }
+
+6. **todoList** - Simple todo list
+   - Config: { label: "Label", items: [{text: "Task", done: false}] }
+
+7. **fileList** - Display file list with status
+   - Config: { label: "Label", files: [{name: "file.txt", status: "created"}] }
+
+8. **keyValue** - Key-value pairs
+   - Config: { label: "Label", items: [{key: "Key", value: "Value"}] }
+
+9. **diffList** - Git-style diff view
+   - Config: { label: "Label", items: [["file.txt", 10, 5]] }
+
+10. **layoutSettings** - Grid layout controls
+    - Config: { label: "Layout Settings" }
+
+11. **commandRunner** - Run shell commands and display output
+    - Config: { label: "Label", command: "npm test", cwd: "/path/to/dir", autoRun: true/false, showOutput: true/false }
+
+12. **webView** - Embedded web browser
+    - Config: { label: "Label", url: "https://example.com" }
+
 ## Available Custom Tools
 
 You have access to specialized tools for this dashboard that allow you to quickly modify widgets without using the Edit tool:
@@ -395,7 +526,7 @@ ${widgetToolsList}
 
 ### General Tools:
 - update_widget(widgetId, property, value) - Update any widget property
-- add_widget(type, id, x, y, width, height, config?) - Add a new widget
+- add_widget(type, id, x, y, width, height, config?) - Add a new widget (use widget types above)
 - remove_widget(widgetId) - Remove a widget
 
 **Usage**: When the user asks to update a widget value (like "set uptime to 99%"), prefer using the widget-specific tool (e.g., update_stat_uptime("99%")) instead of manually editing the JSON file. This is faster and more reliable.`;
@@ -424,13 +555,26 @@ ${widgetToolsList}
           }
         }
 
+        // Determine the working directory - use project root if available
+        let workingDirectory = queryOptions.cwd || process.cwd();
+        if (dashboardContext?.filePath) {
+          const dashboardEntry = watchedPaths.get(dashboardContext.filePath);
+          if (dashboardEntry?.projectId) {
+            const project = projects.get(dashboardEntry.projectId);
+            if (project?.rootPath) {
+              workingDirectory = project.rootPath;
+              console.log(`[Claude] Using project root as cwd: ${workingDirectory}`);
+            }
+          }
+        }
+
         // Create query with streaming enabled
         // Use SDK's session resumption if we have a session ID
         const result = query({
           prompt: message,
           options: {
             model: queryOptions.model || 'claude-sonnet-4-5-20250929',
-            cwd: queryOptions.cwd || process.cwd(),
+            cwd: workingDirectory,
             systemPrompt: systemPrompt || undefined,
             resume: existingSessionId || undefined, // Resume session if we have one
             mcpServers, // Include dashboard-specific tools
@@ -775,11 +919,933 @@ ipcMain.handle('load-data-file', async (event, filePath) => {
   }
 });
 
+// Command Runner Handler
+ipcMain.handle('run-command', async (event, { command, cwd }) => {
+  try {
+    console.log(`[CommandRunner] Executing: ${command}`);
+
+    const { spawn } = require('child_process');
+    const workingDir = cwd || process.cwd();
+
+    return new Promise((resolve, reject) => {
+      // Use shell to support command chaining, pipes, etc.
+      const child = spawn(command, {
+        cwd: workingDir,
+        shell: true,
+        // Increase buffer size to handle large outputs
+        maxBuffer: 10 * 1024 * 1024 // 10MB
+      });
+
+      let output = '';
+      let hasError = false;
+      let errorMessage = '';
+
+      // Capture stdout and stderr in the order they arrive (interleaved)
+      child.stdout.on('data', (data) => {
+        output += data.toString();
+      });
+
+      child.stderr.on('data', (data) => {
+        output += data.toString();
+      });
+
+      child.on('error', (error) => {
+        hasError = true;
+        errorMessage = error.message;
+      });
+
+      child.on('close', (code) => {
+        console.log(`[CommandRunner] Command completed with code ${code}`);
+
+        if (hasError) {
+          reject(new Error(errorMessage));
+        } else if (code !== 0) {
+          // Non-zero exit code - return output as error so user can see what failed
+          resolve({ success: false, error: output || `Command exited with code ${code}` });
+        } else {
+          resolve({ success: true, output: output || 'Command completed successfully' });
+        }
+      });
+    });
+  } catch (error) {
+    console.error('[CommandRunner] Error executing command:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Streaming Command Runners (for long-running dev servers, etc.)
+const runningCommands = new Map(); // widgetId -> { process, output }
+
+ipcMain.handle('start-streaming-command', async (event, { widgetId, command, cwd }) => {
+  try {
+    console.log(`[StreamingCommand] Starting command for widget ${widgetId}: ${command}`);
+
+    // Stop existing command if running
+    if (runningCommands.has(widgetId)) {
+      const existing = runningCommands.get(widgetId);
+      existing.process.kill();
+      runningCommands.delete(widgetId);
+    }
+
+    const { spawn } = require('child_process');
+    const workingDir = cwd || process.cwd();
+
+    const child = spawn(command, {
+      cwd: workingDir,
+      shell: true
+    });
+
+    runningCommands.set(widgetId, {
+      process: child,
+      output: ''
+    });
+
+    // Stream stdout
+    child.stdout.on('data', (data) => {
+      const text = data.toString();
+      const entry = runningCommands.get(widgetId);
+      if (entry) {
+        entry.output += text;
+        event.sender.send('command-output', { widgetId, output: text, type: 'stdout' });
+      }
+    });
+
+    // Stream stderr
+    child.stderr.on('data', (data) => {
+      const text = data.toString();
+      const entry = runningCommands.get(widgetId);
+      if (entry) {
+        entry.output += text;
+        event.sender.send('command-output', { widgetId, output: text, type: 'stderr' });
+      }
+    });
+
+    // Handle process exit
+    child.on('close', (code) => {
+      console.log(`[StreamingCommand] Command for widget ${widgetId} exited with code ${code}`);
+      event.sender.send('command-exit', { widgetId, code });
+      runningCommands.delete(widgetId);
+    });
+
+    // Handle errors
+    child.on('error', (error) => {
+      console.error(`[StreamingCommand] Error for widget ${widgetId}:`, error);
+      event.sender.send('command-error', { widgetId, error: error.message });
+      runningCommands.delete(widgetId);
+    });
+
+    return { success: true, message: 'Command started' };
+  } catch (error) {
+    console.error('[StreamingCommand] Error starting command:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('stop-streaming-command', async (event, { widgetId }) => {
+  try {
+    console.log(`[StreamingCommand] Stopping command for widget ${widgetId}`);
+
+    if (!runningCommands.has(widgetId)) {
+      return { success: false, error: 'No command running for this widget' };
+    }
+
+    const entry = runningCommands.get(widgetId);
+    entry.process.kill();
+    runningCommands.delete(widgetId);
+
+    return { success: true, message: 'Command stopped' };
+  } catch (error) {
+    console.error('[StreamingCommand] Error stopping command:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('is-command-running', async (event, { widgetId }) => {
+  return { running: runningCommands.has(widgetId) };
+});
+
+// WebContentsView Handlers (for webView widgets)
+ipcMain.handle('create-webcontentsview', async (event, { widgetId, url, bounds }) => {
+  try {
+    console.log(`[WebContentsView] Creating view for widget ${widgetId}`);
+
+    // Remove existing view if any
+    if (webContentsViews.has(widgetId)) {
+      const existing = webContentsViews.get(widgetId);
+      mainWindow.contentView.removeChildView(existing.view);
+      existing.view.webContents.close();
+      webContentsViews.delete(widgetId);
+    }
+
+    // Create new view
+    const view = new WebContentsView({
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true
+      }
+    });
+
+    // Set bounds
+    view.setBounds(bounds);
+
+    // Add to window
+    mainWindow.contentView.addChildView(view);
+
+    // Track history
+    const viewData = {
+      view,
+      history: url ? [url] : [],
+      historyIndex: 0
+    };
+    webContentsViews.set(widgetId, viewData);
+
+    // Load initial URL if provided
+    if (url) {
+      view.webContents.loadURL(url);
+    }
+
+    // Listen for navigation events
+    view.webContents.on('did-navigate', (ev, navigationUrl) => {
+      console.log(`[WebContentsView] ${widgetId} navigated to ${navigationUrl}`);
+      event.sender.send('webcontentsview-navigated', { widgetId, url: navigationUrl });
+    });
+
+    view.webContents.on('did-navigate-in-page', (ev, navigationUrl) => {
+      event.sender.send('webcontentsview-navigated', { widgetId, url: navigationUrl });
+    });
+
+    // Handle new windows
+    view.webContents.setWindowOpenHandler(({ url: newUrl }) => {
+      shell.openExternal(newUrl);
+      return { action: 'deny' };
+    });
+
+    return { success: true };
+  } catch (error) {
+    console.error('[WebContentsView] Error creating view:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('navigate-webcontentsview', async (event, { widgetId, url }) => {
+  try {
+    const viewData = webContentsViews.get(widgetId);
+    if (!viewData) {
+      return { success: false, error: 'View not found' };
+    }
+
+    viewData.view.webContents.loadURL(url);
+    return { success: true };
+  } catch (error) {
+    console.error('[WebContentsView] Error navigating:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('webcontentsview-go-back', async (event, { widgetId }) => {
+  try {
+    const viewData = webContentsViews.get(widgetId);
+    if (!viewData) {
+      return { success: false, error: 'View not found' };
+    }
+
+    if (viewData.view.webContents.canGoBack()) {
+      viewData.view.webContents.goBack();
+      return { success: true };
+    }
+    return { success: false, error: 'Cannot go back' };
+  } catch (error) {
+    console.error('[WebContentsView] Error going back:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('webcontentsview-go-forward', async (event, { widgetId }) => {
+  try {
+    const viewData = webContentsViews.get(widgetId);
+    if (!viewData) {
+      return { success: false, error: 'View not found' };
+    }
+
+    if (viewData.view.webContents.canGoForward()) {
+      viewData.view.webContents.goForward();
+      return { success: true };
+    }
+    return { success: false, error: 'Cannot go forward' };
+  } catch (error) {
+    console.error('[WebContentsView] Error going forward:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('webcontentsview-reload', async (event, { widgetId }) => {
+  try {
+    const viewData = webContentsViews.get(widgetId);
+    if (!viewData) {
+      return { success: false, error: 'View not found' };
+    }
+
+    viewData.view.webContents.reload();
+    return { success: true };
+  } catch (error) {
+    console.error('[WebContentsView] Error reloading:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('update-webcontentsview-bounds', async (event, { widgetId, bounds }) => {
+  try {
+    const viewData = webContentsViews.get(widgetId);
+    if (!viewData) {
+      return { success: false, error: 'View not found' };
+    }
+
+    viewData.view.setBounds(bounds);
+    return { success: true };
+  } catch (error) {
+    console.error('[WebContentsView] Error updating bounds:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('destroy-webcontentsview', async (event, { widgetId }) => {
+  try {
+    const viewData = webContentsViews.get(widgetId);
+    if (!viewData) {
+      return { success: true }; // Already destroyed
+    }
+
+    mainWindow.contentView.removeChildView(viewData.view);
+    viewData.view.webContents.close();
+    webContentsViews.delete(widgetId);
+
+    return { success: true };
+  } catch (error) {
+    console.error('[WebContentsView] Error destroying view:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Widget Regeneration Handlers
+ipcMain.handle('regenerate-widget', async (event, { dashboardId, widgetId }) => {
+  try {
+    console.log(`[Regenerate] Regenerating widget ${widgetId} in dashboard ${dashboardId}`);
+
+    // Find the dashboard and widget
+    let targetPath = null;
+    let entry = null;
+    for (const [filePath, e] of watchedPaths.entries()) {
+      if (e.dashboard.id === dashboardId) {
+        targetPath = filePath;
+        entry = e;
+        break;
+      }
+    }
+
+    if (!targetPath || !entry) {
+      return { success: false, error: 'Dashboard not found' };
+    }
+
+    const widget = entry.dashboard.widgets.find(w => w.id === widgetId);
+    if (!widget) {
+      return { success: false, error: 'Widget not found' };
+    }
+
+    // Get the command to run (support multiple property names)
+    let command = widget.regenerateCommand || widget.regenerate;
+
+    // If regenerateScript is specified instead, load the script file
+    if (!command && widget.regenerateScript) {
+      const dashboardDir = path.dirname(targetPath);
+      const scriptPath = path.join(dashboardDir, widget.regenerateScript);
+
+      if (!fs.existsSync(scriptPath)) {
+        return { success: false, error: `Script file not found: ${widget.regenerateScript}` };
+      }
+
+      // Read the script and use it as the command
+      command = fs.readFileSync(scriptPath, 'utf-8').trim();
+    }
+
+    if (!command) {
+      return { success: false, error: 'No regenerateCommand, regenerate, or regenerateScript specified' };
+    }
+
+    // Determine working directory - use project root if available
+    let workingDir = process.cwd();
+    if (entry.projectId) {
+      const project = projects.get(entry.projectId);
+      if (project?.rootPath) {
+        workingDir = project.rootPath;
+      }
+    }
+
+    console.log(`[Regenerate] Running command: ${command}`);
+    console.log(`[Regenerate] Working directory: ${workingDir}`);
+
+    // Execute the command
+    const { spawn } = require('child_process');
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, {
+        cwd: workingDir,
+        shell: true,
+        maxBuffer: 10 * 1024 * 1024 // 10MB
+      });
+
+      let stdout = '';
+      let stderr = '';
+      let hasError = false;
+      let errorMessage = '';
+
+      child.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      child.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      child.on('error', (error) => {
+        hasError = true;
+        errorMessage = error.message;
+      });
+
+      child.on('close', (code) => {
+        console.log(`[Regenerate] Command completed with code ${code}`);
+
+        if (hasError) {
+          resolve({ success: false, error: errorMessage });
+          return;
+        }
+
+        if (code !== 0) {
+          resolve({ success: false, error: stderr || stdout || `Command exited with code ${code}` });
+          return;
+        }
+
+        // Parse output based on widget type
+        // stat widgets can use plain text, others need JSON
+        let data;
+        const outputTrimmed = stdout.trim();
+
+        if (widget.type === 'stat') {
+          // For stat widgets, try JSON first, fall back to plain text
+          try {
+            data = JSON.parse(outputTrimmed);
+          } catch {
+            // Use plain text as-is
+            data = outputTrimmed;
+          }
+        } else {
+          // For structured widgets, require JSON
+          try {
+            data = JSON.parse(outputTrimmed);
+          } catch (parseError) {
+            console.error('[Regenerate] JSON parse error:', parseError);
+            resolve({ success: false, error: `Invalid JSON output: ${parseError.message}` });
+            return;
+          }
+        }
+
+        // Update the appropriate data field based on widget type
+        try {
+          switch (widget.type) {
+            case 'barChart':
+              widget.data = data;
+              break;
+            case 'stat':
+              widget.value = data;
+              break;
+            case 'progress':
+              if (typeof data === 'object' && data.value !== undefined) {
+                widget.value = data.value;
+                if (data.text !== undefined) widget.text = data.text;
+              } else {
+                widget.value = data;
+              }
+              break;
+            case 'diffList':
+            case 'fileList':
+            case 'todoList':
+            case 'keyValue':
+              widget.items = data;
+              break;
+            default:
+              // For other types, try to update 'data' field if it exists
+              if ('data' in widget) {
+                widget.data = data;
+              } else if ('items' in widget) {
+                widget.items = data;
+              } else {
+                resolve({ success: false, error: `Don't know how to update widget type: ${widget.type}` });
+                return;
+              }
+          }
+
+          // Record the time of this write so we can ignore the file watcher event
+          entry.lastWriteTime = Date.now();
+
+          // Write the updated dashboard to file
+          fs.writeFileSync(targetPath, JSON.stringify(entry.dashboard, null, 2), 'utf-8');
+
+          // Broadcast to UI
+          broadcastDashboards();
+
+          console.log(`[Regenerate] Successfully regenerated widget ${widgetId}`);
+          resolve({ success: true });
+        } catch (updateError) {
+          console.error('[Regenerate] Error updating widget:', updateError);
+          resolve({ success: false, error: `Failed to update widget: ${updateError.message}` });
+        }
+      });
+    });
+  } catch (error) {
+    console.error('[Regenerate] Error regenerating widget:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('regenerate-all-widgets', async (event, { dashboardId }) => {
+  try {
+    console.log(`[Regenerate] Regenerating all widgets in dashboard ${dashboardId}`);
+
+    // Find the dashboard
+    let entry = null;
+    for (const [filePath, e] of watchedPaths.entries()) {
+      if (e.dashboard.id === dashboardId) {
+        entry = e;
+        break;
+      }
+    }
+
+    if (!entry) {
+      return { success: false, error: 'Dashboard not found' };
+    }
+
+    // Find all widgets with regenerate commands
+    const regeneratableWidgets = entry.dashboard.widgets.filter(w =>
+      w.regenerateCommand || w.regenerateScript || w.regenerate
+    );
+
+    if (regeneratableWidgets.length === 0) {
+      return { success: true, message: 'No widgets have regenerate commands', results: [] };
+    }
+
+    console.log(`[Regenerate] Found ${regeneratableWidgets.length} widgets to regenerate`);
+
+    // Regenerate each widget by calling the handler directly
+    const results = [];
+    for (const widget of regeneratableWidgets) {
+      // Get the handler function
+      const regenerateHandler = ipcMain._events['regenerate-widget']?.[0];
+      if (regenerateHandler) {
+        const result = await regenerateHandler(event, {
+          dashboardId,
+          widgetId: widget.id
+        });
+        results.push({
+          widgetId: widget.id,
+          label: Array.isArray(widget.label) ? widget.label.join(' - ') : widget.label,
+          ...result
+        });
+      }
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    const failureCount = results.length - successCount;
+
+    return {
+      success: true,
+      message: `Regenerated ${successCount} widgets, ${failureCount} failed`,
+      results
+    };
+  } catch (error) {
+    console.error('[Regenerate] Error regenerating all widgets:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Project Management Handlers
+
+// List all projects
+ipcMain.handle('project-list', async () => {
+  try {
+    const projectList = Array.from(projects.values());
+    console.log(`[Projects] Listing ${projectList.length} projects`);
+    return { success: true, projects: projectList };
+  } catch (error) {
+    console.error('[Projects] Error listing projects:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get details for a specific project
+ipcMain.handle('project-get', async (event, { projectId }) => {
+  try {
+    const project = projects.get(projectId);
+    if (!project) {
+      return { success: false, error: 'Project not found' };
+    }
+    console.log(`[Projects] Retrieved project ${projectId}`);
+    return { success: true, project };
+  } catch (error) {
+    console.error('[Projects] Error getting project:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Add a project from an existing folder
+ipcMain.handle('project-add', async (event, { projectPath, type, name, description }) => {
+  try {
+    console.log(`[Projects] Adding project from ${projectPath}`);
+
+    // Validate the path
+    const validation = projectUtils.validateProjectPath(projectPath);
+    if (!validation.valid) {
+      return { success: false, error: validation.error };
+    }
+
+    // Detect type if not provided
+    const projectType = type || projectUtils.detectProjectType(projectPath);
+    const configDir = projectUtils.getProjectConfigDir(projectPath, projectType);
+
+    // Load existing project.json if it exists, otherwise initialize
+    let projectConfig = projectUtils.loadProjectConfig(configDir);
+
+    if (!projectConfig) {
+      // Initialize new project structure
+      const result = projectUtils.initializeProject(projectPath, projectType, { name, description });
+      if (!result.success) {
+        return result;
+      }
+      projectConfig = result.projectConfig;
+    }
+
+    // Find all dashboard files in the project
+    const dashboardFiles = projectUtils.findDashboardFiles(configDir);
+    projectConfig.dashboards = dashboardFiles;
+
+    // Add to projects registry
+    projects.set(projectConfig.id, projectConfig);
+    saveProjects();
+
+    // Watch all dashboard files and associate them with the project
+    dashboardFiles.forEach(dashboardPath => {
+      watchFile(dashboardPath);
+      // Associate dashboard with project
+      const entry = watchedPaths.get(dashboardPath);
+      if (entry) {
+        entry.projectId = projectConfig.id;
+      }
+    });
+
+    broadcastDashboards();
+
+    console.log(`[Projects] Added project ${projectConfig.id} with ${dashboardFiles.length} dashboards`);
+    return { success: true, project: projectConfig };
+  } catch (error) {
+    console.error('[Projects] Error adding project:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Update a project in the registry
+ipcMain.handle('project-update', async (event, { projectId, updates }) => {
+  try {
+    const project = projects.get(projectId);
+    if (!project) {
+      return { success: false, error: 'Project not found' };
+    }
+
+    // Update project with new data
+    Object.assign(project, updates);
+    projects.set(projectId, project);
+    saveProjects();
+
+    // Broadcast dashboards so UI updates with new icon/theme
+    broadcastDashboards();
+
+    console.log(`[Projects] Updated project ${projectId}`);
+    return { success: true, project };
+  } catch (error) {
+    console.error('[Projects] Error updating project:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Remove a project from the registry
+ipcMain.handle('project-remove', async (event, { projectId }) => {
+  try {
+    console.log(`[Projects] Attempting to remove project ${projectId}`);
+    const project = projects.get(projectId);
+    if (!project) {
+      console.log(`[Projects] Project ${projectId} not found`);
+      return { success: false, error: 'Project not found' };
+    }
+
+    console.log(`[Projects] Project found:`, project);
+    console.log(`[Projects] Dashboard paths before removal:`, Array.from(watchedPaths.keys()));
+
+    // Unwatch all dashboard files for this project
+    if (project.dashboards && Array.isArray(project.dashboards)) {
+      console.log(`[Projects] Unwatching ${project.dashboards.length} dashboard(s)`);
+      project.dashboards.forEach(dashboardPath => {
+        console.log(`[Projects] Unwatching: ${dashboardPath}`);
+        unwatchFile(dashboardPath);
+      });
+    } else {
+      console.log(`[Projects] No dashboards to unwatch`);
+    }
+
+    console.log(`[Projects] Dashboard paths after unwatching:`, Array.from(watchedPaths.keys()));
+
+    // Remove from registry
+    projects.delete(projectId);
+    saveProjects();
+
+    // Save updated paths to persist the removal
+    savePaths();
+
+    // Broadcast updated dashboard list
+    const remainingDashboards = getAllDashboards();
+    console.log(`[Projects] Broadcasting ${remainingDashboards.length} remaining dashboards`);
+    broadcastDashboards();
+
+    console.log(`[Projects] Successfully removed project ${projectId}`);
+    return { success: true };
+  } catch (error) {
+    console.error('[Projects] Error removing project:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Initialize .ai-dashboard structure in an existing folder
+ipcMain.handle('project-init', async (event, { projectPath, name, description }) => {
+  try {
+    console.log(`[Projects] Initializing project in ${projectPath}`);
+
+    // Validate the path
+    const validation = projectUtils.validateProjectPath(projectPath);
+    if (!validation.valid) {
+      return { success: false, error: validation.error };
+    }
+
+    // Check if project already exists
+    if (projectUtils.hasEmbeddedProject(projectPath)) {
+      return { success: false, error: 'Project already has .ai-dashboard folder' };
+    }
+
+    // Initialize as embedded project
+    const result = projectUtils.initializeProject(projectPath, 'embedded', { name, description });
+
+    if (result.success) {
+      console.log(`[Projects] Initialized project structure at ${result.configDir}`);
+    }
+
+    return result;
+  } catch (error) {
+    console.error('[Projects] Error initializing project:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Open project folder in file explorer
+ipcMain.handle('project-open-folder', async (event, { projectId }) => {
+  try {
+    const project = projects.get(projectId);
+    if (!project) {
+      return { success: false, error: 'Project not found' };
+    }
+
+    const folderPath = project.rootPath;
+    if (!fs.existsSync(folderPath)) {
+      return { success: false, error: 'Project folder does not exist' };
+    }
+
+    // Open in file explorer/finder
+    await shell.openPath(folderPath);
+
+    console.log(`[Projects] Opened folder for project ${projectId}`);
+    return { success: true };
+  } catch (error) {
+    console.error('[Projects] Error opening project folder:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Show folder picker dialog
+ipcMain.handle('project-select-folder', async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory'],
+      title: 'Select Project Folder'
+    });
+
+    if (result.canceled) {
+      return { success: false, canceled: true };
+    }
+
+    return { success: true, path: result.filePaths[0] };
+  } catch (error) {
+    console.error('[Projects] Error showing folder picker:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Generate AI-powered SVG icon and theme for a project
+ipcMain.handle('project-generate-design', async (event, { projectName }) => {
+  try {
+    console.log(`[Projects] Generating design for project: ${projectName}`);
+
+    const prompt = `Generate an abstract SVG icon and color theme for a project named "${projectName}".
+
+CRITICAL SVG Requirements:
+1. The SVG will be styled with CSS, so DO NOT include any color attributes:
+   - NO stroke attribute
+   - NO fill attribute
+   - NO color attribute
+   - NO style attribute
+2. Use viewBox="0 0 60 60" and xmlns="http://www.w3.org/2000/svg"
+3. Be creative with complexity - intricate designs are welcome
+4. Design for visibility at 48x48px - ensure shapes are bold enough to see
+5. Make it abstract, unique, and inspired by the project name's meaning or vibe
+6. Use stroke-linecap="round" and stroke-linejoin="round" for smooth appearance
+
+Theme Requirements - Create a UNIQUE, cohesive visual identity:
+- accent: A vibrant, distinctive primary color (hex format, avoid generic blue)
+- textColor: Light gray for text (#c9d1d9 or similar)
+- positive: Success color (greenish, hex format)
+- negative: Error color (reddish, hex format)
+- bgApp: Dark background color (hex format)
+- textHead: Font for headings - be creative! (e.g., "Georgia, serif" or "Courier New, monospace" or system fonts)
+- textBody: Font for body text - should complement textHead
+- widgetBg: Widget background with transparency (rgba format, e.g., "rgba(22, 27, 34, 0.8)")
+- widgetBorder: Widget border style (e.g., "1px solid rgba(255, 255, 255, 0.1)" or "2px dashed rgba(...)")
+- widgetRadius: Widget corner radius - vary this! (e.g., "0px" for sharp, "12px" for round, "20px" for very round)
+- chartRadius: Chart element corner radius (e.g., "0px", "4px", "8px")
+- bgLayer: Background layer CSS object for gradients/effects (can be empty {} or include background, opacity, etc.)
+
+Return ONLY a JSON object with this exact structure (no markdown, no explanation):
+{
+  "icon": "<svg viewBox=\\"0 0 60 60\\" xmlns=\\"http://www.w3.org/2000/svg\\"><path d=\\"...\\" stroke-linecap=\\"round\\" stroke-linejoin=\\"round\\"/></svg>",
+  "theme": {
+    "accent": "#hexcolor",
+    "textColor": "#hexcolor",
+    "positive": "#hexcolor",
+    "negative": "#hexcolor",
+    "bgApp": "#hexcolor",
+    "textHead": "font-family string",
+    "textBody": "font-family string",
+    "widgetBg": "rgba(...)",
+    "widgetBorder": "border style string",
+    "widgetRadius": "Xpx",
+    "chartRadius": "Xpx",
+    "bgLayer": {}
+  }
+}
+
+Example good SVG (notice NO color attributes):
+<svg viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><circle cx="30" cy="30" r="20" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 30 L30 40 L40 20" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+    const queryInstance = query({
+      prompt,
+      model: 'claude-haiku-4-5-20251001',
+      maxTokens: 1000
+    });
+
+    console.log('[Projects] Waiting for Claude response...');
+
+    // Iterate through messages to get the result
+    let responseText = '';
+    for await (const message of queryInstance) {
+      console.log('[Projects] Received message:', JSON.stringify(message, null, 2));
+
+      if (message.type === 'result') {
+        // The result message contains the final response
+        // Check if content exists and has text blocks
+        if (message.content && Array.isArray(message.content)) {
+          const textBlocks = message.content.filter(block => block.type === 'text');
+          responseText = textBlocks.map(block => block.text).join('');
+        } else if (message.text) {
+          // Some SDK versions might put text directly on the message
+          responseText = message.text;
+        }
+
+        console.log('[Projects] Got response text:', responseText.substring(0, 100) + '...');
+
+        if (responseText) {
+          break; // We got what we need
+        }
+      } else if (message.type === 'assistant' && message.message?.content) {
+        // For some SDK versions, the assistant message has the content
+        const content = message.message.content;
+        if (Array.isArray(content)) {
+          const textBlocks = content.filter(block => block.type === 'text');
+          if (textBlocks.length > 0) {
+            responseText = textBlocks.map(block => block.text).join('');
+            console.log('[Projects] Got response text from assistant message:', responseText.substring(0, 100) + '...');
+            break;
+          }
+        }
+      }
+    }
+
+    if (!responseText) {
+      throw new Error('No response text received from Claude');
+    }
+
+    // Parse the response
+    const text = responseText.trim();
+    // Remove markdown code blocks if present
+    const jsonText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const design = JSON.parse(jsonText);
+
+    console.log('[Projects] Generated design:', design);
+
+    return { success: true, design };
+  } catch (error) {
+    console.error('[Projects] Error generating design:', error);
+    // Return fallback design
+    return {
+      success: true,
+      design: {
+        icon: '<svg viewBox="0 0 60 60"><rect x="10" y="10" width="40" height="40" /></svg>',
+        theme: {
+          accent: '#58a6ff',
+          textColor: '#c9d1d9',
+          positive: '#3fb950',
+          negative: '#f85149',
+          bgApp: '#0d1117'
+        }
+      }
+    };
+  }
+});
+
 app.whenReady().then(() => {
   const savedPaths = loadSavedPaths();
   savedPaths.forEach(watchFile);
   loadChatHistory(); // Load persisted chat messages
   loadConversations(); // Load conversation metadata
+  loadProjects(); // Load project registry
+
+  // Watch dashboard files for all loaded projects
+  projects.forEach((project) => {
+    if (project.dashboards && Array.isArray(project.dashboards)) {
+      project.dashboards.forEach(dashboardPath => {
+        console.log(`[Projects] Watching dashboard from project ${project.id}: ${dashboardPath}`);
+        watchFile(dashboardPath);
+        // Associate dashboard with project
+        const entry = watchedPaths.get(dashboardPath);
+        if (entry) {
+          entry.projectId = project.id;
+        }
+      });
+    }
+  });
+
   createWindow();
 });
 

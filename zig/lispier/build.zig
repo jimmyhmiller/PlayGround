@@ -22,6 +22,25 @@ pub fn build(b: *std.Build) void {
         .root_module = show_reader_module,
     });
 
+    // Add MLIR include paths and libraries for show-reader
+    show_reader_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/llvm/include" });
+    show_reader_exe.addIncludePath(.{ .cwd_relative = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/c-mlir-wrapper/include" });
+    show_reader_exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/llvm/lib" });
+    show_reader_exe.addLibraryPath(.{ .cwd_relative = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/c-mlir-wrapper/build" });
+    show_reader_exe.linkSystemLibrary("MLIR");
+    show_reader_exe.linkSystemLibrary("LLVM");
+    show_reader_exe.linkSystemLibrary("MLIRCAPIIR");
+    show_reader_exe.linkSystemLibrary("MLIRCAPIFunc");
+    show_reader_exe.linkSystemLibrary("MLIRCAPIArith");
+    show_reader_exe.linkSystemLibrary("MLIRCAPIControlFlow");
+    show_reader_exe.linkSystemLibrary("MLIRCAPISCF");
+    show_reader_exe.linkSystemLibrary("MLIRCAPIMemRef");
+    show_reader_exe.linkSystemLibrary("MLIRCAPIVector");
+    show_reader_exe.linkSystemLibrary("MLIRCAPILLVM");
+    show_reader_exe.linkSystemLibrary("mlir-introspection");
+    show_reader_exe.linkLibC();
+    show_reader_exe.linkLibCpp();
+
     b.installArtifact(show_reader_exe);
 
     const run_show_reader = b.addRunArtifact(show_reader_exe);
@@ -47,6 +66,25 @@ pub fn build(b: *std.Build) void {
         .root_module = show_ast_module,
     });
 
+    // Add MLIR include paths and libraries for show-ast
+    show_ast_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/llvm/include" });
+    show_ast_exe.addIncludePath(.{ .cwd_relative = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/c-mlir-wrapper/include" });
+    show_ast_exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/llvm/lib" });
+    show_ast_exe.addLibraryPath(.{ .cwd_relative = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/c-mlir-wrapper/build" });
+    show_ast_exe.linkSystemLibrary("MLIR");
+    show_ast_exe.linkSystemLibrary("LLVM");
+    show_ast_exe.linkSystemLibrary("MLIRCAPIIR");
+    show_ast_exe.linkSystemLibrary("MLIRCAPIFunc");
+    show_ast_exe.linkSystemLibrary("MLIRCAPIArith");
+    show_ast_exe.linkSystemLibrary("MLIRCAPIControlFlow");
+    show_ast_exe.linkSystemLibrary("MLIRCAPISCF");
+    show_ast_exe.linkSystemLibrary("MLIRCAPIMemRef");
+    show_ast_exe.linkSystemLibrary("MLIRCAPIVector");
+    show_ast_exe.linkSystemLibrary("MLIRCAPILLVM");
+    show_ast_exe.linkSystemLibrary("mlir-introspection");
+    show_ast_exe.linkLibC();
+    show_ast_exe.linkLibCpp();
+
     b.installArtifact(show_ast_exe);
 
     const run_show_ast = b.addRunArtifact(show_ast_exe);
@@ -58,6 +96,41 @@ pub fn build(b: *std.Build) void {
 
     const show_ast_step = b.step("show-ast", "Show AST output for source code");
     show_ast_step.dependOn(&run_show_ast.step);
+
+    // Find overlaps tool
+    const find_overlaps_module = b.createModule(.{
+        .root_source_file = b.path("src/find_overlaps.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    find_overlaps_module.addImport("main", main_module);
+
+    const find_overlaps_exe = b.addExecutable(.{
+        .name = "find-overlaps",
+        .root_module = find_overlaps_module,
+    });
+    find_overlaps_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/llvm/include" });
+    find_overlaps_exe.addIncludePath(.{ .cwd_relative = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/c-mlir-wrapper/include" });
+    find_overlaps_exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/llvm/lib" });
+    find_overlaps_exe.addLibraryPath(.{ .cwd_relative = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/c-mlir-wrapper/build" });
+    find_overlaps_exe.linkSystemLibrary("MLIR");
+    find_overlaps_exe.linkSystemLibrary("LLVM");
+    find_overlaps_exe.linkSystemLibrary("MLIRCAPIIR");
+    find_overlaps_exe.linkSystemLibrary("MLIRCAPIFunc");
+    find_overlaps_exe.linkSystemLibrary("MLIRCAPIArith");
+    find_overlaps_exe.linkSystemLibrary("MLIRCAPIControlFlow");
+    find_overlaps_exe.linkSystemLibrary("MLIRCAPISCF");
+    find_overlaps_exe.linkSystemLibrary("MLIRCAPIMemRef");
+    find_overlaps_exe.linkSystemLibrary("MLIRCAPIVector");
+    find_overlaps_exe.linkSystemLibrary("MLIRCAPILLVM");
+    find_overlaps_exe.linkSystemLibrary("mlir-introspection");
+    find_overlaps_exe.linkLibC();
+    find_overlaps_exe.linkLibCpp();
+    b.installArtifact(find_overlaps_exe);
+
+    const run_find_overlaps = b.addRunArtifact(find_overlaps_exe);
+    const find_overlaps_step = b.step("find-overlaps", "Find overlapping operations in MLIR dialects");
+    find_overlaps_step.dependOn(&run_find_overlaps.step);
 
     // Tests
     const tests = b.addTest(.{

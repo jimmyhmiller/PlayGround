@@ -343,16 +343,24 @@ function ClaudeTodoList({ theme, config, dashboardId, widgetConversations }) {
 }
 
 function KeyValue({ theme, config }) {
+  const items = Array.isArray(config.items) ? config.items : [];
+
   return (
     <>
       <div className="widget-label" style={{ fontFamily: theme.textBody }}>{config.label}</div>
       <div className="kv-list">
-        {config.items.map((item, i) => (
-          <div key={i} className="kv-item" style={{ fontFamily: theme.textBody }}>
-            <span className="kv-key" style={{ color: theme.textColor }}>{item.key}</span>
-            <span className="kv-value" style={{ color: theme.accent }}>{item.value}</span>
+        {items.length > 0 ? (
+          items.map((item, i) => (
+            <div key={i} className="kv-item" style={{ fontFamily: theme.textBody }}>
+              <span className="kv-key" style={{ color: theme.textColor }}>{item.key}</span>
+              <span className="kv-value" style={{ color: theme.accent }}>{item.value}</span>
+            </div>
+          ))
+        ) : (
+          <div style={{ fontFamily: theme.textBody, color: theme.neutral, fontSize: '0.8rem', padding: '12px 0' }}>
+            No items
           </div>
-        ))}
+        )}
       </div>
     </>
   );
@@ -412,6 +420,487 @@ function LayoutSettings({ theme, config, dashboardId, layout }) {
         </div>
       </div>
     </>
+  );
+}
+
+// Helper to convert ANSI escape codes to React elements
+function parseAnsiToReact(text) {
+  const ansiRegex = /\x1b\[([0-9;]+)m/g;
+  const elements = [];
+  let lastIndex = 0;
+  let currentStyle = {};
+
+  const colorMap = {
+    30: '#000', 31: '#e74c3c', 32: '#2ecc71', 33: '#f39c12',
+    34: '#3498db', 35: '#9b59b6', 36: '#1abc9c', 37: '#ecf0f1',
+    90: '#7f8c8d', 91: '#ff6b6b', 92: '#51cf66', 93: '#ffd43b',
+    94: '#4dabf7', 95: '#da77f2', 96: '#3bc9db', 97: '#f8f9fa'
+  };
+
+  const applyCode = (code, style) => {
+    const num = parseInt(code);
+    if (num === 0) return {}; // Reset
+    if (num === 1) return { ...style, fontWeight: 'bold' };
+    if (num === 3) return { ...style, fontStyle: 'italic' };
+    if (num === 4) return { ...style, textDecoration: 'underline' };
+    if (colorMap[num]) return { ...style, color: colorMap[num] };
+    return style;
+  };
+
+  let match;
+  while ((match = ansiRegex.exec(text)) !== null) {
+    // Add text before this code
+    if (match.index > lastIndex) {
+      const textContent = text.substring(lastIndex, match.index);
+      elements.push(
+        <span key={elements.length} style={currentStyle}>
+          {textContent}
+        </span>
+      );
+    }
+
+    // Apply the ANSI code(s)
+    const codes = match[1].split(';');
+    for (const code of codes) {
+      currentStyle = applyCode(code, currentStyle);
+    }
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Add remaining text
+  if (lastIndex < text.length) {
+    elements.push(
+      <span key={elements.length} style={currentStyle}>
+        {text.substring(lastIndex)}
+      </span>
+    );
+  }
+
+  return elements.length > 0 ? elements : text;
+}
+
+function CommandRunner({ theme, config, dashboard }) {
+  const [output, setOutput] = useState('');
+  const [isRunning, setIsRunning] = useState(false);
+  const [showOutput, setShowOutput] = useState(config.showOutput !== false);
+  const [error, setError] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  const widgetId = config.id;
+
+  const copyOutput = () => {
+    // Remove ANSI codes for clean copy
+    const cleanText = (error || output).replace(/\x1b\[[0-9;]+m/g, '');
+    navigator.clipboard.writeText(cleanText);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const startCommand = async () => {
+    if (!config.command || !window.commandAPI) return;
+
+    setIsRunning(true);
+    setError(null);
+    setOutput('');
+
+    try {
+      const cwd = config.cwd || dashboard?._projectRoot;
+      const result = await window.commandAPI.startStreaming(widgetId, config.command, cwd);
+      if (!result.success) {
+        setError(result.error);
+        setIsRunning(false);
+      }
+    } catch (err) {
+      setError(err.message);
+      setIsRunning(false);
+    }
+  };
+
+  const stopCommand = async () => {
+    if (!window.commandAPI) return;
+
+    try {
+      await window.commandAPI.stopStreaming(widgetId);
+      setIsRunning(false);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  // Check if already running on mount
+  useEffect(() => {
+    const checkRunning = async () => {
+      if (window.commandAPI) {
+        const result = await window.commandAPI.isRunning(widgetId);
+        setIsRunning(result.running);
+      }
+    };
+    checkRunning();
+  }, [widgetId]);
+
+  // Listen for command output
+  useEffect(() => {
+    if (!window.commandAPI) return;
+
+    const handleOutput = ({ widgetId: eventWidgetId, output: text }) => {
+      if (eventWidgetId === widgetId) {
+        setOutput(prev => prev + text);
+      }
+    };
+
+    const handleExit = ({ widgetId: eventWidgetId, code }) => {
+      if (eventWidgetId === widgetId) {
+        setIsRunning(false);
+        if (code !== 0) {
+          setOutput(prev => prev + `\n\n[Process exited with code ${code}]`);
+        }
+      }
+    };
+
+    const handleError = ({ widgetId: eventWidgetId, error: errorMsg }) => {
+      if (eventWidgetId === widgetId) {
+        setError(errorMsg);
+        setIsRunning(false);
+      }
+    };
+
+    const outputHandler = window.commandAPI.onOutput(handleOutput);
+    const exitHandler = window.commandAPI.onExit(handleExit);
+    const errorHandler = window.commandAPI.onError(handleError);
+
+    return () => {
+      window.commandAPI.offOutput(outputHandler);
+      window.commandAPI.offExit(exitHandler);
+      window.commandAPI.offError(errorHandler);
+    };
+  }, [widgetId]);
+
+  // Auto-run if configured
+  useEffect(() => {
+    if (config.autoRun && !isRunning) {
+      startCommand();
+    }
+  }, [config.command, config.autoRun]);
+
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <div className="widget-label" style={{ fontFamily: theme.textBody, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
+        <span>{config.label}</span>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {config.command && (output || error) && (
+            <button
+              onClick={copyOutput}
+              style={{
+                background: copied ? theme.positive : 'rgba(255,255,255,0.1)',
+                border: `1px solid ${theme.accent}44`,
+                borderRadius: 4,
+                padding: '4px 8px',
+                color: theme.textColor,
+                cursor: 'pointer',
+                fontSize: '0.65rem'
+              }}
+            >
+              {copied ? 'Copied!' : 'Copy'}
+            </button>
+          )}
+          {config.command && (
+            <button
+              onClick={() => setShowOutput(!showOutput)}
+              style={{
+                background: 'rgba(255,255,255,0.1)',
+                border: `1px solid ${theme.accent}44`,
+                borderRadius: 4,
+                padding: '4px 8px',
+                color: theme.textColor,
+                cursor: 'pointer',
+                fontSize: '0.65rem'
+              }}
+            >
+              {showOutput ? 'Hide' : 'Show'}
+            </button>
+          )}
+          <button
+            onClick={isRunning ? stopCommand : startCommand}
+            disabled={!config.command}
+            style={{
+              background: isRunning ? theme.negative : theme.accent,
+              border: 'none',
+              borderRadius: 4,
+              padding: '4px 12px',
+              color: '#fff',
+              cursor: 'pointer',
+              fontSize: '0.7rem',
+              fontWeight: 600
+            }}
+          >
+            {isRunning ? 'Stop' : 'Run'}
+          </button>
+        </div>
+      </div>
+      {!config.command && (
+        <div style={{ fontFamily: theme.textBody, color: theme.negative, fontSize: '0.8rem', padding: '12px 0' }}>
+          No command configured
+        </div>
+      )}
+      {showOutput && (output || error) && (
+        <div style={{
+          fontFamily: 'monospace',
+          fontSize: '0.7rem',
+          color: theme.textColor,
+          background: 'rgba(0,0,0,0.3)',
+          padding: 8,
+          borderRadius: 4,
+          marginTop: 8,
+          flex: 1,
+          overflow: 'auto',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+          minHeight: 0,
+          userSelect: 'text',
+          cursor: 'text'
+        }}>
+          {error ? (
+            <span style={{ color: theme.negative }}>{error}</span>
+          ) : (
+            parseAnsiToReact(output)
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WebView({ theme, config }) {
+  const [currentUrl, setCurrentUrl] = useState(config.url || '');
+  const [inputUrl, setInputUrl] = useState(config.url || '');
+  const [canGoBack, setCanGoBack] = useState(false);
+  const [canGoForward, setCanGoForward] = useState(false);
+  const containerRef = useRef(null);
+  const widgetId = config.id;
+
+  // Create WebContentsView on mount
+  useEffect(() => {
+    const createView = async () => {
+      if (!window.webContentsViewAPI || !containerRef.current) return;
+
+      // Get bounds from container
+      const rect = containerRef.current.getBoundingClientRect();
+      const bounds = {
+        x: Math.round(rect.left),
+        y: Math.round(rect.top),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height)
+      };
+
+      console.log('[WebView] Creating WebContentsView:', { widgetId, bounds, url: currentUrl });
+
+      await window.webContentsViewAPI.create(widgetId, currentUrl, bounds);
+    };
+
+    createView();
+
+    // Listen for navigation events
+    const handleNavigated = ({ widgetId: navWidgetId, url }) => {
+      if (navWidgetId === widgetId) {
+        console.log('[WebView] Navigated to:', url);
+        setCurrentUrl(url);
+        setInputUrl(url);
+      }
+    };
+
+    const handler = window.webContentsViewAPI.onNavigated(handleNavigated);
+
+    // Cleanup on unmount
+    return () => {
+      window.webContentsViewAPI.offNavigated(handler);
+      window.webContentsViewAPI.destroy(widgetId);
+    };
+  }, [widgetId]);
+
+  // Update bounds when container resizes
+  useEffect(() => {
+    if (!containerRef.current || !window.webContentsViewAPI) return;
+
+    const resizeObserver = new ResizeObserver(() => {
+      const rect = containerRef.current.getBoundingClientRect();
+      const bounds = {
+        x: Math.round(rect.left),
+        y: Math.round(rect.top),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height)
+      };
+
+      window.webContentsViewAPI.updateBounds(widgetId, bounds);
+    });
+
+    resizeObserver.observe(containerRef.current);
+
+    return () => resizeObserver.disconnect();
+  }, [widgetId]);
+
+  const handleNavigate = async () => {
+    let url = inputUrl.trim();
+    if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
+      url = 'http://' + url;
+    }
+
+    if (window.webContentsViewAPI) {
+      await window.webContentsViewAPI.navigate(widgetId, url);
+    }
+  };
+
+  const handleReload = async () => {
+    if (window.webContentsViewAPI) {
+      await window.webContentsViewAPI.reload(widgetId);
+    }
+  };
+
+  const goBack = async () => {
+    if (window.webContentsViewAPI) {
+      const result = await window.webContentsViewAPI.goBack(widgetId);
+      if (!result.success) {
+        setCanGoBack(false);
+      }
+    }
+  };
+
+  const goForward = async () => {
+    if (window.webContentsViewAPI) {
+      const result = await window.webContentsViewAPI.goForward(widgetId);
+      if (!result.success) {
+        setCanGoForward(false);
+      }
+    }
+  };
+
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <div className="widget-label" style={{ fontFamily: theme.textBody, marginBottom: 8 }}>{config.label}</div>
+
+      {/* Navigation Bar */}
+      <div style={{
+        display: 'flex',
+        gap: 6,
+        marginBottom: 8,
+        alignItems: 'center'
+      }}>
+        <button
+          onClick={goBack}
+          disabled={!canGoBack}
+          style={{
+            background: 'rgba(255,255,255,0.1)',
+            border: `1px solid ${theme.accent}44`,
+            borderRadius: 4,
+            padding: '6px 10px',
+            color: theme.textColor,
+            cursor: !canGoBack ? 'not-allowed' : 'pointer',
+            fontSize: '0.75rem',
+            opacity: !canGoBack ? 0.4 : 1
+          }}
+          title="Back"
+        >
+          ←
+        </button>
+
+        <button
+          onClick={goForward}
+          disabled={!canGoForward}
+          style={{
+            background: 'rgba(255,255,255,0.1)',
+            border: `1px solid ${theme.accent}44`,
+            borderRadius: 4,
+            padding: '6px 10px',
+            color: theme.textColor,
+            cursor: !canGoForward ? 'not-allowed' : 'pointer',
+            fontSize: '0.75rem',
+            opacity: !canGoForward ? 0.4 : 1
+          }}
+          title="Forward"
+        >
+          →
+        </button>
+
+        <button
+          onClick={handleReload}
+          style={{
+            background: 'rgba(255,255,255,0.1)',
+            border: `1px solid ${theme.accent}44`,
+            borderRadius: 4,
+            padding: '6px 10px',
+            color: theme.textColor,
+            cursor: 'pointer',
+            fontSize: '0.75rem'
+          }}
+          title="Reload"
+        >
+          ↻
+        </button>
+
+        <input
+          type="text"
+          value={inputUrl}
+          onChange={(e) => setInputUrl(e.target.value)}
+          onKeyPress={(e) => e.key === 'Enter' && handleNavigate()}
+          placeholder="Enter URL..."
+          style={{
+            flex: 1,
+            background: 'rgba(255,255,255,0.05)',
+            border: `1px solid ${theme.accent}44`,
+            borderRadius: 4,
+            padding: '6px 10px',
+            color: theme.textColor,
+            fontFamily: theme.textCode,
+            fontSize: '0.75rem',
+            outline: 'none'
+          }}
+        />
+
+        <button
+          onClick={handleNavigate}
+          style={{
+            background: theme.accent,
+            border: 'none',
+            borderRadius: 4,
+            padding: '6px 12px',
+            color: '#000',
+            cursor: 'pointer',
+            fontSize: '0.75rem',
+            fontWeight: 600
+          }}
+        >
+          Go
+        </button>
+      </div>
+
+      {/* WebContentsView Placeholder */}
+      <div
+        ref={containerRef}
+        style={{
+          flex: 1,
+          position: 'relative',
+          border: `1px solid ${theme.accent}22`,
+          borderRadius: 4,
+          background: '#fff',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center'
+        }}
+      >
+        {!currentUrl && (
+          <div style={{
+            fontFamily: theme.textBody,
+            color: theme.neutral,
+            fontSize: '0.8rem',
+            padding: '12px',
+            textAlign: 'center',
+            position: 'absolute'
+          }}>
+            Enter a URL to navigate
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1115,14 +1604,21 @@ const widgetComponents = {
   claudeTodos: ClaudeTodoList,
   keyValue: KeyValue,
   layoutSettings: LayoutSettings,
+  commandRunner: CommandRunner,
+  webView: WebView,
 };
 
-function Widget({ theme, config, clipPath, onResize, dashboardId, dashboard, layout, allWidgets, widgetConversations, setWidgetConversations, reloadTrigger }) {
+function Widget({ theme, config, clipPath, onResize, onDelete, dashboardId, dashboard, layout, allWidgets, widgetConversations, setWidgetConversations, reloadTrigger }) {
   const Component = widgetComponents[config.type];
+  const [showContextMenu, setShowContextMenu] = useState(false);
+  const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
+  const [isRegenerating, setIsRegenerating] = useState(false);
+
   if (!Component) return null;
 
   const isChat = config.type === 'chat';
   const widgetKey = `${dashboardId}-${config.id}`;
+  const hasRegenerate = config.regenerateCommand || config.regenerateScript || config.regenerate;
 
   const handleDrag = ({ x, y }) => {
     if (onResize && dashboardId) {
@@ -1136,9 +1632,66 @@ function Widget({ theme, config, clipPath, onResize, dashboardId, dashboard, lay
     }
   };
 
+  const handleMouseDown = (e) => {
+    // Check for ctrl + option + command (Mac)
+    if (e.metaKey && e.ctrlKey && e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (onDelete && dashboardId) {
+        onDelete(dashboardId, config.id);
+      }
+    }
+  };
+
+  const handleContextMenu = (e) => {
+    console.log('Context menu triggered, hasRegenerate:', hasRegenerate, 'config:', config.id);
+    if (!hasRegenerate) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenuPos({ x: e.clientX, y: e.clientY });
+    setShowContextMenu(true);
+    console.log('Context menu shown at:', e.clientX, e.clientY);
+  };
+
+  const handleRegenerate = async () => {
+    console.log('Regenerating widget:', config.id);
+    setShowContextMenu(false);
+    setIsRegenerating(true);
+    try {
+      if (!window.dashboardAPI || !window.dashboardAPI.regenerateWidget) {
+        console.error('dashboardAPI.regenerateWidget not available');
+        return;
+      }
+      const result = await window.dashboardAPI.regenerateWidget(dashboardId, config.id);
+      console.log('Regenerate result:', result);
+      if (!result.success) {
+        console.error('Regenerate failed:', result.error);
+        alert(`Regenerate failed: ${result.error}`);
+      } else {
+        console.log('Regenerate succeeded');
+      }
+    } catch (error) {
+      console.error('Regenerate error:', error);
+      alert(`Regenerate error: ${error.message}`);
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
+
+  // Close context menu when clicking outside
+  useEffect(() => {
+    if (showContextMenu) {
+      const handleClick = () => setShowContextMenu(false);
+      document.addEventListener('click', handleClick);
+      return () => document.removeEventListener('click', handleClick);
+    }
+  }, [showContextMenu]);
+
   const widgetContent = (
     <div
       className={`widget ${isChat ? 'chat-widget' : ''}`}
+      onMouseDown={handleMouseDown}
+      onContextMenu={handleContextMenu}
       style={{
         background: theme.widgetBg,
         border: theme.widgetBorder,
@@ -1146,6 +1699,9 @@ function Widget({ theme, config, clipPath, onResize, dashboardId, dashboard, lay
         clipPath: clipPath,
         width: '100%',
         height: '100%',
+        position: 'relative',
+        opacity: isRegenerating ? 0.6 : 1,
+        transition: 'opacity 0.2s',
       }}
     >
       <Component
@@ -1160,45 +1716,93 @@ function Widget({ theme, config, clipPath, onResize, dashboardId, dashboard, lay
         widgetConversations={widgetConversations}
         reloadTrigger={reloadTrigger}
       />
+      {/* Context Menu */}
+      {showContextMenu && (
+        <div
+          style={{
+            position: 'fixed',
+            left: contextMenuPos.x,
+            top: contextMenuPos.y,
+            background: 'rgba(30, 30, 30, 0.95)',
+            border: `1px solid ${theme.accent}`,
+            borderRadius: 6,
+            padding: 4,
+            zIndex: 10000,
+            minWidth: 150,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div
+            onClick={handleRegenerate}
+            style={{
+              padding: '8px 12px',
+              cursor: 'pointer',
+              color: theme.accent,
+              fontSize: '0.85rem',
+              fontFamily: theme.textBody,
+              transition: 'background-color 0.2s',
+              borderRadius: 4,
+            }}
+            onMouseEnter={(e) => e.target.style.backgroundColor = 'rgba(255, 255, 255, 0.1)'}
+            onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
+          >
+            ⟳ Regenerate
+          </div>
+        </div>
+      )}
     </div>
   );
 
-  // If we have explicit dimensions, make it resizable and draggable with GridItem
-  if (config.width || config.height) {
-    // Parse width/height - they might be strings like "200px" or numbers
-    const parseSize = (size) => {
-      if (typeof size === 'string') {
-        return parseInt(size.replace('px', ''));
-      }
-      return size;
-    };
+  // Parse width/height - they might be strings like "200px" or numbers
+  const parseSize = (size, defaultSize) => {
+    if (!size) return defaultSize;
+    if (typeof size === 'string') {
+      return parseInt(size.replace('px', ''));
+    }
+    return size;
+  };
 
-    return (
-      <GridItem
-        x={config.x || 0}
-        y={config.y || 0}
-        width={parseSize(config.width)}
-        height={parseSize(config.height)}
-        resizable={true}
-        draggable={true}
-        onDrag={handleDrag}
-        onDragEnd={handleDrag}
-        onResize={handleResizeEnd}
-      >
-        {widgetContent}
-      </GridItem>
-    );
-  }
+  // Default dimensions for widgets without explicit sizes
+  const defaultWidgetDimensions = {
+    chat: { width: 400, height: 500 },
+    barChart: { width: 300, height: 200 },
+    stat: { width: 200, height: 150 },
+    progress: { width: 250, height: 100 },
+    fileList: { width: 250, height: 200 },
+    todoList: { width: 250, height: 200 },
+    claudeTodos: { width: 250, height: 200 },
+    keyValue: { width: 200, height: 150 },
+    diffList: { width: 300, height: 200 },
+    layoutSettings: { width: 250, height: 200 },
+    commandRunner: { width: 350, height: 250 },
+    webView: { width: 400, height: 400 },
+  };
 
-  // Otherwise use standard grid positioning (for CSS grid-based layouts)
+  const defaults = defaultWidgetDimensions[config.type] || { width: 250, height: 200 };
+
+  // Always use GridItem for draggable/resizable widgets
   return (
-    <div style={{ gridArea: config.area }}>
+    <GridItem
+      x={config.x || 0}
+      y={config.y || 0}
+      width={parseSize(config.width, defaults.width)}
+      height={parseSize(config.height, defaults.height)}
+      resizable={true}
+      draggable={true}
+      onDrag={handleDrag}
+      onDragEnd={handleDrag}
+      onResize={handleResizeEnd}
+    >
       {widgetContent}
-    </div>
+    </GridItem>
   );
 }
 
-function ProjectNode({ icon, active, accent, hoverAccent, onClick }) {
+function ProjectNode({ icon, active, accent, hoverAccent, onClick, onDelete }) {
+  const [showContextMenu, setShowContextMenu] = useState(false);
+  const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
+
   // Support inline SVG string or predefined icon name
   const iconContent = typeof icon === 'string' && icons[icon]
     ? icons[icon]
@@ -1206,14 +1810,72 @@ function ProjectNode({ icon, active, accent, hoverAccent, onClick }) {
       ? <span dangerouslySetInnerHTML={{ __html: icon }} />
       : icons.square;
 
+  const handleContextMenu = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenuPosition({ x: e.clientX, y: e.clientY });
+    setShowContextMenu(true);
+  };
+
+  const handleDelete = () => {
+    setShowContextMenu(false);
+    if (onDelete) {
+      onDelete();
+    }
+  };
+
+  useEffect(() => {
+    if (showContextMenu) {
+      const handleClick = () => setShowContextMenu(false);
+      document.addEventListener('click', handleClick);
+      return () => document.removeEventListener('click', handleClick);
+    }
+  }, [showContextMenu]);
+
   return (
-    <div
-      className={`project-node ${active ? 'active' : ''}`}
-      style={{ '--accent': accent, '--hover-accent': hoverAccent }}
-      onClick={onClick}
-    >
-      {iconContent}
-    </div>
+    <>
+      <div
+        className={`project-node ${active ? 'active' : ''}`}
+        style={{ '--accent': accent, '--hover-accent': hoverAccent }}
+        onClick={onClick}
+        onContextMenu={handleContextMenu}
+      >
+        {iconContent}
+      </div>
+      {showContextMenu && (
+        <div
+          style={{
+            position: 'fixed',
+            left: menuPosition.x,
+            top: menuPosition.y,
+            backgroundColor: '#1a1a1a',
+            border: '1px solid #333',
+            borderRadius: '6px',
+            padding: '4px 0',
+            zIndex: 10000,
+            minWidth: 150,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div
+            onClick={handleDelete}
+            style={{
+              padding: '8px 12px',
+              cursor: 'pointer',
+              color: '#f85149',
+              fontSize: '0.85rem',
+              fontFamily: 'system-ui',
+              transition: 'background-color 0.2s'
+            }}
+            onMouseEnter={(e) => e.target.style.backgroundColor = 'rgba(248, 81, 73, 0.1)'}
+            onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
+          >
+            Remove Project
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1232,15 +1894,97 @@ const defaultTheme = {
   bgLayer: {},
 };
 
-function Dashboard({ dashboard, allDashboards, onSelect, onWidgetResize, widgetConversations, setWidgetConversations, dashboardVersion }) {
+function Dashboard({ dashboard, allDashboards, onSelect, onWidgetResize, onWidgetDelete, widgetConversations, setWidgetConversations, dashboardVersion, onRefreshProjects, onDashboardsChange }) {
+  const [showAddDialog, setShowAddDialog] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [projectToDelete, setProjectToDelete] = useState(null);
+
   const theme = dashboard.theme && typeof dashboard.theme === 'object'
     ? { ...defaultTheme, ...dashboard.theme }
     : defaultTheme;
   const { layout } = dashboard;
 
+  const handleAddProject = (project) => {
+    if (onRefreshProjects) {
+      onRefreshProjects();
+    }
+  };
+
+  const handleDeleteProject = (dashboardToDelete) => {
+    setProjectToDelete(dashboardToDelete);
+    setShowDeleteConfirm(true);
+  };
+
+  const confirmDelete = async () => {
+    if (projectToDelete) {
+      try {
+        // If we're deleting the active dashboard, switch to another one first
+        if (projectToDelete.id === dashboard.id && allDashboards.length > 1) {
+          const nextDashboard = allDashboards.find(d => d.id !== projectToDelete.id);
+          if (nextDashboard) {
+            onSelect(nextDashboard.id);
+          }
+        }
+
+        // Check if this dashboard is associated with a project
+        if (projectToDelete._projectId && window.projectAPI) {
+          // Remove as a project
+          console.log('Removing project:', projectToDelete._projectId);
+          await window.projectAPI.removeProject(projectToDelete._projectId);
+        } else if (window.dashboardAPI && projectToDelete._sourcePath) {
+          // Remove as a standalone dashboard file
+          console.log('Removing standalone dashboard file:', projectToDelete._sourcePath);
+          await window.dashboardAPI.removeConfigPath(projectToDelete._sourcePath);
+        }
+
+        // Trigger both refreshes
+        if (onRefreshProjects) {
+          onRefreshProjects();
+        }
+
+        // Notify parent to update dashboards list
+        if (onDashboardsChange) {
+          onDashboardsChange();
+        }
+      } catch (error) {
+        console.error('Failed to remove:', error);
+      }
+    }
+    setShowDeleteConfirm(false);
+    setProjectToDelete(null);
+  };
+
   // Use dashboardVersion as the reload trigger - this increments whenever any dashboard file changes
   // This will force widgets to reload their data from files
   const reloadTrigger = dashboardVersion;
+
+  const [isRegeneratingAll, setIsRegeneratingAll] = useState(false);
+  const [regenerateMessage, setRegenerateMessage] = useState(null);
+
+  const handleRegenerateAll = async () => {
+    setIsRegeneratingAll(true);
+    setRegenerateMessage(null);
+
+    try {
+      const result = await window.dashboardAPI.regenerateAllWidgets(dashboard.id);
+      if (result.success) {
+        setRegenerateMessage({ type: 'success', text: result.message });
+      } else {
+        setRegenerateMessage({ type: 'error', text: result.error });
+      }
+      setTimeout(() => setRegenerateMessage(null), 5000);
+    } catch (error) {
+      setRegenerateMessage({ type: 'error', text: error.message });
+      setTimeout(() => setRegenerateMessage(null), 5000);
+    } finally {
+      setIsRegeneratingAll(false);
+    }
+  };
+
+  // Check if any widgets have regenerate commands
+  const hasRegeneratableWidgets = dashboard.widgets?.some(w =>
+    w.regenerateCommand || w.regenerateScript
+  );
 
   const gridStyle = {
     gridTemplateColumns: layout.columns,
@@ -1267,44 +2011,74 @@ function Dashboard({ dashboard, allDashboards, onSelect, onWidgetResize, widgetC
               key={d.id}
               icon={d.icon}
               active={d.id === dashboard.id}
-              accent={theme.accent}
+              accent={dTheme.accent}
               hoverAccent={dTheme.accent}
               onClick={() => onSelect(d.id)}
+              onDelete={() => handleDeleteProject(d)}
             />
           );
         })}
+        <div
+          className="project-node add-button"
+          style={{ '--accent': theme.accent, '--hover-accent': theme.accent }}
+          onClick={() => setShowAddDialog(true)}
+          title="Add Project"
+        >
+          <svg viewBox="0 0 60 60">
+            <line x1="30" y1="15" x2="30" y2="45" strokeWidth="4" />
+            <line x1="15" y1="30" x2="45" y2="30" strokeWidth="4" />
+          </svg>
+        </div>
       </div>
       <div className="dashboard" style={{ backgroundColor: theme.bgApp }}>
-        <div className="header">
-          <h1 style={{ fontFamily: theme.textHead, color: theme.textColor }}>{dashboard.title}</h1>
-          <p style={{ fontFamily: theme.textBody, color: theme.accent }}>{dashboard.subtitle}</p>
-        </div>
-        <div className="grid" style={gridStyle}>
-          {dashboard.widgets.filter(w => !w.width && !w.height).map((widget) => (
-            <Widget
-              key={`${dashboard.id}-${widget.id}`}
-              theme={theme}
-              config={widget}
-              clipPath={theme.clipPath}
-              onResize={onWidgetResize}
-              dashboardId={dashboard.id}
-              dashboard={dashboard}
-              layout={layout}
-              allWidgets={dashboard.widgets}
-              widgetConversations={widgetConversations}
-              setWidgetConversations={setWidgetConversations}
-              reloadTrigger={reloadTrigger}
-            />
-          ))}
+        <div className="header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <h1 style={{ fontFamily: theme.textHead, color: theme.textColor }}>{dashboard.title}</h1>
+            <p style={{ fontFamily: theme.textBody, color: theme.accent }}>{dashboard.subtitle}</p>
+          </div>
+          {hasRegeneratableWidgets && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              {regenerateMessage && (
+                <span style={{
+                  fontSize: '0.75rem',
+                  color: regenerateMessage.type === 'success' ? theme.positive : theme.negative,
+                  fontFamily: theme.textBody
+                }}>
+                  {regenerateMessage.text}
+                </span>
+              )}
+              <button
+                onClick={handleRegenerateAll}
+                disabled={isRegeneratingAll}
+                title="Regenerate all widgets with commands"
+                style={{
+                  background: theme.accent,
+                  border: 'none',
+                  borderRadius: 6,
+                  padding: '8px 16px',
+                  color: '#000',
+                  cursor: isRegeneratingAll ? 'wait' : 'pointer',
+                  fontSize: '0.8rem',
+                  fontWeight: 600,
+                  opacity: isRegeneratingAll ? 0.6 : 1,
+                  fontFamily: theme.textBody,
+                  transition: 'opacity 0.2s'
+                }}
+              >
+                {isRegeneratingAll ? '⟳ Refreshing...' : '⟳ Refresh All Data'}
+              </button>
+            </div>
+          )}
         </div>
         <Grid cellSize={cellSize} gapX={gapX} gapY={gapY} width="100%" height="calc(100% - 80px)">
-          {dashboard.widgets.filter(w => w.width || w.height).map((widget) => (
+          {dashboard.widgets.map((widget) => (
             <Widget
               key={`${dashboard.id}-${widget.id}`}
               theme={theme}
               config={widget}
               clipPath={theme.clipPath}
               onResize={onWidgetResize}
+              onDelete={onWidgetDelete}
               dashboardId={dashboard.id}
               dashboard={dashboard}
               layout={layout}
@@ -1316,6 +2090,93 @@ function Dashboard({ dashboard, allDashboards, onSelect, onWidgetResize, widgetC
           ))}
         </Grid>
       </div>
+      {showAddDialog && (
+        <AddProjectDialog
+          theme={theme}
+          onClose={() => setShowAddDialog(false)}
+          onAdd={handleAddProject}
+        />
+      )}
+      {showDeleteConfirm && projectToDelete && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.7)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000
+        }}>
+          <div style={{
+            backgroundColor: theme.widgetBg || '#1a1a1a',
+            border: theme.widgetBorder || '1px solid #333',
+            borderRadius: theme.widgetRadius || '6px',
+            padding: 24,
+            width: 400,
+            maxWidth: '90%',
+            fontFamily: theme.textBody || 'system-ui'
+          }}>
+            <h2 style={{
+              margin: '0 0 16px 0',
+              color: theme.textColor || '#fff',
+              fontSize: '1.2rem'
+            }}>
+              Remove Project
+            </h2>
+            <p style={{
+              margin: '0 0 20px 0',
+              color: theme.textColor || '#fff',
+              opacity: 0.8,
+              fontSize: '0.9rem'
+            }}>
+              Are you sure you want to remove "{projectToDelete.title || projectToDelete.id}"? This will remove it from the dashboard but won't delete any files from disk.
+            </p>
+            <div style={{
+              display: 'flex',
+              gap: 12,
+              justifyContent: 'flex-end'
+            }}>
+              <button
+                onClick={() => {
+                  setShowDeleteConfirm(false);
+                  setProjectToDelete(null);
+                }}
+                style={{
+                  padding: '8px 16px',
+                  backgroundColor: 'rgba(255,255,255,0.1)',
+                  border: `1px solid ${theme.accent}44`,
+                  borderRadius: 4,
+                  color: theme.textColor || '#fff',
+                  cursor: 'pointer',
+                  fontFamily: theme.textBody || 'system-ui',
+                  fontSize: '0.9rem'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDelete}
+                style={{
+                  padding: '8px 16px',
+                  backgroundColor: '#f85149',
+                  border: 'none',
+                  borderRadius: 4,
+                  color: '#fff',
+                  cursor: 'pointer',
+                  fontFamily: theme.textBody || 'system-ui',
+                  fontSize: '0.9rem',
+                  fontWeight: 600
+                }}
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1348,15 +2209,268 @@ function LoadingFallback() {
   );
 }
 
+function AddProjectDialog({ theme, onClose, onAdd }) {
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+  const [status, setStatus] = useState('');
+  const [pickerOpen, setPickerOpen] = useState(true);
+
+  const handleSelectFolder = async () => {
+    try {
+      console.log('[AddProject] Starting folder selection...');
+
+      if (!window.projectAPI) {
+        console.error('[AddProject] window.projectAPI is not available!');
+        setError('Project API not available');
+        setPickerOpen(false);
+        return;
+      }
+
+      const result = await window.projectAPI.selectFolder();
+      console.log('[AddProject] Folder selection result:', result);
+
+      setPickerOpen(false);
+
+      if (result.canceled) {
+        console.log('[AddProject] User canceled folder selection');
+        onClose();
+        return;
+      }
+
+      if (result.success && result.path) {
+        console.log('[AddProject] Starting project creation for:', result.path);
+        setIsSubmitting(true);
+        setError(null);
+        setStatus('Generating AI-powered icon and theme...');
+
+        // Extract project name from path
+        const projectName = result.path.split('/').pop() || result.path.split('\\').pop();
+        console.log('[AddProject] Project name:', projectName);
+
+        // Generate AI-powered design
+        console.log('[AddProject] Calling generateDesign...');
+        const designResult = await window.projectAPI.generateDesign(projectName);
+        console.log('[AddProject] Design result:', designResult);
+        const design = designResult.design;
+
+        setStatus('Creating project...');
+
+        console.log('[AddProject] Calling addProject...');
+        const addResult = await window.projectAPI.addProject(
+          result.path,
+          'embedded', // Default to embedded
+          undefined, // Auto-generate name from folder
+          undefined  // No description
+        );
+        console.log('[AddProject] Add result:', addResult);
+
+        if (addResult.success) {
+          setStatus('Saving icon and theme...');
+
+          // Update the project with the generated icon and theme
+          console.log('[AddProject] Updating project with icon and theme...');
+          await window.projectAPI.updateProject(addResult.project.id, {
+            icon: design.icon,
+            theme: design.theme
+          });
+          console.log('[AddProject] Project updated successfully');
+
+          onAdd(addResult.project);
+          onClose();
+        } else {
+          console.error('[AddProject] Failed to add project:', addResult.error);
+          setError(addResult.error || 'Failed to add project');
+          setIsSubmitting(false);
+        }
+      } else {
+        console.warn('[AddProject] Invalid result from selectFolder:', result);
+      }
+    } catch (err) {
+      console.error('[AddProject] Error in handleSelectFolder:', err);
+      setError(err.message || 'Failed to add project');
+      setIsSubmitting(false);
+      setPickerOpen(false);
+    }
+  };
+
+  useEffect(() => {
+    // Auto-open folder picker when dialog opens
+    handleSelectFolder();
+  }, []);
+
+  // Don't show anything while the native picker is open
+  if (pickerOpen && !error && !isSubmitting) {
+    return null;
+  }
+
+  // Show loading dialog if submitting
+  if (isSubmitting && !error) {
+    return (
+      <div style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: 'rgba(0, 0, 0, 0.7)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000
+      }}>
+        <div style={{
+          backgroundColor: theme.widgetBg || '#1a1a1a',
+          border: theme.widgetBorder || '1px solid #333',
+          borderRadius: theme.widgetRadius || '6px',
+          padding: 24,
+          width: 400,
+          maxWidth: '90%',
+          fontFamily: theme.textBody || 'system-ui',
+          textAlign: 'center'
+        }}>
+          <div style={{
+            width: 40,
+            height: 40,
+            border: `3px solid ${theme.accent}44`,
+            borderTopColor: theme.accent,
+            borderRadius: '50%',
+            animation: 'spin 1s linear infinite',
+            margin: '0 auto 16px'
+          }} />
+          <div style={{
+            color: theme.textColor || '#fff',
+            fontSize: '1rem',
+            marginBottom: 8
+          }}>
+            Adding Project
+          </div>
+          <div style={{
+            color: theme.accent || '#58a6ff',
+            fontSize: '0.85rem',
+            opacity: 0.8
+          }}>
+            {status}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Don't show anything if no error and not submitting (folder picker is open)
+  if (!error) {
+    return null;
+  }
+
+  // Only show error dialog if something went wrong
+  return (
+    <div style={{
+      position: 'fixed',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: 'rgba(0, 0, 0, 0.7)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      zIndex: 1000
+    }}>
+      <div style={{
+        backgroundColor: theme.widgetBg || '#1a1a1a',
+        border: theme.widgetBorder || '1px solid #333',
+        borderRadius: theme.widgetRadius || '6px',
+        padding: 24,
+        width: 400,
+        maxWidth: '90%',
+        fontFamily: theme.textBody || 'system-ui'
+      }}>
+        <h2 style={{
+          margin: '0 0 16px 0',
+          color: theme.textColor || '#fff',
+          fontSize: '1.2rem'
+        }}>
+          Error Adding Project
+        </h2>
+
+        <div style={{
+          marginBottom: 20,
+          padding: 12,
+          backgroundColor: 'rgba(248, 81, 73, 0.15)',
+          border: '1px solid rgba(248, 81, 73, 0.3)',
+          borderRadius: 4,
+          color: theme.negative || '#f85149',
+          fontSize: '0.9rem'
+        }}>
+          {error}
+        </div>
+
+        <div style={{
+          display: 'flex',
+          gap: 12,
+          justifyContent: 'flex-end'
+        }}>
+          <button
+            onClick={onClose}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: theme.accent || '#58a6ff',
+              border: 'none',
+              borderRadius: 4,
+              color: '#000',
+              cursor: 'pointer',
+              fontFamily: theme.textBody || 'system-ui',
+              fontSize: '0.9rem',
+              fontWeight: 600
+            }}
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 export default function App() {
   const [activeId, setActiveId] = useState(null);
   const [dashboards, setDashboards] = useState([]);
+  const [projects, setProjects] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const debounceTimers = useRef(new Map());
   const [dashboardVersion, setDashboardVersion] = useState(0);
 
   // Conversation state: Map of widgetKey -> currentConversationId
   const [widgetConversations, setWidgetConversations] = useState({});
+
+  // Load projects on mount
+  useEffect(() => {
+    if (window.projectAPI) {
+      window.projectAPI.listProjects().then((result) => {
+        if (result.success) {
+          setProjects(result.projects || []);
+        }
+      });
+    }
+  }, []);
+
+  // Function to refresh projects list
+  const refreshProjects = async () => {
+    if (window.projectAPI) {
+      const result = await window.projectAPI.listProjects();
+      if (result.success) {
+        setProjects(result.projects || []);
+      }
+    }
+  };
+
+  // Function to refresh dashboards list
+  const refreshDashboards = async () => {
+    if (window.dashboardAPI) {
+      const loaded = await window.dashboardAPI.loadDashboards();
+      setDashboards(loaded);
+    }
+  };
 
   // Load dashboards and set up listener
   useEffect(() => {
@@ -1431,7 +2545,39 @@ export default function App() {
     debounceTimers.current.set(key, timer);
   };
 
+  const handleWidgetDelete = async (dashboardId, widgetId) => {
+    // Optimistically update local state immediately
+    setDashboards(prevDashboards => {
+      return prevDashboards.map(dashboard => {
+        if (dashboard.id !== dashboardId) return dashboard;
+
+        return {
+          ...dashboard,
+          widgets: dashboard.widgets.filter(widget => widget.id !== widgetId)
+        };
+      });
+    });
+
+    if (!window.dashboardAPI) return;
+
+    try {
+      await window.dashboardAPI.deleteWidget(dashboardId, widgetId);
+    } catch (error) {
+      console.error('Failed to delete widget:', error);
+      // Reload dashboards to restore state on error
+      if (window.dashboardAPI) {
+        const loaded = await window.dashboardAPI.loadDashboards();
+        setDashboards(loaded);
+      }
+    }
+  };
+
   const activeDashboard = dashboards.find((d) => d.id === activeId) || dashboards[0];
+
+  // Get theme from active dashboard
+  const currentTheme = activeDashboard?.theme && typeof activeDashboard.theme === 'object'
+    ? { ...defaultTheme, ...activeDashboard.theme }
+    : defaultTheme;
 
   // Show loading state while initial data is being fetched
   if (isLoading) {
@@ -1458,9 +2604,12 @@ export default function App() {
         allDashboards={dashboards}
         onSelect={setActiveId}
         onWidgetResize={handleWidgetResize}
+        onWidgetDelete={handleWidgetDelete}
         widgetConversations={widgetConversations}
         setWidgetConversations={setWidgetConversations}
         dashboardVersion={dashboardVersion}
+        onRefreshProjects={refreshProjects}
+        onDashboardsChange={refreshDashboards}
       />
     </div>
   );
