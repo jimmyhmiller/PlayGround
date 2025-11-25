@@ -693,9 +693,20 @@ function WebView({ theme, config }) {
         height: Math.round(rect.height)
       };
 
-      console.log('[WebView] Creating WebContentsView:', { widgetId, bounds, url: currentUrl });
+      // Use widget background color from theme, fallback to bgApp
+      // Convert rgba to rgb by removing alpha channel if present
+      let backgroundColor = theme.widgetBg || theme.bgApp;
+      if (typeof backgroundColor === 'string' && backgroundColor.startsWith('rgba')) {
+        // Extract rgb values from rgba(r, g, b, a) format
+        const match = backgroundColor.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+        if (match) {
+          backgroundColor = `rgb(${match[1]}, ${match[2]}, ${match[3]})`;
+        }
+      }
 
-      await window.webContentsViewAPI.create(widgetId, currentUrl, bounds);
+      console.log('[WebView] Creating WebContentsView:', { widgetId, bounds, url: currentUrl, backgroundColor });
+
+      await window.webContentsViewAPI.create(widgetId, currentUrl, bounds, backgroundColor);
     };
 
     createView();
@@ -881,7 +892,6 @@ function WebView({ theme, config }) {
           position: 'relative',
           border: `1px solid ${theme.accent}22`,
           borderRadius: 4,
-          background: '#fff',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center'
@@ -1112,9 +1122,17 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
     const loadMessages = async () => {
       setIsLoading(true);
       hasLoadedInitialMessagesRef.current = false; // Reset flag before loading
+      previousMessageCountRef.current = 0; // Reset count to enable initial scroll positioning
       await reloadMessages();
       setIsLoading(false);
-      hasLoadedInitialMessagesRef.current = true; // Mark as loaded after initial load
+      // Scroll to bottom immediately after initial load (no animation)
+      // Use setTimeout to ensure DOM has updated
+      setTimeout(() => {
+        if (messagesEndRef.current) {
+          messagesEndRef.current.scrollIntoView({ behavior: 'instant' });
+        }
+        hasLoadedInitialMessagesRef.current = true; // Mark as loaded after scroll
+      }, 0);
     };
 
     loadMessages();
@@ -1125,9 +1143,8 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
     const currentCount = messages.length;
     const previousCount = previousMessageCountRef.current;
 
-    // Scroll if: (we've loaded initial messages AND count increased) OR we're streaming
-    // Don't scroll on initial load (hasLoadedInitialMessagesRef.current is false during first load)
-    if ((hasLoadedInitialMessagesRef.current && currentCount > previousCount) || isStreaming) {
+    // Only scroll if we've finished initial load AND count actually increased OR we're streaming
+    if (hasLoadedInitialMessagesRef.current && (currentCount > previousCount || isStreaming)) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
 

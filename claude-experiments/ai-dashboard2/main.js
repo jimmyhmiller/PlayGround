@@ -1065,7 +1065,7 @@ ipcMain.handle('is-command-running', async (event, { widgetId }) => {
 });
 
 // WebContentsView Handlers (for webView widgets)
-ipcMain.handle('create-webcontentsview', async (event, { widgetId, url, bounds }) => {
+ipcMain.handle('create-webcontentsview', async (event, { widgetId, url, bounds, backgroundColor }) => {
   try {
     console.log(`[WebContentsView] Creating view for widget ${widgetId}`);
 
@@ -1086,6 +1086,10 @@ ipcMain.handle('create-webcontentsview', async (event, { widgetId, url, bounds }
       }
     });
 
+    // Set transparent background immediately to avoid white flash
+    // WebContentsView defaults to white, so we must set it to transparent ASAP
+    view.setBackgroundColor(backgroundColor || '#000000');
+
     // Set bounds
     view.setBounds(bounds);
 
@@ -1099,6 +1103,18 @@ ipcMain.handle('create-webcontentsview', async (event, { widgetId, url, bounds }
       historyIndex: 0
     };
     webContentsViews.set(widgetId, viewData);
+
+    // Ensure background stays transparent on every navigation event
+    const ensureTransparent = () => {
+      if (backgroundColor) {
+        view.setBackgroundColor(backgroundColor);
+      }
+    };
+
+    view.webContents.on('did-start-loading', ensureTransparent);
+    view.webContents.on('did-finish-load', ensureTransparent);
+    view.webContents.on('did-navigate', ensureTransparent);
+    view.webContents.on('did-navigate-in-page', ensureTransparent);
 
     // Load initial URL if provided
     if (url) {

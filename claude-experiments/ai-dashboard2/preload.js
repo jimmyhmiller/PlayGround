@@ -191,8 +191,8 @@ contextBridge.exposeInMainWorld('claudeAPI', {
 
 contextBridge.exposeInMainWorld('webContentsViewAPI', {
   // Create a WebContentsView for a widget
-  create: (widgetId, url, bounds) =>
-    ipcRenderer.invoke('create-webcontentsview', { widgetId, url, bounds }),
+  create: (widgetId, url, bounds, backgroundColor) =>
+    ipcRenderer.invoke('create-webcontentsview', { widgetId, url, bounds, backgroundColor }),
 
   // Navigate to a URL
   navigate: (widgetId, url) =>
