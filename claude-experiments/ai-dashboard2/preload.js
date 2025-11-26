@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
   updateWidgetDimensions: (dashboardId, widgetId, dimensions) =>
     ipcRenderer.invoke('update-widget-dimensions', { dashboardId, widgetId, dimensions }),
 
+  // Update entire widget configuration
+  updateWidget: (dashboardId, widgetId, config) =>
+    ipcRenderer.invoke('update-widget', { dashboardId, widgetId, config }),
+
   // Delete a widget from the dashboard
   deleteWidget: (dashboardId, widgetId) =>
     ipcRenderer.invoke('delete-widget', { dashboardId, widgetId }),
@@ -209,6 +213,10 @@ contextBridge.exposeInMainWorld('webContentsViewAPI', {
   // Reload
   reload: (widgetId) =>
     ipcRenderer.invoke('webcontentsview-reload', { widgetId }),
+
+  // Check if can navigate back/forward
+  canNavigate: (widgetId) =>
+    ipcRenderer.invoke('webcontentsview-can-navigate', { widgetId }),
 
   // Update bounds
   updateBounds: (widgetId, bounds) =>

@@ -331,6 +331,53 @@ ipcMain.handle('update-widget-dimensions', async (event, { dashboardId, widgetId
   }
 });
 
+ipcMain.handle('update-widget', async (event, { dashboardId, widgetId, config }) => {
+  try {
+    // Find the dashboard in memory
+    let targetPath = null;
+    let entry = null;
+    for (const [path, e] of watchedPaths.entries()) {
+      if (e.dashboard.id === dashboardId) {
+        targetPath = path;
+        entry = e;
+        break;
+      }
+    }
+
+    if (!targetPath || !entry) {
+      return { success: false, error: 'Dashboard not found' };
+    }
+
+    // Find and update the widget
+    const widgetIndex = entry.dashboard.widgets.findIndex(w => w.id === widgetId);
+    if (widgetIndex === -1) {
+      return { success: false, error: 'Widget not found' };
+    }
+
+    // Replace the entire widget config
+    entry.dashboard.widgets[widgetIndex] = { ...config, id: widgetId };
+
+    // Record the time of this write so we can ignore the file watcher event
+    entry.lastWriteTime = Date.now();
+
+    // Write the updated dashboard to file
+    fs.writeFileSync(targetPath, JSON.stringify(entry.dashboard, null, 2), 'utf-8');
+
+    // Broadcast the update to all windows
+    BrowserWindow.getAllWindows().forEach(win => {
+      win.webContents.send('dashboard-updated', {
+        dashboardId: entry.dashboard.id,
+        dashboard: entry.dashboard
+      });
+    });
+
+    return { success: true };
+  } catch (error) {
+    console.error('Error updating widget:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle('delete-widget', async (event, { dashboardId, widgetId }) => {
   try {
     // Find the dashboard in memory
@@ -1124,11 +1171,21 @@ ipcMain.handle('create-webcontentsview', async (event, { widgetId, url, bounds, 
     // Listen for navigation events
     view.webContents.on('did-navigate', (ev, navigationUrl) => {
       console.log(`[WebContentsView] ${widgetId} navigated to ${navigationUrl}`);
-      event.sender.send('webcontentsview-navigated', { widgetId, url: navigationUrl });
+      event.sender.send('webcontentsview-navigated', {
+        widgetId,
+        url: navigationUrl,
+        canGoBack: view.webContents.canGoBack(),
+        canGoForward: view.webContents.canGoForward()
+      });
     });
 
     view.webContents.on('did-navigate-in-page', (ev, navigationUrl) => {
-      event.sender.send('webcontentsview-navigated', { widgetId, url: navigationUrl });
+      event.sender.send('webcontentsview-navigated', {
+        widgetId,
+        url: navigationUrl,
+        canGoBack: view.webContents.canGoBack(),
+        canGoForward: view.webContents.canGoForward()
+      });
     });
 
     // Handle new windows
@@ -1210,6 +1267,24 @@ ipcMain.handle('webcontentsview-reload', async (event, { widgetId }) => {
   }
 });
 
+ipcMain.handle('webcontentsview-can-navigate', async (event, { widgetId }) => {
+  try {
+    const viewData = webContentsViews.get(widgetId);
+    if (!viewData) {
+      return { success: false, error: 'View not found' };
+    }
+
+    return {
+      success: true,
+      canGoBack: viewData.view.webContents.canGoBack(),
+      canGoForward: viewData.view.webContents.canGoForward()
+    };
+  } catch (error) {
+    console.error('[WebContentsView] Error checking navigation state:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle('update-webcontentsview-bounds', async (event, { widgetId, bounds }) => {
   try {
     const viewData = webContentsViews.get(widgetId);
@@ -1268,8 +1343,104 @@ ipcMain.handle('regenerate-widget', async (event, { dashboardId, widgetId }) => 
       return { success: false, error: 'Widget not found' };
     }
 
+    // Built-in test runner configurations
+    const testRunners = {
+      cargo: {
+        command: 'cargo test 2>&1',
+        parser: (output) => {
+          const tests = [];
+          const lines = output.split('\n');
+
+          for (const line of lines) {
+            // Match lines like: "test codegen::tests::test_compile_addition ... ok"
+            const match = line.match(/^test\s+(\S+)\s+\.\.\.\s+(\w+)/);
+            if (match) {
+              const name = match[1];
+              const result = match[2];
+
+              let status;
+              if (result === 'ok') {
+                status = 'passed';
+              } else if (result === 'FAILED') {
+                status = 'failed';
+              } else if (result === 'ignored') {
+                status = 'skipped';
+              } else {
+                status = 'passed';
+              }
+
+              tests.push({ name, status });
+            }
+          }
+          return tests;
+        }
+      },
+      jest: {
+        command: 'npm test -- --json 2>&1',
+        parser: (output) => {
+          try {
+            const result = JSON.parse(output);
+            const tests = [];
+            if (result.testResults) {
+              result.testResults.forEach(file => {
+                file.assertionResults?.forEach(test => {
+                  tests.push({
+                    name: test.title || test.fullName,
+                    status: test.status === 'passed' ? 'passed' : test.status === 'failed' ? 'failed' : 'skipped',
+                    duration: test.duration,
+                    error: test.failureMessages?.[0]
+                  });
+                });
+              });
+            }
+            return tests;
+          } catch (e) {
+            console.error('[TestRunner] Failed to parse Jest output:', e);
+            return [];
+          }
+        }
+      },
+      pytest: {
+        command: 'pytest --tb=short -v 2>&1',
+        parser: (output) => {
+          const tests = [];
+          const lines = output.split('\n');
+
+          for (const line of lines) {
+            // Match lines like: "test_example.py::test_addition PASSED"
+            const match = line.match(/^(.+?)::([\w_]+)\s+(PASSED|FAILED|SKIPPED)/);
+            if (match) {
+              const name = `${match[1]}::${match[2]}`;
+              const result = match[3];
+
+              let status;
+              if (result === 'PASSED') {
+                status = 'passed';
+              } else if (result === 'FAILED') {
+                status = 'failed';
+              } else if (result === 'SKIPPED') {
+                status = 'skipped';
+              }
+
+              tests.push({ name, status });
+            }
+          }
+          return tests;
+        }
+      }
+    };
+
     // Get the command to run (support multiple property names)
     let command = widget.regenerateCommand || widget.regenerate;
+    let parser = null;
+
+    // Check if using a built-in test runner
+    if (widget.testRunner && testRunners[widget.testRunner]) {
+      const runner = testRunners[widget.testRunner];
+      command = widget.regenerateCommand || runner.command;
+      parser = runner.parser;
+      console.log(`[Regenerate] Using built-in test runner: ${widget.testRunner}`);
+    }
 
     // If regenerateScript is specified instead, load the script file
     if (!command && widget.regenerateScript) {
@@ -1285,7 +1456,7 @@ ipcMain.handle('regenerate-widget', async (event, { dashboardId, widgetId }) => 
     }
 
     if (!command) {
-      return { success: false, error: 'No regenerateCommand, regenerate, or regenerateScript specified' };
+      return { success: false, error: 'No testRunner, regenerateCommand, regenerate, or regenerateScript specified' };
     }
 
     // Determine working directory - use project root if available
@@ -1336,17 +1507,28 @@ ipcMain.handle('regenerate-widget', async (event, { dashboardId, widgetId }) => 
           return;
         }
 
-        if (code !== 0) {
+        // For test runners, allow non-zero exit codes (tests might fail)
+        const allowNonZeroExit = parser !== null;
+        if (code !== 0 && !allowNonZeroExit) {
           resolve({ success: false, error: stderr || stdout || `Command exited with code ${code}` });
           return;
         }
 
         // Parse output based on widget type
-        // stat widgets can use plain text, others need JSON
         let data;
         const outputTrimmed = stdout.trim();
 
-        if (widget.type === 'stat') {
+        // Use built-in parser if available
+        if (parser) {
+          console.log('[Regenerate] Using built-in parser for test runner output');
+          try {
+            data = parser(stdout);
+          } catch (parseError) {
+            console.error('[Regenerate] Parser error:', parseError);
+            resolve({ success: false, error: `Parser error: ${parseError.message}` });
+            return;
+          }
+        } else if (widget.type === 'stat') {
           // For stat widgets, try JSON first, fall back to plain text
           try {
             data = JSON.parse(outputTrimmed);
@@ -1388,12 +1570,20 @@ ipcMain.handle('regenerate-widget', async (event, { dashboardId, widgetId }) => 
             case 'keyValue':
               widget.items = data;
               break;
+            case 'testResults':
+              widget.tests = data;
+              break;
+            case 'jsonViewer':
+              widget.data = data;
+              break;
             default:
               // For other types, try to update 'data' field if it exists
               if ('data' in widget) {
                 widget.data = data;
               } else if ('items' in widget) {
                 widget.items = data;
+              } else if ('tests' in widget) {
+                widget.tests = data;
               } else {
                 resolve({ success: false, error: `Don't know how to update widget type: ${widget.type}` });
                 return;

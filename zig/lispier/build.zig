@@ -165,6 +165,7 @@ pub fn build(b: *std.Build) void {
     tests.linkLibCpp();
 
     const run_tests = b.addRunArtifact(tests);
+    run_tests.has_side_effects = true;
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_tests.step);
 
@@ -200,6 +201,7 @@ pub fn build(b: *std.Build) void {
     integration_tests.linkLibCpp();
 
     const run_integration_tests = b.addRunArtifact(integration_tests);
+    run_integration_tests.has_side_effects = true;
     const integration_step = b.step("integration-test", "Run integration tests");
     integration_step.dependOn(&run_integration_tests.step);
 }

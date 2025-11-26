@@ -42,7 +42,7 @@
       "x": 784,
       "y": 0,
       "width": 380,
-      "height": 408,
+      "height": 464,
       "label": "Available Component Types",
       "items": [
         {
@@ -92,6 +92,14 @@
         {
           "key": "webView",
           "value": "Embedded browser"
+        },
+        {
+          "key": "jsonViewer",
+          "value": "Collapsible JSON tree view"
+        },
+        {
+          "key": "testResults",
+          "value": "Test results with pass/fail status. Built-in runners: cargo, jest, pytest"
         }
       ]
     },
@@ -134,7 +142,7 @@
         },
         {
           "text": "Add \"flip over\" feature to widgets to view and edit their JSON configuration",
-          "done": false
+          "done": true
         },
         {
           "text": "Change initial dashboard setup to be WAY cleaner, no modal, take you straight there and start generating things",
@@ -199,17 +207,64 @@
       ]
     },
     {
+      "id": "test-results-demo",
+      "type": "testResults",
+      "x": 1176,
+      "y": 0,
+      "width": 380,
+      "height": 576,
+      "label": "Test Suite Results",
+      "tests": [
+        {
+          "name": "User authentication flow",
+          "status": "passed",
+          "duration": 145
+        },
+        {
+          "name": "Database connection pool",
+          "status": "passed",
+          "duration": 23
+        },
+        {
+          "name": "API rate limiting",
+          "status": "failed",
+          "duration": 1204,
+          "error": "Expected 429 status code but got 200\n  at Object.test (api.test.js:45:12)"
+        },
+        {
+          "name": "File upload validation",
+          "status": "passed",
+          "duration": 312
+        },
+        {
+          "name": "Email notification service",
+          "status": "skipped"
+        },
+        {
+          "name": "Cache invalidation",
+          "status": "failed",
+          "duration": 89,
+          "error": "Cache key 'user:123' still exists after invalidation"
+        },
+        {
+          "name": "Payment processing",
+          "status": "passed",
+          "duration": 567
+        }
+      ]
+    },
+    {
       "id": "bugs-list",
       "type": "todoList",
       "x": 0,
       "y": 532,
       "width": 380,
-      "height": 296,
+      "height": 324,
       "label": "Bugs",
       "items": [
         {
           "text": "Sometimes replies from claude disappear if we are on a different dashboard when received",
-          "done": false
+          "done": true
         },
         {
           "text": "Sizes of components and location should be in terms of the grid, not pixels",
@@ -221,13 +276,74 @@
         },
         {
           "text": "Can't select chat text",
-          "done": false
+          "done": true
         },
         {
           "text": "Backward and forward buttons don't work on webview",
+          "done": true
+        },
+        {
+          "text": "Chat doesn't stay scrolled to bottom as content comes in",
+          "done": true
+        },
+        {
+          "text": "Text in chat box doesn't stay when switching dashboards",
+          "done": true
+        },
+        {
+          "text": "When tools are added, it goes above the message and causes weird scrolling behavior",
           "done": false
         }
       ]
+    },
+    {
+      "id": "json-example",
+      "type": "jsonViewer",
+      "x": 784,
+      "y": 476,
+      "width": 380,
+      "height": 464,
+      "label": "JSON Viewer Example",
+      "data": {
+        "user": {
+          "id": 12345,
+          "name": "John Doe",
+          "email": "john@example.com",
+          "active": true,
+          "settings": {
+            "theme": "dark",
+            "notifications": {
+              "email": true,
+              "push": false,
+              "sms": null
+            },
+            "privacy": {
+              "profileVisible": true,
+              "showEmail": false
+            }
+          },
+          "roles": [
+            "admin",
+            "user",
+            "developer"
+          ]
+        },
+        "metadata": {
+          "created": "2024-01-15",
+          "lastLogin": "2024-01-20",
+          "loginCount": 42
+        },
+        "tags": [
+          "premium",
+          "verified",
+          "early-adopter"
+        ],
+        "stats": {
+          "posts": 156,
+          "followers": 2847,
+          "following": 321
+        }
+      }
     }
   ],
   "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/.ai-dashboard/dashboard.json"

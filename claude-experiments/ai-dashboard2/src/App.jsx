@@ -157,6 +157,413 @@ function DiffList({ theme, config }) {
   );
 }
 
+function TestResults({ theme, config, dashboardId }) {
+  const [hiddenStatuses, setHiddenStatuses] = useState(new Set());
+  const [isRegenerating, setIsRegenerating] = useState(false);
+
+  const toggleStatus = (status) => {
+    setHiddenStatuses(prev => {
+      const next = new Set(prev);
+      if (next.has(status)) {
+        next.delete(status);
+      } else {
+        next.add(status);
+      }
+      return next;
+    });
+  };
+
+  const handleRegenerate = async () => {
+    if (!window.dashboardAPI || !dashboardId || !config.id) return;
+
+    setIsRegenerating(true);
+    try {
+      const result = await window.dashboardAPI.regenerateWidget(dashboardId, config.id);
+      if (!result.success) {
+        console.error('Regenerate failed:', result.error);
+      }
+    } catch (error) {
+      console.error('Regenerate error:', error);
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
+
+  const hasRegenerate = config.regenerateCommand || config.regenerateScript || config.regenerate || config.testRunner;
+
+  // Validation
+  const validateTests = () => {
+    // If using a built-in test runner, tests array is optional (will be populated on run)
+    if (!config.tests && !config.testRunner) {
+      return {
+        valid: false,
+        message: 'Missing "tests" array',
+        expected: 'The testResults widget requires a "tests" array property.\n\nExpected format:\n{\n  "type": "testResults",\n  "label": "Test Suite Results",\n  "tests": [\n    {\n      "name": "Test name",\n      "status": "passed" | "failed" | "skipped",\n      "duration": 123,  // optional, in milliseconds\n      "error": "Error message"  // optional, for failed tests\n    }\n  ]\n}\n\nAlternatively, use a built-in test runner:\n{\n  "type": "testResults",\n  "label": "Test Suite",\n  "testRunner": "cargo" | "jest" | "pytest",\n  "autoRun": false\n}'
+      };
+    }
+
+    // If no tests yet (using testRunner), validation passes
+    if (!config.tests) {
+      return { valid: true };
+    }
+
+    if (!Array.isArray(config.tests)) {
+      return {
+        valid: false,
+        message: '"tests" must be an array',
+        expected: `Expected "tests" to be an array, but got ${typeof config.tests}.\n\nExpected format:\n"tests": [\n  {\n    "name": "Test name",\n    "status": "passed",\n    "duration": 123\n  }\n]`
+      };
+    }
+
+    // Validate each test
+    for (let i = 0; i < config.tests.length; i++) {
+      const test = config.tests[i];
+
+      if (!test || typeof test !== 'object') {
+        return {
+          valid: false,
+          message: `Test at index ${i} is not an object`,
+          expected: `Each test must be an object with "name" and "status" properties.\n\nExpected format for test:\n{\n  "name": "Test name",\n  "status": "passed" | "failed" | "skipped",\n  "duration": 123,  // optional\n  "error": "Error message"  // optional\n}`
+        };
+      }
+
+      if (!test.name || typeof test.name !== 'string') {
+        return {
+          valid: false,
+          message: `Test at index ${i} missing or invalid "name" property`,
+          expected: `Each test must have a "name" property (string).\n\nCurrent test: ${JSON.stringify(test, null, 2)}\n\nExpected: { "name": "Test name", "status": "passed", ... }`
+        };
+      }
+
+      if (!test.status || !['passed', 'failed', 'skipped'].includes(test.status)) {
+        return {
+          valid: false,
+          message: `Test "${test.name}" has invalid "status" property`,
+          expected: `The "status" property must be one of: "passed", "failed", or "skipped".\n\nCurrent value: "${test.status}"\n\nExpected format:\n{\n  "name": "${test.name}",\n  "status": "passed" | "failed" | "skipped"\n}`
+        };
+      }
+
+      if (test.duration !== undefined && typeof test.duration !== 'number') {
+        return {
+          valid: false,
+          message: `Test "${test.name}" has invalid "duration" property`,
+          expected: `The "duration" property must be a number (milliseconds).\n\nCurrent value: ${JSON.stringify(test.duration)} (${typeof test.duration})\n\nExpected format:\n{\n  "name": "${test.name}",\n  "status": "${test.status}",\n  "duration": 123\n}`
+        };
+      }
+
+      if (test.error !== undefined && typeof test.error !== 'string') {
+        return {
+          valid: false,
+          message: `Test "${test.name}" has invalid "error" property`,
+          expected: `The "error" property must be a string.\n\nCurrent value: ${JSON.stringify(test.error)} (${typeof test.error})\n\nExpected format:\n{\n  "name": "${test.name}",\n  "status": "failed",\n  "error": "Error message here"\n}`
+        };
+      }
+    }
+
+    return { valid: true };
+  };
+
+  const validation = validateTests();
+
+  if (!validation.valid) {
+    return (
+      <>
+        <div className="widget-label" style={{ fontFamily: theme.textBody }}>{config.label || 'Test Results'}</div>
+        <div style={{
+          fontFamily: theme.textBody,
+          fontSize: '0.8rem',
+          padding: '16px',
+          color: theme.negative,
+          backgroundColor: `${theme.negative}15`,
+          border: `1px solid ${theme.negative}40`,
+          borderRadius: '8px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px'
+        }}>
+          <div style={{ fontWeight: 600, fontSize: '0.85rem' }}>
+            ⚠️ Invalid configuration: {validation.message}
+          </div>
+          <div style={{
+            fontFamily: theme.textCode || 'monospace',
+            fontSize: '0.7rem',
+            backgroundColor: `${theme.negative}10`,
+            padding: '12px',
+            borderRadius: '6px',
+            whiteSpace: 'pre-wrap',
+            color: theme.textColor,
+            lineHeight: 1.5,
+            userSelect: 'text',
+            cursor: 'text'
+          }}>
+            {validation.expected}
+          </div>
+          <div style={{
+            fontSize: '0.7rem',
+            opacity: 0.8,
+            borderTop: `1px solid ${theme.negative}20`,
+            paddingTop: '8px',
+            marginTop: '4px'
+          }}>
+            💡 Tip: Copy the expected format above and provide it to an AI to generate the correct configuration.
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  const tests = config.tests || [];
+  const passedCount = tests.filter(t => t.status === 'passed').length;
+  const failedCount = tests.filter(t => t.status === 'failed').length;
+  const skippedCount = tests.filter(t => t.status === 'skipped').length;
+  const totalCount = tests.length;
+
+  return (
+    <>
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: hasRegenerate ? '8px' : '0'
+      }}>
+        <div className="widget-label" style={{ fontFamily: theme.textBody, marginBottom: 0 }}>
+          {config.label || 'Test Results'}
+        </div>
+        {hasRegenerate && (
+          <button
+            onClick={handleRegenerate}
+            disabled={isRegenerating}
+            style={{
+              background: 'transparent',
+              border: `1px solid ${theme.accent}40`,
+              borderRadius: '4px',
+              color: theme.accent,
+              cursor: isRegenerating ? 'wait' : 'pointer',
+              padding: '4px 8px',
+              fontSize: '0.75rem',
+              fontFamily: theme.textBody,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              opacity: isRegenerating ? 0.5 : 1,
+              transition: 'all 0.2s'
+            }}
+            onMouseEnter={(e) => {
+              if (!isRegenerating) {
+                e.target.style.backgroundColor = `${theme.accent}15`;
+                e.target.style.borderColor = `${theme.accent}80`;
+              }
+            }}
+            onMouseLeave={(e) => {
+              e.target.style.backgroundColor = 'transparent';
+              e.target.style.borderColor = `${theme.accent}40`;
+            }}
+          >
+            <span style={{ fontSize: '0.9rem' }}>{isRegenerating ? '⟳' : '▶'}</span>
+            {isRegenerating ? 'Running...' : 'Run Tests'}
+          </button>
+        )}
+      </div>
+
+      {/* Summary */}
+      <div style={{
+        fontFamily: theme.textBody,
+        fontSize: '0.85rem',
+        padding: '12px 0',
+        borderBottom: `1px solid ${theme.accent}22`,
+        marginBottom: '12px',
+        display: 'flex',
+        gap: '16px',
+        flexWrap: 'wrap'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <span style={{ color: theme.textColor, opacity: 0.7 }}>Total:</span>
+          <span style={{ color: theme.accent, fontWeight: 600 }}>{totalCount}</span>
+        </div>
+        {passedCount > 0 && (
+          <div
+            onClick={() => toggleStatus('passed')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              cursor: 'pointer',
+              padding: '2px 6px',
+              margin: '-2px -6px',
+              borderRadius: '4px',
+              backgroundColor: hiddenStatuses.has('passed') ? `${theme.positive}10` : 'transparent',
+              opacity: hiddenStatuses.has('passed') ? 0.5 : 1,
+              transition: 'all 0.2s',
+              userSelect: 'none'
+            }}
+          >
+            <span style={{ color: theme.positive }}>✓</span>
+            <span style={{ color: theme.positive, fontWeight: 600 }}>{passedCount} passed</span>
+          </div>
+        )}
+        {failedCount > 0 && (
+          <div
+            onClick={() => toggleStatus('failed')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              cursor: 'pointer',
+              padding: '2px 6px',
+              margin: '-2px -6px',
+              borderRadius: '4px',
+              backgroundColor: hiddenStatuses.has('failed') ? `${theme.negative}10` : 'transparent',
+              opacity: hiddenStatuses.has('failed') ? 0.5 : 1,
+              transition: 'all 0.2s',
+              userSelect: 'none'
+            }}
+          >
+            <span style={{ color: theme.negative }}>✗</span>
+            <span style={{ color: theme.negative, fontWeight: 600 }}>{failedCount} failed</span>
+          </div>
+        )}
+        {skippedCount > 0 && (
+          <div
+            onClick={() => toggleStatus('skipped')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              cursor: 'pointer',
+              padding: '2px 6px',
+              margin: '-2px -6px',
+              borderRadius: '4px',
+              backgroundColor: hiddenStatuses.has('skipped') ? `${theme.textColor}10` : 'transparent',
+              opacity: hiddenStatuses.has('skipped') ? 0.5 : 1,
+              transition: 'all 0.2s',
+              userSelect: 'none'
+            }}
+          >
+            <span style={{ color: theme.textColor, opacity: 0.5 }}>○</span>
+            <span style={{ color: theme.textColor, opacity: 0.7 }}>{skippedCount} skipped</span>
+          </div>
+        )}
+      </div>
+
+      {/* Test List */}
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '8px',
+        overflow: 'auto',
+        maxHeight: '100%'
+      }}>
+        {tests.length === 0 && config.testRunner ? (
+          <div style={{
+            fontFamily: theme.textBody,
+            fontSize: '0.85rem',
+            padding: '24px',
+            textAlign: 'center',
+            color: theme.textColor,
+            opacity: 0.6
+          }}>
+            <div style={{ fontSize: '2rem', marginBottom: '12px' }}>📋</div>
+            <div>No test results yet</div>
+            <div style={{ fontSize: '0.75rem', marginTop: '8px' }}>
+              Click "Run Tests" to execute {config.testRunner} tests
+            </div>
+          </div>
+        ) : tests.length === 0 ? (
+          <div style={{
+            fontFamily: theme.textBody,
+            fontSize: '0.85rem',
+            padding: '24px',
+            textAlign: 'center',
+            color: theme.textColor,
+            opacity: 0.6
+          }}>
+            No tests configured
+          </div>
+        ) : null}
+        {tests.filter(test => !hiddenStatuses.has(test.status)).map((test, i) => (
+          <div
+            key={i}
+            style={{
+              fontFamily: theme.textBody,
+              fontSize: '0.75rem',
+              padding: '8px 12px',
+              borderRadius: '6px',
+              backgroundColor: test.status === 'passed'
+                ? `${theme.positive}15`
+                : test.status === 'failed'
+                ? `${theme.negative}15`
+                : `${theme.textColor}08`,
+              border: `1px solid ${
+                test.status === 'passed'
+                  ? `${theme.positive}40`
+                  : test.status === 'failed'
+                  ? `${theme.negative}40`
+                  : `${theme.textColor}20`
+              }`,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '4px'
+            }}
+          >
+            {/* Test name with status icon */}
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+              <span style={{
+                color: test.status === 'passed'
+                  ? theme.positive
+                  : test.status === 'failed'
+                  ? theme.negative
+                  : theme.textColor,
+                opacity: test.status === 'skipped' ? 0.5 : 1,
+                fontSize: '0.85rem',
+                flexShrink: 0
+              }}>
+                {test.status === 'passed' ? '✓' : test.status === 'failed' ? '✗' : '○'}
+              </span>
+              <div style={{ flex: 1 }}>
+                <div style={{
+                  color: theme.textColor,
+                  fontWeight: 500,
+                  wordBreak: 'break-word'
+                }}>
+                  {test.name}
+                </div>
+                {test.duration && (
+                  <div style={{
+                    color: theme.textColor,
+                    opacity: 0.5,
+                    fontSize: '0.7rem',
+                    marginTop: '2px'
+                  }}>
+                    {test.duration}ms
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Error message for failed tests */}
+            {test.status === 'failed' && test.error && (
+              <div style={{
+                marginTop: '4px',
+                padding: '6px 8px',
+                backgroundColor: `${theme.negative}10`,
+                borderLeft: `2px solid ${theme.negative}`,
+                borderRadius: '4px',
+                color: theme.negative,
+                fontSize: '0.7rem',
+                fontFamily: theme.textCode || 'monospace',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word'
+              }}>
+                {test.error}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
 function Stat({ theme, config }) {
   return (
     <>
@@ -366,6 +773,140 @@ function KeyValue({ theme, config }) {
   );
 }
 
+function JsonViewer({ theme, config }) {
+  const [collapsed, setCollapsed] = useState(new Set());
+
+  const data = config.data || {};
+
+  const toggleCollapse = (path) => {
+    setCollapsed(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  };
+
+  const renderValue = (value, path = '', depth = 0) => {
+    const indent = depth * 16;
+
+    if (value === null) {
+      return <span style={{ color: theme.accent, opacity: 0.6 }}>null</span>;
+    }
+
+    if (value === undefined) {
+      return <span style={{ color: theme.accent, opacity: 0.6 }}>undefined</span>;
+    }
+
+    if (typeof value === 'boolean') {
+      return <span style={{ color: theme.accent }}>{value.toString()}</span>;
+    }
+
+    if (typeof value === 'number') {
+      return <span style={{ color: theme.positive }}>{value}</span>;
+    }
+
+    if (typeof value === 'string') {
+      return <span style={{ color: theme.textColor }}>&quot;{value}&quot;</span>;
+    }
+
+    if (Array.isArray(value)) {
+      const isCollapsed = collapsed.has(path);
+      const isEmpty = value.length === 0;
+
+      return (
+        <div>
+          <span
+            onClick={() => !isEmpty && toggleCollapse(path)}
+            style={{
+              cursor: isEmpty ? 'default' : 'pointer',
+              userSelect: 'none',
+              color: theme.textColor,
+              opacity: 0.7
+            }}
+          >
+            {!isEmpty && (isCollapsed ? '▶ ' : '▼ ')}
+            [
+            {isEmpty && ']'}
+            {!isEmpty && isCollapsed && ` ... ${value.length} items ]`}
+          </span>
+          {!isEmpty && !isCollapsed && (
+            <div style={{ paddingLeft: 16 }}>
+              {value.map((item, idx) => (
+                <div key={idx} style={{ marginBottom: 4, fontFamily: theme.textBody }}>
+                  <span style={{ color: theme.accent, opacity: 0.5 }}>{idx}: </span>
+                  {renderValue(item, `${path}[${idx}]`, depth + 1)}
+                  {idx < value.length - 1 && <span style={{ color: theme.textColor, opacity: 0.5 }}>,</span>}
+                </div>
+              ))}
+              <span style={{ color: theme.textColor, opacity: 0.7 }}>]</span>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    if (typeof value === 'object') {
+      const isCollapsed = collapsed.has(path);
+      const keys = Object.keys(value);
+      const isEmpty = keys.length === 0;
+
+      return (
+        <div>
+          <span
+            onClick={() => !isEmpty && toggleCollapse(path)}
+            style={{
+              cursor: isEmpty ? 'default' : 'pointer',
+              userSelect: 'none',
+              color: theme.textColor,
+              opacity: 0.7
+            }}
+          >
+            {!isEmpty && (isCollapsed ? '▶ ' : '▼ ')}
+            {'{'}
+            {isEmpty && '}'}
+            {!isEmpty && isCollapsed && ` ... ${keys.length} keys }`}
+          </span>
+          {!isEmpty && !isCollapsed && (
+            <div style={{ paddingLeft: 16 }}>
+              {keys.map((key, idx) => (
+                <div key={key} style={{ marginBottom: 4, fontFamily: theme.textBody }}>
+                  <span style={{ color: theme.accent }}>&quot;{key}&quot;</span>
+                  <span style={{ color: theme.textColor, opacity: 0.5 }}>: </span>
+                  {renderValue(value[key], `${path}.${key}`, depth + 1)}
+                  {idx < keys.length - 1 && <span style={{ color: theme.textColor, opacity: 0.5 }}>,</span>}
+                </div>
+              ))}
+              <span style={{ color: theme.textColor, opacity: 0.7 }}>{'}'}</span>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    return <span style={{ color: theme.textColor }}>{String(value)}</span>;
+  };
+
+  return (
+    <>
+      <div className="widget-label" style={{ fontFamily: theme.textBody }}>{config.label || 'JSON'}</div>
+      <div style={{
+        fontFamily: 'Monaco, Menlo, "Courier New", monospace',
+        fontSize: '0.75rem',
+        padding: '8px 12px',
+        overflow: 'auto',
+        color: theme.textColor,
+        lineHeight: 1.6
+      }}>
+        {renderValue(data)}
+      </div>
+    </>
+  );
+}
+
 function LayoutSettings({ theme, config, dashboardId, layout }) {
   const [widgetGap, setWidgetGap] = useState(layout?.widgetGap ?? 10);
   const [buffer, setBuffer] = useState(layout?.buffer ?? 20);
@@ -481,13 +1022,13 @@ function parseAnsiToReact(text) {
 }
 
 function CommandRunner({ theme, config, dashboard }) {
-  const [output, setOutput] = useState('');
+  const widgetId = config.id;
+  // Initialize output from global state if available
+  const [output, setOutput] = useState(() => globalCommandOutputs.get(widgetId) || '');
   const [isRunning, setIsRunning] = useState(false);
   const [showOutput, setShowOutput] = useState(config.showOutput !== false);
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
-
-  const widgetId = config.id;
 
   const copyOutput = () => {
     // Remove ANSI codes for clean copy
@@ -503,6 +1044,7 @@ function CommandRunner({ theme, config, dashboard }) {
     setIsRunning(true);
     setError(null);
     setOutput('');
+    globalCommandOutputs.set(widgetId, ''); // Clear global state too
 
     try {
       const cwd = config.cwd || dashboard?._projectRoot;
@@ -539,13 +1081,24 @@ function CommandRunner({ theme, config, dashboard }) {
     checkRunning();
   }, [widgetId]);
 
+  // Sync output with global state when it changes
+  useEffect(() => {
+    if (widgetId) {
+      globalCommandOutputs.set(widgetId, output);
+    }
+  }, [output, widgetId]);
+
   // Listen for command output
   useEffect(() => {
     if (!window.commandAPI) return;
 
     const handleOutput = ({ widgetId: eventWidgetId, output: text }) => {
       if (eventWidgetId === widgetId) {
-        setOutput(prev => prev + text);
+        setOutput(prev => {
+          const newOutput = prev + text;
+          globalCommandOutputs.set(widgetId, newOutput);
+          return newOutput;
+        });
       }
     };
 
@@ -553,7 +1106,11 @@ function CommandRunner({ theme, config, dashboard }) {
       if (eventWidgetId === widgetId) {
         setIsRunning(false);
         if (code !== 0) {
-          setOutput(prev => prev + `\n\n[Process exited with code ${code}]`);
+          setOutput(prev => {
+            const newOutput = prev + `\n\n[Process exited with code ${code}]`;
+            globalCommandOutputs.set(widgetId, newOutput);
+            return newOutput;
+          });
         }
       }
     };
@@ -671,6 +1228,83 @@ function CommandRunner({ theme, config, dashboard }) {
   );
 }
 
+function FlippableTest({ theme, config }) {
+  const [isFlipped, setIsFlipped] = useState(false);
+
+  return (
+    <div
+      className={`widget-flip-container ${isFlipped ? 'flipped' : ''}`}
+      style={{ width: '100%', height: '100%' }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setIsFlipped(!isFlipped);
+      }}
+    >
+      <div className="widget-flip-inner">
+        {/* Front - Just apply .widget class like normal */}
+        <div
+          className="widget widget-flip-front"
+          style={{
+            background: theme.widgetBg,
+            border: theme.widgetBorder,
+            borderRadius: theme.widgetRadius,
+          }}
+        >
+          <div className="widget-label" style={{ fontFamily: theme.textBody }}>
+            Flippable Test Widget
+          </div>
+          <p style={{ marginBottom: '8px', color: theme.accent, fontSize: '0.85rem' }}>
+            Right-click to flip and see JSON
+          </p>
+          {[...Array(20)].map((_, i) => (
+            <div key={i} style={{
+              padding: '8px 12px',
+              marginBottom: '4px',
+              background: 'rgba(255,255,255,0.05)',
+              borderRadius: '4px',
+              border: '1px solid rgba(255,255,255,0.1)',
+              color: theme.textColor,
+              fontSize: '0.85rem',
+            }}>
+              Item {i + 1} - This is scrollable content to test the flip animation
+            </div>
+          ))}
+        </div>
+
+        {/* Back - Just apply .widget class like normal */}
+        <div
+          className="widget widget-flip-back"
+          style={{
+            background: theme.widgetBg,
+            border: theme.widgetBorder,
+            borderRadius: theme.widgetRadius,
+          }}
+        >
+          <div className="widget-label" style={{ fontFamily: theme.textBody, marginBottom: '12px' }}>
+            Back Side - JSON Configuration
+          </div>
+          <textarea
+            style={{
+              width: '100%',
+              height: 'calc(100% - 40px)',
+              background: 'rgba(0,0,0,0.3)',
+              border: '1px solid rgba(255,255,255,0.1)',
+              borderRadius: '4px',
+              padding: '12px',
+              color: theme.textColor,
+              fontFamily: 'monospace',
+              fontSize: '0.75rem',
+              resize: 'none',
+            }}
+            value={JSON.stringify(config, null, 2)}
+            readOnly
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function WebView({ theme, config }) {
   const [currentUrl, setCurrentUrl] = useState(config.url || '');
   const [inputUrl, setInputUrl] = useState(config.url || '');
@@ -707,16 +1341,25 @@ function WebView({ theme, config }) {
       console.log('[WebView] Creating WebContentsView:', { widgetId, bounds, url: currentUrl, backgroundColor });
 
       await window.webContentsViewAPI.create(widgetId, currentUrl, bounds, backgroundColor);
+
+      // Check initial navigation state
+      const navState = await window.webContentsViewAPI.canNavigate(widgetId);
+      if (navState?.success) {
+        setCanGoBack(navState.canGoBack || false);
+        setCanGoForward(navState.canGoForward || false);
+      }
     };
 
     createView();
 
     // Listen for navigation events
-    const handleNavigated = ({ widgetId: navWidgetId, url }) => {
+    const handleNavigated = ({ widgetId: navWidgetId, url, canGoBack: navCanGoBack, canGoForward: navCanGoForward }) => {
       if (navWidgetId === widgetId) {
         console.log('[WebView] Navigated to:', url);
         setCurrentUrl(url);
         setInputUrl(url);
+        setCanGoBack(navCanGoBack || false);
+        setCanGoForward(navCanGoForward || false);
       }
     };
 
@@ -1010,7 +1653,8 @@ function ChatMessage({ msg, theme }) {
 
 function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConversationId, setCurrentConversationId }) {
   const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState('');
+  // Initialize input from global state if available
+  const [input, setInput] = useState(() => globalChatInputs.get(currentConversationId) || '');
   const [isStreaming, setIsStreaming] = useState(false);
   const [currentStreamText, setCurrentStreamText] = useState(''); // Temporary state for streaming display
   const [currentToolCalls, setCurrentToolCalls] = useState([]); // Track active tool calls
@@ -1040,6 +1684,21 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
 
   // Determine backend type: 'claude' for Claude Agent SDK, 'mock' for demo, or custom handler
   const backend = config.backend || 'mock';
+
+  // Sync input with global state when it changes
+  useEffect(() => {
+    if (currentConversationId) {
+      globalChatInputs.set(currentConversationId, input);
+    }
+  }, [input, currentConversationId]);
+
+  // Load input from global state when conversation changes
+  useEffect(() => {
+    if (currentConversationId) {
+      const savedInput = globalChatInputs.get(currentConversationId) || '';
+      setInput(savedInput);
+    }
+  }, [currentConversationId]);
 
   // Load conversations on mount ONLY - runs once per widget instance
   useEffect(() => {
@@ -1152,6 +1811,13 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
     previousMessageCountRef.current = currentCount;
   }, [messages, isStreaming]);
 
+  // Scroll when streaming text or tool calls update
+  useEffect(() => {
+    if (isStreaming && hasLoadedInitialMessagesRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [currentStreamText, currentToolCalls, isStreaming]);
+
   // Handle Esc key to interrupt streaming and Shift+Tab to toggle mode
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -1255,45 +1921,19 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
     const handleComplete = async (data) => {
       if (data.chatId !== currentConversationId) return;
 
-      console.log('[Chat UI] Stream complete - saving final message and reloading');
-      console.log('[Chat UI] Current stream text length (ref):', currentStreamTextRef.current?.length);
-      console.log('[Chat UI] Current stream text (ref):', currentStreamTextRef.current);
-      console.log('[Chat UI] Tool calls (ref):', currentToolCallsRef.current);
+      console.log('[Chat UI] Stream complete - reloading (global handler already saved)');
 
-      // Save the current stream text as the final assistant message with tool calls
-      if (currentStreamTextRef.current || currentToolCallsRef.current.length > 0) {
-        console.log('[Chat UI] Saving assistant message to backend...');
-        const messageToSave = {
-          from: 'assistant',
-          text: currentStreamTextRef.current || ''
-        };
-
-        // Include tool calls if any were made
-        if (currentToolCallsRef.current.length > 0) {
-          console.log('[Chat UI] Adding toolCalls to message:', currentToolCallsRef.current.length, 'tool calls');
-          messageToSave.toolCalls = currentToolCallsRef.current.map(({ name, description, input }) => ({
-            name,
-            description,
-            input
-          }));
-          console.log('[Chat UI] Message with toolCalls:', JSON.stringify(messageToSave, null, 2));
-        }
-
-        await saveMessageToBackend(messageToSave);
-        console.log('[Chat UI] Assistant message saved');
-      } else {
-        console.warn('[Chat UI] No stream text or tool calls to save!');
-      }
-
-      // Reload messages from backend (single source of truth)
-      console.log('[Chat UI] Reloading messages from backend...');
+      // Note: Global stream manager already saved the message
+      // Just reload messages and clear UI state
       await reloadMessages();
 
       setIsStreaming(false);
       setCurrentStreamText('');
-      setCurrentToolCalls([]); // Clear tool calls
-      currentStreamTextRef.current = ''; // Reset ref
-      currentToolCallsRef.current = []; // Reset tool calls ref
+      setCurrentToolCalls([]);
+      currentStreamTextRef.current = '';
+      currentToolCallsRef.current = [];
+      processedTextsRef.current.clear();
+      processedToolsRef.current.clear();
     };
 
     const handleError = async (data) => {
@@ -1301,16 +1941,15 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
 
       console.error('[Chat UI] Error:', data.error);
 
-      const errorMessage = {
-        from: 'assistant',
-        text: `Error: ${data.error}`
-      };
-      await saveMessageToBackend(errorMessage);
+      // Note: Global stream manager already saved the error message
+      // Just reload and clear state
       await reloadMessages();
       setCurrentStreamText('');
       setCurrentToolCalls([]);
       currentStreamTextRef.current = '';
-      currentToolCallsRef.current = [];
+      currentToolCallsRef.current = '';
+      processedTextsRef.current.clear();
+      processedToolsRef.current.clear();
       setIsStreaming(false);
     };
 
@@ -1320,6 +1959,7 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
 
     return () => {
       console.log('[Chat UI] Cleaning up event listeners for conversationId:', currentConversationId);
+      // Note: Global stream manager handles saving, even if component unmounts
       // Remove only this instance's listeners
       window.claudeAPI.offMessage(messageHandler);
       window.claudeAPI.offComplete(completeHandler);
@@ -1613,6 +2253,7 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
 const widgetComponents = {
   barChart: BarChart,
   diffList: DiffList,
+  testResults: TestResults,
   stat: Stat,
   progress: Progress,
   chat: Chat,
@@ -1620,9 +2261,11 @@ const widgetComponents = {
   todoList: TodoList,
   claudeTodos: ClaudeTodoList,
   keyValue: KeyValue,
+  jsonViewer: JsonViewer,
   layoutSettings: LayoutSettings,
   commandRunner: CommandRunner,
   webView: WebView,
+  flippableTest: FlippableTest,
 };
 
 function Widget({ theme, config, clipPath, onResize, onDelete, dashboardId, dashboard, layout, allWidgets, widgetConversations, setWidgetConversations, reloadTrigger }) {
@@ -1631,7 +2274,39 @@ function Widget({ theme, config, clipPath, onResize, onDelete, dashboardId, dash
   const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
   const [isRegenerating, setIsRegenerating] = useState(false);
 
-  if (!Component) return null;
+  if (!Component) {
+    // Show unknown widget type instead of returning null
+    return (
+      <div
+        className="widget"
+        style={{
+          background: theme.widgetBg,
+          border: '2px solid ' + theme.negative,
+          borderRadius: theme.widgetRadius,
+          clipPath: clipPath,
+          width: '100%',
+          height: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '20px',
+          textAlign: 'center',
+        }}
+      >
+        <div style={{ fontSize: '48px', marginBottom: '16px' }}>⚠️</div>
+        <div style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '8px', color: theme.negative }}>
+          Unknown Widget Type
+        </div>
+        <div style={{ fontSize: '14px', color: theme.textColor, opacity: 0.7, marginBottom: '8px' }}>
+          Type: "{config.type}"
+        </div>
+        <div style={{ fontSize: '12px', color: theme.textColor, opacity: 0.5 }}>
+          Widget ID: {config.id}
+        </div>
+      </div>
+    );
+  }
 
   const isChat = config.type === 'chat';
   const widgetKey = `${dashboardId}-${config.id}`;
@@ -2448,6 +3123,161 @@ function AddProjectDialog({ theme, onClose, onAdd }) {
   );
 }
 
+// Global stream manager to persist stream data across component unmounts
+const globalStreamManager = {
+  activeStreams: new Map(), // conversationId -> {text, toolCalls, processedTexts, processedTools}
+
+  initStream(conversationId) {
+    if (!this.activeStreams.has(conversationId)) {
+      this.activeStreams.set(conversationId, {
+        text: '',
+        toolCalls: [],
+        processedTexts: new Set(),
+        processedTools: new Set()
+      });
+    }
+    return this.activeStreams.get(conversationId);
+  },
+
+  getStream(conversationId) {
+    return this.activeStreams.get(conversationId);
+  },
+
+  clearStream(conversationId) {
+    this.activeStreams.delete(conversationId);
+  },
+
+  appendText(conversationId, text) {
+    const stream = this.initStream(conversationId);
+    const needsSpace = stream.text && !stream.text.endsWith(' ') && !stream.text.endsWith('\n');
+    stream.text += (needsSpace ? ' ' : '') + text;
+  },
+
+  addToolCall(conversationId, toolCall) {
+    const stream = this.initStream(conversationId);
+    stream.toolCalls.push(toolCall);
+  }
+};
+
+// Global state manager for chat inputs (persists across component unmounts)
+const globalChatInputs = new Map(); // conversationId -> input text
+
+// Global state manager for command outputs (persists across component unmounts)
+const globalCommandOutputs = new Map(); // widgetId -> output text
+
+// Set up global event handlers for Claude streaming (persists across component mounts/unmounts)
+if (typeof window !== 'undefined' && !window.__claudeStreamHandlersInitialized) {
+  window.__claudeStreamHandlersInitialized = true;
+
+  // Wait for claudeAPI to be available
+  const initGlobalHandlers = () => {
+    if (!window.claudeAPI) {
+      setTimeout(initGlobalHandlers, 100);
+      return;
+    }
+
+    console.log('[Global Stream Manager] Initializing global Claude stream handlers');
+
+    // Global message handler
+    window.claudeAPI.onMessage((data) => {
+      const { chatId, message } = data;
+      if (!chatId || !message) return;
+
+      if (message.type === 'result') return; // Ignore result messages
+
+      if (message.type === 'assistant' && message.message?.content) {
+        const stream = globalStreamManager.initStream(chatId);
+
+        message.message.content.forEach((block) => {
+          if (block.type === 'text' && block.text) {
+            const textHash = block.text.trim();
+            if (!stream.processedTexts.has(textHash)) {
+              stream.processedTexts.add(textHash);
+              globalStreamManager.appendText(chatId, block.text);
+              console.log('[Global Stream Manager] Appended text for', chatId);
+            }
+          } else if (block.type === 'tool_use' && block.name) {
+            const toolId = block.id || block.name;
+            if (!stream.processedTools.has(toolId)) {
+              stream.processedTools.add(toolId);
+              const toolCall = {
+                name: block.name,
+                id: toolId,
+                description: block.name, // Simplified, can enhance later
+                input: block.input
+              };
+              globalStreamManager.addToolCall(chatId, toolCall);
+              console.log('[Global Stream Manager] Added tool call for', chatId);
+            }
+          }
+        });
+      }
+    });
+
+    // Global completion handler
+    window.claudeAPI.onComplete(async (data) => {
+      const { chatId } = data;
+      if (!chatId) return;
+
+      const stream = globalStreamManager.getStream(chatId);
+      if (!stream) {
+        console.warn('[Global Stream Manager] No stream data for', chatId);
+        return;
+      }
+
+      console.log('[Global Stream Manager] Stream complete for', chatId, '- saving message');
+
+      // Save the message
+      if (stream.text || stream.toolCalls.length > 0) {
+        const messageToSave = {
+          from: 'assistant',
+          text: stream.text || ''
+        };
+
+        if (stream.toolCalls.length > 0) {
+          messageToSave.toolCalls = stream.toolCalls.map(({ name, description, input }) => ({
+            name,
+            description,
+            input
+          }));
+        }
+
+        try {
+          await window.claudeAPI.saveMessage(chatId, messageToSave);
+          console.log('[Global Stream Manager] Message saved successfully');
+        } catch (error) {
+          console.error('[Global Stream Manager] Error saving message:', error);
+        }
+      }
+
+      // Clear stream data
+      globalStreamManager.clearStream(chatId);
+    });
+
+    // Global error handler
+    window.claudeAPI.onError(async (data) => {
+      const { chatId, error } = data;
+      if (!chatId) return;
+
+      console.error('[Global Stream Manager] Stream error for', chatId, error);
+
+      const errorMessage = {
+        from: 'assistant',
+        text: `Error: ${error}`
+      };
+
+      try {
+        await window.claudeAPI.saveMessage(chatId, errorMessage);
+      } catch (err) {
+        console.error('[Global Stream Manager] Error saving error message:', err);
+      }
+
+      globalStreamManager.clearStream(chatId);
+    });
+  };
+
+  initGlobalHandlers();
+}
 
 export default function App() {
   const [activeId, setActiveId] = useState(null);

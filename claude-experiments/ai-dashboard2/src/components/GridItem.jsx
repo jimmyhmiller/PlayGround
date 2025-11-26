@@ -347,7 +347,7 @@ export const GridItem = ({
     height: `${size.height}px`,
     zIndex: zIndex,
     cursor: currentCursor,
-    userSelect: 'none',
+    userSelect: (isDragging || isResizing) ? 'none' : 'auto',
     boxSizing: 'border-box',
     ...style
   };

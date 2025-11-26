@@ -380,3 +380,133 @@ body {
     opacity: 1;
   }
 }
+
+/* 3D Flip Animation for Widgets */
+.widget-flip-container {
+  width: 100%;
+  height: 100%;
+  perspective: 1500px;
+  position: relative;
+}
+
+.widget-flip-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transition: transform 0.8s cubic-bezier(0.4, 0.0, 0.2, 1);
+  transform-style: preserve-3d;
+}
+
+.widget-flip-container.flipped .widget-flip-inner {
+  transform: rotateY(180deg);
+}
+
+.widget-flip-front,
+.widget-flip-back {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  overflow: hidden;
+}
+
+.widget-flip-front .widget,
+.widget-flip-back .widget {
+  overflow: auto;
+  height: 100%;
+}
+
+.widget-flip-back {
+  transform: rotateY(180deg);
+}
+
+.flip-button {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-family: monospace;
+  color: #888;
+  transition: all 0.2s;
+  z-index: 10;
+}
+
+.flip-button:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #aaa;
+}
+
+.json-editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.json-editor textarea {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  padding: 12px;
+  color: #c9d1d9;
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+  font-size: 0.75rem;
+  resize: none;
+  outline: none;
+  line-height: 1.5;
+}
+
+.json-editor textarea:focus {
+  border-color: rgba(88, 166, 255, 0.5);
+}
+
+.json-editor-buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.json-editor-buttons button {
+  padding: 6px 14px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.json-editor-buttons .save-button {
+  background: #3fb950;
+  color: #fff;
+}
+
+.json-editor-buttons .save-button:hover {
+  background: #4ac959;
+}
+
+.json-editor-buttons .cancel-button {
+  background: rgba(255, 255, 255, 0.1);
+  color: #c9d1d9;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.json-editor-buttons .cancel-button:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.json-editor-error {
+  color: #f85149;
+  font-size: 0.7rem;
+  padding: 6px 10px;
+  background: rgba(248, 81, 73, 0.1);
+  border: 1px solid rgba(248, 81, 73, 0.3);
+  border-radius: 4px;
+}
