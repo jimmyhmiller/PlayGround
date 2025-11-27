@@ -100,6 +100,10 @@
         {
           "key": "testResults",
           "value": "Test results with pass/fail status. Built-in runners: cargo, jest, pytest"
+        },
+        {
+          "key": "markdown",
+          "value": "Render markdown from content or file"
         }
       ]
     },
@@ -207,53 +211,6 @@
       ]
     },
     {
-      "id": "test-results-demo",
-      "type": "testResults",
-      "x": 1176,
-      "y": 0,
-      "width": 380,
-      "height": 576,
-      "label": "Test Suite Results",
-      "tests": [
-        {
-          "name": "User authentication flow",
-          "status": "passed",
-          "duration": 145
-        },
-        {
-          "name": "Database connection pool",
-          "status": "passed",
-          "duration": 23
-        },
-        {
-          "name": "API rate limiting",
-          "status": "failed",
-          "duration": 1204,
-          "error": "Expected 429 status code but got 200\n  at Object.test (api.test.js:45:12)"
-        },
-        {
-          "name": "File upload validation",
-          "status": "passed",
-          "duration": 312
-        },
-        {
-          "name": "Email notification service",
-          "status": "skipped"
-        },
-        {
-          "name": "Cache invalidation",
-          "status": "failed",
-          "duration": 89,
-          "error": "Cache key 'user:123' still exists after invalidation"
-        },
-        {
-          "name": "Payment processing",
-          "status": "passed",
-          "duration": 567
-        }
-      ]
-    },
-    {
       "id": "bugs-list",
       "type": "todoList",
       "x": 0,
@@ -344,6 +301,16 @@
           "following": 321
         }
       }
+    },
+    {
+      "id": "code-editor-plan",
+      "type": "markdown",
+      "x": 1176,
+      "y": 0,
+      "width": 520,
+      "height": 604,
+      "label": "Code Editor Widget Planning",
+      "filePath": "CODE_EDITOR_WIDGET_PLAN.md"
     }
   ],
   "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/.ai-dashboard/dashboard.json"

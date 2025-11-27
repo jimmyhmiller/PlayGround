@@ -966,6 +966,40 @@ ipcMain.handle('load-data-file', async (event, filePath) => {
   }
 });
 
+ipcMain.handle('load-text-file', async (event, filePath) => {
+  try {
+    // Resolve relative paths from the dashboard's directory
+    // If path is absolute, use it directly
+    let resolvedPath = filePath;
+
+    // If it's a relative path, try to resolve it relative to each dashboard directory
+    if (!path.isAbsolute(filePath)) {
+      // Try to find the file relative to any watched dashboard directory
+      for (const dashboardPath of watchedPaths.keys()) {
+        const dashboardDir = path.dirname(dashboardPath);
+        const testPath = path.join(dashboardDir, filePath);
+        if (fs.existsSync(testPath)) {
+          resolvedPath = testPath;
+          break;
+        }
+      }
+    }
+
+    console.log(`[TextLoader] Loading text file from: ${resolvedPath}`);
+
+    if (!fs.existsSync(resolvedPath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+
+    const content = fs.readFileSync(resolvedPath, 'utf-8');
+
+    return { success: true, content };
+  } catch (error) {
+    console.error('[TextLoader] Error loading text file:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 // Command Runner Handler
 ipcMain.handle('run-command', async (event, { command, cwd }) => {
   try {

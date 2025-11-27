@@ -265,12 +265,15 @@ public class Parser {
                     }
 
                     Token declaratorEnd = previous();
-                    SourceLocation declaratorLoc = initExpr != null
-                        ? createLocation(patternStart, declaratorEnd)
-                        : createLocation(patternStart, previous());
 
                     int declaratorStart = getStart(patternStart);
-                    int declaratorEndPos = initExpr != null ? getEnd(declaratorEnd) : getEnd(previous());
+                    int declaratorEndPos;
+                    SourceLocation declaratorLoc;
+
+                    // Use the end of the last token (which includes closing parens)
+                    declaratorEndPos = getEnd(declaratorEnd);
+                    declaratorLoc = createLocation(patternStart, declaratorEnd);
+
                     declarators.add(new VariableDeclarator(declaratorStart, declaratorEndPos, declaratorLoc, pattern, initExpr));
 
                 } while (match(TokenType.COMMA));
@@ -1418,19 +1421,9 @@ public class Parser {
             int declaratorEndPos;
             SourceLocation declaratorLoc;
 
-            // Use init.end() and init.loc() for template literals and complex expressions that calculate their own end positions
-            if (init != null && (init instanceof TemplateLiteral || init instanceof ConditionalExpression)) {
-                declaratorEndPos = init.end();
-                // Create location using getPositionFromOffset for accurate line/column
-                SourceLocation.Position startPos = new SourceLocation.Position(patternStart.line(), patternStart.column());
-                SourceLocation.Position endPos = getPositionFromOffset(declaratorEndPos);
-                declaratorLoc = new SourceLocation(startPos, endPos);
-            } else {
-                declaratorEndPos = init != null ? getEnd(declaratorEnd) : getEnd(previous());
-                declaratorLoc = init != null
-                    ? createLocation(patternStart, declaratorEnd)
-                    : createLocation(patternStart, previous());
-            }
+            // Use the end of the last token (which includes closing parens)
+            declaratorEndPos = getEnd(declaratorEnd);
+            declaratorLoc = createLocation(patternStart, declaratorEnd);
 
             declarators.add(new VariableDeclarator(declaratorStart, declaratorEndPos, declaratorLoc, pattern, init));
 

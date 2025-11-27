@@ -907,6 +907,190 @@ function JsonViewer({ theme, config }) {
   );
 }
 
+function Markdown({ theme, config, dashboard }) {
+  const [content, setContent] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    // If markdown content is provided inline, use it directly
+    if (config.content !== undefined) {
+      setContent(config.content);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
+    // If filePath is provided, load from file
+    if (config.filePath) {
+      setLoading(true);
+      setError(null);
+
+      // Resolve relative paths based on project root
+      let fullPath = config.filePath;
+      if (!fullPath.startsWith('/') && dashboard?._projectRoot) {
+        fullPath = `${dashboard._projectRoot}/${config.filePath}`;
+      }
+
+      // Use the dashboard API to load the file as text
+      if (window.dashboardAPI && window.dashboardAPI.loadTextFile) {
+        console.log('[Markdown] Loading file via dashboardAPI:', fullPath);
+        window.dashboardAPI.loadTextFile(fullPath)
+          .then(text => {
+            console.log('[Markdown] Loaded text, length:', text.length);
+            setContent(text);
+            setLoading(false);
+          })
+          .catch(err => {
+            console.error('[Markdown] Failed to load file from', fullPath, err);
+            setError(err.message || 'Failed to load file');
+            setLoading(false);
+          });
+      } else {
+        console.error('[Markdown] dashboardAPI.loadTextFile not available, this will not work correctly');
+        setError('File loading API not available');
+        setLoading(false);
+      }
+    }
+  }, [config.content, config.filePath, dashboard]);
+
+  if (loading) {
+    return (
+      <>
+        <div className="widget-label" style={{ fontFamily: theme.textBody }}>{config.label}</div>
+        <div style={{
+          fontFamily: theme.textBody,
+          color: theme.textColor,
+          opacity: 0.6,
+          padding: '20px',
+          textAlign: 'center'
+        }}>
+          Loading...
+        </div>
+      </>
+    );
+  }
+
+  if (error) {
+    return (
+      <>
+        <div className="widget-label" style={{ fontFamily: theme.textBody }}>{config.label}</div>
+        <div style={{
+          fontFamily: theme.textBody,
+          color: theme.negative,
+          padding: '20px'
+        }}>
+          ⚠️ Error: {error}
+        </div>
+      </>
+    );
+  }
+
+  if (!content) {
+    return (
+      <>
+        <div className="widget-label" style={{ fontFamily: theme.textBody }}>{config.label}</div>
+        <div style={{
+          fontFamily: theme.textBody,
+          color: theme.textColor,
+          opacity: 0.6,
+          padding: '20px',
+          textAlign: 'center'
+        }}>
+          No content provided. Add "content" or "filePath" to widget config.
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div className="widget-label" style={{ fontFamily: theme.textBody }}>{config.label}</div>
+      <div style={{
+        flex: 1,
+        overflow: 'auto',
+        padding: '12px',
+        fontFamily: theme.textBody,
+        color: theme.textColor,
+        lineHeight: 1.6,
+        fontSize: '0.9rem'
+      }}>
+        <ReactMarkdown
+          components={{
+            code({ node, inline, className, children, ...props }) {
+              const match = /language-(\w+)/.exec(className || '');
+              return !inline && match ? (
+                <SyntaxHighlighter
+                  style={oneDark}
+                  language={match[1]}
+                  PreTag="div"
+                  {...props}
+                >
+                  {String(children).replace(/\n$/, '')}
+                </SyntaxHighlighter>
+              ) : (
+                <code
+                  style={{
+                    background: 'rgba(0,0,0,0.3)',
+                    padding: '2px 6px',
+                    borderRadius: '3px',
+                    fontFamily: 'monospace',
+                    fontSize: '0.85em'
+                  }}
+                  className={className}
+                  {...props}
+                >
+                  {children}
+                </code>
+              );
+            },
+            h1: ({ children }) => (
+              <h1 style={{ color: theme.accent, marginTop: '0.5em', marginBottom: '0.5em' }}>{children}</h1>
+            ),
+            h2: ({ children }) => (
+              <h2 style={{ color: theme.accent, marginTop: '0.5em', marginBottom: '0.5em' }}>{children}</h2>
+            ),
+            h3: ({ children }) => (
+              <h3 style={{ color: theme.accent, marginTop: '0.5em', marginBottom: '0.5em' }}>{children}</h3>
+            ),
+            a: ({ children, href }) => (
+              <a href={href} style={{ color: theme.accent }} target="_blank" rel="noopener noreferrer">{children}</a>
+            ),
+            ul: ({ children }) => (
+              <ul style={{ paddingLeft: '1.5em' }}>{children}</ul>
+            ),
+            ol: ({ children }) => (
+              <ol style={{ paddingLeft: '1.5em' }}>{children}</ol>
+            ),
+            blockquote: ({ children }) => (
+              <blockquote style={{
+                borderLeft: `3px solid ${theme.accent}`,
+                paddingLeft: '1em',
+                marginLeft: 0,
+                opacity: 0.8
+              }}>
+                {children}
+              </blockquote>
+            ),
+            pre: ({ children }) => (
+              <pre style={{
+                background: 'rgba(0,0,0,0.3)',
+                padding: '12px',
+                borderRadius: '6px',
+                overflow: 'auto'
+              }}>
+                {children}
+              </pre>
+            ),
+          }}
+        >
+          {content}
+        </ReactMarkdown>
+      </div>
+    </>
+  );
+}
+
 function LayoutSettings({ theme, config, dashboardId, layout }) {
   const [widgetGap, setWidgetGap] = useState(layout?.widgetGap ?? 10);
   const [buffer, setBuffer] = useState(layout?.buffer ?? 20);
@@ -2262,6 +2446,7 @@ const widgetComponents = {
   claudeTodos: ClaudeTodoList,
   keyValue: KeyValue,
   jsonViewer: JsonViewer,
+  markdown: Markdown,
   layoutSettings: LayoutSettings,
   commandRunner: CommandRunner,
   webView: WebView,

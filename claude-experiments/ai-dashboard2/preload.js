@@ -55,6 +55,15 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
     }
     return result.data;
   },
+
+  // Load text from a file (for markdown, code, etc.)
+  loadTextFile: async (filePath) => {
+    const result = await ipcRenderer.invoke('load-text-file', filePath);
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return result.content;
+  },
 });
 
 contextBridge.exposeInMainWorld('commandAPI', {
