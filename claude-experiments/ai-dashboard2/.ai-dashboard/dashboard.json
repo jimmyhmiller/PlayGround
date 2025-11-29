@@ -19,7 +19,8 @@
     "areas": "\". .\" \". .\"",
     "gridSize": 16,
     "widgetGap": 12,
-    "buffer": 12
+    "buffer": 12,
+    "mode": "vertical-scroll"
   },
   "widgets": [
     {
@@ -41,8 +42,8 @@
       "type": "keyValue",
       "x": 784,
       "y": 0,
-      "width": 380,
-      "height": 464,
+      "width": 548,
+      "height": 548,
       "label": "Available Component Types",
       "items": [
         {
@@ -104,6 +105,10 @@
         {
           "key": "markdown",
           "value": "Render markdown from content or file"
+        },
+        {
+          "key": "errorTest",
+          "value": "Test widget with error boundary - throws error on button click"
         }
       ]
     },
@@ -216,7 +221,7 @@
       "x": 0,
       "y": 532,
       "width": 380,
-      "height": 324,
+      "height": 380,
       "label": "Bugs",
       "items": [
         {
@@ -254,63 +259,23 @@
       ]
     },
     {
-      "id": "json-example",
-      "type": "jsonViewer",
-      "x": 784,
-      "y": 476,
-      "width": 380,
-      "height": 464,
-      "label": "JSON Viewer Example",
-      "data": {
-        "user": {
-          "id": 12345,
-          "name": "John Doe",
-          "email": "john@example.com",
-          "active": true,
-          "settings": {
-            "theme": "dark",
-            "notifications": {
-              "email": true,
-              "push": false,
-              "sms": null
-            },
-            "privacy": {
-              "profileVisible": true,
-              "showEmail": false
-            }
-          },
-          "roles": [
-            "admin",
-            "user",
-            "developer"
-          ]
-        },
-        "metadata": {
-          "created": "2024-01-15",
-          "lastLogin": "2024-01-20",
-          "loginCount": 42
-        },
-        "tags": [
-          "premium",
-          "verified",
-          "early-adopter"
-        ],
-        "stats": {
-          "posts": 156,
-          "followers": 2847,
-          "following": 321
-        }
-      }
-    },
-    {
       "id": "code-editor-plan",
       "type": "markdown",
-      "x": 1176,
-      "y": 0,
+      "x": 784,
+      "y": 560,
       "width": 520,
-      "height": 604,
+      "height": 408,
       "label": "Code Editor Widget Planning",
       "filePath": "CODE_EDITOR_WIDGET_PLAN.md"
+    },
+    {
+      "id": "layout-settings",
+      "type": "layoutSettings",
+      "x": 1344,
+      "y": 0,
+      "width": 380,
+      "height": 440,
+      "label": "Layout Settings"
     }
   ],
   "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/.ai-dashboard/dashboard.json"

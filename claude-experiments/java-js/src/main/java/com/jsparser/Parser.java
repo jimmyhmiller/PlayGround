@@ -791,8 +791,8 @@ public class Parser {
             boolean computed = false;
 
             if (isPrivate) {
-                // Private identifier
-                if (!check(TokenType.IDENTIFIER)) {
+                // Private identifier - allow keywords as private names
+                if (!check(TokenType.IDENTIFIER) && !isKeyword(keyToken)) {
                     throw new ExpectedTokenException("identifier after '#'", peek());
                 }
                 advance();
@@ -1215,7 +1215,8 @@ public class Parser {
                 if (check(TokenType.STRING)) {
                     advance();
                     exported = new Literal(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.literal(), nameToken.lexeme());
-                } else if (check(TokenType.IDENTIFIER) || isKeyword(nameToken)) {
+                } else if (check(TokenType.IDENTIFIER) || isKeyword(nameToken) ||
+                           check(TokenType.TRUE) || check(TokenType.FALSE) || check(TokenType.NULL)) {
                     advance();
                     exported = new Identifier(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.lexeme());
                 } else {
@@ -1271,7 +1272,8 @@ public class Parser {
                         if (check(TokenType.STRING)) {
                             advance();
                             exported = new Literal(getStart(exportedToken), getEnd(exportedToken), createLocation(exportedToken, exportedToken), exportedToken.literal(), exportedToken.lexeme());
-                        } else if (check(TokenType.IDENTIFIER) || isKeyword(exportedToken)) {
+                        } else if (check(TokenType.IDENTIFIER) || isKeyword(exportedToken) ||
+                                   check(TokenType.TRUE) || check(TokenType.FALSE) || check(TokenType.NULL)) {
                             advance();
                             exported = new Identifier(getStart(exportedToken), getEnd(exportedToken), createLocation(exportedToken, exportedToken), exportedToken.lexeme());
                         } else {
@@ -2131,18 +2133,9 @@ public class Parser {
             allowIn = oldAllowIn;
             Token endToken = previous();
 
-            // Use alternate.end() and accurate location for template literals and complex expressions
-            int conditionalEnd;
-            SourceLocation loc;
-            if (alternate instanceof TemplateLiteral) {
-                conditionalEnd = alternate.end();
-                SourceLocation.Position startPos = new SourceLocation.Position(startToken.line(), startToken.column());
-                SourceLocation.Position endPos = getPositionFromOffset(conditionalEnd);
-                loc = new SourceLocation(startPos, endPos);
-            } else {
-                conditionalEnd = getEnd(endToken);
-                loc = createLocation(startToken, endToken);
-            }
+            // Always use endToken to include any closing parens
+            int conditionalEnd = getEnd(endToken);
+            SourceLocation loc = createLocation(startToken, endToken);
 
             return new ConditionalExpression(getStart(startToken), conditionalEnd, loc, test, consequent, alternate);
         }
@@ -2457,10 +2450,10 @@ public class Parser {
                     SourceLocation loc = createLocation(startToken, endToken);
                     expr = new MemberExpression(getStart(startToken), getEnd(endToken), loc, expr, property, true, true);
                 } else if (match(TokenType.HASH)) {
-                    // Optional private field: obj?.#x
+                    // Optional private field: obj?.#x - allow keywords as private names
                     Token hashToken = previous();
                     Token propertyToken = peek();
-                    if (!check(TokenType.IDENTIFIER)) {
+                    if (!check(TokenType.IDENTIFIER) && !isKeyword(propertyToken)) {
                         throw new ExpectedTokenException("identifier after '#'", peek());
                     }
                     advance();
@@ -2485,10 +2478,10 @@ public class Parser {
             } else if (match(TokenType.DOT)) {
                 // Member expression: obj.property or obj.#privateProperty
                 if (match(TokenType.HASH)) {
-                    // Private field: obj.#x
+                    // Private field: obj.#x - allow keywords as private names
                     Token hashToken = previous();
                     Token propertyToken = peek();
-                    if (!check(TokenType.IDENTIFIER)) {
+                    if (!check(TokenType.IDENTIFIER) && !isKeyword(propertyToken)) {
                         throw new ExpectedTokenException("identifier after '#'", peek());
                     }
                     advance();
@@ -2583,10 +2576,10 @@ public class Parser {
 
         return switch (token.type()) {
             case HASH -> {
-                // Private identifier for `#field in obj` expressions
+                // Private identifier for `#field in obj` expressions - allow keywords as private names
                 advance(); // consume #
                 Token nameToken = peek();
-                if (!check(TokenType.IDENTIFIER)) {
+                if (!check(TokenType.IDENTIFIER) && !isKeyword(nameToken)) {
                     throw new ExpectedTokenException("identifier after '#'", peek());
                 }
                 advance();

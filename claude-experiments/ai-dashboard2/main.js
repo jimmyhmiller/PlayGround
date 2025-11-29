@@ -443,6 +443,9 @@ ipcMain.handle('update-layout-settings', async (event, { dashboardId, settings }
     if (settings.buffer !== undefined) {
       entry.dashboard.layout.buffer = settings.buffer;
     }
+    if (settings.mode !== undefined) {
+      entry.dashboard.layout.mode = settings.mode;
+    }
 
     // Record the time of this write
     entry.lastWriteTime = Date.now();

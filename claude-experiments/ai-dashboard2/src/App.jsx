@@ -1,9 +1,88 @@
-import { useState, useRef, useEffect, useMemo, Suspense } from 'react';
+import { useState, useRef, useEffect, useMemo, Suspense, Component } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { Grid, GridItem } from './components';
 import './styles.css';
+
+// Error Boundary Component
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null, errorInfo: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('ErrorBoundary caught an error:', error, errorInfo);
+    this.setState({
+      error,
+      errorInfo
+    });
+  }
+
+  render() {
+    if (this.state.hasError) {
+      const { theme } = this.props;
+
+      return (
+        <div style={{
+          padding: '20px',
+          fontFamily: theme?.textBody || 'sans-serif',
+          color: theme?.negative || '#ff4757',
+          backgroundColor: theme?.widgetBg || 'rgba(22, 27, 34, 0.85)',
+          border: `1px solid ${theme?.negative || '#ff4757'}`,
+          borderRadius: theme?.widgetRadius || '8px',
+          height: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px'
+        }}>
+          <div style={{ fontSize: '1.2rem', fontWeight: 'bold' }}>
+            ⚠️ Widget Error
+          </div>
+          <div style={{
+            fontSize: '0.9rem',
+            opacity: 0.9,
+            fontFamily: 'monospace',
+            whiteSpace: 'pre-wrap',
+            overflow: 'auto',
+            flex: 1
+          }}>
+            {this.state.error?.toString()}
+            {this.state.errorInfo?.componentStack && (
+              <details style={{ marginTop: '10px', fontSize: '0.8rem', opacity: 0.7 }}>
+                <summary style={{ cursor: 'pointer' }}>Stack Trace</summary>
+                <pre>{this.state.errorInfo.componentStack}</pre>
+              </details>
+            )}
+          </div>
+          <button
+            onClick={() => this.setState({ hasError: false, error: null, errorInfo: null })}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: theme?.accent || '#00d9ff',
+              color: theme?.bgApp || '#0d1117',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              fontFamily: theme?.textBody || 'sans-serif',
+              fontSize: '0.9rem',
+              fontWeight: 'bold'
+            }}
+          >
+            Try Again
+          </button>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 const icons = {
   botanist: (
@@ -912,6 +991,9 @@ function Markdown({ theme, config, dashboard }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  // Extract only the project root to avoid re-rendering on every dashboard change
+  const projectRoot = dashboard?._projectRoot;
+
   useEffect(() => {
     // If markdown content is provided inline, use it directly
     if (config.content !== undefined) {
@@ -928,8 +1010,8 @@ function Markdown({ theme, config, dashboard }) {
 
       // Resolve relative paths based on project root
       let fullPath = config.filePath;
-      if (!fullPath.startsWith('/') && dashboard?._projectRoot) {
-        fullPath = `${dashboard._projectRoot}/${config.filePath}`;
+      if (!fullPath.startsWith('/') && projectRoot) {
+        fullPath = `${projectRoot}/${config.filePath}`;
       }
 
       // Use the dashboard API to load the file as text
@@ -952,7 +1034,7 @@ function Markdown({ theme, config, dashboard }) {
         setLoading(false);
       }
     }
-  }, [config.content, config.filePath, dashboard]);
+  }, [config.content, config.filePath, projectRoot]);
 
   if (loading) {
     return (
@@ -1091,9 +1173,69 @@ function Markdown({ theme, config, dashboard }) {
   );
 }
 
+function ErrorTestWidget({ theme, config }) {
+  const [shouldError, setShouldError] = useState(false);
+
+  if (shouldError) {
+    throw new Error('This is a test error thrown by the button!');
+  }
+
+  return (
+    <>
+      <div className="widget-label" style={{ fontFamily: theme.textBody }}>
+        {config.label || 'Error Test'}
+      </div>
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: '20px',
+        padding: '40px',
+        fontFamily: theme.textBody,
+        color: theme.textColor,
+        height: '100%'
+      }}>
+        <div style={{ fontSize: '3rem' }}>💣</div>
+        <div style={{ textAlign: 'center', opacity: 0.8 }}>
+          Click the button below to throw an error and test the error boundary
+        </div>
+        <button
+          onClick={() => setShouldError(true)}
+          style={{
+            padding: '12px 24px',
+            backgroundColor: theme.negative || '#ff4757',
+            color: '#fff',
+            border: 'none',
+            borderRadius: '8px',
+            cursor: 'pointer',
+            fontFamily: theme.textBody,
+            fontSize: '1rem',
+            fontWeight: 'bold',
+            transition: 'transform 0.1s',
+          }}
+          onMouseEnter={(e) => e.target.style.transform = 'scale(1.05)'}
+          onMouseLeave={(e) => e.target.style.transform = 'scale(1)'}
+        >
+          💥 Throw Error
+        </button>
+      </div>
+    </>
+  );
+}
+
 function LayoutSettings({ theme, config, dashboardId, layout }) {
   const [widgetGap, setWidgetGap] = useState(layout?.widgetGap ?? 10);
   const [buffer, setBuffer] = useState(layout?.buffer ?? 20);
+  const [layoutMode, setLayoutMode] = useState(layout?.mode || 'single-pane');
+
+
+  // Update local state when layout prop changes
+  useEffect(() => {
+    if (layout?.mode && layout.mode !== layoutMode) {
+      setLayoutMode(layout.mode);
+    }
+  }, [layout?.mode]);
 
   const handleGapChange = (e) => {
     const value = parseInt(e.target.value);
@@ -1111,10 +1253,63 @@ function LayoutSettings({ theme, config, dashboardId, layout }) {
     }
   };
 
+  const handleModeChange = (mode) => {
+    setLayoutMode(mode);
+    if (window.dashboardAPI && dashboardId) {
+      window.dashboardAPI.updateLayoutSettings(dashboardId, { mode });
+    } else {
+      console.error('[LayoutSettings] dashboardAPI not available or no dashboardId');
+    }
+  };
+
+  const modes = [
+    { value: 'single-pane', label: '📄 Single Pane', description: 'Fixed viewport, no scrolling' },
+    { value: 'infinite-canvas', label: '🎨 Infinite Canvas', description: 'Hold Option/Alt to pan around' },
+    { value: 'vertical-scroll', label: '↕️ Vertical Scroll', description: 'Scroll up and down' },
+    { value: 'horizontal-scroll', label: '↔️ Horizontal Scroll', description: 'Scroll left and right' }
+  ];
+
   return (
     <>
       <div className="widget-label" style={{ fontFamily: theme.textBody }}>Layout Settings</div>
-      <div style={{ fontFamily: theme.textBody, fontSize: '0.85rem', color: theme.textColor }}>
+      <div style={{ fontFamily: theme.textBody, fontSize: '0.85rem', color: theme.textColor, padding: '12px' }}>
+        {/* Layout Mode Selector */}
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ marginBottom: 8, fontWeight: 'bold', color: theme.accent }}>Layout Mode</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {modes.map(mode => (
+              <div
+                key={mode.value}
+                onClick={() => handleModeChange(mode.value)}
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: '6px',
+                  border: `2px solid ${layoutMode === mode.value ? theme.accent : 'rgba(255,255,255,0.1)'}`,
+                  backgroundColor: layoutMode === mode.value ? `${theme.accent}22` : 'rgba(255,255,255,0.05)',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                }}
+                onMouseEnter={(e) => {
+                  if (layoutMode !== mode.value) {
+                    e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.08)';
+                    e.currentTarget.style.borderColor = 'rgba(255,255,255,0.2)';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (layoutMode !== mode.value) {
+                    e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)';
+                    e.currentTarget.style.borderColor = 'rgba(255,255,255,0.1)';
+                  }
+                }}
+              >
+                <div style={{ fontWeight: 'bold', marginBottom: 2 }}>{mode.label}</div>
+                <div style={{ fontSize: '0.75rem', opacity: 0.7 }}>{mode.description}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Widget Gap Slider */}
         <div style={{ marginBottom: 15 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
             <label>Widget Gap</label>
@@ -1129,6 +1324,8 @@ function LayoutSettings({ theme, config, dashboardId, layout }) {
             style={{ width: '100%', accentColor: theme.accent }}
           />
         </div>
+
+        {/* Buffer Slider */}
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
             <label>Min Size Buffer</label>
@@ -1847,6 +2044,7 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
   const [showConversations, setShowConversations] = useState(false);
   const [permissionMode, setPermissionMode] = useState('bypassPermissions'); // 'plan' or 'bypassPermissions', default to bypassPermissions
   const messagesEndRef = useRef(null);
+  const messagesContainerRef = useRef(null);
   const processedTextsRef = useRef(new Set()); // Track processed text content to avoid duplicates
   const processedToolsRef = useRef(new Set()); // Track processed tool calls to avoid duplicates
   const currentStreamTextRef = useRef(''); // Track stream text for saving (ref to avoid closure issues)
@@ -1971,8 +2169,8 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
       // Scroll to bottom immediately after initial load (no animation)
       // Use setTimeout to ensure DOM has updated
       setTimeout(() => {
-        if (messagesEndRef.current) {
-          messagesEndRef.current.scrollIntoView({ behavior: 'instant' });
+        if (messagesContainerRef.current) {
+          messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
         }
         hasLoadedInitialMessagesRef.current = true; // Mark as loaded after scroll
       }, 0);
@@ -1988,7 +2186,12 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
 
     // Only scroll if we've finished initial load AND count actually increased OR we're streaming
     if (hasLoadedInitialMessagesRef.current && (currentCount > previousCount || isStreaming)) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      if (messagesContainerRef.current) {
+        messagesContainerRef.current.scrollTo({
+          top: messagesContainerRef.current.scrollHeight,
+          behavior: 'smooth'
+        });
+      }
     }
 
     // Update the ref for next comparison
@@ -1998,7 +2201,12 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
   // Scroll when streaming text or tool calls update
   useEffect(() => {
     if (isStreaming && hasLoadedInitialMessagesRef.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      if (messagesContainerRef.current) {
+        messagesContainerRef.current.scrollTo({
+          top: messagesContainerRef.current.scrollHeight,
+          behavior: 'smooth'
+        });
+      }
     }
   }, [currentStreamText, currentToolCalls, isStreaming]);
 
@@ -2363,7 +2571,7 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
           ))}
         </div>
       )}
-      <div className="chat-messages">
+      <div className="chat-messages" ref={messagesContainerRef}>
         {messages.map((msg, i) => (
           <ChatMessage key={i} msg={msg} theme={theme} />
         ))}
@@ -2447,6 +2655,7 @@ const widgetComponents = {
   keyValue: KeyValue,
   jsonViewer: JsonViewer,
   markdown: Markdown,
+  errorTest: ErrorTestWidget,
   layoutSettings: LayoutSettings,
   commandRunner: CommandRunner,
   webView: WebView,
@@ -2581,18 +2790,20 @@ function Widget({ theme, config, clipPath, onResize, onDelete, dashboardId, dash
         transition: 'opacity 0.2s',
       }}
     >
-      <Component
-        theme={theme}
-        config={config}
-        dashboardId={dashboardId}
-        dashboard={dashboard}
-        layout={layout}
-        widgetKey={widgetKey}
-        currentConversationId={widgetConversations[widgetKey] || null}
-        setCurrentConversationId={(id) => setWidgetConversations(prev => ({ ...prev, [widgetKey]: id }))}
-        widgetConversations={widgetConversations}
-        reloadTrigger={reloadTrigger}
-      />
+      <ErrorBoundary theme={theme}>
+        <Component
+          theme={theme}
+          config={config}
+          dashboardId={dashboardId}
+          dashboard={dashboard}
+          layout={layout}
+          widgetKey={widgetKey}
+          currentConversationId={widgetConversations[widgetKey] || null}
+          setCurrentConversationId={(id) => setWidgetConversations(prev => ({ ...prev, [widgetKey]: id }))}
+          widgetConversations={widgetConversations}
+          reloadTrigger={reloadTrigger}
+        />
+      </ErrorBoundary>
       {/* Context Menu */}
       {showContextMenu && (
         <div
@@ -2873,9 +3084,24 @@ function Dashboard({ dashboard, allDashboards, onSelect, onWidgetResize, onWidge
   const cellSize = layout?.gridSize || 16;
   const gapX = layout?.widgetGap || 10;
   const gapY = layout?.widgetGap || 10;
+  const layoutMode = layout?.mode || 'single-pane';
+
+
+  // Get overflow styles for window-frame based on mode
+  const getWindowFrameOverflow = () => {
+    switch (layoutMode) {
+      case 'vertical-scroll':
+      case 'horizontal-scroll':
+        return 'visible'; // Allow scrolling to pass through
+      case 'infinite-canvas':
+      case 'single-pane':
+      default:
+        return 'hidden';
+    }
+  };
 
   return (
-    <div className="window-frame" style={{ '--accent': theme.accent }}>
+    <div className="window-frame" style={{ '--accent': theme.accent, overflow: getWindowFrameOverflow() }}>
       <div className="titlebar" />
       <div className="bg-layer" style={theme.bgLayer} />
       <div className="sidebar">
@@ -2947,7 +3173,7 @@ function Dashboard({ dashboard, allDashboards, onSelect, onWidgetResize, onWidge
             </div>
           )}
         </div>
-        <Grid cellSize={cellSize} gapX={gapX} gapY={gapY} width="100%" height="calc(100% - 80px)">
+        <Grid cellSize={cellSize} gapX={gapX} gapY={gapY} mode={layoutMode} width="100%" height="calc(100% - 80px)">
           {dashboard.widgets.map((widget) => (
             <Widget
               key={`${dashboard.id}-${widget.id}`}
