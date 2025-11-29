@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebGPU Texture Readback Test</title>
+    <style>
+        body { margin: 0; padding: 20px; font-family: monospace; }
+        canvas { border: 1px solid #ccc; }
+        #log { margin-top: 10px; white-space: pre; }
+    </style>
+</head>
+<body>
+    <h1>WebGPU Texture Readback Test</h1>
+    <canvas id="canvas" width="400" height="400"></canvas>
+    <div id="log"></div>
+
+    <script type="module">
+        const log = document.getElementById('log');
+        function addLog(msg) {
+            log.textContent += msg + '\n';
+            console.log(msg);
+        }
+
+        async function testWithReadback() {
+            addLog('=== WebGPU Texture Readback Test ===');
+
+            if (!navigator.gpu) {
+                addLog('❌ WebGPU not supported');
+                return;
+            }
+            addLog('✓ WebGPU available');
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            addLog('✓ Device ready');
+
+            const format = 'bgra8unorm';
+
+            // Create offscreen texture we can copy from
+            const texture = device.createTexture({
+                size: { width: 400, height: 400 },
+                format,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+            });
+            addLog('✓ Offscreen texture created');
+
+            // Simple shader
+            const shaderCode = `
+                @vertex
+                fn vs_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32> {
+                    var pos = array<vec2<f32>, 4>(
+                        vec2<f32>(-1.0, -1.0),
+                        vec2<f32>( 1.0, -1.0),
+                        vec2<f32>(-1.0,  1.0),
+                        vec2<f32>( 1.0,  1.0)
+                    );
+                    return vec4<f32>(pos[idx], 0.0, 1.0);
+                }
+
+                @fragment
+                fn fs_main() -> @location(0) vec4<f32> {
+                    return vec4<f32>(1.0, 0.0, 0.0, 1.0); // RED
+                }
+            `;
+
+            const shaderModule = device.createShaderModule({ code: shaderCode });
+            const pipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: { module: shaderModule, entryPoint: 'vs_main' },
+                fragment: {
+                    module: shaderModule,
+                    entryPoint: 'fs_main',
+                    targets: [{ format }],
+                },
+                primitive: { topology: 'triangle-strip' },
+            });
+            addLog('✓ Pipeline created');
+
+            // Render to texture
+            const encoder = device.createCommandEncoder();
+            const renderPass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: texture.createView(),
+                    clearValue: { r: 0, g: 1, b: 0, a: 1 }, // GREEN background
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+            });
+
+            renderPass.setPipeline(pipeline);
+            renderPass.draw(4);
+            renderPass.end();
+
+            // Copy texture to buffer for readback
+            const bytesPerRow = Math.ceil(400 * 4 / 256) * 256;
+            const buffer = device.createBuffer({
+                size: bytesPerRow * 400,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            });
+
+            encoder.copyTextureToBuffer(
+                { texture },
+                { buffer, bytesPerRow },
+                { width: 400, height: 400 }
+            );
+
+            device.queue.submit([encoder.finish()]);
+            addLog('✓ Render + copy submitted');
+
+            // Read back
+            await buffer.mapAsync(GPUMapMode.READ);
+            const data = new Uint8Array(buffer.getMappedRange());
+
+            // Check center pixel
+            const centerX = 200;
+            const centerY = 200;
+            const idx = centerY * bytesPerRow + centerX * 4;
+
+            const r = data[idx + 2];  // BGRA format, so R is at +2
+            const g = data[idx + 1];
+            const b = data[idx + 0];
+            const a = data[idx + 3];
+
+            addLog(`\nCenter pixel (${centerX}, ${centerY}):`);
+            addLog(`  R: ${r}, G: ${g}, B: ${b}, A: ${a}`);
+
+            if (r > 200 && g < 50 && b < 50) {
+                addLog('✅ SUCCESS: Red quad rendering correctly!');
+                window.RENDER_TEST_PASSED = true;
+            } else if (r < 50 && g > 200 && b < 50) {
+                addLog('⚠️ PARTIAL: Green background visible (quad not rendering)');
+                window.RENDER_TEST_PASSED = false;
+            } else {
+                addLog(`❌ FAIL: Unexpected color`);
+                window.RENDER_TEST_PASSED = false;
+            }
+
+            buffer.unmap();
+
+            // Also render to canvas for visual inspection
+            const canvas = document.getElementById('canvas');
+            const context = canvas.getContext('webgpu');
+            context.configure({ device, format, alphaMode: 'opaque' });
+
+            const encoder2 = device.createCommandEncoder();
+            const renderPass2 = encoder2.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    clearValue: { r: 0, g: 1, b: 0, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+            });
+            renderPass2.setPipeline(pipeline);
+            renderPass2.draw(4);
+            renderPass2.end();
+            device.queue.submit([encoder2.finish()]);
+            addLog('✓ Also rendered to canvas');
+        }
+
+        testWithReadback();
+    </script>
+</body>
+</html>

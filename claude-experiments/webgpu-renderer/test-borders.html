@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Test Borders - WebGPU Renderer</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #2a2a2a;
+            font-family: sans-serif;
+            color: white;
+        }
+        h1 {
+            margin: 0 0 20px 0;
+        }
+        canvas {
+            border: 2px solid #444;
+            display: block;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Test Borders - WebGPU Renderer</h1>
+    <canvas id="canvas" width="900" height="700"></canvas>
+    <div id="status">Initializing...</div>
+
+    <script type="module">
+        import { WebGPURenderer } from './src/renderer/webgpu-renderer.js';
+        import { Quad } from './src/core/primitives.js';
+        import { Bounds } from './src/core/geometry.js';
+
+        async function runTest() {
+            const canvas = document.getElementById('canvas');
+            const statusEl = document.getElementById('status');
+
+            try {
+                const renderer = new WebGPURenderer(canvas);
+                await renderer.initialize();
+                statusEl.textContent = 'Renderer initialized ✓';
+
+                const quads = [];
+                let order = 0;
+
+                // Row 1: Uniform border widths (solid style)
+                // Thin border (2px)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 50, 150, 100),
+                    background: { tag: 0, solid: { h: 0.66, s: 0.3, l: 0.8, a: 1 } },  // Light blue
+                    borderStyle: 0,  // Solid
+                    borderWidths: { top: 2, right: 2, bottom: 2, left: 2 },
+                    borderColor: { h: 0.66, s: 1, l: 0.5, a: 1 },  // Blue
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Medium border (5px)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(220, 50, 150, 100),
+                    background: { tag: 0, solid: { h: 0.33, s: 0.3, l: 0.8, a: 1 } },  // Light green
+                    borderStyle: 0,
+                    borderWidths: { top: 5, right: 5, bottom: 5, left: 5 },
+                    borderColor: { h: 0.33, s: 1, l: 0.4, a: 1 },  // Green
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Thick border (10px)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(390, 50, 150, 100),
+                    background: { tag: 0, solid: { h: 0, s: 0.3, l: 0.8, a: 1 } },  // Light red
+                    borderStyle: 0,
+                    borderWidths: { top: 10, right: 10, bottom: 10, left: 10 },
+                    borderColor: { h: 0, s: 1, l: 0.5, a: 1 },  // Red
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Very thick border (20px)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(560, 50, 150, 100),
+                    background: { tag: 0, solid: { h: 0.83, s: 0.3, l: 0.8, a: 1 } },  // Light purple
+                    borderStyle: 0,
+                    borderWidths: { top: 20, right: 20, bottom: 20, left: 20 },
+                    borderColor: { h: 0.83, s: 1, l: 0.5, a: 1 },  // Purple
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Row 2: Asymmetric border widths
+                // Top border only
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 170, 150, 100),
+                    background: { tag: 0, solid: { h: 0.5, s: 0.3, l: 0.8, a: 1 } },
+                    borderStyle: 0,
+                    borderWidths: { top: 8, right: 0, bottom: 0, left: 0 },
+                    borderColor: { h: 0.5, s: 1, l: 0.5, a: 1 },  // Cyan
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Left border only
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(220, 170, 150, 100),
+                    background: { tag: 0, solid: { h: 0.08, s: 0.3, l: 0.8, a: 1 } },
+                    borderStyle: 0,
+                    borderWidths: { top: 0, right: 0, bottom: 0, left: 8 },
+                    borderColor: { h: 0.08, s: 1, l: 0.5, a: 1 },  // Yellow
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Top and bottom
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(390, 170, 150, 100),
+                    background: { tag: 0, solid: { h: 0.91, s: 0.3, l: 0.8, a: 1 } },
+                    borderStyle: 0,
+                    borderWidths: { top: 8, right: 0, bottom: 8, left: 0 },
+                    borderColor: { h: 0.91, s: 1, l: 0.5, a: 1 },  // Pink
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // All different widths
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(560, 170, 150, 100),
+                    background: { tag: 0, solid: { h: 0.16, s: 0.3, l: 0.8, a: 1 } },
+                    borderStyle: 0,
+                    borderWidths: { top: 3, right: 6, bottom: 9, left: 12 },
+                    borderColor: { h: 0.16, s: 1, l: 0.5, a: 1 },  // Orange
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Row 3: Dashed borders
+                // Thin dashed
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 290, 150, 100),
+                    background: { tag: 0, solid: { h: 0, s: 0.3, l: 0.8, a: 1 } },
+                    borderStyle: 1,  // Dashed
+                    borderWidths: { top: 3, right: 3, bottom: 3, left: 3 },
+                    borderColor: { h: 0, s: 1, l: 0.5, a: 1 },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Thick dashed
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(220, 290, 150, 100),
+                    background: { tag: 0, solid: { h: 0.33, s: 0.3, l: 0.8, a: 1 } },
+                    borderStyle: 1,
+                    borderWidths: { top: 8, right: 8, bottom: 8, left: 8 },
+                    borderColor: { h: 0.33, s: 1, l: 0.4, a: 1 },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Dashed with large corners
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(390, 290, 150, 100),
+                    background: { tag: 0, solid: { h: 0.66, s: 0.3, l: 0.8, a: 1 } },
+                    borderStyle: 1,
+                    borderWidths: { top: 5, right: 5, bottom: 5, left: 5 },
+                    borderColor: { h: 0.66, s: 1, l: 0.5, a: 1 },
+                    cornerRadii: { topLeft: 30, topRight: 30, bottomRight: 30, bottomLeft: 30 }
+                }));
+
+                // Dashed asymmetric (top only)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(560, 290, 150, 100),
+                    background: { tag: 0, solid: { h: 0.83, s: 0.3, l: 0.8, a: 1 } },
+                    borderStyle: 1,
+                    borderWidths: { top: 6, right: 0, bottom: 0, left: 0 },
+                    borderColor: { h: 0.83, s: 1, l: 0.5, a: 1 },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Row 4: Borders with gradients
+                // Solid border with linear gradient
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 410, 200, 120),
+                    background: {
+                        tag: 1,
+                        colorSpace: 0,
+                        gradientAngle: 90,
+                        colors: [
+                            { color: { h: 0.5, s: 0.5, l: 0.9, a: 1 }, percentage: 0 },
+                            { color: { h: 0.5, s: 0.5, l: 0.7, a: 1 }, percentage: 1 }
+                        ]
+                    },
+                    borderStyle: 0,
+                    borderWidths: { top: 6, right: 6, bottom: 6, left: 6 },
+                    borderColor: { h: 0.5, s: 1, l: 0.4, a: 1 },
+                    cornerRadii: { topLeft: 15, topRight: 15, bottomRight: 15, bottomLeft: 15 }
+                }));
+
+                // Dashed border with radial gradient
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(270, 410, 200, 120),
+                    background: {
+                        tag: 3,  // Radial
+                        colorSpace: 0,
+                        solid: { h: 0.5, s: 0.5, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0.08, s: 1, l: 0.9, a: 1 }, percentage: 0 },
+                            { color: { h: 0.08, s: 1, l: 0.6, a: 1 }, percentage: 1 }
+                        ]
+                    },
+                    borderStyle: 1,
+                    borderWidths: { top: 5, right: 5, bottom: 5, left: 5 },
+                    borderColor: { h: 0.08, s: 1, l: 0.3, a: 1 },
+                    cornerRadii: { topLeft: 15, topRight: 15, bottomRight: 15, bottomLeft: 15 }
+                }));
+
+                // Row 5: Edge cases
+                // No border (0 width) - should render without antialiasing artifacts
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 550, 150, 100),
+                    background: { tag: 0, solid: { h: 0.16, s: 0.8, l: 0.6, a: 1 } },
+                    borderStyle: 0,
+                    borderWidths: { top: 0, right: 0, bottom: 0, left: 0 },
+                    borderColor: { h: 0, s: 0, l: 0, a: 1 },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Circle with border
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(220, 550, 100, 100),
+                    background: { tag: 0, solid: { h: 0.91, s: 0.5, l: 0.8, a: 1 } },
+                    borderStyle: 0,
+                    borderWidths: { top: 8, right: 8, bottom: 8, left: 8 },
+                    borderColor: { h: 0.91, s: 1, l: 0.4, a: 1 },
+                    cornerRadii: { topLeft: 50, topRight: 50, bottomRight: 50, bottomLeft: 50 }
+                }));
+
+                // Pill with dashed border
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(340, 550, 250, 100),
+                    background: { tag: 0, solid: { h: 0.66, s: 0.4, l: 0.8, a: 1 } },
+                    borderStyle: 1,
+                    borderWidths: { top: 6, right: 6, bottom: 6, left: 6 },
+                    borderColor: { h: 0.66, s: 1, l: 0.4, a: 1 },
+                    cornerRadii: { topLeft: 50, topRight: 50, bottomRight: 50, bottomLeft: 50 }
+                }));
+
+                console.log('=== Testing Borders ===');
+                console.log(`Created ${quads.length} test quads with various border styles`);
+                console.log('- Uniform borders (thin to very thick)');
+                console.log('- Asymmetric borders (different widths per side)');
+                console.log('- Solid and dashed border styles');
+                console.log('- Borders combined with gradients');
+                console.log('- Edge cases (no border, circles, pills)');
+
+                // Render the scene
+                renderer.beginFrame();
+                renderer.clear([0, 0, 0, 1]);
+                renderer.renderQuads(quads);
+                renderer.endFrame();
+
+                statusEl.textContent = `✓ SUCCESS: Rendered ${quads.length} quads with borders`;
+                console.log('✓ Border test completed');
+            } catch (error) {
+                statusEl.textContent = `❌ FAILED: ${error.message}`;
+                console.error('Test failed:', error);
+            }
+        }
+
+        runTest();
+    </script>
+</body>
+</html>

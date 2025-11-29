@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Test Gradients - WebGPU Renderer</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #2a2a2a;
+            font-family: sans-serif;
+            color: white;
+        }
+        h1 {
+            margin: 0 0 20px 0;
+        }
+        canvas {
+            border: 2px solid #444;
+            display: block;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Test Gradients - WebGPU Renderer</h1>
+    <canvas id="canvas" width="900" height="700"></canvas>
+    <div id="status">Initializing...</div>
+
+    <script type="module">
+        import { WebGPURenderer } from './src/renderer/webgpu-renderer.js';
+        import { Quad } from './src/core/primitives.js';
+        import { Bounds } from './src/core/geometry.js';
+
+        async function runTest() {
+            const canvas = document.getElementById('canvas');
+            const statusEl = document.getElementById('status');
+
+            try {
+                const renderer = new WebGPURenderer(canvas);
+                await renderer.initialize();
+                statusEl.textContent = 'Renderer initialized ✓';
+
+                const quads = [];
+                let order = 0;
+
+                // Row 1: Linear gradients at different angles
+                // 0° (right)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 50, 200, 150),
+                    background: {
+                        tag: 1,  // Linear gradient
+                        colorSpace: 0,  // sRGB
+                        gradientAngle: 0,
+                        colors: [
+                            { color: { h: 0, s: 1, l: 0.5, a: 1 }, percentage: 0 },      // Red
+                            { color: { h: 0.66, s: 1, l: 0.5, a: 1 }, percentage: 1 }  // Blue
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // 90° (down)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(270, 50, 200, 150),
+                    background: {
+                        tag: 1,
+                        colorSpace: 0,
+                        gradientAngle: 90,
+                        colors: [
+                            { color: { h: 0.33, s: 1, l: 0.5, a: 1 }, percentage: 0 },   // Green
+                            { color: { h: 0.16, s: 1, l: 0.5, a: 1 }, percentage: 1 }  // Orange
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // 180° (left)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(490, 50, 200, 150),
+                    background: {
+                        tag: 1,
+                        colorSpace: 0,
+                        gradientAngle: 180,
+                        colors: [
+                            { color: { h: 0.83, s: 1, l: 0.5, a: 1 }, percentage: 0 },   // Purple
+                            { color: { h: 0.91, s: 1, l: 0.5, a: 1 }, percentage: 1 }  // Pink
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Row 2: Diagonal gradients
+                // 45° (down-right)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 220, 200, 150),
+                    background: {
+                        tag: 1,
+                        colorSpace: 0,
+                        gradientAngle: 45,
+                        colors: [
+                            { color: { h: 0.5, s: 1, l: 0.5, a: 1 }, percentage: 0 },    // Cyan
+                            { color: { h: 0, s: 1, l: 0.5, a: 1 }, percentage: 1 }     // Red
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // 135° (down-left)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(270, 220, 200, 150),
+                    background: {
+                        tag: 1,
+                        colorSpace: 0,
+                        gradientAngle: 135,
+                        colors: [
+                            { color: { h: 0.08, s: 1, l: 0.5, a: 1 }, percentage: 0 },   // Yellow
+                            { color: { h: 0.66, s: 1, l: 0.5, a: 1 }, percentage: 1 }  // Blue
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Oklab color space (smoother color transitions)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(490, 220, 200, 150),
+                    background: {
+                        tag: 1,
+                        colorSpace: 1,  // Oklab
+                        gradientAngle: 90,
+                        colors: [
+                            { color: { h: 0, s: 1, l: 0.5, a: 1 }, percentage: 0 },      // Red
+                            { color: { h: 0.66, s: 1, l: 0.5, a: 1 }, percentage: 1 }  // Blue
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Row 3: Radial gradients
+                // Center radial
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 390, 200, 150),
+                    background: {
+                        tag: 3,  // Radial gradient
+                        colorSpace: 0,
+                        solid: { h: 0.5, s: 0.5, l: 1, a: 1 },  // center_x=0.5, center_y=0.5, radius=1
+                        colors: [
+                            { color: { h: 0.08, s: 1, l: 0.8, a: 1 }, percentage: 0 },  // Light yellow center
+                            { color: { h: 0, s: 1, l: 0.3, a: 1 }, percentage: 1 }    // Dark red edge
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Off-center radial
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(270, 390, 200, 150),
+                    background: {
+                        tag: 3,
+                        colorSpace: 0,
+                        solid: { h: 0.3, s: 0.3, l: 0.8, a: 1 },  // center_x=0.3, center_y=0.3, radius=0.8
+                        colors: [
+                            { color: { h: 0.66, s: 1, l: 0.9, a: 1 }, percentage: 0 },  // Light blue
+                            { color: { h: 0.66, s: 1, l: 0.2, a: 1 }, percentage: 1 }  // Dark blue
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Row 4: Conic (angular) gradients
+                // Conic from 0°
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 560, 200, 120),
+                    background: {
+                        tag: 4,  // Conic gradient
+                        colorSpace: 0,
+                        solid: { h: 0.5, s: 0.5, l: 0, a: 0 },  // center_x=0.5, center_y=0.5
+                        gradientAngle: 0,  // start angle
+                        colors: [
+                            { color: { h: 0, s: 1, l: 0.5, a: 1 }, percentage: 0 },      // Red
+                            { color: { h: 0.66, s: 1, l: 0.5, a: 1 }, percentage: 1 }  // Blue
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Conic from 90°
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(270, 560, 200, 120),
+                    background: {
+                        tag: 4,
+                        colorSpace: 0,
+                        solid: { h: 0.5, s: 0.5, l: 0, a: 0 },
+                        gradientAngle: 90,
+                        colors: [
+                            { color: { h: 0.33, s: 1, l: 0.5, a: 1 }, percentage: 0 },   // Green
+                            { color: { h: 0.83, s: 1, l: 0.5, a: 1 }, percentage: 1 }  // Purple
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Rainbow conic
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(490, 560, 200, 120),
+                    background: {
+                        tag: 4,
+                        colorSpace: 1,  // Oklab for smoother transitions
+                        solid: { h: 0.5, s: 0.5, l: 0, a: 0 },
+                        gradientAngle: 0,
+                        colors: [
+                            { color: { h: 0, s: 1, l: 0.5, a: 1 }, percentage: 0 },      // Red
+                            { color: { h: 0.5, s: 1, l: 0.5, a: 1 }, percentage: 1 }   // Cyan
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                console.log('=== Testing Gradients ===');
+                console.log(`Created ${quads.length} test quads with various gradients`);
+                console.log('- Linear gradients at different angles (0°, 90°, 180°, 45°, 135°)');
+                console.log('- Color spaces: sRGB and Oklab');
+                console.log('- Radial gradients (center and off-center)');
+                console.log('- Conic (angular) gradients with different start angles');
+
+                // Render the scene
+                renderer.beginFrame();
+                renderer.clear([0, 0, 0, 1]);
+                renderer.renderQuads(quads);
+                renderer.endFrame();
+
+                statusEl.textContent = `✓ SUCCESS: Rendered ${quads.length} quads with gradients`;
+                console.log('✓ Gradient test completed');
+            } catch (error) {
+                statusEl.textContent = `❌ FAILED: ${error.message}`;
+                console.error('Test failed:', error);
+            }
+        }
+
+        runTest();
+    </script>
+</body>
+</html>

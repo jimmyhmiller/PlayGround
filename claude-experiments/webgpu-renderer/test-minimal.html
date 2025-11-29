@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Minimal WebGPU Test</title>
+    <style>
+        body { margin: 0; padding: 20px; font-family: monospace; }
+        canvas { border: 1px solid #ccc; }
+        #log { margin-top: 10px; white-space: pre; }
+    </style>
+</head>
+<body>
+    <h1>Minimal WebGPU Renderer Test</h1>
+    <canvas id="canvas" width="400" height="400"></canvas>
+    <div id="log"></div>
+
+    <script type="module">
+        const log = document.getElementById('log');
+        function addLog(msg) {
+            log.textContent += msg + '\n';
+            console.log(msg);
+        }
+
+        async function testMinimalQuad() {
+            addLog('=== Starting Minimal Quad Test ===');
+
+            // Check WebGPU support
+            if (!navigator.gpu) {
+                addLog('❌ WebGPU not supported');
+                return;
+            }
+            addLog('✓ WebGPU available');
+
+            // Get adapter and device
+            const adapter = await navigator.gpu.requestAdapter();
+            if (!adapter) {
+                addLog('❌ No adapter');
+                return;
+            }
+            addLog('✓ Got adapter');
+
+            const device = await adapter.requestDevice();
+            addLog('✓ Got device');
+
+            // Setup canvas
+            const canvas = document.getElementById('canvas');
+            const context = canvas.getContext('webgpu');
+            const format = navigator.gpu.getPreferredCanvasFormat();
+
+            context.configure({
+                device,
+                format,
+                alphaMode: 'opaque',
+            });
+            addLog(`✓ Canvas configured (format: ${format})`);
+
+            // Simple vertex shader - draws a full-screen quad
+            const shaderCode = `
+                @vertex
+                fn vs_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32> {
+                    var pos = array<vec2<f32>, 4>(
+                        vec2<f32>(-1.0, -1.0),
+                        vec2<f32>( 1.0, -1.0),
+                        vec2<f32>(-1.0,  1.0),
+                        vec2<f32>( 1.0,  1.0)
+                    );
+                    return vec4<f32>(pos[idx], 0.0, 1.0);
+                }
+
+                @fragment
+                fn fs_main() -> @location(0) vec4<f32> {
+                    return vec4<f32>(1.0, 0.0, 0.0, 1.0); // RED
+                }
+            `;
+
+            const shaderModule = device.createShaderModule({ code: shaderCode });
+            addLog('✓ Shader module created');
+
+            // Create pipeline
+            const pipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: shaderModule,
+                    entryPoint: 'vs_main',
+                },
+                fragment: {
+                    module: shaderModule,
+                    entryPoint: 'fs_main',
+                    targets: [{ format }],
+                },
+                primitive: {
+                    topology: 'triangle-strip',
+                },
+            });
+            addLog('✓ Pipeline created');
+
+            // Render
+            const encoder = device.createCommandEncoder();
+            const textureView = context.getCurrentTexture().createView();
+
+            const renderPass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: textureView,
+                    clearValue: { r: 0, g: 0, b: 1, a: 1 }, // BLUE background
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+            });
+
+            renderPass.setPipeline(pipeline);
+            renderPass.draw(4, 1, 0, 0); // Draw 4 vertices
+            renderPass.end();
+
+            device.queue.submit([encoder.finish()]);
+            addLog('✓ Render pass submitted');
+
+            // Wait a moment for rendering
+            await new Promise(resolve => setTimeout(resolve, 100));
+
+            // Check pixel color
+            const ctx2d = document.createElement('canvas').getContext('2d');
+            ctx2d.canvas.width = canvas.width;
+            ctx2d.canvas.height = canvas.height;
+            ctx2d.drawImage(canvas, 0, 0);
+
+            const centerX = Math.floor(canvas.width / 2);
+            const centerY = Math.floor(canvas.height / 2);
+            const pixel = ctx2d.getImageData(centerX, centerY, 1, 1).data;
+
+            addLog(`\nPixel at center (${centerX}, ${centerY}):`);
+            addLog(`  R: ${pixel[0]}, G: ${pixel[1]}, B: ${pixel[2]}, A: ${pixel[3]}`);
+
+            if (pixel[0] > 200 && pixel[1] < 50 && pixel[2] < 50) {
+                addLog('✅ SUCCESS: Red quad is rendering!');
+            } else if (pixel[0] < 50 && pixel[1] < 50 && pixel[2] > 200) {
+                addLog('⚠️  PARTIAL: Showing blue background (quad not rendering)');
+            } else {
+                addLog('❌ FAIL: Unexpected color');
+            }
+        }
+
+        testMinimalQuad();
+    </script>
+</body>
+</html>

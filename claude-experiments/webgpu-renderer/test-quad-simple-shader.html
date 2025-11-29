@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Quad with Simplified Shader</title>
+    <style>
+        body { margin: 0; padding: 20px; font-family: monospace; }
+        canvas { border: 1px solid #ccc; }
+        #log { margin-top: 10px; white-space: pre; }
+    </style>
+</head>
+<body>
+    <h1>Test Quad with Simplified Shader</h1>
+    <canvas id="canvas" width="400" height="400"></canvas>
+    <div id="log"></div>
+
+    <script type="module">
+        import { WebGPURenderer } from './src/renderer/webgpu-renderer.js';
+        import { Scene, Quad } from './src/core/primitives.js';
+        import { Bounds, Point, Hsla, Size, Corners, Edges, Transform } from './src/core/geometry.js';
+
+        const log = document.getElementById('log');
+        function addLog(msg) {
+            log.textContent += msg + '\n';
+            console.log(msg);
+        }
+
+        async function testSimplifiedShader() {
+            addLog('=== Testing Quad with Debug Logging ===');
+
+            const canvas = document.getElementById('canvas');
+            const renderer = new WebGPURenderer(canvas);
+
+            await renderer.initialize();
+            addLog('✓ Renderer initialized');
+
+            // Create scene with ONE quad
+            const scene = new Scene();
+            const quad = new Quad();
+            quad.bounds = new Bounds(new Point(100, 100), new Size(200, 200));
+            quad.background = {
+                tag: 0,  // Solid
+                colorSpace: 0,
+                solid: new Hsla(0.0, 1.0, 0.5, 1.0),  // RED
+                gradientAngle: 0,
+                colors: [
+                    { color: new Hsla(), percentage: 0 },
+                    { color: new Hsla(), percentage: 1 }
+                ],
+                pad: 0
+            };
+            quad.cornerRadii = new Corners(0, 0, 0, 0);
+            quad.borderWidths = new Edges(0, 0, 0, 0);
+            quad.borderColor = new Hsla(0, 0, 0, 0);
+            quad.contentMask.bounds = new Bounds(new Point(0, 0), new Size(400, 400));
+            quad.transform = Transform.identity();
+            quad.opacity = 1.0;
+            quad.order = 0;
+            scene.insertQuad(quad);
+
+            addLog(`Quad data: ${quad.toArray().length} floats`);
+            addLog(`First 25 values: ${quad.toArray().slice(0, 25).join(', ')}`);
+
+            // Render to canvas
+            try {
+                renderer.render(scene);
+                addLog('✓ render() called');
+            } catch (e) {
+                addLog(`❌ Error: ${e.message}`);
+                console.error(e);
+                window.SIMPLIFIED_TEST_PASSED = false;
+                return;
+            }
+
+            // Give it time to render
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            // Check canvas pixels
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            const centerPixel = ctx.getImageData(200, 200, 1, 1).data;
+            const edgePixel = ctx.getImageData(50, 50, 1, 1).data;
+
+            addLog(`\nPixel at (200, 200): R:${centerPixel[0]} G:${centerPixel[1]} B:${centerPixel[2]} A:${centerPixel[3]}`);
+            addLog(`Pixel at (50, 50): R:${edgePixel[0]} G:${edgePixel[1]} B:${edgePixel[2]} A:${edgePixel[3]}`);
+
+            if (centerPixel[0] > 200) {
+                addLog('\n✅ SUCCESS: Quad renders RED!');
+                window.SIMPLIFIED_TEST_PASSED = true;
+            } else {
+                addLog('\n❌ FAIL: Quad not rendering correctly');
+                window.SIMPLIFIED_TEST_PASSED = false;
+            }
+        }
+
+        testSimplifiedShader();
+    </script>
+</body>
+</html>

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebGPU Renderer Demo</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #f0f0f0;
+            font-family: sans-serif;
+        }
+        canvas {
+            border: 2px solid #333;
+            background: white;
+        }
+        h1 {
+            margin: 0 0 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebGPU Renderer - Colorful Quads Demo</h1>
+    <canvas id="canvas" width="800" height="600"></canvas>
+
+    <script type="module">
+        import { WebGPURenderer } from './src/renderer/webgpu-renderer.js';
+        import { Scene, Quad, Background } from './src/core/primitives.js';
+        import { Bounds, Point, Hsla, Size, Corners, Edges } from './src/core/geometry.js';
+
+        async function main() {
+            const canvas = document.getElementById('canvas');
+            const renderer = new WebGPURenderer(canvas);
+            await renderer.initialize();
+
+            const scene = new Scene();
+
+            // Red quad with rounded corners
+            const quad1 = new Quad();
+            quad1.bounds = new Bounds(new Point(50, 50), new Size(200, 150));
+            quad1.background = Background.Solid(new Hsla(0, 1, 0.5, 1));
+            quad1.cornerRadii = new Corners(20, 20, 20, 20);
+            quad1.contentMask.bounds = new Bounds(new Point(0, 0), new Size(800, 600));
+            scene.insertQuad(quad1);
+
+            // Blue quad with border
+            const quad2 = new Quad();
+            quad2.bounds = new Bounds(new Point(300, 100), new Size(180, 180));
+            quad2.background = Background.Solid(new Hsla(0.6, 1, 0.5, 1));
+            quad2.borderColor = new Hsla(0, 0, 0, 1);
+            quad2.borderWidths = new Edges(5, 5, 5, 5);
+            quad2.contentMask.bounds = new Bounds(new Point(0, 0), new Size(800, 600));
+            scene.insertQuad(quad2);
+
+            // Green quad
+            const quad3 = new Quad();
+            quad3.bounds = new Bounds(new Point(550, 50), new Size(200, 120));
+            quad3.background = Background.Solid(new Hsla(0.33, 1, 0.5, 1));
+            quad3.cornerRadii = new Corners(10, 10, 10, 10);
+            quad3.contentMask.bounds = new Bounds(new Point(0, 0), new Size(800, 600));
+            scene.insertQuad(quad3);
+
+            // Purple circle
+            const quad4 = new Quad();
+            quad4.bounds = new Bounds(new Point(150, 300), new Size(150, 150));
+            quad4.background = Background.Solid(new Hsla(0.75, 1, 0.5, 1));
+            quad4.cornerRadii = new Corners(75, 75, 75, 75);
+            quad4.contentMask.bounds = new Bounds(new Point(0, 0), new Size(800, 600));
+            scene.insertQuad(quad4);
+
+            // Orange rounded rect
+            const quad5 = new Quad();
+            quad5.bounds = new Bounds(new Point(400, 350), new Size(300, 100));
+            quad5.background = Background.Solid(new Hsla(0.08, 1, 0.5, 1));
+            quad5.cornerRadii = new Corners(50, 50, 50, 50);
+            quad5.contentMask.bounds = new Bounds(new Point(0, 0), new Size(800, 600));
+            scene.insertQuad(quad5);
+
+            // Yellow small quad
+            const quad6 = new Quad();
+            quad6.bounds = new Bounds(new Point(100, 500), new Size(80, 60));
+            quad6.background = Background.Solid(new Hsla(0.16, 1, 0.5, 1));
+            quad6.contentMask.bounds = new Bounds(new Point(0, 0), new Size(800, 600));
+            scene.insertQuad(quad6);
+
+            // Cyan circle
+            const quad7 = new Quad();
+            quad7.bounds = new Bounds(new Point(600, 400), new Size(120, 120));
+            quad7.background = Background.Solid(new Hsla(0.5, 1, 0.5, 1));
+            quad7.cornerRadii = new Corners(60, 60, 60, 60);
+            quad7.contentMask.bounds = new Bounds(new Point(0, 0), new Size(800, 600));
+            scene.insertQuad(quad7);
+
+            renderer.render(scene);
+            console.log('✅ Demo rendered successfully!');
+        }
+
+        main().catch(err => console.error('Error:', err));
+    </script>
+</body>
+</html>

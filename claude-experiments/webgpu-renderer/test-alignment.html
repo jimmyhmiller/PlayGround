@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Alignment</title>
+</head>
+<body>
+    <h1>Test Struct Alignment</h1>
+    <div id="log"></div>
+
+    <script type="module">
+        const log = document.getElementById('log');
+        function addLog(msg) {
+            log.innerHTML += msg + '<br>';
+            console.log(msg);
+        }
+
+        async function testAlignment() {
+            if (!navigator.gpu) {
+                addLog('WebGPU not supported');
+                return;
+            }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+
+            // Test shader that prints struct offsets
+            const shaderCode = `
+struct TestQuad {
+    order: u32,
+    border_style: u32,
+    bounds_origin: vec2<f32>,
+    bounds_size: vec2<f32>,
+    content_mask_origin: vec2<f32>,
+    content_mask_size: vec2<f32>,
+    tag: u32,
+    color_space: u32,
+    solid: vec4<f32>,
+}
+
+@group(0) @binding(0) var<storage, read> quads: array<TestQuad>;
+@group(0) @binding(1) var<storage, read_write> output: array<vec4<f32>>;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let quad = quads[0];
+    output[0] = vec4<f32>(f32(quad.order), f32(quad.border_style), quad.bounds_origin.x, quad.bounds_origin.y);
+    output[1] = vec4<f32>(quad.bounds_size.x, quad.bounds_size.y, quad.content_mask_origin.x, quad.content_mask_origin.y);
+    output[2] = vec4<f32>(quad.content_mask_size.x, quad.content_mask_size.y, f32(quad.tag), f32(quad.color_space));
+    output[3] = quad.solid;
+}
+`;
+
+            const shaderModule = device.createShaderModule({ code: shaderCode });
+
+            const pipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: {
+                    module: shaderModule,
+                    entryPoint: 'main',
+                },
+            });
+
+            // Create input data WITHOUT padding (61 floats layout from debug test)
+            const inputData = new Float32Array([
+                0, 0,  // order, border_style
+                100, 100, 200, 200,  // bounds
+                0, 0, 400, 400,  // content_mask
+                0, 0,  // tag, color_space (NO PADDING BEFORE THIS!)
+                0, 0,  // padding inside background
+                0.5, 1.0, 0.5, 1.0,  // solid HSLA (red: h=0.5 cycles to red)
+            ]);
+
+            const inputBuffer = device.createBuffer({
+                size: inputData.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+            device.queue.writeBuffer(inputBuffer, 0, inputData);
+
+            const outputBuffer = device.createBuffer({
+                size: 4 * 4 * 4,  // 4 vec4s
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+            });
+
+            const readBuffer = device.createBuffer({
+                size: 4 * 4 * 4,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            });
+
+            const bindGroup = device.createBindGroup({
+                layout: pipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: inputBuffer } },
+                    { binding: 1, resource: { buffer: outputBuffer } },
+                ],
+            });
+
+            const encoder = device.createCommandEncoder();
+            const pass = encoder.beginComputePass();
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, bindGroup);
+            pass.dispatchWorkgroups(1);
+            pass.end();
+
+            encoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, 4 * 4 * 4);
+            device.queue.submit([encoder.finish()]);
+
+            await readBuffer.mapAsync(GPUMapMode.READ);
+            const result = new Float32Array(readBuffer.getMappedRange());
+
+            addLog('Input data (no padding before tag/color_space):');
+            addLog(`  order=${inputData[0]}, border_style=${inputData[1]}`);
+            addLog(`  bounds=${inputData.slice(2, 6)}`);
+            addLog(`  content_mask=${inputData.slice(6, 10)}`);
+            addLog(`  tag=${inputData[10]}, color_space=${inputData[11]}`);
+            addLog(`  solid=${inputData.slice(14, 18)}`);
+
+            addLog('<br>Output from shader:');
+            addLog(`  [0] order=${result[0]}, border_style=${result[1]}, bounds.origin=(${result[2]}, ${result[3]})`);
+            addLog(`  [1] bounds.size=(${result[4]}, ${result[5]}), content_mask.origin=(${result[6]}, ${result[7]})`);
+            addLog(`  [2] content_mask.size=(${result[8]}, ${result[9]}), tag=${result[10]}, color_space=${result[11]}`);
+            addLog(`  [3] solid=(${result[12]}, ${result[13]}, ${result[14]}, ${result[15]})`);
+
+            const isCorrect =
+                result[0] === 0 && result[1] === 0 &&
+                result[2] === 100 && result[3] === 100 &&
+                result[4] === 200 && result[5] === 200 &&
+                result[6] === 0 && result[7] === 0 &&
+                result[8] === 400 && result[9] === 400 &&
+                result[10] === 0 && result[11] === 0 &&
+                Math.abs(result[12] - 0.5) < 0.01 &&
+                Math.abs(result[13] - 1.0) < 0.01 &&
+                Math.abs(result[14] - 0.5) < 0.01 &&
+                Math.abs(result[15] - 1.0) < 0.01;
+
+            if (isCorrect) {
+                addLog('<br><strong style="color: green">✓ Struct members read correctly WITHOUT padding!</strong>');
+            } else {
+                addLog('<br><strong style="color: red">✗ Struct members NOT read correctly</strong>');
+            }
+
+            readBuffer.unmap();
+        }
+
+        testAlignment();
+    </script>
+</body>
+</html>

@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Test Rounded Corners - WebGPU Renderer</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #2a2a2a;
+            font-family: sans-serif;
+            color: white;
+        }
+        h1 {
+            margin: 0 0 20px 0;
+        }
+        canvas {
+            border: 2px solid #444;
+            display: block;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Test Rounded Corners - WebGPU Renderer</h1>
+    <canvas id="canvas" width="800" height="600"></canvas>
+    <div id="status">Initializing...</div>
+
+    <script type="module">
+        import { WebGPURenderer } from './src/renderer/webgpu-renderer.js';
+        import { Quad } from './src/core/primitives.js';
+        import { Bounds } from './src/core/geometry.js';
+
+        async function runTest() {
+            const canvas = document.getElementById('canvas');
+            const statusEl = document.getElementById('status');
+
+            try {
+                const renderer = new WebGPURenderer(canvas);
+                await renderer.initialize();
+                statusEl.textContent = 'Renderer initialized ✓';
+
+                // Test quads with different corner radii
+                const quads = [];
+                let order = 0;
+
+                // Row 1: Uniform corner radii
+                // 1. No rounded corners
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 50, 150, 100),
+                    background: { tag: 0, solid: { h: 0, s: 0.8, l: 0.5, a: 1 } }, // Red
+                    cornerRadii: { topLeft: 0, topRight: 0, bottomRight: 0, bottomLeft: 0 }
+                }));
+
+                // 2. Small uniform corners (10px)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(220, 50, 150, 100),
+                    background: { tag: 0, solid: { h: 0.33, s: 0.8, l: 0.5, a: 1 } }, // Green
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // 3. Medium uniform corners (20px)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(390, 50, 150, 100),
+                    background: { tag: 0, solid: { h: 0.66, s: 0.8, l: 0.5, a: 1 } }, // Blue
+                    cornerRadii: { topLeft: 20, topRight: 20, bottomRight: 20, bottomLeft: 20 }
+                }));
+
+                // 4. Large uniform corners (50px - circle)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(560, 50, 100, 100),
+                    background: { tag: 0, solid: { h: 0.16, s: 0.8, l: 0.5, a: 1 } }, // Orange
+                    cornerRadii: { topLeft: 50, topRight: 50, bottomRight: 50, bottomLeft: 50 }
+                }));
+
+                // Row 2: Asymmetric corner radii
+                // 5. Top-left only
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 180, 150, 100),
+                    background: { tag: 0, solid: { h: 0.83, s: 0.8, l: 0.5, a: 1 } }, // Purple
+                    cornerRadii: { topLeft: 30, topRight: 0, bottomRight: 0, bottomLeft: 0 }
+                }));
+
+                // 6. Top corners (pill shape)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(220, 180, 150, 100),
+                    background: { tag: 0, solid: { h: 0.5, s: 0.8, l: 0.5, a: 1 } }, // Cyan
+                    cornerRadii: { topLeft: 50, topRight: 50, bottomRight: 0, bottomLeft: 0 }
+                }));
+
+                // 7. Diagonal corners
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(390, 180, 150, 100),
+                    background: { tag: 0, solid: { h: 0.91, s: 0.8, l: 0.5, a: 1 } }, // Pink
+                    cornerRadii: { topLeft: 30, topRight: 0, bottomRight: 30, bottomLeft: 0 }
+                }));
+
+                // 8. All different radii
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(560, 180, 150, 100),
+                    background: { tag: 0, solid: { h: 0.08, s: 0.8, l: 0.6, a: 1 } }, // Yellow
+                    cornerRadii: { topLeft: 10, topRight: 20, bottomRight: 30, bottomLeft: 40 }
+                }));
+
+                // Row 3: Edge cases
+                // 9. Very small quad with corners
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 310, 50, 50),
+                    background: { tag: 0, solid: { h: 0, s: 1, l: 0.7, a: 1 } }, // Light red
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // 10. Tall pill (vertical)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(120, 310, 80, 200),
+                    background: { tag: 0, solid: { h: 0.33, s: 1, l: 0.7, a: 1 } }, // Light green
+                    cornerRadii: { topLeft: 40, topRight: 40, bottomRight: 40, bottomLeft: 40 }
+                }));
+
+                // 11. Wide pill (horizontal)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(220, 310, 200, 80),
+                    background: { tag: 0, solid: { h: 0.66, s: 1, l: 0.7, a: 1 } }, // Light blue
+                    cornerRadii: { topLeft: 40, topRight: 40, bottomRight: 40, bottomLeft: 40 }
+                }));
+
+                // 12. Maximum radius (stadium)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(440, 310, 250, 100),
+                    background: { tag: 0, solid: { h: 0.16, s: 1, l: 0.7, a: 1 } }, // Light orange
+                    cornerRadii: { topLeft: 50, topRight: 50, bottomRight: 50, bottomLeft: 50 }
+                }));
+
+                console.log('=== Testing Rounded Corners ===');
+                console.log(`Created ${quads.length} test quads with various corner radii`);
+
+                // Render the scene
+                renderer.beginFrame();
+                renderer.clear([0, 0, 0, 1]);
+                renderer.renderQuads(quads);
+                renderer.endFrame();
+
+                statusEl.textContent = `✓ SUCCESS: Rendered ${quads.length} quads with rounded corners`;
+                console.log('✓ Rounded corners test completed');
+            } catch (error) {
+                statusEl.textContent = `❌ FAILED: ${error.message}`;
+                console.error('Test failed:', error);
+            }
+        }
+
+        runTest();
+    </script>
+</body>
+</html>

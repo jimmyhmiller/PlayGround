@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Minimal Pipeline Test</title>
+    <style>
+        body { margin: 0; padding: 20px; font-family: monospace; }
+        canvas { border: 1px solid #000; }
+        #log { white-space: pre-wrap; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h2>Minimal Pipeline Test - No Storage Buffer</h2>
+    <canvas id="canvas" width="400" height="400"></canvas>
+    <div id="log"></div>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+        const log = document.getElementById('log');
+
+        function addLog(msg) {
+            log.textContent += msg + '\n';
+            console.log(msg);
+        }
+
+        async function main() {
+            addLog('=== Testing Minimal Pipeline (Hardcoded Positions) ===');
+
+            if (!navigator.gpu) {
+                addLog('❌ WebGPU not supported');
+                return;
+            }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            const context = canvas.getContext('webgpu');
+            const format = navigator.gpu.getPreferredCanvasFormat();
+
+            context.configure({
+                device,
+                format,
+                alphaMode: 'premultiplied',
+            });
+
+            addLog('✓ WebGPU initialized');
+
+            // EXACT COPY of working shader from test-simple-quad.html
+            const shaderCode = `
+                struct VertexOutput {
+                    @builtin(position) position: vec4<f32>,
+                }
+
+                @vertex
+                fn vs_main(@builtin(vertex_index) vertex_id: u32) -> VertexOutput {
+                    // Generate quad covering 100,100 to 300,300 in a 400x400 viewport
+                    // Vertex order: 0=top-left, 1=top-right, 2=bottom-left, 3=bottom-right
+                    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+
+                    // Map to pixel space
+                    let pixel_pos = vec2<f32>(100.0, 100.0) + unit_vertex * vec2<f32>(200.0, 200.0);
+
+                    // Convert to device coords
+                    let viewport_size = vec2<f32>(400.0, 400.0);
+                    let device_pos = pixel_pos / viewport_size * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
+
+                    var out: VertexOutput;
+                    out.position = vec4<f32>(device_pos, 0.0, 1.0);
+                    return out;
+                }
+
+                @fragment
+                fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+                    // Just return RED
+                    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+                }
+            `;
+
+            const shaderModule = device.createShaderModule({ code: shaderCode });
+
+            const compilationInfo = await shaderModule.getCompilationInfo();
+            if (compilationInfo.messages.length > 0) {
+                addLog('Shader messages:');
+                compilationInfo.messages.forEach(msg => {
+                    addLog(`  ${msg.type}: ${msg.message}`);
+                });
+            } else {
+                addLog('✓ Shader compiled');
+            }
+
+            const pipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: shaderModule,
+                    entryPoint: 'vs_main',
+                },
+                fragment: {
+                    module: shaderModule,
+                    entryPoint: 'fs_main',
+                    targets: [{
+                        format,
+                        blend: {
+                            color: {
+                                srcFactor: 'one',
+                                dstFactor: 'one-minus-src-alpha',
+                                operation: 'add',
+                            },
+                            alpha: {
+                                srcFactor: 'one',
+                                dstFactor: 'one-minus-src-alpha',
+                                operation: 'add',
+                            },
+                        },
+                    }],
+                },
+                primitive: {
+                    topology: 'triangle-strip',
+                },
+            });
+
+            addLog('✓ Pipeline created');
+
+            // Render to offscreen texture for readback
+            const texture = device.createTexture({
+                size: { width: 400, height: 400 },
+                format,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+            });
+
+            const encoder = device.createCommandEncoder();
+            const renderPass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: texture.createView(),
+                    clearValue: { r: 0, g: 0, b: 1, a: 1 }, // BLUE
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+            });
+
+            renderPass.setPipeline(pipeline);
+            renderPass.draw(4, 1, 0, 0);  // 4 vertices, 1 instance
+            renderPass.end();
+
+            // Read back pixels using GPU buffer
+            const bytesPerRow = Math.ceil(400 * 4 / 256) * 256;
+            const buffer = device.createBuffer({
+                size: bytesPerRow * 400,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            });
+
+            encoder.copyTextureToBuffer(
+                { texture },
+                { buffer, bytesPerRow },
+                { width: 400, height: 400 }
+            );
+
+            device.queue.submit([encoder.finish()]);
+
+            addLog('✓ Draw submitted');
+
+            // Read center pixel (format is BGRA!)
+            await buffer.mapAsync(GPUMapMode.READ);
+            const data = new Uint8Array(buffer.getMappedRange());
+            const centerIndex = (200 * bytesPerRow) + (200 * 4);
+            const b = data[centerIndex + 0];  // BGRA format
+            const g = data[centerIndex + 1];
+            const r = data[centerIndex + 2];
+            const a = data[centerIndex + 3];
+            addLog(`\nCenter pixel (200,200): R:${r} G:${g} B:${b} A:${a}`);
+
+            if (r > 200 && b < 50) {
+                addLog('✅ SUCCESS: Quad renders RED!');
+                window.PIPELINE_TEST_PASSED = true;
+            } else {
+                addLog('❌ FAIL: Expected RED, got different color');
+                window.PIPELINE_TEST_PASSED = false;
+            }
+        }
+
+        main().catch(err => {
+            addLog(`Error: ${err.message}`);
+            console.error(err);
+        });
+    </script>
+</body>
+</html>

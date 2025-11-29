@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Actual Renderer</title>
+    <style>
+        body { margin: 0; padding: 20px; font-family: monospace; }
+        canvas { border: 1px solid #ccc; }
+        #log { margin-top: 10px; white-space: pre; }
+    </style>
+</head>
+<body>
+    <h1>Test Actual Renderer</h1>
+    <canvas id="canvas" width="400" height="400"></canvas>
+    <div id="log"></div>
+
+    <script type="module">
+        import { WebGPURenderer } from './src/renderer/webgpu-renderer.js';
+        import { Scene, Quad, Background } from './src/core/primitives.js';
+        import { Bounds, Point, Hsla, Size, Corners, Edges } from './src/core/geometry.js';
+
+        const log = document.getElementById('log');
+        function addLog(msg) {
+            log.textContent += msg + '\n';
+            console.log(msg);
+        }
+
+        async function testActualRenderer() {
+            addLog('=== Testing Actual WebGPURenderer ===');
+
+            const canvas = document.getElementById('canvas');
+            const renderer = new WebGPURenderer(canvas);
+
+            try {
+                // Add WebGPU error handlers
+                renderer.device?.addEventListener?.('uncapturederror', (event) => {
+                    addLog(`❌ WebGPU uncaptured error: ${event.error.message}`);
+                    console.error('WebGPU error:', event.error);
+                });
+
+                addLog('Initializing renderer...');
+                await renderer.initialize();
+
+                // Add error handler after init
+                renderer.device.addEventListener('uncapturederror', (event) => {
+                    addLog(`❌ WebGPU uncaptured error: ${event.error.message}`);
+                    console.error('WebGPU error:', event.error);
+                });
+                addLog('✓ Renderer initialized');
+                addLog(`  Format: ${renderer.presentationFormat}`);
+                addLog(`  Device: ${renderer.device !== undefined}`);
+                addLog(`  Pipelines: ${Object.keys(renderer.pipelines).join(', ')}`);
+
+                // Create simple scene with ONE quad
+                const scene = new Scene();
+                const quad = new Quad();
+                quad.bounds = new Bounds(new Point(100, 100), new Size(200, 200));
+                quad.background = Background.Solid(new Hsla(0.0, 1.0, 0.5, 1.0)); // Red
+                quad.cornerRadii = new Corners(0, 0, 0, 0);
+                quad.borderWidths = new Edges(0, 0, 0, 0);
+                quad.borderColor = new Hsla(0, 0, 0, 0);
+                quad.borderStyle = 0; // Solid
+                quad.order = 0;
+                // Set content mask to full viewport so quad is not clipped
+                quad.contentMask.bounds = new Bounds(new Point(0, 0), new Size(400, 400));
+                scene.insertQuad(quad);
+
+                addLog('✓ Scene created with 1 red quad (100,100 to 300,300)');
+
+                // Render offscreen to check pixels
+                const texture = renderer.device.createTexture({
+                    size: { width: 400, height: 400 },
+                    format: renderer.presentationFormat,
+                    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+                });
+
+                // Render using the actual renderer
+                const encoder = renderer.device.createCommandEncoder();
+
+                // Update uniforms
+                const uniformData = new Float32Array([
+                    400, 400,  // viewport_size
+                    1,  // premultiplied_alpha
+                    0,  // padding
+                ]);
+                renderer.device.queue.writeBuffer(renderer.uniformBuffer, 0, uniformData);
+
+                // Get batches
+                const batches = Array.from(scene.batches());
+                addLog(`  Batches: ${batches.length}`);
+                batches.forEach((b, i) => {
+                    addLog(`    ${i}: ${b.type} (${b.primitives.length} prims)`);
+                    if (b.type === 'quads' && b.primitives.length > 0) {
+                        const q = b.primitives[0];
+                        addLog(`      Quad bounds: ${JSON.stringify(q.bounds.toArray())}`);
+                        addLog(`      Quad background tag: ${q.background.tag}`);
+                        addLog(`      Quad background solid: ${JSON.stringify([q.background.solid.h, q.background.solid.s, q.background.solid.l, q.background.solid.a])}`);
+                    }
+                });
+
+                // Render pass
+                const renderPass = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: texture.createView(),
+                        clearValue: { r: 0, g: 0, b: 1, a: 1 }, // BLUE background
+                        loadOp: 'clear',
+                        storeOp: 'store',
+                    }],
+                });
+
+                // Render each batch
+                for (const batch of batches) {
+                    addLog(`  Rendering batch: ${batch.type}`);
+                    try {
+                        if (batch.type === 'quads') {
+                            // Debug: log quad data
+                            const quadData = batch.primitives[0].toArray();
+                            addLog(`    Quad data length: ${quadData.length} floats`);
+                            addLog(`    First 20 values: ${quadData.slice(0, 20).join(', ')}`);
+
+                            renderer.renderQuads(renderPass, batch.primitives);
+                            addLog('    ✓ renderQuads called');
+                        }
+                    } catch (e) {
+                        addLog(`    ❌ Error: ${e.message}`);
+                        console.error(e);
+                    }
+                }
+
+                renderPass.end();
+
+                // Read back pixels
+                const bytesPerRow = Math.ceil(400 * 4 / 256) * 256;
+                const buffer = renderer.device.createBuffer({
+                    size: bytesPerRow * 400,
+                    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+                });
+
+                encoder.copyTextureToBuffer(
+                    { texture },
+                    { buffer, bytesPerRow },
+                    { width: 400, height: 400 }
+                );
+
+                renderer.device.queue.submit([encoder.finish()]);
+
+                await buffer.mapAsync(GPUMapMode.READ);
+                const data = new Uint8Array(buffer.getMappedRange());
+
+                // Check multiple points
+                function checkPixel(x, y, expectedDesc) {
+                    const idx = y * bytesPerRow + x * 4;
+                    const b = data[idx + 0];  // BGRA
+                    const g = data[idx + 1];
+                    const r = data[idx + 2];
+                    const a = data[idx + 3];
+                    addLog(`  (${x},${y}) R:${r} G:${g} B:${b} A:${a} - ${expectedDesc}`);
+                    return { r, g, b, a };
+                }
+
+                addLog('\nPixel checks:');
+                const center = checkPixel(200, 200, 'center - should be RED');
+                const topLeft = checkPixel(50, 50, 'outside quad - should be BLUE');
+                const edge = checkPixel(100, 100, 'quad edge');
+
+                if (center.r > 200 && center.g < 50 && center.b < 50) {
+                    addLog('\n✅ SUCCESS: Quad is rendering RED!');
+                    window.RENDERER_TEST_PASSED = true;
+                } else if (center.b > 200) {
+                    addLog('\n❌ FAIL: Center is BLUE (background) - quad not rendering');
+                    window.RENDERER_TEST_PASSED = false;
+                } else {
+                    addLog('\n❌ FAIL: Unexpected center color');
+                    window.RENDERER_TEST_PASSED = false;
+                }
+
+                buffer.unmap();
+
+            } catch (error) {
+                addLog(`\n❌ ERROR: ${error.message}`);
+                addLog(error.stack);
+                window.RENDERER_TEST_PASSED = false;
+            }
+        }
+
+        testActualRenderer();
+    </script>
+</body>
+</html>

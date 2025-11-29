@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Renderer with Debug Shader</title>
+    <style>
+        body { margin: 0; padding: 20px; font-family: monospace; }
+        canvas { border: 1px solid #ccc; }
+        #log { margin-top: 10px; white-space: pre; }
+    </style>
+</head>
+<body>
+    <h1>Test Renderer with Debug Shader</h1>
+    <canvas id="canvas" width="400" height="400"></canvas>
+    <div id="log"></div>
+
+    <script type="module">
+        const log = document.getElementById('log');
+        function addLog(msg) {
+            log.textContent += msg + '\n';
+            console.log(msg);
+        }
+
+        async function testDebugShader() {
+            addLog('=== Testing Renderer with Debug Shader ===');
+
+            if (!navigator.gpu) {
+                addLog('❌ WebGPU not supported');
+                return;
+            }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            const format = 'bgra8unorm';
+
+            addLog('✓ Device ready');
+
+            // Load common shader and debug shader
+            const commonShaderResp = await fetch('/src/shaders/common.wgsl');
+            const commonShader = await commonShaderResp.text();
+
+            const debugShaderResp = await fetch('/src/shaders/quad-debug.wgsl');
+            const debugShader = await debugShaderResp.text();
+
+            const shaderCode = commonShader + '\n' + debugShader;
+            const shaderModule = device.createShaderModule({ code: shaderCode });
+
+            // Check for compilation errors
+            const compilationInfo = await shaderModule.getCompilationInfo();
+            if (compilationInfo.messages.length > 0) {
+                addLog('Shader compilation messages:');
+                compilationInfo.messages.forEach(msg => {
+                    addLog(`  ${msg.type}: ${msg.message}`);
+                });
+                if (compilationInfo.messages.some(m => m.type === 'error')) {
+                    window.DEBUG_SHADER_TEST_PASSED = false;
+                    return;
+                }
+            } else {
+                addLog('✓ Debug shader compiled successfully');
+            }
+
+            // Create bind group layout
+            const bindGroupLayout = device.createBindGroupLayout({
+                entries: [
+                    { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                    { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } }
+                ]
+            });
+
+            const pipelineLayout = device.createPipelineLayout({
+                bindGroupLayouts: [bindGroupLayout]
+            });
+
+            const pipeline = device.createRenderPipeline({
+                layout: pipelineLayout,
+                vertex: {
+                    module: shaderModule,
+                    entryPoint: 'vs_main',
+                },
+                fragment: {
+                    module: shaderModule,
+                    entryPoint: 'fs_main',
+                    targets: [{
+                        format,
+                        blend: {
+                            color: {
+                                srcFactor: 'one',
+                                dstFactor: 'one-minus-src-alpha',
+                                operation: 'add',
+                            },
+                            alpha: {
+                                srcFactor: 'one',
+                                dstFactor: 'one-minus-src-alpha',
+                                operation: 'add',
+                            },
+                        },
+                    }],
+                },
+                primitive: {
+                    topology: 'triangle-strip',
+                },
+            });
+
+            addLog('✓ Debug pipeline created');
+
+            // Create uniform buffer
+            const uniformData = new Float32Array([
+                400, 400,  // viewport_size
+                1,  // premultiplied_alpha
+                0,  // padding
+            ]);
+            const uniformBuffer = device.createBuffer({
+                size: uniformData.byteLength,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            });
+            device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+            // Create quad data - 61 floats per quad
+            // order, borderStyle, bounds(4), contentMask(4), background(29), borderColor(4), cornerRadii(4), borderWidths(4), transform(8), opacity, pad
+            const quadData = new Float32Array(61);
+            let offset = 0;
+
+            // order, borderStyle
+            quadData[offset++] = 0;
+            quadData[offset++] = 0;
+
+            // bounds: origin(100, 100), size(200, 200)
+            quadData[offset++] = 100;
+            quadData[offset++] = 100;
+            quadData[offset++] = 200;
+            quadData[offset++] = 200;
+
+            // contentMask: origin(0, 0), size(400, 400)
+            quadData[offset++] = 0;
+            quadData[offset++] = 0;
+            quadData[offset++] = 400;
+            quadData[offset++] = 400;
+
+            // background: tag=0 (solid), colorSpace=0
+            quadData[offset++] = 0;
+            quadData[offset++] = 0;
+            // padding (8 bytes = 2 floats)
+            quadData[offset++] = 0;
+            quadData[offset++] = 0;
+            // solid color: HSLA(0.0, 1.0, 0.5, 1.0) = RED
+            quadData[offset++] = 0.0;  // h
+            quadData[offset++] = 1.0;  // s
+            quadData[offset++] = 0.5;  // l
+            quadData[offset++] = 1.0;  // a
+            // gradient_angle
+            quadData[offset++] = 0.0;
+            // padding (12 bytes = 3 floats)
+            quadData[offset++] = 0;
+            quadData[offset++] = 0;
+            quadData[offset++] = 0;
+            // colors[0]: HSLA + percentage + padding
+            quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0; // HSLA
+            quadData[offset++] = 0; // percentage
+            quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0; // padding
+            // colors[1]: HSLA + percentage + padding
+            quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0; // HSLA
+            quadData[offset++] = 0; // percentage
+            quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0; // padding
+            // pad
+            quadData[offset++] = 0;
+
+            // borderColor: HSLA(0, 0, 0, 0)
+            quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0;
+
+            // cornerRadii: Corners(0, 0, 0, 0)
+            quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0;
+
+            // borderWidths: Edges(0, 0, 0, 0)
+            quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0;
+
+            // transform: identity (m0=1, m1=0, m2=0, m3=1, m4=0, m5=0, pad, pad)
+            quadData[offset++] = 1; quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 1;
+            quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0; quadData[offset++] = 0;
+
+            // opacity, pad
+            quadData[offset++] = 1.0;
+            quadData[offset++] = 0;
+
+            addLog(`Quad data: ${offset} floats`);
+
+            const quadBuffer = device.createBuffer({
+                size: quadData.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+            device.queue.writeBuffer(quadBuffer, 0, quadData);
+
+            const bindGroup = device.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: uniformBuffer } },
+                    { binding: 1, resource: { buffer: quadBuffer } }
+                ]
+            });
+
+            addLog('✓ Buffers and bind group created');
+
+            // Render offscreen
+            const texture = device.createTexture({
+                size: { width: 400, height: 400 },
+                format,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+            });
+
+            const encoder = device.createCommandEncoder();
+            const renderPass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: texture.createView(),
+                    clearValue: { r: 0, g: 0, b: 1, a: 1 }, // BLUE background
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+            });
+
+            renderPass.setPipeline(pipeline);
+            renderPass.setBindGroup(0, bindGroup);
+            renderPass.draw(4, 1, 0, 0);
+            renderPass.end();
+
+            addLog('✓ Draw command issued');
+
+            // Read back pixels
+            const bytesPerRow = Math.ceil(400 * 4 / 256) * 256;
+            const buffer = device.createBuffer({
+                size: bytesPerRow * 400,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            });
+
+            encoder.copyTextureToBuffer(
+                { texture },
+                { buffer, bytesPerRow },
+                { width: 400, height: 400 }
+            );
+
+            device.queue.submit([encoder.finish()]);
+
+            await buffer.mapAsync(GPUMapMode.READ);
+            const data = new Uint8Array(buffer.getMappedRange());
+
+            function checkPixel(x, y, expectedDesc) {
+                const idx = y * bytesPerRow + x * 4;
+                const b = data[idx + 0];
+                const g = data[idx + 1];
+                const r = data[idx + 2];
+                const a = data[idx + 3];
+                addLog(`  (${x},${y}) R:${r} G:${g} B:${b} A:${a} - ${expectedDesc}`);
+                return { r, g, b, a };
+            }
+
+            addLog('\nPixel checks:');
+            const center = checkPixel(200, 200, 'center - should be RED');
+            const topLeft = checkPixel(50, 50, 'outside quad - should be BLUE');
+
+            if (center.r > 200 && center.g < 50 && center.b < 50) {
+                addLog('\n✅ SUCCESS: Debug shader outputs RED from storage buffer!');
+                window.DEBUG_SHADER_TEST_PASSED = true;
+            } else if (center.b > 200) {
+                addLog('\n❌ FAIL: Center is BLUE - quad not rendering or data not read correctly');
+                window.DEBUG_SHADER_TEST_PASSED = false;
+            } else {
+                addLog(`\n❌ FAIL: Unexpected color - R:${center.r} G:${center.g} B:${center.b}`);
+                window.DEBUG_SHADER_TEST_PASSED = false;
+            }
+
+            buffer.unmap();
+        }
+
+        testDebugShader();
+    </script>
+</body>
+</html>

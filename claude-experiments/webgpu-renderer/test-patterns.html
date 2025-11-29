@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Test Patterns - WebGPU Renderer</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #2a2a2a;
+            font-family: sans-serif;
+            color: white;
+        }
+        h1 {
+            margin: 0 0 20px 0;
+        }
+        canvas {
+            border: 2px solid #444;
+            display: block;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Test Patterns - WebGPU Renderer</h1>
+    <canvas id="canvas" width="900" height="700"></canvas>
+    <div id="status">Initializing...</div>
+
+    <script type="module">
+        import { WebGPURenderer } from './src/renderer/webgpu-renderer.js';
+        import { Quad } from './src/core/primitives.js';
+        import { Bounds } from './src/core/geometry.js';
+
+        async function runTest() {
+            const canvas = document.getElementById('canvas');
+            const statusEl = document.getElementById('status');
+
+            try {
+                const renderer = new WebGPURenderer(canvas);
+                await renderer.initialize();
+                statusEl.textContent = 'Renderer initialized ✓';
+
+                const quads = [];
+                let order = 0;
+
+                // Row 1: Diagonal stripe patterns at different angles
+                // Vertical stripes (angle 0°)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 50, 200, 150),
+                    background: {
+                        tag: 2,  // Pattern
+                        colorSpace: 0,  // Pattern type: 0=stripes
+                        gradientAngle: 0,  // Angle
+                        solid: { h: 0, s: 0, l: 1, a: 1 },  // Not used for stripes
+                        colors: [
+                            { color: { h: 0.66, s: 0.8, l: 0.8, a: 1 }, percentage: 20 },  // Light blue, spacing=20
+                            { color: { h: 0.66, s: 0.8, l: 0.4, a: 1 }, percentage: 0 }   // Dark blue
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Diagonal stripes (45°)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(270, 50, 200, 150),
+                    background: {
+                        tag: 2,
+                        colorSpace: 0,
+                        gradientAngle: 45,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0, s: 0.8, l: 0.8, a: 1 }, percentage: 15 },    // Light red
+                            { color: { h: 0, s: 0.8, l: 0.4, a: 1 }, percentage: 0 }     // Dark red
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Horizontal stripes (90°)
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(490, 50, 200, 150),
+                    background: {
+                        tag: 2,
+                        colorSpace: 0,
+                        gradientAngle: 90,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0.33, s: 0.8, l: 0.8, a: 1 }, percentage: 12 }, // Light green
+                            { color: { h: 0.33, s: 0.8, l: 0.4, a: 1 }, percentage: 0 }  // Dark green
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Row 2: Dot patterns with different spacings
+                // Small dots
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 220, 200, 150),
+                    background: {
+                        tag: 2,
+                        colorSpace: 1,  // Pattern type: 1=dots
+                        gradientAngle: 0,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0.5, s: 0.3, l: 0.9, a: 1 }, percentage: 15 },  // Light cyan background, spacing=15
+                            { color: { h: 0.5, s: 1, l: 0.5, a: 1 }, percentage: 0 }     // Cyan dots
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Medium dots
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(270, 220, 200, 150),
+                    background: {
+                        tag: 2,
+                        colorSpace: 1,
+                        gradientAngle: 0,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0.08, s: 0.3, l: 0.9, a: 1 }, percentage: 25 }, // Light yellow background
+                            { color: { h: 0.08, s: 1, l: 0.5, a: 1 }, percentage: 0 }    // Yellow dots
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Large dots
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(490, 220, 200, 150),
+                    background: {
+                        tag: 2,
+                        colorSpace: 1,
+                        gradientAngle: 0,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0.91, s: 0.3, l: 0.9, a: 1 }, percentage: 40 }, // Light pink background
+                            { color: { h: 0.91, s: 1, l: 0.5, a: 1 }, percentage: 0 }    // Pink dots
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Row 3: Checkerboard patterns
+                // Small checkerboard
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 390, 200, 150),
+                    background: {
+                        tag: 2,
+                        colorSpace: 2,  // Pattern type: 2=checkerboard
+                        gradientAngle: 0,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0.83, s: 0.2, l: 0.9, a: 1 }, percentage: 20 }, // Light purple, spacing=20
+                            { color: { h: 0.83, s: 0.8, l: 0.5, a: 1 }, percentage: 0 }  // Purple
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Medium checkerboard
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(270, 390, 200, 150),
+                    background: {
+                        tag: 2,
+                        colorSpace: 2,
+                        gradientAngle: 0,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0.16, s: 0.2, l: 0.9, a: 1 }, percentage: 35 }, // Light orange
+                            { color: { h: 0.16, s: 0.9, l: 0.5, a: 1 }, percentage: 0 }  // Orange
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Large checkerboard
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(490, 390, 200, 150),
+                    background: {
+                        tag: 2,
+                        colorSpace: 2,
+                        gradientAngle: 0,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0, s: 0, l: 0.95, a: 1 }, percentage: 50 },    // Very light gray
+                            { color: { h: 0, s: 0, l: 0.3, a: 1 }, percentage: 0 }      // Dark gray
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Row 4: Grid patterns
+                // Fine grid
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 560, 200, 120),
+                    background: {
+                        tag: 2,
+                        colorSpace: 3,  // Pattern type: 3=grid
+                        gradientAngle: 0,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0.66, s: 0.1, l: 0.95, a: 1 }, percentage: 25 }, // Light blue background
+                            { color: { h: 0.66, s: 0.8, l: 0.4, a: 1 }, percentage: 0 }   // Blue lines
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Medium grid
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(270, 560, 200, 120),
+                    background: {
+                        tag: 2,
+                        colorSpace: 3,
+                        gradientAngle: 0,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0.33, s: 0.1, l: 0.95, a: 1 }, percentage: 40 }, // Light green background
+                            { color: { h: 0.33, s: 0.8, l: 0.4, a: 1 }, percentage: 0 }   // Green lines
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                // Coarse grid
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(490, 560, 200, 120),
+                    background: {
+                        tag: 2,
+                        colorSpace: 3,
+                        gradientAngle: 0,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0, s: 0.1, l: 0.95, a: 1 }, percentage: 60 },   // Light red background
+                            { color: { h: 0, s: 0.8, l: 0.4, a: 1 }, percentage: 0 }     // Red lines
+                        ]
+                    },
+                    cornerRadii: { topLeft: 10, topRight: 10, bottomRight: 10, bottomLeft: 10 }
+                }));
+
+                console.log('=== Testing Patterns ===');
+                console.log(`Created ${quads.length} test quads with various patterns`);
+                console.log('- Diagonal stripe patterns (0°, 45°, 90°)');
+                console.log('- Dot patterns (small, medium, large spacing)');
+                console.log('- Checkerboard patterns (various sizes)');
+                console.log('- Grid patterns (fine, medium, coarse)');
+
+                // Render the scene
+                renderer.beginFrame();
+                renderer.clear([0, 0, 0, 1]);
+                renderer.renderQuads(quads);
+                renderer.endFrame();
+
+                statusEl.textContent = `✓ SUCCESS: Rendered ${quads.length} quads with patterns`;
+                console.log('✓ Pattern test completed');
+            } catch (error) {
+                statusEl.textContent = `❌ FAILED: ${error.message}`;
+                console.error('Test failed:', error);
+            }
+        }
+
+        runTest();
+    </script>
+</body>
+</html>

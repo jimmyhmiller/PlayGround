@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Storage Buffer Layout</title>
+    <style>
+        body { margin: 0; padding: 20px; font-family: monospace; }
+        #log { white-space: pre; }
+    </style>
+</head>
+<body>
+    <h1>Storage Buffer Layout Test</h1>
+    <div id="log"></div>
+
+    <script type="module">
+        const log = document.getElementById('log');
+        function addLog(msg) {
+            log.textContent += msg + '\n';
+            console.log(msg);
+        }
+
+        async function testLayout() {
+            addLog('=== Testing Storage Buffer Layout ===\n');
+
+            if (!navigator.gpu) {
+                addLog('❌ WebGPU not supported');
+                return;
+            }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+
+            // Minimal shader that reads just bounds from a simplified Quad struct
+            const shaderCode = `
+struct Bounds {
+    origin: vec2<f32>,
+    size: vec2<f32>,
+}
+
+struct MinimalQuad {
+    order: u32,
+    border_style: u32,
+    bounds: Bounds,
+}
+
+@group(0) @binding(0) var<storage, read> quads: array<MinimalQuad>;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_id: u32) -> @builtin(position) vec4<f32> {
+    let quad = quads[0];
+
+    // Generate unit quad vertices
+    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+
+    // Apply bounds
+    let position = unit_vertex * quad.bounds.size + quad.bounds.origin;
+
+    // Convert to NDC (hardcoded 400x400 viewport)
+    let ndc = position / vec2<f32>(400.0, 400.0) * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
+    return vec4<f32>(ndc, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);  // RED
+}
+`;
+
+            const shaderModule = device.createShaderModule({ code: shaderCode });
+
+            const bindGroupLayout = device.createBindGroupLayout({
+                entries: [
+                    { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }
+                ]
+            });
+
+            const pipeline = device.createRenderPipeline({
+                layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+                vertex: { module: shaderModule, entryPoint: 'vs_main' },
+                fragment: {
+                    module: shaderModule,
+                    entryPoint: 'fs_main',
+                    targets: [{ format: 'bgra8unorm' }],
+                },
+                primitive: { topology: 'triangle-strip' },
+            });
+
+            // Create minimal quad data: order(u32), border_style(u32), bounds(vec2+vec2)
+            // Total: 2 u32s + 4 f32s = 6 floats
+            const quadData = new Float32Array([
+                0,      // order
+                0,      // border_style
+                100,    // bounds.origin.x
+                100,    // bounds.origin.y
+                200,    // bounds.size.width
+                200,    // bounds.size.height
+            ]);
+
+            addLog('Quad data:');
+            addLog(`  order: ${quadData[0]}`);
+            addLog(`  border_style: ${quadData[1]}`);
+            addLog(`  bounds.origin: (${quadData[2]}, ${quadData[3]})`);
+            addLog(`  bounds.size: (${quadData[4]}, ${quadData[5]})`);
+            addLog(`  Total: ${quadData.length} floats = ${quadData.byteLength} bytes\n`);
+
+            const quadBuffer = device.createBuffer({
+                size: quadData.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+            device.queue.writeBuffer(quadBuffer, 0, quadData);
+
+            const bindGroup = device.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [{ binding: 0, resource: { buffer: quadBuffer } }]
+            });
+
+            // Render
+            const texture = device.createTexture({
+                size: { width: 400, height: 400 },
+                format: 'bgra8unorm',
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+            });
+
+            const encoder = device.createCommandEncoder();
+            const renderPass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: texture.createView(),
+                    clearValue: { r: 0, g: 0, b: 1, a: 1 },  // BLUE background
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+            });
+
+            renderPass.setPipeline(pipeline);
+            renderPass.setBindGroup(0, bindGroup);
+            renderPass.draw(4, 1, 0, 0);
+            renderPass.end();
+
+            // Read pixels
+            const bytesPerRow = Math.ceil(400 * 4 / 256) * 256;
+            const buffer = device.createBuffer({
+                size: bytesPerRow * 400,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            });
+
+            encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow }, { width: 400, height: 400 });
+            device.queue.submit([encoder.finish()]);
+
+            await buffer.mapAsync(GPUMapMode.READ);
+            const data = new Uint8Array(buffer.getMappedRange());
+
+            function checkPixel(x, y) {
+                const idx = y * bytesPerRow + x * 4;
+                return {
+                    r: data[idx + 2],
+                    g: data[idx + 1],
+                    b: data[idx + 0],
+                    a: data[idx + 3]
+                };
+            }
+
+            const center = checkPixel(200, 200);
+            const outside = checkPixel(50, 50);
+
+            addLog('Pixel checks:');
+            addLog(`  Center (200,200): R=${center.r} G=${center.g} B=${center.b} A=${center.a}`);
+            addLog(`  Outside (50,50): R=${outside.r} G=${outside.g} B=${outside.b} A=${outside.a}\n`);
+
+            if (center.r > 200 && center.b < 50) {
+                addLog('✅ SUCCESS: Minimal storage buffer test works!');
+                addLog('   This confirms the pipeline can read from storage buffers.');
+                window.STORAGE_TEST_PASSED = true;
+            } else {
+                addLog('❌ FAIL: Storage buffer read failed at minimal level');
+                window.STORAGE_TEST_PASSED = false;
+            }
+
+            buffer.unmap();
+        }
+
+        testLayout();
+    </script>
+</body>
+</html>

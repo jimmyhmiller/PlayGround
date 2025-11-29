@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Renderer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #1e1e1e;
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+        #container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        canvas {
+            border: 2px solid #333;
+            background: white;
+            cursor: none;
+        }
+        #info {
+            color: #ccc;
+            font-size: 14px;
+            text-align: center;
+        }
+        #error {
+            color: #ff6b6b;
+            padding: 20px;
+            background: #2d2d2d;
+            border-radius: 8px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <canvas id="canvas" width="600" height="600"></canvas>
+        <div id="info">WebGPU Renderer - Initializing...</div>
+        <div id="error"></div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+</body>
+</html>

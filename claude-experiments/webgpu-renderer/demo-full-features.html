@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>WebGPU Renderer - Full Feature Demo</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 {
+            margin: 0 0 10px 0;
+            font-size: 32px;
+            text-align: center;
+            background: linear-gradient(90deg, #60a5fa, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .subtitle {
+            margin: 0 0 20px 0;
+            font-size: 14px;
+            color: #94a3b8;
+            text-align: center;
+        }
+        canvas {
+            border: 2px solid #334155;
+            border-radius: 8px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            display: block;
+            margin-bottom: 20px;
+        }
+        #status {
+            padding: 12px 24px;
+            background: rgba(30, 41, 59, 0.8);
+            border-radius: 8px;
+            font-size: 14px;
+            backdrop-filter: blur(10px);
+        }
+        .features {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+            margin-top: 20px;
+            max-width: 1100px;
+        }
+        .feature {
+            padding: 16px;
+            background: rgba(30, 41, 59, 0.6);
+            border-radius: 8px;
+            border: 1px solid #334155;
+        }
+        .feature h3 {
+            margin: 0 0 8px 0;
+            font-size: 14px;
+            color: #60a5fa;
+        }
+        .feature ul {
+            margin: 0;
+            padding-left: 20px;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #cbd5e1;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebGPU Renderer</h1>
+    <div class="subtitle">Full Feature Demonstration: SDF Rendering, Gradients, Borders, Patterns & More</div>
+    <canvas id="canvas" width="1100" height="800"></canvas>
+    <div id="status">Initializing...</div>
+
+    <div class="features">
+        <div class="feature">
+            <h3>✨ Rendering Features</h3>
+            <ul>
+                <li>Signed Distance Field (SDF) rendering</li>
+                <li>Smooth anti-aliasing</li>
+                <li>Rounded corners (per-corner control)</li>
+                <li>Clipping & content masks</li>
+            </ul>
+        </div>
+        <div class="feature">
+            <h3>🎨 Backgrounds</h3>
+            <ul>
+                <li>Solid colors (HSLA)</li>
+                <li>Linear gradients (any angle)</li>
+                <li>Radial gradients</li>
+                <li>Conic (angular) gradients</li>
+                <li>sRGB & Oklab color spaces</li>
+            </ul>
+        </div>
+        <div class="feature">
+            <h3>🔲 Borders</h3>
+            <ul>
+                <li>Per-side border widths</li>
+                <li>Solid & dashed border styles</li>
+                <li>Border colors (HSLA)</li>
+                <li>Borders with rounded corners</li>
+            </ul>
+        </div>
+        <div class="feature">
+            <h3>🎭 Patterns</h3>
+            <ul>
+                <li>Diagonal stripes (any angle)</li>
+                <li>Dots (anti-aliased)</li>
+                <li>Checkerboard</li>
+                <li>Grid lines</li>
+            </ul>
+        </div>
+    </div>
+
+    <script type="module">
+        import { WebGPURenderer } from './src/renderer/webgpu-renderer.js';
+        import { Quad } from './src/core/primitives.js';
+        import { Bounds } from './src/core/geometry.js';
+
+        async function runDemo() {
+            const canvas = document.getElementById('canvas');
+            const statusEl = document.getElementById('status');
+
+            try {
+                const renderer = new WebGPURenderer(canvas);
+                await renderer.initialize();
+
+                const quads = [];
+                let order = 0;
+
+                // === HEADER: Large gradient banner with text-like appearance ===
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 30, 1000, 80),
+                    background: {
+                        tag: 1,
+                        colorSpace: 1,  // Oklab for smooth transitions
+                        gradientAngle: 90,
+                        colors: [
+                            { color: { h: 0.66, s: 0.8, l: 0.6, a: 1 }, percentage: 0 },
+                            { color: { h: 0.83, s: 0.8, l: 0.6, a: 1 }, percentage: 1 }
+                        ]
+                    },
+                    borderStyle: 0,
+                    borderWidths: { top: 3, right: 3, bottom: 3, left: 3 },
+                    borderColor: { h: 0.75, s: 1, l: 0.7, a: 1 },
+                    cornerRadii: { topLeft: 20, topRight: 20, bottomRight: 20, bottomLeft: 20 }
+                }));
+
+                // === ROW 1: Showcase gradients ===
+                // Linear gradient card
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 130, 320, 200),
+                    background: {
+                        tag: 1,
+                        colorSpace: 0,
+                        gradientAngle: 135,
+                        colors: [
+                            { color: { h: 0.16, s: 1, l: 0.7, a: 1 }, percentage: 0 },
+                            { color: { h: 0, s: 1, l: 0.5, a: 1 }, percentage: 1 }
+                        ]
+                    },
+                    borderStyle: 0,
+                    borderWidths: { top: 4, right: 4, bottom: 4, left: 4 },
+                    borderColor: { h: 0.08, s: 1, l: 0.4, a: 0.8 },
+                    cornerRadii: { topLeft: 16, topRight: 16, bottomRight: 16, bottomLeft: 16 }
+                }));
+
+                // Radial gradient card
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(390, 130, 320, 200),
+                    background: {
+                        tag: 3,
+                        colorSpace: 0,
+                        solid: { h: 0.5, s: 0.5, l: 0.9, a: 1 },
+                        colors: [
+                            { color: { h: 0.5, s: 1, l: 0.8, a: 1 }, percentage: 0.2 },
+                            { color: { h: 0.55, s: 1, l: 0.4, a: 1 }, percentage: 1 }
+                        ]
+                    },
+                    borderStyle: 0,
+                    borderWidths: { top: 4, right: 4, bottom: 4, left: 4 },
+                    borderColor: { h: 0.5, s: 1, l: 0.3, a: 0.8 },
+                    cornerRadii: { topLeft: 16, topRight: 16, bottomRight: 16, bottomLeft: 16 }
+                }));
+
+                // Conic gradient card
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(730, 130, 320, 200),
+                    background: {
+                        tag: 4,
+                        colorSpace: 1,
+                        solid: { h: 0.5, s: 0.5, l: 0, a: 0 },
+                        gradientAngle: 0,
+                        colors: [
+                            { color: { h: 0.83, s: 1, l: 0.6, a: 1 }, percentage: 0 },
+                            { color: { h: 0.91, s: 1, l: 0.6, a: 1 }, percentage: 1 }
+                        ]
+                    },
+                    borderStyle: 0,
+                    borderWidths: { top: 4, right: 4, bottom: 4, left: 4 },
+                    borderColor: { h: 0.87, s: 1, l: 0.5, a: 0.8 },
+                    cornerRadii: { topLeft: 16, topRight: 16, bottomRight: 16, bottomLeft: 16 }
+                }));
+
+                // === ROW 2: Pattern showcase ===
+                // Diagonal stripes
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 350, 230, 180),
+                    background: {
+                        tag: 2,
+                        colorSpace: 0,
+                        gradientAngle: 45,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0.66, s: 0.3, l: 0.85, a: 1 }, percentage: 18 },
+                            { color: { h: 0.66, s: 0.8, l: 0.5, a: 1 }, percentage: 0 }
+                        ]
+                    },
+                    borderStyle: 1,  // Dashed
+                    borderWidths: { top: 3, right: 3, bottom: 3, left: 3 },
+                    borderColor: { h: 0.66, s: 1, l: 0.4, a: 1 },
+                    cornerRadii: { topLeft: 12, topRight: 12, bottomRight: 12, bottomLeft: 12 }
+                }));
+
+                // Dots pattern
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(300, 350, 230, 180),
+                    background: {
+                        tag: 2,
+                        colorSpace: 1,
+                        gradientAngle: 0,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0.08, s: 0.2, l: 0.9, a: 1 }, percentage: 22 },
+                            { color: { h: 0.08, s: 1, l: 0.55, a: 1 }, percentage: 0 }
+                        ]
+                    },
+                    borderStyle: 0,
+                    borderWidths: { top: 3, right: 3, bottom: 3, left: 3 },
+                    borderColor: { h: 0.08, s: 1, l: 0.4, a: 1 },
+                    cornerRadii: { topLeft: 12, topRight: 12, bottomRight: 12, bottomLeft: 12 }
+                }));
+
+                // Checkerboard
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(550, 350, 230, 180),
+                    background: {
+                        tag: 2,
+                        colorSpace: 2,
+                        gradientAngle: 0,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0, s: 0, l: 0.95, a: 1 }, percentage: 30 },
+                            { color: { h: 0, s: 0, l: 0.25, a: 1 }, percentage: 0 }
+                        ]
+                    },
+                    borderStyle: 0,
+                    borderWidths: { top: 3, right: 3, bottom: 3, left: 3 },
+                    borderColor: { h: 0, s: 0, l: 0.15, a: 1 },
+                    cornerRadii: { topLeft: 12, topRight: 12, bottomRight: 12, bottomLeft: 12 }
+                }));
+
+                // Grid pattern
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(800, 350, 250, 180),
+                    background: {
+                        tag: 2,
+                        colorSpace: 3,
+                        gradientAngle: 0,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0.33, s: 0.15, l: 0.92, a: 1 }, percentage: 35 },
+                            { color: { h: 0.33, s: 0.8, l: 0.45, a: 1 }, percentage: 0 }
+                        ]
+                    },
+                    borderStyle: 0,
+                    borderWidths: { top: 3, right: 3, bottom: 3, left: 3 },
+                    borderColor: { h: 0.33, s: 1, l: 0.35, a: 1 },
+                    cornerRadii: { topLeft: 12, topRight: 12, bottomRight: 12, bottomLeft: 12 }
+                }));
+
+                // === ROW 3: Border & corner showcase ===
+                // Pills with various borders
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 550, 200, 70),
+                    background: { tag: 0, solid: { h: 0.91, s: 0.4, l: 0.85, a: 1 } },
+                    borderStyle: 0,
+                    borderWidths: { top: 5, right: 5, bottom: 5, left: 5 },
+                    borderColor: { h: 0.91, s: 1, l: 0.5, a: 1 },
+                    cornerRadii: { topLeft: 35, topRight: 35, bottomRight: 35, bottomLeft: 35 }
+                }));
+
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(270, 550, 200, 70),
+                    background: { tag: 0, solid: { h: 0.5, s: 0.4, l: 0.85, a: 1 } },
+                    borderStyle: 1,  // Dashed
+                    borderWidths: { top: 5, right: 5, bottom: 5, left: 5 },
+                    borderColor: { h: 0.5, s: 1, l: 0.5, a: 1 },
+                    cornerRadii: { topLeft: 35, topRight: 35, bottomRight: 35, bottomLeft: 35 }
+                }));
+
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(490, 550, 200, 70),
+                    background: { tag: 0, solid: { h: 0.33, s: 0.4, l: 0.85, a: 1 } },
+                    borderStyle: 0,
+                    borderWidths: { top: 8, right: 8, bottom: 8, left: 8 },
+                    borderColor: { h: 0.33, s: 1, l: 0.4, a: 1 },
+                    cornerRadii: { topLeft: 35, topRight: 35, bottomRight: 35, bottomLeft: 35 }
+                }));
+
+                // Circles
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(730, 550, 70, 70),
+                    background: {
+                        tag: 3,
+                        colorSpace: 0,
+                        solid: { h: 0.5, s: 0.5, l: 0.8, a: 1 },
+                        colors: [
+                            { color: { h: 0, s: 1, l: 0.7, a: 1 }, percentage: 0 },
+                            { color: { h: 0, s: 1, l: 0.4, a: 1 }, percentage: 1 }
+                        ]
+                    },
+                    borderStyle: 0,
+                    borderWidths: { top: 4, right: 4, bottom: 4, left: 4 },
+                    borderColor: { h: 0, s: 1, l: 0.3, a: 1 },
+                    cornerRadii: { topLeft: 35, topRight: 35, bottomRight: 35, bottomLeft: 35 }
+                }));
+
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(820, 550, 70, 70),
+                    background: {
+                        tag: 3,
+                        colorSpace: 0,
+                        solid: { h: 0.5, s: 0.5, l: 0.8, a: 1 },
+                        colors: [
+                            { color: { h: 0.66, s: 1, l: 0.7, a: 1 }, percentage: 0 },
+                            { color: { h: 0.66, s: 1, l: 0.4, a: 1 }, percentage: 1 }
+                        ]
+                    },
+                    borderStyle: 0,
+                    borderWidths: { top: 4, right: 4, bottom: 4, left: 4 },
+                    borderColor: { h: 0.66, s: 1, l: 0.3, a: 1 },
+                    cornerRadii: { topLeft: 35, topRight: 35, bottomRight: 35, bottomLeft: 35 }
+                }));
+
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(910, 550, 70, 70),
+                    background: {
+                        tag: 3,
+                        colorSpace: 0,
+                        solid: { h: 0.5, s: 0.5, l: 0.8, a: 1 },
+                        colors: [
+                            { color: { h: 0.33, s: 1, l: 0.7, a: 1 }, percentage: 0 },
+                            { color: { h: 0.33, s: 1, l: 0.4, a: 1 }, percentage: 1 }
+                        ]
+                    },
+                    borderStyle: 0,
+                    borderWidths: { top: 4, right: 4, bottom: 4, left: 4 },
+                    borderColor: { h: 0.33, s: 1, l: 0.3, a: 1 },
+                    cornerRadii: { topLeft: 35, topRight: 35, bottomRight: 35, bottomLeft: 35 }
+                }));
+
+                // === ROW 4: Complex combinations ===
+                // Large card with pattern + border + gradient overlay
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(50, 640, 480, 130),
+                    background: {
+                        tag: 2,
+                        colorSpace: 1,
+                        gradientAngle: 0,
+                        solid: { h: 0, s: 0, l: 1, a: 1 },
+                        colors: [
+                            { color: { h: 0.83, s: 0.15, l: 0.9, a: 1 }, percentage: 20 },
+                            { color: { h: 0.83, s: 0.6, l: 0.6, a: 1 }, percentage: 0 }
+                        ]
+                    },
+                    borderStyle: 0,
+                    borderWidths: { top: 6, right: 6, bottom: 6, left: 6 },
+                    borderColor: { h: 0.83, s: 1, l: 0.5, a: 1 },
+                    cornerRadii: { topLeft: 20, topRight: 20, bottomRight: 20, bottomLeft: 20 }
+                }));
+
+                // Gradient card with asymmetric borders
+                quads.push(new Quad({
+                    order: order++,
+                    bounds: new Bounds(550, 640, 500, 130),
+                    background: {
+                        tag: 1,
+                        colorSpace: 1,
+                        gradientAngle: 45,
+                        colors: [
+                            { color: { h: 0.58, s: 0.8, l: 0.65, a: 1 }, percentage: 0 },
+                            { color: { h: 0.66, s: 0.8, l: 0.55, a: 1 }, percentage: 1 }
+                        ]
+                    },
+                    borderStyle: 0,
+                    borderWidths: { top: 3, right: 3, bottom: 10, left: 3 },
+                    borderColor: { h: 0.62, s: 1, l: 0.4, a: 1 },
+                    cornerRadii: { topLeft: 20, topRight: 20, bottomRight: 20, bottomLeft: 20 }
+                }));
+
+                console.log('=== WebGPU Renderer - Full Feature Demo ===');
+                console.log(`Rendering ${quads.length} quads demonstrating:`);
+                console.log('  ✓ SDF-based rounded corners');
+                console.log('  ✓ Linear, radial, and conic gradients');
+                console.log('  ✓ sRGB and Oklab color spaces');
+                console.log('  ✓ Solid and dashed borders');
+                console.log('  ✓ Pattern rendering (stripes, dots, checkerboard, grid)');
+                console.log('  ✓ Anti-aliased edges');
+
+                // Render the scene
+                renderer.beginFrame();
+                renderer.clear([0.1, 0.13, 0.18, 1]);  // Dark blue-gray background
+                renderer.renderQuads(quads);
+                renderer.endFrame();
+
+                statusEl.textContent = `✓ SUCCESS: Rendered ${quads.length} quads with full feature set`;
+                console.log('✓ Demo completed successfully');
+            } catch (error) {
+                statusEl.textContent = `❌ FAILED: ${error.message}`;
+                console.error('Demo failed:', error);
+                console.error(error.stack);
+            }
+        }
+
+        runDemo();
+    </script>
+</body>
+</html>
