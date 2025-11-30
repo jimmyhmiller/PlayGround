@@ -43,7 +43,8 @@ fn vs_main(
     out.quad_id = instance_id;
 
     // Output the solid color from quad data
-    out.debug_color = hsla_to_rgba(quad.background.solid);
+    let solid_hsla = Hsla(quad.background.solid_h, quad.background.solid_s, quad.background.solid_l, quad.background.solid_a);
+    out.debug_color = hsla_to_rgba(solid_hsla);
 
     return out;
 }

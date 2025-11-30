@@ -14,8 +14,9 @@ import { getWebGPU, getCanvasContext, getPreferredCanvasFormat, isNode } from '.
 import { PathTessellator } from '../utils/path-tessellator.js';
 
 export class WebGPURenderer {
-    constructor(canvas, options = {}) {
+    constructor(canvas, externalDevice = null, options = {}) {
         this.canvas = canvas;
+        this.externalDevice = externalDevice;
         this.device = null;
         this.context = null;
         this.pipelines = {};
@@ -27,6 +28,7 @@ export class WebGPURenderer {
         this.pathTessellator = null;
         this.ready = false;
         this.presentationFormat = null;
+        this.canvasSize = null; // For external rendering without canvas
 
         // Path rendering settings (matches GPUI)
         this.pathSampleCount = options.pathSampleCount || 4; // MSAA sample count (4, 2, or 1)
@@ -37,17 +39,22 @@ export class WebGPURenderer {
     }
 
     async initialize() {
-        // Get WebGPU (browser or Node.js)
-        const gpu = await getWebGPU();
+        // Use external device if provided, otherwise create one
+        if (this.externalDevice) {
+            this.device = this.externalDevice;
+        } else {
+            // Get WebGPU (browser or Node.js)
+            const gpu = await getWebGPU();
 
-        // Request adapter
-        const adapter = await gpu.requestAdapter();
-        if (!adapter) {
-            throw new Error('Failed to get WebGPU adapter');
+            // Request adapter
+            const adapter = await gpu.requestAdapter();
+            if (!adapter) {
+                throw new Error('Failed to get WebGPU adapter');
+            }
+
+            // Request device
+            this.device = await adapter.requestDevice();
         }
-
-        // Request device
-        this.device = await adapter.requestDevice();
 
         // Check supported MSAA sample counts and adjust if needed
         const supportedCounts = [4, 2, 1];
@@ -61,6 +68,7 @@ export class WebGPURenderer {
         }
 
         // Get preferred format
+        const gpu = await getWebGPU();
         this.presentationFormat = await getPreferredCanvasFormat(gpu);
 
         // Configure canvas context (if canvas exists)
@@ -760,6 +768,63 @@ export class WebGPURenderer {
 
         // Return offscreen texture for headless rendering
         return offscreenTexture;
+    }
+
+    renderToPass(renderPass, scene) {
+        if (!this.ready) {
+            console.warn('Renderer not ready');
+            return;
+        }
+
+        // Release all buffers from previous frame for reuse
+        this.bufferPool.releaseAll();
+
+        scene.finish();
+
+        // Determine render target dimensions
+        const width = this.canvasSize ? this.canvasSize.width : (this.canvas ? this.canvas.width : 800);
+        const height = this.canvasSize ? this.canvasSize.height : (this.canvas ? this.canvas.height : 600);
+
+        // Update globals
+        const globalsData = new Float32Array([
+            width,
+            height,
+            1, // premultiplied_alpha
+            0, // pad
+        ]);
+        this.device.queue.writeBuffer(this.uniformBuffer, 0, globalsData);
+
+        // Collect all batches
+        const batches = Array.from(scene.batches());
+
+        // Render all batches in order
+        for (const batch of batches) {
+            switch (batch.type) {
+                case 'shadows':
+                    this.renderShadows(renderPass, batch.primitives);
+                    break;
+                case 'quads':
+                    this.renderQuads(renderPass, batch.primitives);
+                    break;
+                case 'underlines':
+                    this.renderUnderlines(renderPass, batch.primitives);
+                    break;
+                case 'monochromeSprites':
+                    this.renderMonochromeSprites(renderPass, batch.primitives);
+                    break;
+                case 'polychromeSprites':
+                    this.renderPolychromeSprites(renderPass, batch.primitives);
+                    break;
+                case 'surfaces':
+                    this.renderSurfaces(renderPass, batch.primitives);
+                    break;
+                case 'paths':
+                    // Note: Path rendering requires two-pass approach, so we skip it here
+                    // TODO: Support paths in renderToPass by creating intermediate textures
+                    console.warn('Path rendering not yet supported in renderToPass');
+                    break;
+            }
+        }
     }
 
     createPrimitiveBuffer(primitives, floatsPerPrimitive) {

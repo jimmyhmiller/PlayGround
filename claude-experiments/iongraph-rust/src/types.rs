@@ -1,11 +1,22 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, BTreeMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BlockID(pub u32);
 
+impl Default for BlockID {
+    fn default() -> Self {
+        BlockID(0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockNumber(pub u32);
+
+impl Default for BlockNumber {
+    fn default() -> Self {
+        BlockNumber(0)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IonJSON {
@@ -38,18 +49,25 @@ pub struct LIRData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MIRBlock {
     pub id: BlockID,
+    #[serde(rename = "ptr")]
+    pub ptr: u32,
+    #[serde(default)]
     pub number: BlockNumber,
     #[serde(rename = "loopDepth")]
     pub loop_depth: u32,
+    #[serde(default)]
     pub attributes: Vec<String>,
-    pub predecessors: Vec<BlockNumber>,
-    pub successors: Vec<BlockNumber>,
+    pub predecessors: Vec<BlockID>,
+    pub successors: Vec<BlockID>,
     pub instructions: Vec<MIRInstruction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LIRBlock {
     pub id: BlockID,
+    #[serde(rename = "ptr")]
+    pub ptr: u32,
+    #[serde(default)]
     pub number: BlockNumber,
     pub instructions: Vec<LIRInstruction>,
 }
@@ -57,12 +75,17 @@ pub struct LIRBlock {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MIRInstruction {
     pub id: u32,
+    #[serde(rename = "ptr")]
+    pub ptr: u32,
     pub opcode: String,
+    #[serde(default)]
     pub attributes: Vec<String>,
-    pub inputs: Vec<u32>,
-    pub uses: Vec<u32>,
-    #[serde(rename = "memInputs")]
-    pub mem_inputs: Vec<serde_json::Value>, // Unknown type, using generic JSON
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uses: Option<Vec<u32>>,
+    #[serde(default, rename = "memInputs", skip_serializing_if = "Option::is_none")]
+    pub mem_inputs: Option<Vec<serde_json::Value>>, // Unknown type, using generic JSON
     #[serde(rename = "type")]
     pub instruction_type: String,
 }
@@ -70,8 +93,13 @@ pub struct MIRInstruction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LIRInstruction {
     pub id: u32,
+    #[serde(rename = "ptr")]
+    pub ptr: u32,
     pub opcode: String,
-    pub defs: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defs: Option<Vec<u32>>,
+    #[serde(default, rename = "mirPtr", skip_serializing_if = "Option::is_none")]
+    pub mir_ptr: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,10 +138,11 @@ pub const IMMINENT_BACKEDGE_DUMMY: NodeFlags = 1 << 2;
 
 impl LayoutNode {
     pub fn new_block_node(id: LayoutNodeID, block: Block, layer: usize) -> Self {
+        let size = block.size.clone(); // Use the calculated block size
         Self {
             id,
             pos: Vec2::new(CONTENT_PADDING, CONTENT_PADDING),
-            size: Vec2::new(100.0, 50.0), // Default size for now
+            size,  // Use the block's calculated size
             block: Some(block),
             src_nodes: vec![],
             dst_nodes: vec![],
@@ -159,7 +188,7 @@ pub struct Block {
     pub attributes: Vec<String>,
     pub layer: usize, // Layer assignment for layout
     pub size: Vec2, // Size of the block for rendering
-    
+
     // Additional fields to match TypeScript Block IR
     #[serde(rename = "hasLayoutNode")]
     pub has_layout_node: bool,
@@ -175,6 +204,16 @@ pub struct Block {
     pub is_exit: bool,
     #[serde(rename = "isMerge")]
     pub is_merge: bool,
+
+    // Loop hierarchy fields (for TypeScript parity)
+    #[serde(skip)]
+    pub loop_id: BlockID,  // Which loop this block belongs to
+    #[serde(skip)]
+    pub parent_loop: Option<BlockID>,  // Parent loop for nesting
+    #[serde(skip)]
+    pub loop_height: usize,  // For loop headers: vertical span of the loop
+    #[serde(skip)]
+    pub outgoing_edges: Vec<BlockNumber>,  // For loop headers: edges exiting the loop
 }
 
 impl Block {

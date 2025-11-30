@@ -10,7 +10,9 @@
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:visual": "node e2e-visual-test.js",
-    "example:dawn": "node --loader ./wgsl-loader.js examples/node-headless.js"
+    "example:dawn": "node --loader ./wgsl-loader.js examples/node-headless.js",
+    "example:window": "node --loader ./wgsl-loader.js examples/node-window.js",
+    "example:window:full": "node --loader ./wgsl-loader.js examples/node-window-full.js"
   },
   "devDependencies": {
     "@vitest/browser": "^4.0.13",
@@ -23,6 +25,8 @@
     "vitest": "^4.0.13"
   },
   "dependencies": {
+    "@kmamal/gpu": "^0.2.1",
+    "@kmamal/sdl": "^0.11.13",
     "webgpu": "^0.3.8"
   }
 }

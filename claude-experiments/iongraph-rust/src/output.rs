@@ -95,8 +95,8 @@ impl LayoutOutput {
         let (nodes_by_layer, layer_heights, track_heights) = graph.layout();
         
         // Calculate graph size
-        let mut max_x = 0.0;
-        let mut max_y = 0.0;
+        let mut max_x: f64 = 0.0;
+        let mut max_y: f64 = 0.0;
         for layer in &nodes_by_layer {
             for node in layer {
                 max_x = max_x.max(node.pos.x + node.size.x);

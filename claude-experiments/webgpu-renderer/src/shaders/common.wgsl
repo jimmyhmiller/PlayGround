@@ -52,9 +52,14 @@ struct LinearColorStop {
 struct Background {
     tag: u32,          // 0=Solid, 1=LinearGradient, 2=Pattern
     color_space: u32,  // 0=sRGB linear, 1=Oklab
-    solid: Hsla,
+    // Inline solid color fields to avoid struct alignment issues
+    solid_h: f32,
+    solid_s: f32,
+    solid_l: f32,
+    solid_a: f32,
     gradient_angle: f32,
-    @align(16) colors: array<LinearColorStop, 2>,
+    _pad0: f32,        // Explicit 1-float padding
+    colors: array<LinearColorStop, 2>,
     pad: u32,
     @size(12) _pad: array<f32, 3>,  // Explicit padding to 112 bytes total
 }
@@ -188,7 +193,8 @@ fn prepare_gradient_colors(bg: Background) -> GradientColors {
 
     if (bg.tag == 0u) {
         // Solid color
-        result.solid = hsla_to_rgba(bg.solid);
+        let solid_hsla = Hsla(bg.solid_h, bg.solid_s, bg.solid_l, bg.solid_a);
+        result.solid = hsla_to_rgba(solid_hsla);
     } else if (bg.tag == 1u) {
         // Linear gradient - convert to appropriate color space
         result.color0 = hsla_to_rgba(bg.colors[0].color);
@@ -205,8 +211,35 @@ fn prepare_gradient_colors(bg: Background) -> GradientColors {
         }
     } else if (bg.tag == 2u) {
         // Pattern - store colors directly
-        result.color0 = hsla_to_rgba(bg.solid);
+        let solid_hsla = Hsla(bg.solid_h, bg.solid_s, bg.solid_l, bg.solid_a);
+        result.color0 = hsla_to_rgba(solid_hsla);
         result.color1 = hsla_to_rgba(bg.colors[0].color);
+    } else if (bg.tag == 3u) {
+        // Radial gradient - pack center and radius in solid_color
+        result.solid = vec4<f32>(bg.solid_h, bg.solid_s, bg.solid_l, bg.solid_a);
+        result.color0 = hsla_to_rgba(bg.colors[0].color);
+        result.color1 = hsla_to_rgba(bg.colors[1].color);
+
+        if (bg.color_space == 0u) {
+            result.color0 = linear_to_srgba(result.color0);
+            result.color1 = linear_to_srgba(result.color1);
+        } else if (bg.color_space == 1u) {
+            result.color0 = linear_srgb_to_oklab(result.color0);
+            result.color1 = linear_srgb_to_oklab(result.color1);
+        }
+    } else if (bg.tag == 4u) {
+        // Conic gradient - pack center in solid_color
+        result.solid = vec4<f32>(bg.solid_h, bg.solid_s, bg.solid_l, bg.solid_a);
+        result.color0 = hsla_to_rgba(bg.colors[0].color);
+        result.color1 = hsla_to_rgba(bg.colors[1].color);
+
+        if (bg.color_space == 0u) {
+            result.color0 = linear_to_srgba(result.color0);
+            result.color1 = linear_to_srgba(result.color1);
+        } else if (bg.color_space == 1u) {
+            result.color0 = linear_srgb_to_oklab(result.color0);
+            result.color1 = linear_srgb_to_oklab(result.color1);
+        }
     }
 
     return result;

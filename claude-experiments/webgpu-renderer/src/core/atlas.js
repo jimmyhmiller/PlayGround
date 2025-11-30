@@ -108,11 +108,13 @@ export class Atlas {
     }
 
     getFormat() {
-        return this.kind === 'monochrome' ? 'r8unorm' : 'rgba8unorm';
+        // Use rgba8unorm for all atlases to avoid needing texture-component-swizzle feature
+        return 'rgba8unorm';
     }
 
     getBytesPerPixel() {
-        return this.kind === 'monochrome' ? 1 : 4;
+        // Always use 4 bytes per pixel now
+        return 4;
     }
 
     createTexture() {
@@ -121,24 +123,24 @@ export class Atlas {
             size: [this.size, this.size, 1],
             format: this.getFormat(),
             usage: GPUTextureUsage.TEXTURE_BINDING |
-                   GPUTextureUsage.COPY_DST |
-                   GPUTextureUsage.RENDER_ATTACHMENT,
+                   GPUTextureUsage.COPY_DST,
         });
 
         const view = texture.createView();
 
-        // Clear texture to transparent
-        const encoder = this.device.createCommandEncoder();
-        const renderPass = encoder.beginRenderPass({
-            colorAttachments: [{
-                view,
-                clearValue: { r: 0, g: 0, b: 0, a: 0 },
-                loadOp: 'clear',
-                storeOp: 'store',
-            }],
-        });
-        renderPass.end();
-        this.device.queue.submit([encoder.finish()]);
+        // Clear texture to transparent by writing zeros
+        const bytesPerPixel = this.getBytesPerPixel();
+        const clearData = new Uint8Array(this.size * this.size * bytesPerPixel);
+        this.device.queue.writeTexture(
+            { texture },
+            clearData,
+            {
+                offset: 0,
+                bytesPerRow: this.size * bytesPerPixel,
+                rowsPerImage: this.size,
+            },
+            [this.size, this.size, 1]
+        );
 
         const allocator = new ShelfAllocator(this.size, this.size);
 
@@ -181,12 +183,25 @@ export class Atlas {
         const texture = this.textures[textureIndex].texture;
         const bytesPerPixel = this.getBytesPerPixel();
 
+        // Convert monochrome data (1 byte per pixel) to RGBA (4 bytes per pixel)
+        let uploadData = data;
+        if (this.kind === 'monochrome' && data.length === width * height) {
+            // Data is 1 byte per pixel, need to expand to RGBA
+            uploadData = new Uint8Array(width * height * 4);
+            for (let i = 0; i < width * height; i++) {
+                uploadData[i * 4 + 0] = 255;      // R
+                uploadData[i * 4 + 1] = 255;      // G
+                uploadData[i * 4 + 2] = 255;      // B
+                uploadData[i * 4 + 3] = data[i];  // A (alpha from input)
+            }
+        }
+
         this.device.queue.writeTexture(
             {
                 texture,
                 origin: [allocation.x, allocation.y, 0],
             },
-            data,
+            uploadData,
             {
                 offset: 0,
                 bytesPerRow: width * bytesPerPixel,

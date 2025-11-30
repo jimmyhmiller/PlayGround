@@ -4,8 +4,14 @@
   "description": "AI Dashboard with dynamic JSON configuration",
   "main": "main.js",
   "scripts": {
-    "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && NODE_ENV=development electron .\"",
-    "build": "node scripts/prepare-build.js && vite build && electron-builder",
+    "dev": "concurrently \"npm run dev:vite\" \"npm run dev:electron\"",
+    "dev:vite": "vite",
+    "dev:electron": "wait-on http://localhost:5173 && NODE_ENV=development electron -r ts-node/register main.ts",
+    "build": "npm run build:renderer && npm run build:main && electron-builder",
+    "build:renderer": "tsc -p tsconfig.renderer.json && vite build",
+    "build:main": "tsc -p tsconfig.json",
+    "type-check": "tsc --noEmit -p tsconfig.renderer.json && tsc --noEmit -p tsconfig.json",
+    "type-check:watch": "tsc --noEmit --watch -p tsconfig.renderer.json",
     "vite": "vite"
   },
   "keywords": [],
@@ -25,9 +31,14 @@
     "vite": "^7.2.4"
   },
   "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
     "concurrently": "^9.2.1",
     "electron": "^39.2.3",
     "electron-builder": "^26.0.12",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
     "wait-on": "^9.0.3"
   },
   "build": {
@@ -41,7 +52,10 @@
       "dist/**/*",
       "main.js",
       "preload.js",
-      "dashboard-tools.js"
+      "dashboard-tools.js",
+      "project-utils.js",
+      "scripts/*.js",
+      "node_modules/**/*"
     ],
     "npmRebuild": false,
     "nodeGypRebuild": false,

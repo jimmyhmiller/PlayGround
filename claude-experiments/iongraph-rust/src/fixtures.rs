@@ -3,6 +3,7 @@ use crate::types::*;
 pub fn create_mock_mir_block(overrides: Option<MIRBlockOverrides>) -> MIRBlock {
     let defaults = MIRBlock {
         id: BlockID(0),
+        ptr: 1000,
         number: BlockNumber(0),
         loop_depth: 0,
         attributes: vec![],
@@ -11,20 +12,22 @@ pub fn create_mock_mir_block(overrides: Option<MIRBlockOverrides>) -> MIRBlock {
         instructions: vec![
             MIRInstruction {
                 id: 1,
+                ptr: 2001,
                 opcode: "Parameter".to_string(),
                 attributes: vec![],
-                inputs: vec![],
-                uses: vec![],
-                mem_inputs: vec![],
+                inputs: Some(vec![]),
+                uses: Some(vec![]),
+                mem_inputs: Some(vec![]),
                 instruction_type: "Int32".to_string(),
             },
             MIRInstruction {
                 id: 2,
+                ptr: 2002,
                 opcode: "Return".to_string(),
                 attributes: vec![],
-                inputs: vec![1],
-                uses: vec![1],
-                mem_inputs: vec![],
+                inputs: Some(vec![1]),
+                uses: Some(vec![1]),
+                mem_inputs: Some(vec![]),
                 instruction_type: "None".to_string(),
             },
         ],
@@ -40,17 +43,22 @@ pub fn create_mock_mir_block(overrides: Option<MIRBlockOverrides>) -> MIRBlock {
 pub fn create_mock_lir_block(overrides: Option<LIRBlockOverrides>) -> LIRBlock {
     let defaults = LIRBlock {
         id: BlockID(0),
+        ptr: 3000,
         number: BlockNumber(0),
         instructions: vec![
             LIRInstruction {
                 id: 1,
+                ptr: 4001,
                 opcode: "move32 %eax, %r0".to_string(),
-                defs: vec![0],
+                defs: Some(vec![0]),
+                mir_ptr: None,
             },
             LIRInstruction {
                 id: 2,
+                ptr: 4002,
                 opcode: "ret".to_string(),
-                defs: vec![],
+                defs: Some(vec![]),
+                mir_ptr: None,
             },
         ],
     };
@@ -71,13 +79,13 @@ pub fn create_simple_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(0)),
                     number: Some(BlockNumber(0)),
-                    successors: Some(vec![BlockNumber(1)]),
+                    successors: Some(vec![BlockID(1)]),
                     ..Default::default()
                 })),
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(1)),
                     number: Some(BlockNumber(1)),
-                    predecessors: Some(vec![BlockNumber(0)]),
+                    predecessors: Some(vec![BlockID(0)]),
                     ..Default::default()
                 })),
             ],
@@ -107,15 +115,15 @@ pub fn create_loop_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(0)),
                     number: Some(BlockNumber(0)),
-                    successors: Some(vec![BlockNumber(1)]),
+                    successors: Some(vec![BlockID(1)]),
                     loop_depth: Some(0),
                     ..Default::default()
                 })),
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(1)),
                     number: Some(BlockNumber(1)),
-                    predecessors: Some(vec![BlockNumber(0), BlockNumber(2)]),
-                    successors: Some(vec![BlockNumber(2)]),
+                    predecessors: Some(vec![BlockID(0), BlockID(2)]),
+                    successors: Some(vec![BlockID(2)]),
                     loop_depth: Some(1),
                     attributes: Some(vec!["loopheader".to_string()]),
                     ..Default::default()
@@ -123,8 +131,8 @@ pub fn create_loop_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(2)),
                     number: Some(BlockNumber(2)),
-                    predecessors: Some(vec![BlockNumber(1)]),
-                    successors: Some(vec![BlockNumber(1)]),
+                    predecessors: Some(vec![BlockID(1)]),
+                    successors: Some(vec![BlockID(1)]),
                     loop_depth: Some(1),
                     attributes: Some(vec!["backedge".to_string()]),
                     ..Default::default()
@@ -162,16 +170,17 @@ pub fn create_complex_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(0)),
                     number: Some(BlockNumber(0)),
-                    successors: Some(vec![BlockNumber(1)]),
+                    successors: Some(vec![BlockID(1)]),
                     loop_depth: Some(0),
                     instructions: Some(vec![
                         MIRInstruction {
                             id: 1,
+                            ptr: 2001,
                             opcode: "Parameter".to_string(),
                             attributes: vec![],
-                            inputs: vec![],
-                            uses: vec![],
-                            mem_inputs: vec![],
+                            inputs: Some(vec![]),
+                            uses: Some(vec![]),
+                            mem_inputs: Some(vec![]),
                             instruction_type: "Int32".to_string(),
                         },
                     ]),
@@ -181,26 +190,28 @@ pub fn create_complex_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(1)),
                     number: Some(BlockNumber(1)),
-                    predecessors: Some(vec![BlockNumber(0)]),
-                    successors: Some(vec![BlockNumber(2), BlockNumber(3)]),
+                    predecessors: Some(vec![BlockID(0)]),
+                    successors: Some(vec![BlockID(2), BlockID(3)]),
                     loop_depth: Some(0),
                     instructions: Some(vec![
                         MIRInstruction {
                             id: 2,
+                            ptr: 2002,
                             opcode: "Compare".to_string(),
                             attributes: vec![],
-                            inputs: vec![1],
-                            uses: vec![1],
-                            mem_inputs: vec![],
+                            inputs: Some(vec![1]),
+                            uses: Some(vec![1]),
+                            mem_inputs: Some(vec![]),
                             instruction_type: "Bool".to_string(),
                         },
                         MIRInstruction {
                             id: 3,
+                            ptr: 2003,
                             opcode: "Branch".to_string(),
                             attributes: vec![],
-                            inputs: vec![2],
-                            uses: vec![2],
-                            mem_inputs: vec![],
+                            inputs: Some(vec![2]),
+                            uses: Some(vec![2]),
+                            mem_inputs: Some(vec![]),
                             instruction_type: "None".to_string(),
                         },
                     ]),
@@ -210,17 +221,18 @@ pub fn create_complex_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(2)),
                     number: Some(BlockNumber(2)),
-                    predecessors: Some(vec![BlockNumber(1)]),
-                    successors: Some(vec![BlockNumber(4)]),
+                    predecessors: Some(vec![BlockID(1)]),
+                    successors: Some(vec![BlockID(4)]),
                     loop_depth: Some(0),
                     instructions: Some(vec![
                         MIRInstruction {
                             id: 4,
+                            ptr: 2004,
                             opcode: "Add".to_string(),
                             attributes: vec![],
-                            inputs: vec![1, 1],
-                            uses: vec![1, 1],
-                            mem_inputs: vec![],
+                            inputs: Some(vec![1, 1]),
+                            uses: Some(vec![1, 1]),
+                            mem_inputs: Some(vec![]),
                             instruction_type: "Int32".to_string(),
                         },
                     ]),
@@ -230,17 +242,18 @@ pub fn create_complex_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(3)),
                     number: Some(BlockNumber(3)),
-                    predecessors: Some(vec![BlockNumber(1)]),
-                    successors: Some(vec![BlockNumber(4)]),
+                    predecessors: Some(vec![BlockID(1)]),
+                    successors: Some(vec![BlockID(4)]),
                     loop_depth: Some(0),
                     instructions: Some(vec![
                         MIRInstruction {
                             id: 5,
+                            ptr: 2005,
                             opcode: "Sub".to_string(),
                             attributes: vec![],
-                            inputs: vec![1, 1],
-                            uses: vec![1, 1],
-                            mem_inputs: vec![],
+                            inputs: Some(vec![1, 1]),
+                            uses: Some(vec![1, 1]),
+                            mem_inputs: Some(vec![]),
                             instruction_type: "Int32".to_string(),
                         },
                     ]),
@@ -250,17 +263,18 @@ pub fn create_complex_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(4)),
                     number: Some(BlockNumber(4)),
-                    predecessors: Some(vec![BlockNumber(2), BlockNumber(3)]),
+                    predecessors: Some(vec![BlockID(2), BlockID(3)]),
                     successors: Some(vec![]),
                     loop_depth: Some(0),
                     instructions: Some(vec![
                         MIRInstruction {
                             id: 6,
+                            ptr: 2006,
                             opcode: "Return".to_string(),
                             attributes: vec![],
-                            inputs: vec![],
-                            uses: vec![],
-                            mem_inputs: vec![],
+                            inputs: Some(vec![]),
+                            uses: Some(vec![]),
+                            mem_inputs: Some(vec![]),
                             instruction_type: "None".to_string(),
                         },
                     ]),
@@ -310,17 +324,18 @@ pub fn create_switch_like_pass() -> Pass {
                     id: Some(BlockID(0)),
                     number: Some(BlockNumber(0)),
                     successors: Some(vec![
-                        BlockNumber(1), BlockNumber(2), BlockNumber(3), BlockNumber(4), BlockNumber(5)
+                        BlockID(1), BlockID(2), BlockID(3), BlockID(4), BlockID(5)
                     ]),
                     loop_depth: Some(0),
                     instructions: Some(vec![
                         MIRInstruction {
                             id: 1,
+                            ptr: 2001,
                             opcode: "Switch".to_string(),
                             attributes: vec![],
-                            inputs: vec![],
-                            uses: vec![],
-                            mem_inputs: vec![],
+                            inputs: Some(vec![]),
+                            uses: Some(vec![]),
+                            mem_inputs: Some(vec![]),
                             instruction_type: "None".to_string(),
                         },
                     ]),
@@ -330,17 +345,18 @@ pub fn create_switch_like_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(1)),
                     number: Some(BlockNumber(1)),
-                    predecessors: Some(vec![BlockNumber(0)]),
-                    successors: Some(vec![BlockNumber(6)]),
+                    predecessors: Some(vec![BlockID(0)]),
+                    successors: Some(vec![BlockID(6)]),
                     loop_depth: Some(0),
                     instructions: Some(vec![
                         MIRInstruction {
                             id: 2,
+                            ptr: 2002,
                             opcode: "Case0".to_string(),
                             attributes: vec![],
-                            inputs: vec![],
-                            uses: vec![],
-                            mem_inputs: vec![],
+                            inputs: Some(vec![]),
+                            uses: Some(vec![]),
+                            mem_inputs: Some(vec![]),
                             instruction_type: "Int32".to_string(),
                         },
                     ]),
@@ -349,17 +365,18 @@ pub fn create_switch_like_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(2)),
                     number: Some(BlockNumber(2)),
-                    predecessors: Some(vec![BlockNumber(0)]),
-                    successors: Some(vec![BlockNumber(6)]),
+                    predecessors: Some(vec![BlockID(0)]),
+                    successors: Some(vec![BlockID(6)]),
                     loop_depth: Some(0),
                     instructions: Some(vec![
                         MIRInstruction {
                             id: 3,
+                            ptr: 2003,
                             opcode: "Case1".to_string(),
                             attributes: vec![],
-                            inputs: vec![],
-                            uses: vec![],
-                            mem_inputs: vec![],
+                            inputs: Some(vec![]),
+                            uses: Some(vec![]),
+                            mem_inputs: Some(vec![]),
                             instruction_type: "Int32".to_string(),
                         },
                     ]),
@@ -368,17 +385,18 @@ pub fn create_switch_like_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(3)),
                     number: Some(BlockNumber(3)),
-                    predecessors: Some(vec![BlockNumber(0)]),
-                    successors: Some(vec![BlockNumber(6)]),
+                    predecessors: Some(vec![BlockID(0)]),
+                    successors: Some(vec![BlockID(6)]),
                     loop_depth: Some(0),
                     instructions: Some(vec![
                         MIRInstruction {
                             id: 4,
+                            ptr: 2004,
                             opcode: "Case2".to_string(),
                             attributes: vec![],
-                            inputs: vec![],
-                            uses: vec![],
-                            mem_inputs: vec![],
+                            inputs: Some(vec![]),
+                            uses: Some(vec![]),
+                            mem_inputs: Some(vec![]),
                             instruction_type: "Int32".to_string(),
                         },
                     ]),
@@ -387,17 +405,18 @@ pub fn create_switch_like_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(4)),
                     number: Some(BlockNumber(4)),
-                    predecessors: Some(vec![BlockNumber(0)]),
-                    successors: Some(vec![BlockNumber(6)]),
+                    predecessors: Some(vec![BlockID(0)]),
+                    successors: Some(vec![BlockID(6)]),
                     loop_depth: Some(0),
                     instructions: Some(vec![
                         MIRInstruction {
                             id: 5,
+                            ptr: 2005,
                             opcode: "Case3".to_string(),
                             attributes: vec![],
-                            inputs: vec![],
-                            uses: vec![],
-                            mem_inputs: vec![],
+                            inputs: Some(vec![]),
+                            uses: Some(vec![]),
+                            mem_inputs: Some(vec![]),
                             instruction_type: "Int32".to_string(),
                         },
                     ]),
@@ -406,17 +425,18 @@ pub fn create_switch_like_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(5)),
                     number: Some(BlockNumber(5)),
-                    predecessors: Some(vec![BlockNumber(0)]),
-                    successors: Some(vec![BlockNumber(6)]),
+                    predecessors: Some(vec![BlockID(0)]),
+                    successors: Some(vec![BlockID(6)]),
                     loop_depth: Some(0),
                     instructions: Some(vec![
                         MIRInstruction {
                             id: 6,
+                            ptr: 2006,
                             opcode: "Case4".to_string(),
                             attributes: vec![],
-                            inputs: vec![],
-                            uses: vec![],
-                            mem_inputs: vec![],
+                            inputs: Some(vec![]),
+                            uses: Some(vec![]),
+                            mem_inputs: Some(vec![]),
                             instruction_type: "Int32".to_string(),
                         },
                     ]),
@@ -427,17 +447,18 @@ pub fn create_switch_like_pass() -> Pass {
                     id: Some(BlockID(6)),
                     number: Some(BlockNumber(6)),
                     predecessors: Some(vec![
-                        BlockNumber(1), BlockNumber(2), BlockNumber(3), BlockNumber(4), BlockNumber(5)
+                        BlockID(1), BlockID(2), BlockID(3), BlockID(4), BlockID(5)
                     ]),
                     loop_depth: Some(0),
                     instructions: Some(vec![
                         MIRInstruction {
                             id: 7,
+                            ptr: 2007,
                             opcode: "Merge".to_string(),
                             attributes: vec![],
-                            inputs: vec![],
-                            uses: vec![],
-                            mem_inputs: vec![],
+                            inputs: Some(vec![]),
+                            uses: Some(vec![]),
+                            mem_inputs: Some(vec![]),
                             instruction_type: "None".to_string(),
                         },
                     ]),
@@ -466,7 +487,7 @@ pub fn create_deep_loop_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(0)),
                     number: Some(BlockNumber(0)),
-                    successors: Some(vec![BlockNumber(1)]),
+                    successors: Some(vec![BlockID(1)]),
                     loop_depth: Some(0),
                     ..Default::default()
                 })),
@@ -474,8 +495,8 @@ pub fn create_deep_loop_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(1)),
                     number: Some(BlockNumber(1)),
-                    predecessors: Some(vec![BlockNumber(0), BlockNumber(5)]),
-                    successors: Some(vec![BlockNumber(2)]),
+                    predecessors: Some(vec![BlockID(0), BlockID(5)]),
+                    successors: Some(vec![BlockID(2)]),
                     loop_depth: Some(1),
                     attributes: Some(vec!["loopheader".to_string()]),
                     ..Default::default()
@@ -484,8 +505,8 @@ pub fn create_deep_loop_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(2)),
                     number: Some(BlockNumber(2)),
-                    predecessors: Some(vec![BlockNumber(1), BlockNumber(4)]),
-                    successors: Some(vec![BlockNumber(3)]),
+                    predecessors: Some(vec![BlockID(1), BlockID(4)]),
+                    successors: Some(vec![BlockID(3)]),
                     loop_depth: Some(2),
                     attributes: Some(vec!["loopheader".to_string()]),
                     ..Default::default()
@@ -494,8 +515,8 @@ pub fn create_deep_loop_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(3)),
                     number: Some(BlockNumber(3)),
-                    predecessors: Some(vec![BlockNumber(2)]),
-                    successors: Some(vec![BlockNumber(4), BlockNumber(6)]),
+                    predecessors: Some(vec![BlockID(2)]),
+                    successors: Some(vec![BlockID(4), BlockID(6)]),
                     loop_depth: Some(3),
                     attributes: Some(vec!["loopheader".to_string()]),
                     ..Default::default()
@@ -504,8 +525,8 @@ pub fn create_deep_loop_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(4)),
                     number: Some(BlockNumber(4)),
-                    predecessors: Some(vec![BlockNumber(3)]),
-                    successors: Some(vec![BlockNumber(2)]),
+                    predecessors: Some(vec![BlockID(3)]),
+                    successors: Some(vec![BlockID(2)]),
                     loop_depth: Some(2),
                     attributes: Some(vec!["backedge".to_string()]),
                     ..Default::default()
@@ -514,8 +535,8 @@ pub fn create_deep_loop_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(5)),
                     number: Some(BlockNumber(5)),
-                    predecessors: Some(vec![BlockNumber(3)]),
-                    successors: Some(vec![BlockNumber(1)]),
+                    predecessors: Some(vec![BlockID(3)]),
+                    successors: Some(vec![BlockID(1)]),
                     loop_depth: Some(1),
                     attributes: Some(vec!["backedge".to_string()]),
                     ..Default::default()
@@ -524,7 +545,7 @@ pub fn create_deep_loop_pass() -> Pass {
                 create_mock_mir_block(Some(MIRBlockOverrides {
                     id: Some(BlockID(6)),
                     number: Some(BlockNumber(6)),
-                    predecessors: Some(vec![BlockNumber(3)]),
+                    predecessors: Some(vec![BlockID(3)]),
                     loop_depth: Some(0),
                     ..Default::default()
                 })),
@@ -548,8 +569,8 @@ pub struct MIRBlockOverrides {
     pub number: Option<BlockNumber>,
     pub loop_depth: Option<u32>,
     pub attributes: Option<Vec<String>>,
-    pub predecessors: Option<Vec<BlockNumber>>,
-    pub successors: Option<Vec<BlockNumber>>,
+    pub predecessors: Option<Vec<BlockID>>,
+    pub successors: Option<Vec<BlockID>>,
     pub instructions: Option<Vec<MIRInstruction>>,
 }
 

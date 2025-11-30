@@ -1,6 +1,86 @@
 use crate::types::*;
 use std::collections::{HashMap, BTreeMap};
 
+// HTML escape function for SVG text
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+// Font metrics for monospace text (matching PureSVGTextLayoutProvider)
+const CHAR_WIDTH: f64 = 7.0;
+const CHAR_HEIGHT: f64 = 14.0;
+const PADDING: f64 = 8.0;
+const HEADER_HEIGHT: f64 = 30.0;
+
+// Calculate block size based on instruction content
+fn calculate_block_size(block: &Block) -> Vec2 {
+    if let Some(mir_block) = &block.mir_block {
+        let mut max_num_width = 0;
+        let mut max_opcode_width = 0;
+        let mut max_type_width = 0;
+
+        for ins in &mir_block.instructions {
+            // Measure instruction number width
+            let num_text = format!("{}", ins.id);
+            max_num_width = max_num_width.max(num_text.chars().count());
+
+            // Measure opcode width - use RENDERED length (after escape and ← replacement)
+            // IMPORTANT: Use .chars().count() not .len() because ← is 3 bytes but 1 character!
+            let opcode_rendered = html_escape(&ins.opcode).replace("&lt;-", "←");
+            max_opcode_width = max_opcode_width.max(opcode_rendered.chars().count());
+
+            // Measure type width
+            if ins.instruction_type != "None" {
+                max_type_width = max_type_width.max(ins.instruction_type.chars().count());
+            }
+        }
+
+        // Also consider header width
+        let header_text = if block.attributes.contains(&"loopheader".to_string()) {
+            format!("Block {} (loop header)", block.id.0)
+        } else if block.attributes.contains(&"backedge".to_string()) {
+            format!("Block {} (backedge)", block.id.0)
+        } else {
+            format!("Block {}", block.id.0)
+        };
+        let header_width = header_text.chars().count() as f64 * CHAR_WIDTH;
+
+        // Calculate total width: padding + num + gap + opcode + gap + type + padding
+        let content_width = PADDING +
+            (max_num_width as f64 * CHAR_WIDTH) + 8.0 +
+            (max_opcode_width as f64 * CHAR_WIDTH) + 8.0 +
+            (max_type_width as f64 * CHAR_WIDTH) + PADDING;
+
+        let width = content_width.max(header_width + PADDING * 2.0).max(150.0);
+        let height = HEADER_HEIGHT + (mir_block.instructions.len() as f64 * CHAR_HEIGHT) + PADDING * 2.0;
+
+        Vec2::new(width, height)
+    } else if let Some(lir_block) = &block.lir_block {
+        // Similar calculation for LIR blocks
+        let mut max_opcode_width = 0;
+
+        for ins in &lir_block.instructions {
+            max_opcode_width = max_opcode_width.max(ins.opcode.len());
+        }
+
+        let header_text = format!("Block {}", block.id.0);
+        let header_width = header_text.len() as f64 * CHAR_WIDTH;
+
+        let content_width = PADDING + (max_opcode_width as f64 * CHAR_WIDTH) + PADDING;
+        let width = content_width.max(header_width + PADDING * 2.0).max(150.0);
+        let height = HEADER_HEIGHT + (lir_block.instructions.len() as f64 * CHAR_HEIGHT) + PADDING * 2.0;
+
+        Vec2::new(width, height)
+    } else {
+        // Empty block
+        Vec2::new(150.0, 60.0)
+    }
+}
+
 pub struct Graph {
     pub pass: Pass,
     pub blocks: Vec<Block>,
@@ -45,19 +125,19 @@ impl Graph {
 
         // Process MIR blocks
         for mir_block in &self.pass.mir.blocks {
-            let block = Block {
-                id: mir_block.id.clone(),
-                number: mir_block.number.clone(),
+            let mut block = Block {
+                id: mir_block.id,
+                number: BlockNumber(mir_block.id.0),  // Use ID as number
                 mir_block: Some(mir_block.clone()),
                 lir_block: None,
-                predecessors: mir_block.predecessors.clone(),
-                successors: mir_block.successors.clone(),
+                predecessors: mir_block.predecessors.iter().map(|id| BlockNumber(id.0)).collect(),
+                successors: mir_block.successors.iter().map(|id| BlockNumber(id.0)).collect(),
                 loop_depth: mir_block.loop_depth,
                 loop_num: 0, // Will be calculated during loop detection
                 attributes: mir_block.attributes.clone(),
                 layer: 0, // Will be assigned later
-                size: Vec2::new(100.0, 50.0), // Default size
-                
+                size: Vec2::new(100.0, 50.0), // Temporary, will be recalculated
+
                 // New fields for TypeScript Block IR compatibility
                 has_layout_node: true,
                 instruction_count: mir_block.instructions.len() as u32,
@@ -66,19 +146,32 @@ impl Graph {
                 is_entry: mir_block.predecessors.is_empty(),
                 is_exit: mir_block.successors.is_empty(),
                 is_merge: mir_block.predecessors.len() > 1,
+
+                // Loop hierarchy fields (initialized later)
+                loop_id: BlockID(0),
+                parent_loop: None,
+                loop_height: 0,
+                outgoing_edges: Vec::new(),
             };
-            blocks_by_number.insert(mir_block.number.clone(), block);
+
+            // Calculate proper size based on content
+            block.size = calculate_block_size(&block);
+
+            blocks_by_number.insert(BlockNumber(mir_block.id.0), block);
         }
 
         // Add LIR data to existing blocks or create new ones
         for lir_block in &self.pass.lir.blocks {
-            if let Some(block) = blocks_by_number.get_mut(&lir_block.number) {
+            let lir_number = BlockNumber(lir_block.id.0);  // Use ID as number
+            if let Some(block) = blocks_by_number.get_mut(&lir_number) {
                 block.lir_block = Some(lir_block.clone());
                 block.lir_instruction_count = lir_block.instructions.len() as u32;
+                // Recalculate size with LIR data
+                block.size = calculate_block_size(block);
             } else {
-                let block = Block {
-                    id: lir_block.id.clone(),
-                    number: lir_block.number.clone(),
+                let mut block = Block {
+                    id: lir_block.id,
+                    number: lir_number,
                     mir_block: None,
                     lir_block: Some(lir_block.clone()),
                     predecessors: vec![],
@@ -87,8 +180,8 @@ impl Graph {
                     loop_num: 0,
                     attributes: vec![],
                     layer: 0, // Will be assigned later
-                    size: Vec2::new(100.0, 50.0), // Default size
-                    
+                    size: Vec2::new(100.0, 50.0), // Temporary
+
                     // New fields for TypeScript Block IR compatibility
                     has_layout_node: true,
                     instruction_count: 0, // No MIR data available
@@ -97,6 +190,12 @@ impl Graph {
                     is_entry: false, // Unknown without predecessor/successor info
                     is_exit: false, // Unknown without predecessor/successor info
                     is_merge: false, // Unknown without predecessor/successor info
+
+                    // Loop hierarchy fields (initialized later)
+                    loop_id: BlockID(0),
+                    parent_loop: None,
+                    loop_height: 0,
+                    outgoing_edges: Vec::new(),
                 };
                 blocks_by_number.insert(lir_block.number.clone(), block);
             }
@@ -119,74 +218,239 @@ impl Graph {
         self.assign_layers();
     }
 
-    fn assign_layers(&mut self) {
-        // Simple layer assignment using topological ordering
-        let mut in_degree: HashMap<BlockNumber, usize> = HashMap::new();
-        let mut layers: HashMap<BlockNumber, usize> = HashMap::new();
+    fn find_loops(&mut self, block_num: BlockNumber, loop_ids_by_depth: Vec<BlockID>) {
+        // Get the block ID and check if already processed
+        let (block_id, already_processed) = {
+            let block = self.blocks_by_num.get(&block_num).unwrap();
+            let loop_depth = block.loop_depth as usize;
 
-        // Initialize in-degrees
-        for block in &self.blocks {
-            in_degree.insert(block.number, block.predecessors.len());
+            // Check if this block was already processed with the same loop context
+            let already_processed = if loop_depth < loop_ids_by_depth.len() {
+                // Check if loop_id matches what we would assign
+                block.loop_id == loop_ids_by_depth[loop_depth] && block.loop_id != BlockID(0)
+            } else {
+                false
+            };
+
+            (block.id, already_processed)
+        };
+
+        if already_processed {
+            return;
         }
 
-        let mut queue = Vec::new();
-        
-        // Start with blocks that have no predecessors (entry points)
-        for block in &self.blocks {
-            if block.predecessors.is_empty() {
-                queue.push(block.number);
-                layers.insert(block.number, 0);
+        let mut new_loop_ids_by_depth = loop_ids_by_depth.clone();
+
+        // Check if this is a true loop header
+        let is_loop_header = {
+            let block = self.blocks_by_num.get(&block_num).unwrap();
+            block.attributes.contains(&"loopheader".to_string())
+        };
+
+        if is_loop_header {
+            // Set parent loop from the current stack
+            if !new_loop_ids_by_depth.is_empty() {
+                let parent_id = new_loop_ids_by_depth[new_loop_ids_by_depth.len() - 1];
+                if let Some(block) = self.blocks_by_num.get_mut(&block_num) {
+                    block.parent_loop = Some(parent_id);
+                }
             }
+            // Add this block to the stack
+            new_loop_ids_by_depth.push(block_id);
         }
 
-        // Process blocks in topological order
-        while let Some(current) = queue.pop() {
-            let current_layer = layers[&current];
-            
-            if let Some(block) = self.blocks_by_num.get(&current) {
-                for &successor in &block.successors {
-                    // Skip backedges to avoid cycles
-                    if let Some(succ_block) = self.blocks_by_num.get(&successor) {
-                        if succ_block.attributes.contains(&"backedge".to_string()) {
-                            continue;
-                        }
-                    }
+        // Adjust loop_ids_by_depth based on block's loop_depth
+        {
+            let block = self.blocks_by_num.get(&block_num).unwrap();
+            let loop_depth = block.loop_depth as usize;
 
-                    let new_layer = current_layer + 1;
-                    let existing_layer = layers.get(&successor).copied().unwrap_or(0);
-                    layers.insert(successor, new_layer.max(existing_layer));
-
-                    if let Some(count) = in_degree.get_mut(&successor) {
-                        *count -= 1;
-                        if *count == 0 {
-                            queue.push(successor);
-                        }
-                    }
+            if loop_depth < new_loop_ids_by_depth.len().saturating_sub(1) {
+                new_loop_ids_by_depth.truncate(loop_depth + 1);
+            } else if loop_depth >= new_loop_ids_by_depth.len() {
+                // Adjust loop_depth to match stack size (handle corrupted MIR data)
+                if let Some(block) = self.blocks_by_num.get_mut(&block_num) {
+                    block.loop_depth = (new_loop_ids_by_depth.len() - 1) as u32;
                 }
             }
         }
 
-        // Handle backedge blocks specially - they get the same layer as their target
-        for block in &mut self.blocks {
+        // Assign loop_id from the stack
+        {
+            let block = self.blocks_by_num.get_mut(&block_num).unwrap();
+            let loop_depth = block.loop_depth as usize;
+            if loop_depth < new_loop_ids_by_depth.len() {
+                block.loop_id = new_loop_ids_by_depth[loop_depth];
+            }
+        }
+
+        // Collect successors (need to avoid borrow checker issues)
+        let successors: Vec<BlockNumber> = {
+            let block = self.blocks_by_num.get(&block_num).unwrap();
+            // Don't recurse into backedges
+            if block.attributes.contains(&"backedge".to_string()) {
+                vec![]
+            } else {
+                block.successors.clone()
+            }
+        };
+
+        // Recursively process successors
+        for succ in successors {
+            self.find_loops(succ, new_loop_ids_by_depth.clone());
+        }
+    }
+
+    fn assign_layers_longest_path(&mut self, block_num: BlockNumber, layer: usize) {
+        // Check if this is a backedge - assign same layer as target
+        {
+            let block = self.blocks_by_num.get(&block_num).unwrap();
             if block.attributes.contains(&"backedge".to_string()) {
                 if let Some(&successor) = block.successors.first() {
-                    if let Some(&target_layer) = layers.get(&successor) {
-                        block.layer = target_layer;
-                        continue;
+                    if let Some(target_block) = self.blocks_by_num.get(&successor) {
+                        let target_layer = target_block.layer;
+                        if let Some(block_mut) = self.blocks_by_num.get_mut(&block_num) {
+                            block_mut.layer = target_layer;
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
+        // Only process if this layer is greater than the block's current layer
+        // Use < instead of <= to allow processing layer 0 on first visit
+        {
+            let block = self.blocks_by_num.get(&block_num).unwrap();
+            if layer < block.layer {
+                return;
+            }
+        }
+
+        // Update the block's layer to the maximum computed so far
+        {
+            let block_mut = self.blocks_by_num.get_mut(&block_num).unwrap();
+            block_mut.layer = block_mut.layer.max(layer);
+        }
+
+        // Update loop height information for all containing loops
+        {
+            let block = self.blocks_by_num.get(&block_num).unwrap();
+            let mut current_loop_id = Some(block.loop_id);
+
+            while let Some(loop_id) = current_loop_id {
+                if let Some(loop_header) = self.blocks_by_id.get(&loop_id) {
+                    let header_num = loop_header.number;
+                    let header_layer = loop_header.layer;
+                    let block_layer = self.blocks_by_num.get(&block_num).unwrap().layer;
+                    let new_height = block_layer - header_layer + 1;
+
+                    if let Some(header_mut) = self.blocks_by_num.get_mut(&header_num) {
+                        header_mut.loop_height = header_mut.loop_height.max(new_height);
+                    }
+
+                    current_loop_id = self.blocks_by_id.get(&loop_id).and_then(|b| b.parent_loop);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Collect successors and determine which are outgoing edges
+        let (successors, outgoing, loop_id, loop_depth) = {
+            let block = self.blocks_by_num.get(&block_num).unwrap();
+            let successors = block.successors.clone();
+            let loop_depth = block.loop_depth;
+            let loop_id = block.loop_id;
+
+            let mut regular_succs = Vec::new();
+            let mut outgoing_succs = Vec::new();
+
+            for &succ_num in &successors {
+                if let Some(succ_block) = self.blocks_by_num.get(&succ_num) {
+                    if succ_block.loop_depth < loop_depth {
+                        // Edge exits the current loop - defer to loop header
+                        outgoing_succs.push(succ_num);
+                    } else {
+                        // Edge stays within loop - process immediately
+                        regular_succs.push(succ_num);
+                    }
+                } else {
+                    regular_succs.push(succ_num);
+                }
+            }
+
+            (regular_succs, outgoing_succs, loop_id, loop_depth)
+        };
+
+        // Add outgoing edges to the loop header's list
+        if !outgoing.is_empty() {
+            if let Some(loop_header) = self.blocks_by_id.get(&loop_id) {
+                let header_num = loop_header.number;
+                if let Some(header_mut) = self.blocks_by_num.get_mut(&header_num) {
+                    for &outgoing_succ in &outgoing {
+                        if !header_mut.outgoing_edges.contains(&outgoing_succ) {
+                            header_mut.outgoing_edges.push(outgoing_succ);
+                        }
                     }
                 }
             }
-            
-            if let Some(&layer) = layers.get(&block.number) {
-                block.layer = layer;
+        }
+
+        // Process regular successors with next layer
+        for succ in successors {
+            self.assign_layers_longest_path(succ, layer + 1);
+        }
+
+        // If this is a loop header, process outgoing edges with loop height offset
+        {
+            let block = self.blocks_by_num.get(&block_num).unwrap();
+            if block.attributes.contains(&"loopheader".to_string()) {
+                let outgoing_edges = block.outgoing_edges.clone();
+                let loop_height = block.loop_height;
+
+                for outgoing_succ in outgoing_edges {
+                    self.assign_layers_longest_path(outgoing_succ, layer + loop_height);
+                }
             }
         }
-        
-        // Update lookup maps
-        self.blocks_by_num.clear();
+    }
+
+    fn assign_layers(&mut self) {
+        // TypeScript-style layer assignment with loop hierarchy
+
+        // Find all root blocks (no predecessors) and make them pseudo-loop headers
+        let roots: Vec<BlockNumber> = self.blocks.iter()
+            .filter(|b| b.predecessors.is_empty())
+            .map(|b| b.number)
+            .collect();
+
+        // Initialize pseudo-loop headers
+        for &root_num in &roots {
+            if let Some(root) = self.blocks_by_num.get_mut(&root_num) {
+                root.loop_height = 0;
+                root.parent_loop = None;
+                root.loop_id = root.id; // Root blocks are their own loop
+            }
+        }
+
+        // Phase 1: Build loop hierarchy
+        for &root_num in &roots {
+            let root_id = self.blocks_by_num.get(&root_num).unwrap().id;
+            self.find_loops(root_num, vec![root_id]);
+        }
+
+        // Phase 2: Assign layers using longest-path algorithm
+        for &root_num in &roots {
+            self.assign_layers_longest_path(root_num, 0);
+        }
+
+        // Update the blocks vector with the modified blocks from the maps
+        self.blocks = self.blocks_by_num.values().cloned().collect();
+        self.blocks.sort_by_key(|b| b.number);
+
+        // Update blocks_by_id
         self.blocks_by_id.clear();
         for block in &self.blocks {
-            self.blocks_by_num.insert(block.number, block.clone());
             self.blocks_by_id.insert(block.id, block.clone());
         }
     }
@@ -732,87 +996,335 @@ impl Graph {
 
     // SVG rendering methods
     pub fn render_svg(&mut self) -> String {
-        let (nodes_by_layer, layer_heights, _track_heights) = self.layout();
-        
+        let (nodes_by_layer, _layer_heights, _track_heights) = self.layout();
+
         // Calculate total SVG dimensions
         let mut max_x: f64 = 0.0;
         let mut max_y: f64 = 0.0;
-        
+
         for layer in &nodes_by_layer {
             for node in layer {
                 max_x = max_x.max(node.pos.x + node.size.x + CONTENT_PADDING);
                 max_y = max_y.max(node.pos.y + node.size.y + CONTENT_PADDING);
             }
         }
-        
-        let width = max_x + CONTENT_PADDING;
-        let height = max_y + CONTENT_PADDING;
-        
+
+        let width = (max_x + CONTENT_PADDING) as i32;
+        let height = (max_y + CONTENT_PADDING) as i32;
+
         let mut svg = String::new();
-        svg.push_str(&format!(r#"<svg width="{}" height="{}" viewBox="0 0 {} {}" xmlns="http://www.w3.org/2000/svg">"#, 
+        // Match TypeScript attribute order: xmlns width height viewBox
+        svg.push_str(&format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">"#,
             width, height, width, height));
-        
-        // Add styles
-        svg.push_str("
-<defs>
-    <style>
-        .block { fill: #f0f8ff; stroke: #4a90e2; stroke-width: 2; rx: 8; }
-        .block-text { font-family: 'Monaco', 'Consolas', monospace; font-size: 12px; fill: #333; text-anchor: middle; dominant-baseline: central; }
-        .loop-header { fill: #ffe4e1; stroke: #ff6b6b; }
-        .backedge { fill: #e8f5e8; stroke: #4caf50; }
-        .arrow { stroke: #666; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
-        .arrow.backedge { stroke: #4caf50; stroke-width: 2; stroke-dasharray: 5,5; }
-        .dummy { fill: #f9f9f9; stroke: #ccc; stroke-width: 1; }
-    </style>
-    <marker id=\"arrowhead\" markerWidth=\"10\" markerHeight=\"7\" refX=\"9\" refY=\"3.5\" orient=\"auto\" markerUnits=\"strokeWidth\">
-        <polygon points=\"0,0 10,3.5 0,7\" fill=\"#666\"/>
-    </marker>
-</defs>
-");
-        
-        // Render arrows first (so they appear behind blocks)
-        self.render_arrows(&mut svg, &nodes_by_layer);
-        
+        svg.push('\n');
+
+        // Add wrapper and styles
+        svg.push_str("  <g class=\"ig-graph\">\n");
+        svg.push_str("    <rect/>\n");
+
         // Render blocks
-        self.render_blocks(&mut svg, &nodes_by_layer);
-        
+        self.render_blocks_ts_format(&mut svg, &nodes_by_layer);
+
+        // Render arrows
+        self.render_arrows_ts_format(&mut svg, &nodes_by_layer);
+
+        svg.push_str("  </g>\n");
         svg.push_str("</svg>");
         svg
     }
-    
+
+    fn render_arrows_ts_format(&self, svg: &mut String, nodes_by_layer: &[Vec<LayoutNode>]) {
+        // Build a lookup map for nodes by ID
+        let mut node_lookup: HashMap<LayoutNodeID, &LayoutNode> = HashMap::new();
+        for layer in nodes_by_layer {
+            for node in layer {
+                node_lookup.insert(node.id, node);
+            }
+        }
+
+        // Render arrows for all nodes
+        for layer in nodes_by_layer {
+            for node in layer {
+                // Render each outgoing connection
+                for (port_idx, &dst_id) in node.dst_nodes.iter().enumerate() {
+                    if let Some(dst_node) = node_lookup.get(&dst_id) {
+                        self.render_single_arrow_ts_format(svg, node, dst_node, port_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    fn render_single_arrow_ts_format(&self, svg: &mut String, src_node: &LayoutNode, dst_node: &LayoutNode, port_idx: usize) {
+        // Calculate arrow start and end points
+        let x1 = if src_node.is_dummy() {
+            src_node.pos.x
+        } else {
+            src_node.pos.x + PORT_START + (PORT_SPACING * port_idx as f64).min(src_node.size.x - PORT_START - 10.0)
+        };
+
+        let y1 = src_node.pos.y + src_node.size.y;
+
+        let x2 = if dst_node.is_dummy() {
+            dst_node.pos.x
+        } else {
+            dst_node.pos.x + PORT_START
+        };
+
+        let y2 = dst_node.pos.y;
+
+        // Get joint offset for this port if available
+        let joint_offset = src_node.joint_offsets.get(port_idx).copied().unwrap_or(0.0);
+
+        // Determine if this is a backedge (going backwards in layers)
+        let is_backedge = src_node.layer > dst_node.layer;
+
+        // Check if destination is a real block (for arrowhead)
+        let do_arrowhead = !dst_node.is_dummy();
+
+        svg.push_str("    <g>\n");
+
+        if !is_backedge {
+            // Normal downward arrow
+            let ym = y1 + TRACK_PADDING + joint_offset;
+
+            // Check if we need arc-based or bezier-based path
+            let horizontal_dist = (x2 - x1).abs();
+
+            if horizontal_dist < 2.0 * ARROW_RADIUS {
+                // Narrow arrow - use cubic bezier
+                svg.push_str(&format!("      <path d=\"M {} {} C {} {} {} {} {} {}\" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
+                    x1, y1,
+                    x1, y1 + (y2 - y1) / 3.0,
+                    x2, y1 + 2.0 * (y2 - y1) / 3.0,
+                    x2, y2));
+            } else {
+                // Wide arrow - use arc+line+arc
+                let dir = (x2 - x1).signum();
+                let r = ARROW_RADIUS;
+
+                svg.push_str(&format!("      <path d=\"M {} {} L {} {} A {} {} 0 0 {} {} {} L {} {} A {} {} 0 0 {} {} {} L {} {} \" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
+                    x1, y1,
+                    x1, ym - r,
+                    r, r, if dir > 0.0 { "0" } else { "1" }, x1 + r * dir, ym,
+                    x2 - r * dir, ym,
+                    r, r, if dir > 0.0 { "0" } else { "1" }, x2, ym + r,
+                    x2, y2));
+            }
+
+            // Add arrowhead
+            if do_arrowhead {
+                svg.push_str(&format!("      <path d=\"M 0 0 L -5 7.5 L 5 7.5 Z\" transform=\"translate({}, {}) rotate(180)\"/>\n",
+                    x2, y2));
+            }
+        } else {
+            // Backedge arrow - simplified for now
+            svg.push_str(&format!("      <path d=\"M {} {} L {} {}\" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
+                x1, y1, x2, y2));
+
+            if do_arrowhead {
+                let angle = ((y2 - y1).atan2(x2 - x1) * 180.0 / std::f64::consts::PI) + 180.0;
+                svg.push_str(&format!("      <path d=\"M 0 0 L -5 7.5 L 5 7.5 Z\" transform=\"translate({}, {}) rotate({})\"/>\n",
+                    x2, y2, angle));
+            }
+        }
+
+        svg.push_str("    </g>\n");
+    }
+
+    fn render_blocks_ts_format(&self, svg: &mut String, nodes_by_layer: &[Vec<LayoutNode>]) {
+        for layer in nodes_by_layer {
+            for node in layer {
+                if node.is_dummy() {
+                    continue; // Skip dummy nodes
+                }
+
+                if let Some(block) = &node.block {
+                    // Start block group with decimal coordinates (no rounding)
+                    svg.push_str(&format!("    <g transform=\"translate({}, {})\">\n",
+                        node.pos.x, node.pos.y));
+
+                    // Render block rectangles (sizes as integers)
+                    svg.push_str(&format!("      <rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" fill=\"#f9f9f9\" stroke=\"#0c0c0d\" stroke-width=\"1\"/>\n",
+                        node.size.x as i32, node.size.y as i32));
+
+                    // Header color
+                    let header_color = if block.attributes.contains(&"loopheader".to_string()) {
+                        "#1fa411"
+                    } else {
+                        "#0c0c0d"
+                    };
+
+                    svg.push_str(&format!("      <rect x=\"0\" y=\"0\" width=\"{}\" height=\"28\" fill=\"{}\"/>\n",
+                        node.size.x as i32, header_color));
+
+                    // Block header text
+                    let header_x = node.size.x / 2.0;
+                    svg.push_str(&format!("      <text x=\"{}\" y=\"18\" font-family=\"monospace\" font-size=\"12\" fill=\"white\" font-weight=\"bold\" text-anchor=\"middle\">Block {}</text>\n",
+                        header_x, block.id.0));
+
+                    // Render instructions with dynamic column positions
+                    if let Some(mir_block) = &block.mir_block {
+                        // First pass: measure column widths (in pixels, not characters)
+                        // IMPORTANT: Measure the RENDERED text (after escape/replace), not the raw JSON text
+                        let mut max_num_width: f64 = 0.0;
+                        let mut max_opcode_width: f64 = 0.0;
+                        let mut max_type_width: f64 = 0.0;
+
+                        for ins in &mir_block.instructions {
+                            let num_text = format!("{}", ins.id);
+                            max_num_width = max_num_width.max(num_text.chars().count() as f64 * CHAR_WIDTH);
+
+                            // Measure the transformed opcode (after escape and ← replacement)
+                            // IMPORTANT: Use .chars().count() not .len() because ← is 3 bytes but 1 character!
+                            let opcode_rendered = html_escape(&ins.opcode).replace("&lt;-", "←");
+                            max_opcode_width = max_opcode_width.max(opcode_rendered.chars().count() as f64 * CHAR_WIDTH);
+
+                            if ins.instruction_type != "None" {
+                                max_type_width = max_type_width.max(ins.instruction_type.chars().count() as f64 * CHAR_WIDTH);
+                            }
+                        }
+
+                        // Calculate column positions dynamically
+                        let num_x = PADDING;
+                        let opcode_x = PADDING + max_num_width + 8.0;
+                        let type_x = opcode_x + max_opcode_width + 8.0;
+
+                        // Second pass: render instructions
+                        let mut y = 40; // Start after header (28px) + padding
+
+                        for ins in &mir_block.instructions {
+                            // Determine colors based on attributes
+                            let has_movable = ins.attributes.contains(&"Movable".to_string());
+                            let has_guard = ins.attributes.contains(&"Guard".to_string());
+
+                            let opcode_color = if has_movable { "#1048af" } else { "black" };
+                            let decoration = if has_guard { " text-decoration=\"underline\"" } else { "" };
+
+                            // Escape opcode text and replace <- with ←
+                            let opcode = html_escape(&ins.opcode).replace("&lt;-", "←");
+
+                            // Render instruction number at dynamic position
+                            svg.push_str(&format!("      <text x=\"{}\" y=\"{}\" font-family=\"monospace\" font-size=\"11\" fill=\"#777\">{}</text>\n",
+                                num_x as i32, y, ins.id));
+
+                            // Render opcode at dynamic position
+                            svg.push_str(&format!("      <text x=\"{}\" y=\"{}\" font-family=\"monospace\" font-size=\"11\" fill=\"{}\"{}>{}</text>\n",
+                                opcode_x as i32, y, opcode_color, decoration, opcode));
+
+                            // Render type if not None at dynamic position
+                            if ins.instruction_type != "None" {
+                                svg.push_str(&format!("      <text x=\"{}\" y=\"{}\" font-family=\"monospace\" font-size=\"11\" fill=\"#1048af\">{}</text>\n",
+                                    type_x as i32, y, ins.instruction_type));
+                            }
+
+                            y += 14; // Move to next line
+                        }
+                    }
+
+                    // Render branch labels if binary branch
+                    if block.successors.len() == 2 {
+                        let label_y = node.size.y + 12.0;
+                        svg.push_str(&format!("      <text x=\"20\" y=\"{}\" font-family=\"monospace\" font-size=\"9\" fill=\"#777\">1</text>\n", label_y as i32));
+                        svg.push_str(&format!("      <text x=\"80\" y=\"{}\" font-family=\"monospace\" font-size=\"9\" fill=\"#777\">0</text>\n", label_y as i32));
+                    }
+
+                    svg.push_str("    </g>\n");
+                }
+            }
+        }
+    }
+
     fn render_blocks(&self, svg: &mut String, nodes_by_layer: &[Vec<LayoutNode>]) {
         for layer in nodes_by_layer {
             for node in layer {
                 if node.is_dummy() {
-                    // Render dummy node as small circle
-                    svg.push_str(&format!(
-                        r#"<circle cx="{}" cy="{}" r="3" class="dummy"/>"#,
-                        node.pos.x + node.size.x / 2.0,
-                        node.pos.y + node.size.y / 2.0
-                    ));
+                    // Skip rendering dummy nodes - they're just for layout
+                    continue;
                 } else if let Some(block) = &node.block {
-                    // Determine block style based on attributes
-                    let mut class = "block".to_string();
-                    if block.attributes.contains(&"loopheader".to_string()) {
-                        class.push_str(" loop-header");
+                    // Create a group for this block positioned at its location
+                    svg.push_str(&format!(r#"<g transform="translate({}, {})">"#,
+                        node.pos.x, node.pos.y));
+
+                    // Determine header color based on attributes
+                    let header_color = if block.attributes.contains(&"loopheader".to_string()) {
+                        "#1fa411"  // Green for loop headers
                     } else if block.attributes.contains(&"backedge".to_string()) {
-                        class.push_str(" backedge");
+                        "#1fa411"  // Green for backedges
+                    } else {
+                        "#0c0c0d"  // Black for normal blocks
+                    };
+
+                    // Render outer rectangle (block border)
+                    svg.push_str(&format!(
+                        r##"<rect x="0" y="0" width="{}" height="{}" fill="#f9f9f9" stroke="#0c0c0d" stroke-width="1"/>"##,
+                        node.size.x, node.size.y
+                    ));
+
+                    // Render block header
+                    let header_height = 28.0;
+                    svg.push_str(&format!(
+                        r##"<rect x="0" y="0" width="{}" height="{}" fill="{}"/>"##,
+                        node.size.x, header_height, header_color
+                    ));
+
+                    // Add block header text
+                    let desc = if block.attributes.contains(&"loopheader".to_string()) {
+                        " (loop header)"
+                    } else if block.attributes.contains(&"backedge".to_string()) {
+                        " (backedge)"
+                    } else {
+                        ""
+                    };
+
+                    svg.push_str(&format!(
+                        r##"<text x="{}" y="18" font-family="monospace" font-size="12" fill="white" font-weight="bold" text-anchor="middle">Block {}{}</text>"##,
+                        node.size.x / 2.0, block.id.0, desc
+                    ));
+
+                    // Render MIR instructions if present
+                    if let Some(mir_block) = &block.mir_block {
+                        let mut y = header_height + 12.0;  // Start below header with padding
+                        for ins in &mir_block.instructions {
+                            // Render instruction number
+                            svg.push_str(&format!(
+                                r##"<text x="8" y="{}" font-family="monospace" font-size="11" fill="#777">{}</text>"##,
+                                y, ins.id
+                            ));
+
+                            // Render opcode
+                            let opcode = html_escape(&ins.opcode);
+                            svg.push_str(&format!(
+                                r##"<text x="23" y="{}" font-family="monospace" font-size="11" fill="black">{}</text>"##,
+                                y, opcode
+                            ));
+
+                            // Render type (if not None)
+                            if ins.instruction_type != "None" {
+                                let type_x = node.size.x - 45.0;  // Right-aligned
+                                svg.push_str(&format!(
+                                    r##"<text x="{}" y="{}" font-family="monospace" font-size="11" fill="#1048af">{}</text>"##,
+                                    type_x, y, ins.instruction_type
+                                ));
+                            }
+
+                            y += 14.0;  // Move down for next instruction
+                        }
                     }
-                    
-                    // Render block rectangle
-                    svg.push_str(&format!(
-                        r#"<rect x="{}" y="{}" width="{}" height="{}" class="{}"/>"#,
-                        node.pos.x, node.pos.y, node.size.x, node.size.y, class
-                    ));
-                    
-                    // Render block text
-                    let block_text = format!("B{}", block.number.0);
-                    svg.push_str(&format!(
-                        r#"<text x="{}" y="{}" class="block-text">{}</text>"#,
-                        node.pos.x + node.size.x / 2.0,
-                        node.pos.y + node.size.y / 2.0,
-                        block_text
-                    ));
+
+                    // Render edge labels for binary branches
+                    if block.successors.len() == 2 {
+                        let label_y = node.size.y + 12.0;  // Below the block
+                        for (i, label) in [1, 0].iter().enumerate() {
+                            let label_x = PORT_START + PORT_SPACING * i as f64;
+                            svg.push_str(&format!(
+                                r##"<text x="{}" y="{}" font-family="monospace" font-size="9" fill="#777">{}</text>"##,
+                                label_x, label_y, label
+                            ));
+                        }
+                    }
+
+                    svg.push_str("</g>\n");
                 }
             }
         }

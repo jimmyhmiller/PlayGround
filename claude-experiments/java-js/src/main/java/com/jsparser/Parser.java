@@ -16,6 +16,7 @@ public class Parser {
     private boolean allowIn = true;
     private boolean inGenerator = false;
     private boolean inAsyncContext = false;
+    private boolean inClassFieldInitializer = false;
     private final boolean forceModuleMode;
 
     // Strict mode tracking
@@ -990,7 +991,11 @@ public class Parser {
                 // It's a property field
                 Expression value = null;
                 if (match(TokenType.ASSIGN)) {
+                    // Class field initializers are not in async context
+                    boolean oldInClassFieldInitializer = inClassFieldInitializer;
+                    inClassFieldInitializer = true;
                     value = parseAssignment();
+                    inClassFieldInitializer = oldInClassFieldInitializer;
                 }
 
                 // Consume optional semicolon
@@ -2411,7 +2416,8 @@ public class Parser {
         // Await expressions (contextual keyword)
         // Only parse as await expression in async context (or module top-level for top-level await)
         // and not followed by colon (labeled statement), semicolon, or assignment
-        if ((inAsyncContext || forceModuleMode) &&
+        // BUT: await is NOT allowed in class field initializers, even if the class is in an async context
+        if ((inAsyncContext || forceModuleMode) && !inClassFieldInitializer &&
             check(TokenType.IDENTIFIER) && peek().lexeme().equals("await") &&
             !checkAhead(1, TokenType.COLON) && !checkAhead(1, TokenType.SEMICOLON) &&
             !checkAhead(1, TokenType.ASSIGN) && !checkAhead(1, TokenType.PLUS_ASSIGN) &&
@@ -2784,6 +2790,13 @@ public class Parser {
                 }
 
                 advance();
+
+                // In module mode, 'await' is a reserved keyword and cannot be used as an identifier
+                if (forceModuleMode && token.lexeme().equals("await")) {
+                    throw new ParseException("SyntaxError", token, null, null,
+                        "Cannot use keyword 'await' outside an async function");
+                }
+
                 SourceLocation loc = createLocation(token, token);
                 yield new Identifier(getStart(token), getEnd(token), loc, token.lexeme());
             }
