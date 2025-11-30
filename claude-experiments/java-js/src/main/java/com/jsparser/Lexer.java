@@ -220,7 +220,8 @@ public class Lexer {
             case VAR, LET, CONST, FUNCTION, CLASS, ASYNC, AWAIT, RETURN, IF, ELSE,
                  FOR, WHILE, DO, BREAK, CONTINUE, SWITCH, CASE, DEFAULT, TRY, CATCH,
                  FINALLY, THROW, NEW, TYPEOF, VOID, DELETE, THIS, SUPER, IN, OF,
-                 INSTANCEOF, GET, SET, YIELD, IMPORT, EXPORT, WITH, DEBUGGER -> true;
+                 INSTANCEOF, GET, SET, IMPORT, EXPORT, WITH, DEBUGGER -> true;
+                 // Note: YIELD removed - now treated as contextual keyword (IDENTIFIER)
             default -> false;
         };
     }
@@ -1026,7 +1027,8 @@ public class Lexer {
                 // Note: 'of' is a contextual keyword, treated as identifier by lexer
                 // Parser will check for peek().lexeme().equals("of") where needed
                 case "instanceof" -> TokenType.INSTANCEOF;
-                case "yield" -> TokenType.YIELD;
+                // Note: 'yield' is a contextual keyword, treated as identifier by lexer
+                // In strict mode or generators, it's reserved; otherwise it's a valid identifier
                 case "import" -> TokenType.IMPORT;
                 case "export" -> TokenType.EXPORT;
                 case "with" -> TokenType.WITH;

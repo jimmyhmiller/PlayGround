@@ -88,7 +88,7 @@ public class TokenTypeProperties {
         BEFORE_EXPR.put(TokenType.TYPEOF, true);
         BEFORE_EXPR.put(TokenType.VOID, true);
         BEFORE_EXPR.put(TokenType.DELETE, true);
-        BEFORE_EXPR.put(TokenType.YIELD, true);
+        // Note: YIELD removed - now tokenized as IDENTIFIER
         BEFORE_EXPR.put(TokenType.CASE, true);
         BEFORE_EXPR.put(TokenType.ELSE, true);
 

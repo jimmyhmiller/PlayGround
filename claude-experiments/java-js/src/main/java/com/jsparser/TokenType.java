@@ -113,7 +113,7 @@ public enum TokenType {
     INSTANCEOF,
     GET,
     SET,
-    YIELD,
+    // Note: YIELD removed - now tokenized as IDENTIFIER, validated contextually by parser
     IMPORT,
     EXPORT,
     WITH,

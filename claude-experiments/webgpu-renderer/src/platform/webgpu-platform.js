@@ -5,11 +5,14 @@
 
 /**
  * Detect if running in Node.js
+ * Check for window/document to distinguish from browser with process shim
  */
 export function isNode() {
     return typeof process !== 'undefined' &&
            process.versions != null &&
-           process.versions.node != null;
+           process.versions.node != null &&
+           typeof window === 'undefined' &&
+           typeof document === 'undefined';
 }
 
 /**
@@ -17,12 +20,18 @@ export function isNode() {
  */
 export async function getWebGPU() {
     if (isNode()) {
-        // Node.js with node-webgpu
+        // Node.js with node-webgpu (Dawn)
         // Use dynamic import with variable to prevent bundler from resolving it
         try {
             const moduleName = 'webgpu';
             const webgpu = await import(/* @vite-ignore */ moduleName);
-            return webgpu.default || webgpu;
+
+            // Assign WebGPU globals (GPUBufferUsage, GPUMapMode, etc.)
+            Object.assign(globalThis, webgpu.globals);
+
+            // Create and return GPU instance using Dawn
+            // Pass empty array for default options
+            return webgpu.create([]);
         } catch (error) {
             throw new Error('node-webgpu not found. Install it with: npm install webgpu');
         }

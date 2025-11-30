@@ -17,46 +17,40 @@
 
 **Implementation:** Run as shell commands (e.g., `node script.js`, `python script.py`) - similar to commandRunner
 
-### Q2: Language Selection Interface
-**Options:**
-- A) Dropdown selector in the widget UI
-- B) Only configured via JSON (baked into the widget)
-- C) Both - JSON default with optional UI override
+### Q2: Language Selection Interface ✅ ANSWERED
+**User Response:** Both - JSON default with optional UI override
 
-**Status:** ⏳ PENDING
+**Implementation:** Widget will have a language dropdown that syncs with config.language. Users can change language via UI or JSON.
 
-### Q3: Code Persistence
-**Options:**
-- A) Saved in the widget configuration (persists in dashboard.json)
-- B) Linked to an external file (edit existing files)
-- C) Session-only (lost on refresh)
-- D) Multiple options available
+### Q3: Code Persistence ✅ ANSWERED
+**User Response:** Saved in the widget configuration (persists in dashboard.json)
 
-**Status:** ⏳ PENDING
+**Implementation:** Code will be stored in global state and persisted to dashboard.json using the same pattern as other widgets.
 
-### Q4: Editor Complexity
-**Options:**
-- A) Simple textarea with syntax highlighting
-- B) Full Monaco Editor (VS Code-like with autocomplete, multi-cursor, etc.)
-- C) Something in between
+### Q4: Editor Complexity ✅ ANSWERED
+**User Response:** Full Monaco Editor (VS Code-like with autocomplete, multi-cursor, etc.)
 
-**Status:** ⏳ PENDING
+**Implementation:** Use @monaco-editor/react for full VS Code editing experience with IntelliSense, multi-cursor support, and advanced features.
 
-### Q5: Output Display
-**Questions:**
-- Should it show stdout/stderr separately or combined?
-- Should it support ANSI color codes (like commandRunner)?
-- Should it be clearable or show execution history?
-- Should it show execution time/status?
+### Q5: Output Display ✅ ANSWERED
+**User Response:** Combined stdout/stderr, execution history, ANSI colors, execution time/status
 
-**Status:** ⏳ PENDING
+**Implementation:**
+- Combined stdout/stderr with ANSI color parsing (reuse parseAnsiToReact)
+- Show execution history with collapsible runs
+- Display execution time and exit status for each run
+- Include clear history button
 
-### Q6: Supported Languages
-**Baseline:** JavaScript/Node.js, Python, Bash/Shell
+### Q6: Supported Languages ✅ ANSWERED
+**User Response:** As many as possible, including Clojure
 
-**Additional to consider:** Ruby, Go, Rust, TypeScript, etc.
-
-**Status:** ⏳ PENDING
+**Implementation:** Support 25+ languages with default command mappings:
+- JavaScript, Python, Ruby, PHP, Perl, Lua, Bash, Shell
+- Go, Rust, C, C++, Java, Kotlin, Swift
+- TypeScript, Deno, Bun
+- Clojure, R, PowerShell
+- **CRITICAL: Must support custom command override in JSON config for custom languages**
+- Command template uses `{file}` placeholder for temp file path
 
 ---
 

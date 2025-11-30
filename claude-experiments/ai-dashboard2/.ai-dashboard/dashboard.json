@@ -109,6 +109,10 @@
         {
           "key": "errorTest",
           "value": "Test widget with error boundary - throws error on button click"
+        },
+        {
+          "key": "codeEditor",
+          "value": "Monaco-based code editor with 30+ language support, execution, and history"
         }
       ]
     },
@@ -263,7 +267,7 @@
       "type": "markdown",
       "x": 784,
       "y": 560,
-      "width": 520,
+      "width": 548,
       "height": 408,
       "label": "Code Editor Widget Planning",
       "filePath": "CODE_EDITOR_WIDGET_PLAN.md"
@@ -274,8 +278,61 @@
       "x": 1344,
       "y": 0,
       "width": 380,
-      "height": 440,
+      "height": 464,
       "label": "Layout Settings"
+    },
+    {
+      "id": "code-editor-demo",
+      "type": "codeEditor",
+      "x": 0,
+      "y": 924,
+      "width": 772,
+      "height": 600,
+      "label": "JavaScript Playground",
+      "language": "javascript",
+      "content": "// Try running some JavaScript code!\nconsole.log('Hello from the Code Editor!');\n\n// Test with some colors\nconsole.log('\\x1b[32mGreen text\\x1b[0m');\nconsole.log('\\x1b[34mBlue text\\x1b[0m');\nconsole.log('\\x1b[31mRed text\\x1b[0m');\n\n// Do some math\nfor (let i = 1; i <= 5; i++) {\n  console.log(`${i} squared = ${i * i}`);\n}\n\nconsole.log('\\x1b[33m✨ Execution complete!\\x1b[0m');",
+      "minimap": false,
+      "showLineNumbers": true
+    },
+    {
+      "id": "python-editor",
+      "type": "codeEditor",
+      "x": 784,
+      "y": 980,
+      "width": 548,
+      "height": 544,
+      "label": "Python Playground",
+      "language": "python",
+      "content": "# Python code example\nimport sys\n\nprint('Hello from Python!')\nprint('Python version:', sys.version.split()[0])\n\n# Test ANSI colors\nprint('\\033[92mGreen text\\033[0m')\nprint('\\033[94mBlue text\\033[0m')\nprint('\\033[91mRed text\\033[0m')\n\n# List comprehension\nsquares = [i**2 for i in range(1, 6)]\nfor i, sq in enumerate(squares, 1):\n    print(f'{i} squared = {sq}')\n\nprint('\\033[93m✨ All done!\\033[0m')",
+      "minimap": false,
+      "showLineNumbers": true
+    },
+    {
+      "id": "clojure-editor",
+      "type": "codeEditor",
+      "x": 1344,
+      "y": 476,
+      "width": 380,
+      "height": 492,
+      "label": "Clojure Playground",
+      "language": "clojure",
+      "content": ";; Clojure example\n(println \"Hello from Clojure!\")\n\n;; Map and reduce\n(def numbers (range 1 6))\n(def squares (map #(* % %) numbers))\n\n(println \"Squares:\" squares)\n\n;; Thread-first macro\n(->> (range 1 11)\n     (filter even?)\n     (map #(* % 2))\n     (reduce +)\n     (println \"Sum of doubled evens:\"))\n\n(println \"✨ Done!\")",
+      "minimap": false,
+      "showLineNumbers": true
+    },
+    {
+      "id": "custom-command-example",
+      "type": "codeEditor",
+      "x": 1344,
+      "y": 1028,
+      "width": 380,
+      "height": 496,
+      "label": "Custom Command Demo",
+      "language": "bash",
+      "command": "echo 'Running custom command on:' && cat {file} && echo '---' && bash {file}",
+      "content": "# This editor uses a custom command!\n# The command is: echo 'Running custom...' && cat {file} && bash {file}\n\necho \"Hello from a custom command!\"\necho \"File path was: {file}\"\necho \"You can replace this with YOUR custom language compiler!\"\n\n# For example:\n# \"./my-compiler {file} --run\"\n# \"beagle-run {file}\"\n# \"my-lang compile {file} && my-lang execute\"",
+      "minimap": false,
+      "showLineNumbers": true
     }
   ],
   "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/.ai-dashboard/dashboard.json"

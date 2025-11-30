@@ -64,6 +64,15 @@ contextBridge.exposeInMainWorld('dashboardAPI', {
     }
     return result.content;
   },
+
+  // Write code to a temp file (for code editor widget)
+  writeCodeFile: async (filePath, content) => {
+    const result = await ipcRenderer.invoke('write-code-file', { filePath, content });
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return result;
+  },
 });
 
 contextBridge.exposeInMainWorld('commandAPI', {
@@ -199,6 +208,23 @@ contextBridge.exposeInMainWorld('claudeAPI', {
     ipcRenderer.removeAllListeners('claude-chat-complete');
     ipcRenderer.removeAllListeners('claude-chat-error');
     ipcRenderer.removeAllListeners('todo-update');
+  },
+
+  // Listen for user questions (plan mode)
+  onUserQuestion: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('ask-user-question', handler);
+    return handler;
+  },
+
+  // Send answer to a question
+  sendQuestionAnswer: (questionId, answer) => {
+    ipcRenderer.send(`question-answer-${questionId}`, answer);
+  },
+
+  // Remove question listener
+  offUserQuestion: (handler) => {
+    ipcRenderer.off('ask-user-question', handler);
   }
 });
 

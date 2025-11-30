@@ -810,6 +810,18 @@ export class WebGPURenderer {
         console.log(`  First quad bounds (floats 2-5):`, quadData.slice(2, 6));
         console.log(`  Expected bounds:`, quads[0].bounds.toArray());
 
+        if (quads.length > 1) {
+            const quad2Data = quads[1].toArray();
+            console.log(`  Second quad (gradient) data length:`, quad2Data.length);
+            console.log(`  Second quad background section (floats 12-40):`, quad2Data.slice(12, 40));
+            console.log(`  Second quad tag (float 12):`, quad2Data[12], '(should be 1 for gradient)');
+            console.log(`  Second quad colorSpace (float 13):`, quad2Data[13]);
+            console.log(`  Second quad solid color (floats 14-17):`, quad2Data.slice(14, 18));
+            console.log(`  Second quad gradientAngle (float 18):`, quad2Data[18]);
+            console.log(`  Second quad color stop 0 (floats 22-26):`, quad2Data.slice(22, 27));
+            console.log(`  Second quad color stop 1 (floats 30-34):`, quad2Data.slice(30, 35));
+        }
+
         const buffer = this.createPrimitiveBuffer(quads, 64); // 64 floats = 256 bytes (32-byte aligned)
 
         console.log(`  Buffer size: ${buffer.size} bytes (expected ${64 * 4} bytes)`);

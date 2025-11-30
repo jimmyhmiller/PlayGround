@@ -595,11 +595,12 @@ ${widgetToolsList}
                 filePath: dashboardContext.filePath
               },
               watchedPaths,
-              broadcastDashboards // Pass the broadcast function so tools can update UI
+              broadcastDashboards, // Pass the broadcast function so tools can update UI
+              queryOptions.permissionMode || 'bypassPermissions' // Pass permission mode
             );
             // Add the dashboard MCP server to the servers config
             mcpServers[`dashboard-${dashboardContext.id}`] = dashboardMcpServer;
-            console.log(`[Claude] Created ${Object.keys(mcpServers).length} MCP tools for dashboard ${dashboardContext.id}`);
+            console.log(`[Claude] Created ${Object.keys(mcpServers).length} MCP tools for dashboard ${dashboardContext.id} (mode: ${queryOptions.permissionMode || 'bypassPermissions'})`);
           } catch (error) {
             console.error('[Claude] Error creating dashboard tools:', error);
           }
@@ -629,6 +630,18 @@ ${widgetToolsList}
             resume: existingSessionId || undefined, // Resume session if we have one
             mcpServers, // Include dashboard-specific tools
             permissionMode: queryOptions.permissionMode || 'bypassPermissions', // Default to bypass all permissions
+            canUseTool: async (toolName, input, options) => {
+              // Auto-approve AskUserQuestion tool so it doesn't require manual permission
+              // This allows seamless question/answer flow in plan mode
+              // MCP tools are prefixed with "mcp__<server-name>__<tool-name>"
+              console.log('[Claude] canUseTool called for:', toolName);
+              if (toolName === 'AskUserQuestion' || toolName.endsWith('__AskUserQuestion')) {
+                console.log('[Claude] Auto-approving AskUserQuestion tool');
+                return { behavior: 'allow', updatedInput: input };
+              }
+              // Return undefined to use default permission mode behavior for other tools
+              return undefined;
+            },
             ...queryOptions
           }
         });
@@ -999,6 +1012,26 @@ ipcMain.handle('load-text-file', async (event, filePath) => {
     return { success: true, content };
   } catch (error) {
     console.error('[TextLoader] Error loading text file:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('write-code-file', async (event, { filePath, content }) => {
+  try {
+    console.log(`[CodeWriter] Writing code file to: ${filePath}`);
+
+    // Ensure directory exists
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    // Write the file
+    fs.writeFileSync(filePath, content, 'utf-8');
+
+    return { success: true };
+  } catch (error) {
+    console.error('[CodeWriter] Error writing code file:', error);
     return { success: false, error: error.message };
   }
 });

@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test": "vitest",
     "test:ui": "vitest --ui",
-    "test:visual": "node e2e-visual-test.js"
+    "test:visual": "node e2e-visual-test.js",
+    "example:dawn": "node --loader ./wgsl-loader.js examples/node-headless.js"
   },
   "devDependencies": {
     "@vitest/browser": "^4.0.13",
@@ -20,5 +21,8 @@
     "pngjs": "^7.0.0",
     "vite": "^5.0.0",
     "vitest": "^4.0.13"
+  },
+  "dependencies": {
+    "webgpu": "^0.3.8"
   }
 }

@@ -65,6 +65,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Get quad data from storage buffer
     let quad = quads[input.quad_id];
 
+    // DEBUG: Show tag value as color
+    if (input.quad_id == 1u) {
+        if (quad.background.tag == 0u) {
+            return vec4<f32>(1.0, 0.0, 0.0, 1.0); // Red for tag 0
+        } else if (quad.background.tag == 1u) {
+            return vec4<f32>(0.0, 1.0, 0.0, 1.0); // Green for tag 1
+        } else {
+            return vec4<f32>(0.0, 0.0, 1.0, 1.0); // Blue for other
+        }
+    }
+
     // Evaluate background color (solid or gradient)
     let background_color = gradient_color(
         quad.background,

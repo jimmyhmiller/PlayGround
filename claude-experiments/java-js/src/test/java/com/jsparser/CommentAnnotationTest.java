@@ -96,37 +96,7 @@ public class CommentAnnotationTest {
         }
     }
 
-    @Test
-    public void testMinimalRegexAt() throws IOException {
-        String code = Files.readString(Paths.get("/tmp/test-regex-at.js"));
-        System.out.println("Code to parse: " + code);
-        Parser parser = new Parser(code);
-        try {
-            Object result = parser.parse();
-            System.out.println("✓ Parsed minimal regex with @");
-            assertNotNull(result);
-        } catch (Exception e) {
-            System.out.println("✗ Failed: " + e.getMessage());
-            e.printStackTrace();
-            throw e;
-        }
-    }
-
-    @Test
-    public void testRegexWithBackslashLookbehind() throws IOException {
-        String code = Files.readString(Paths.get("/tmp/test-regex-backslash.js"));
-        System.out.println("Code to parse: " + code);
-        Parser parser = new Parser(code);
-        try {
-            Object result = parser.parse();
-            System.out.println("✓ Parsed regex with backslash lookbehind");
-            assertNotNull(result);
-        } catch (Exception e) {
-            System.out.println("✗ Failed: " + e.getMessage());
-            e.printStackTrace();
-            throw e;
-        }
-    }
+    // Removed testMinimalRegexAt and testRegexWithBackslashLookbehind - tests depended on external temp files
 
     // Removed testNextJsChunk - file was truncated/incomplete JavaScript that Acorn also rejects
 

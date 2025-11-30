@@ -18,6 +18,10 @@ public class Parser {
     private boolean inAsyncContext = false;
     private final boolean forceModuleMode;
 
+    // Strict mode tracking
+    private boolean strictMode = false;
+    private java.util.Stack<Boolean> strictModeStack = new java.util.Stack<>();
+
     public Parser(String source) {
         this(source, false);
     }
@@ -30,6 +34,11 @@ public class Parser {
         this.tokens = lexer.tokenize();
         this.forceModuleMode = forceModuleMode;
         this.lineOffsets = buildLineOffsetIndex();
+
+        // Module mode is always strict
+        if (forceModuleMode) {
+            this.strictMode = true;
+        }
     }
 
     public Program parse() {
@@ -56,6 +65,8 @@ public class Parser {
                     stmt instanceof ExportDefaultDeclaration ||
                     stmt instanceof ExportAllDeclaration) {
                     sourceType = "module";
+                    // Module mode is always strict
+                    strictMode = true;
                     break;
                 }
             }
@@ -551,6 +562,11 @@ public class Parser {
         Token startToken = peek();
         advance(); // consume 'with'
 
+        // Strict mode validation: with statements are not allowed in strict mode
+        if (strictMode) {
+            throw new ExpectedTokenException("'with' statement is not allowed in strict mode", startToken);
+        }
+
         consume(TokenType.LPAREN, "Expected '(' after 'with'");
         Expression object = parseExpression();
         consume(TokenType.RPAREN, "Expected ')' after with object");
@@ -594,9 +610,9 @@ public class Parser {
         // Check for generator
         boolean isGenerator = match(TokenType.STAR);
 
-        // Parse function name (allow yield, await in non-strict mode as function names)
+        // Parse function name (allow yield, of, let as function names in appropriate contexts)
         Identifier id = null;
-        if (check(TokenType.IDENTIFIER) || check(TokenType.YIELD) || check(TokenType.OF) || check(TokenType.LET)) {
+        if (check(TokenType.IDENTIFIER) || check(TokenType.OF) || check(TokenType.LET)) {
             Token nameToken = peek();
             advance();
             id = new Identifier(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.lexeme());
@@ -608,6 +624,7 @@ public class Parser {
         // (parameters can have default values that need correct context)
         boolean savedInGenerator = inGenerator;
         boolean savedInAsyncContext = inAsyncContext;
+        boolean savedStrictMode = strictMode;
         inGenerator = isGenerator;
         inAsyncContext = isAsync;
 
@@ -641,12 +658,25 @@ public class Parser {
 
         consume(TokenType.RPAREN, "Expected ')' after parameters");
 
+        // Reset strict mode for function body (unless in module mode)
+        // Functions can have their own "use strict" directive
+        if (!forceModuleMode) {
+            strictMode = false;
+        }
+
         // Parse body (context already set above)
+        // The block statement will call processDirectives which may set strictMode
         BlockStatement body = parseBlockStatement(true); // Function body
+
+        // Check for duplicate parameters if in strict mode
+        // This must be done AFTER parsing the body (which might contain "use strict")
+        // but BEFORE restoring the saved strict mode
+        validateNoDuplicateParameters(params, startToken);
 
         // Restore context
         inGenerator = savedInGenerator;
         inAsyncContext = savedInAsyncContext;
+        strictMode = savedStrictMode;
 
         Token endToken = previous();
         SourceLocation loc = createLocation(startToken, endToken);
@@ -899,11 +929,23 @@ public class Parser {
                 // Parse body with proper generator/async context
                 boolean savedInGenerator = inGenerator;
                 boolean savedInAsyncContext = inAsyncContext;
+                boolean savedStrictMode = strictMode;
                 inGenerator = isGenerator;
                 inAsyncContext = isAsync;
+
+                // Reset strict mode for method body (unless in module mode)
+                if (!forceModuleMode) {
+                    strictMode = false;
+                }
+
                 BlockStatement body = parseBlockStatement(true); // Method body
+
+                // Check for duplicate parameters if in strict mode
+                validateNoDuplicateParameters(params, memberStart);
+
                 inGenerator = savedInGenerator;
                 inAsyncContext = savedInAsyncContext;
+                strictMode = savedStrictMode;
 
                 Token methodEnd = previous();
                 SourceLocation methodLoc = createLocation(memberStart, methodEnd);
@@ -1378,6 +1420,12 @@ public class Parser {
                     // This is a directive
                     // Directive value is the raw string content (without quotes) to preserve escape sequences
                     String directiveValue = lit.raw().substring(1, lit.raw().length() - 1);
+
+                    // Detect "use strict" directive
+                    if (directiveValue.equals("use strict")) {
+                        strictMode = true;
+                    }
+
                     processed.add(new ExpressionStatement(
                         exprStmt.start(),
                         exprStmt.end(),
@@ -1669,7 +1717,7 @@ public class Parser {
         // Yield has assignment-level precedence, so check it here
         // Note: we don't check for COLON here because parseAssignment is only called in expression contexts,
         // so "yield:" as a label will be handled at the statement level, not here
-        if (inGenerator && check(TokenType.YIELD) &&
+        if (inGenerator && check(TokenType.IDENTIFIER) && peek().lexeme().equals("yield") &&
             !checkAhead(1, TokenType.ASSIGN) && !checkAhead(1, TokenType.PLUS_ASSIGN) &&
             !checkAhead(1, TokenType.MINUS_ASSIGN) && !checkAhead(1, TokenType.STAR_ASSIGN) &&
             !checkAhead(1, TokenType.SLASH_ASSIGN) && !checkAhead(1, TokenType.PERCENT_ASSIGN)) {
@@ -1746,8 +1794,8 @@ public class Parser {
             }
         }
 
-        // Check for arrow function: identifier => expr (allow yield, of, let as parameter names)
-        if ((check(TokenType.IDENTIFIER) || check(TokenType.YIELD) || check(TokenType.OF) || check(TokenType.LET)) && !isAsync) {
+        // Check for arrow function: identifier => expr (allow of, let as parameter names)
+        if ((check(TokenType.IDENTIFIER) || check(TokenType.OF) || check(TokenType.LET)) && !isAsync) {
             Token idToken = peek();
             if (current + 1 < tokens.size() && tokens.get(current + 1).type() == TokenType.ARROW) {
                 advance(); // consume identifier/yield/of/let
@@ -1757,7 +1805,7 @@ public class Parser {
                 consume(TokenType.ARROW, "Expected '=>'");
                 return parseArrowFunctionBody(startToken, params, isAsync);
             }
-        } else if ((check(TokenType.IDENTIFIER) || check(TokenType.YIELD) || check(TokenType.OF) || check(TokenType.LET)) && isAsync) {
+        } else if ((check(TokenType.IDENTIFIER) || check(TokenType.OF) || check(TokenType.LET)) && isAsync) {
             // async identifier => expr
             Token idToken = peek();
             advance(); // consume identifier/yield/of/let
@@ -2391,6 +2439,12 @@ public class Parser {
             Token operator = previous();
             Expression argument = parseUnary();  // Right-associative
             Token endToken = previous();
+
+            // Strict mode validation: delete on identifiers is not allowed
+            if (strictMode && operator.type() == TokenType.DELETE && argument instanceof Identifier) {
+                throw new ExpectedTokenException("Delete of an unqualified identifier is not allowed in strict mode", operator);
+            }
+
             SourceLocation loc = createLocation(token, endToken);
             return new UnaryExpression(getStart(token), getEnd(endToken), loc, operator.lexeme(), true, argument);
         }
@@ -2706,11 +2760,23 @@ public class Parser {
                     // Parse body with proper generator/async context
                     boolean savedInGenerator = inGenerator;
                     boolean savedInAsyncContext = inAsyncContext;
+                    boolean savedStrictMode = strictMode;
                     inGenerator = isGenerator;
                     inAsyncContext = true; // async function expression
+
+                    // Reset strict mode for function body (unless in module mode)
+                    if (!forceModuleMode) {
+                        strictMode = false;
+                    }
+
                     BlockStatement body = parseBlockStatement(true); // Function expression body
+
+                    // Check for duplicate parameters if in strict mode
+                    validateNoDuplicateParameters(params, startToken);
+
                     inGenerator = savedInGenerator;
                     inAsyncContext = savedInAsyncContext;
+                    strictMode = savedStrictMode;
 
                     Token endToken = previous();
                     SourceLocation loc = createLocation(startToken, endToken);
@@ -3085,11 +3151,23 @@ public class Parser {
                         // Parse body with proper generator and async context
                         boolean savedInGenerator = inGenerator;
                         boolean savedInAsyncContext = inAsyncContext;
+                        boolean savedStrictMode = strictMode;
                         inGenerator = isGenerator;
                         inAsyncContext = isAsync;
+
+                        // Reset strict mode for method body (unless in module mode)
+                        if (!forceModuleMode) {
+                            strictMode = false;
+                        }
+
                         BlockStatement body = parseBlockStatement(true); // Object method body
+
+                        // Check for duplicate parameters if in strict mode
+                        validateNoDuplicateParameters(params, methodStart);
+
                         inGenerator = savedInGenerator;
                         inAsyncContext = savedInAsyncContext;
+                        strictMode = savedStrictMode;
 
                         Token funcEnd = previous();
                         SourceLocation funcLoc = createLocation(methodStart, funcEnd);
@@ -3242,9 +3320,9 @@ public class Parser {
                 // Check for generator
                 boolean isGenerator = match(TokenType.STAR);
 
-                // Optional function name (can be null for anonymous, allow yield/of/let as names)
+                // Optional function name (can be null for anonymous, allow of/let as names)
                 Identifier id = null;
-                if (check(TokenType.IDENTIFIER) || check(TokenType.YIELD) || check(TokenType.OF) || check(TokenType.LET)) {
+                if (check(TokenType.IDENTIFIER) || check(TokenType.OF) || check(TokenType.LET)) {
                     Token nameToken = peek();
                     advance();
                     id = new Identifier(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.lexeme());
@@ -3253,6 +3331,7 @@ public class Parser {
                 // Set generator context before parsing parameters
                 // (parameters can have default values that need correct context)
                 boolean savedInGenerator = inGenerator;
+                boolean savedStrictMode = strictMode;
                 inGenerator = isGenerator;
 
                 // Parse parameters
@@ -3283,11 +3362,21 @@ public class Parser {
 
                 consume(TokenType.RPAREN, "Expected ')' after parameters");
 
+                // Reset strict mode for function body (unless in module mode)
+                // Functions can have their own "use strict" directive
+                if (!forceModuleMode) {
+                    strictMode = false;
+                }
+
                 // Parse body (context already set above)
                 BlockStatement body = parseBlockStatement(true); // Function expression body
 
+                // Check for duplicate parameters if in strict mode
+                validateNoDuplicateParameters(params, startToken);
+
                 // Restore context
                 inGenerator = savedInGenerator;
+                strictMode = savedStrictMode;
 
                 Token endToken = previous();
                 SourceLocation loc = createLocation(startToken, endToken);
@@ -3319,13 +3408,7 @@ public class Parser {
                 SourceLocation loc = createLocation(startToken, endToken);
                 yield new ClassExpression(getStart(startToken), getEnd(endToken), loc, id, superClass, body);
             }
-            case YIELD -> {
-                // In non-generator contexts, 'yield' can be used as an identifier
-                // TODO: Add proper context tracking to disallow in generator functions
-                advance();
-                SourceLocation loc = createLocation(token, token);
-                yield new Identifier(getStart(token), getEnd(token), loc, "yield");
-            }
+            // Note: 'yield' is now tokenized as IDENTIFIER and handled in the IDENTIFIER case
             case OF -> {
                 // 'of' can be used as an identifier outside of for-of loops
                 advance();
@@ -3448,7 +3531,7 @@ public class Parser {
                type == TokenType.NEW || type == TokenType.TYPEOF || type == TokenType.VOID ||
                type == TokenType.DELETE || type == TokenType.THIS || type == TokenType.SUPER ||
                type == TokenType.IN || type == TokenType.OF || type == TokenType.INSTANCEOF ||
-               type == TokenType.GET || type == TokenType.SET || type == TokenType.YIELD ||
+               type == TokenType.GET || type == TokenType.SET ||
                type == TokenType.IMPORT || type == TokenType.EXPORT || type == TokenType.WITH ||
                type == TokenType.DEBUGGER;
     }
@@ -3476,6 +3559,90 @@ public class Parser {
             return;
         }
         throw new ExpectedTokenException(message, peek());
+    }
+
+    /**
+     * Validate that an identifier name is allowed in the current context.
+     * Throws an exception if the identifier is a strict mode reserved word or
+     * otherwise invalid in the current parsing context.
+     */
+    private void validateIdentifier(String name, Token token) {
+        // Check for strict mode reserved words
+        if (strictMode) {
+            // Future reserved words in strict mode (ECMAScript spec section 12.1.1)
+            if (name.equals("implements") || name.equals("interface") ||
+                name.equals("package") || name.equals("private") ||
+                name.equals("protected") || name.equals("public") ||
+                name.equals("static")) {
+                throw new ExpectedTokenException("'" + name + "' is a reserved identifier in strict mode", token);
+            }
+
+            // 'yield' is reserved in strict mode (outside generators)
+            if (name.equals("yield") && !inGenerator) {
+                throw new ExpectedTokenException("'yield' is a reserved identifier in strict mode", token);
+            }
+        }
+
+        // 'yield' is always reserved inside generators (even in non-strict mode)
+        if (inGenerator && name.equals("yield")) {
+            throw new ExpectedTokenException("'yield' is a reserved identifier in generators", token);
+        }
+    }
+
+    /**
+     * Validate that an identifier is not eval or arguments when used as an assignment target.
+     * In strict mode, eval and arguments cannot be assigned to.
+     */
+    private void validateAssignmentTarget(String name, Token token) {
+        if (strictMode && (name.equals("eval") || name.equals("arguments"))) {
+            throw new ExpectedTokenException("Cannot assign to '" + name + "' in strict mode", token);
+        }
+    }
+
+    /**
+     * Check for duplicate parameter names in a function parameter list.
+     * In strict mode, duplicate parameters are not allowed.
+     */
+    private void validateNoDuplicateParameters(List<Pattern> params, Token functionToken) {
+        if (!strictMode) {
+            return; // Duplicates are only forbidden in strict mode
+        }
+
+        java.util.Set<String> paramNames = new java.util.HashSet<>();
+        for (Pattern param : params) {
+            collectParameterNames(param, paramNames, functionToken);
+        }
+    }
+
+    /**
+     * Recursively collect all parameter names from a pattern, checking for duplicates.
+     */
+    private void collectParameterNames(Pattern pattern, java.util.Set<String> names, Token functionToken) {
+        if (pattern instanceof Identifier id) {
+            String name = id.name();
+            if (names.contains(name)) {
+                throw new ExpectedTokenException("Duplicate parameter name '" + name + "' not allowed in strict mode", functionToken);
+            }
+            names.add(name);
+        } else if (pattern instanceof AssignmentPattern ap) {
+            collectParameterNames(ap.left(), names, functionToken);
+        } else if (pattern instanceof ArrayPattern ap) {
+            for (Pattern element : ap.elements()) {
+                if (element != null) {
+                    collectParameterNames(element, names, functionToken);
+                }
+            }
+        } else if (pattern instanceof ObjectPattern op) {
+            for (Node node : op.properties()) {
+                if (node instanceof Property prop && prop.value() instanceof Pattern p) {
+                    collectParameterNames(p, names, functionToken);
+                } else if (node instanceof RestElement re) {
+                    collectParameterNames(re.argument(), names, functionToken);
+                }
+            }
+        } else if (pattern instanceof RestElement re) {
+            collectParameterNames(re.argument(), names, functionToken);
+        }
     }
 
     // ASI-aware semicolon consumption

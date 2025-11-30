@@ -1,7 +1,8 @@
-import { useState, useRef, useEffect, useMemo, Suspense, Component } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback, Suspense, Component } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import Editor from '@monaco-editor/react';
 import { Grid, GridItem } from './components';
 import './styles.css';
 
@@ -1609,6 +1610,354 @@ function CommandRunner({ theme, config, dashboard }) {
   );
 }
 
+// Language to command and file extension mappings for CodeEditor
+const LANGUAGE_CONFIG = {
+  javascript: { command: 'node {file}', extension: 'js', monacoLang: 'javascript' },
+  typescript: { command: 'ts-node {file}', extension: 'ts', monacoLang: 'typescript' },
+  python: { command: 'python3 {file}', extension: 'py', monacoLang: 'python' },
+  python2: { command: 'python {file}', extension: 'py', monacoLang: 'python' },
+  ruby: { command: 'ruby {file}', extension: 'rb', monacoLang: 'ruby' },
+  php: { command: 'php {file}', extension: 'php', monacoLang: 'php' },
+  perl: { command: 'perl {file}', extension: 'pl', monacoLang: 'perl' },
+  lua: { command: 'lua {file}', extension: 'lua', monacoLang: 'lua' },
+  bash: { command: 'bash {file}', extension: 'sh', monacoLang: 'shell' },
+  sh: { command: 'sh {file}', extension: 'sh', monacoLang: 'shell' },
+  zsh: { command: 'zsh {file}', extension: 'sh', monacoLang: 'shell' },
+  powershell: { command: 'pwsh {file}', extension: 'ps1', monacoLang: 'powershell' },
+  go: { command: 'go run {file}', extension: 'go', monacoLang: 'go' },
+  rust: { command: 'rustc {file} -o {tempdir}/a.out && {tempdir}/a.out', extension: 'rs', monacoLang: 'rust' },
+  c: { command: 'gcc {file} -o {tempdir}/a.out && {tempdir}/a.out', extension: 'c', monacoLang: 'c' },
+  cpp: { command: 'g++ {file} -o {tempdir}/a.out && {tempdir}/a.out', extension: 'cpp', monacoLang: 'cpp' },
+  java: { command: 'java {file}', extension: 'java', monacoLang: 'java' },
+  kotlin: { command: 'kotlinc {file} -include-runtime -d {tempdir}/out.jar && java -jar {tempdir}/out.jar', extension: 'kt', monacoLang: 'kotlin' },
+  swift: { command: 'swift {file}', extension: 'swift', monacoLang: 'swift' },
+  r: { command: 'Rscript {file}', extension: 'R', monacoLang: 'r' },
+  clojure: { command: 'clj -M {file}', extension: 'clj', monacoLang: 'clojure' },
+  deno: { command: 'deno run {file}', extension: 'ts', monacoLang: 'typescript' },
+  bun: { command: 'bun run {file}', extension: 'ts', monacoLang: 'typescript' },
+  scala: { command: 'scala {file}', extension: 'scala', monacoLang: 'scala' },
+  haskell: { command: 'runhaskell {file}', extension: 'hs', monacoLang: 'haskell' },
+  elixir: { command: 'elixir {file}', extension: 'ex', monacoLang: 'elixir' },
+  erlang: { command: 'escript {file}', extension: 'erl', monacoLang: 'erlang' },
+  fsharp: { command: 'dotnet fsi {file}', extension: 'fsx', monacoLang: 'fsharp' },
+  csharp: { command: 'dotnet script {file}', extension: 'csx', monacoLang: 'csharp' },
+};
+
+function CodeEditor({ theme, config, dashboard }) {
+  const widgetId = config.id;
+  const projectRoot = dashboard?._projectRoot;
+
+  // Initialize from global state
+  const globalState = globalCodeEditorStates.get(widgetId) || {};
+  const [code, setCode] = useState(globalState.code || config.content || '// Write your code here\n');
+  const [language, setLanguage] = useState(globalState.language || config.language || 'javascript');
+  const [isRunning, setIsRunning] = useState(false);
+  const [output, setOutput] = useState('');
+  const [exitCode, setExitCode] = useState(null);
+  const [executionTime, setExecutionTime] = useState(null);
+  const [startTime, setStartTime] = useState(null);
+  const [monacoInstance, setMonacoInstance] = useState(null);
+
+  // Sync to global state
+  useEffect(() => {
+    globalCodeEditorStates.set(widgetId, {
+      code,
+      language
+    });
+  }, [code, language, widgetId]);
+
+  // Get command for language (config.command overrides default)
+  const getCommand = () => {
+    if (config.command) {
+      return config.command; // Custom command from config takes precedence
+    }
+    const langConfig = LANGUAGE_CONFIG[language];
+    return langConfig ? langConfig.command : `${language} {file}`;
+  };
+
+  // Get file extension for language
+  const getExtension = () => {
+    const langConfig = LANGUAGE_CONFIG[language];
+    return langConfig ? langConfig.extension : 'txt';
+  };
+
+  // Run code
+  const runCode = async () => {
+    if (!code.trim() || !window.commandAPI) return;
+
+    setIsRunning(true);
+    setOutput('');
+    setExitCode(null);
+    setExecutionTime(null);
+    setStartTime(Date.now());
+
+    try {
+      // Create temp file path
+      const timestamp = Date.now();
+      const extension = getExtension();
+      const tempFile = `/tmp/dashboard-code-${widgetId}-${timestamp}.${extension}`;
+      const tempDir = '/tmp';
+
+      // Write code to temp file
+      const writeResult = await window.dashboardAPI?.writeCodeFile?.(tempFile, code);
+      if (!writeResult?.success) {
+        throw new Error('Failed to write code to temp file');
+      }
+
+      // Prepare command with placeholders replaced
+      let command = getCommand()
+        .replace(/\{file\}/g, tempFile)
+        .replace(/\{tempdir\}/g, tempDir)
+        .replace(/\{basename\}/g, `dashboard-code-${widgetId}-${timestamp}`);
+
+      // Execute command
+      const cwd = config.cwd || projectRoot || tempDir;
+      const result = await window.commandAPI.startStreaming(widgetId, command, cwd);
+
+      if (!result.success) {
+        setOutput(`Error: ${result.error}`);
+        setIsRunning(false);
+        setExitCode(1);
+        setExecutionTime(Date.now() - startTime);
+      }
+    } catch (err) {
+      setOutput(`Error: ${err.message}`);
+      setIsRunning(false);
+      setExitCode(1);
+      setExecutionTime(Date.now() - startTime);
+    }
+  };
+
+  // Stop execution
+  const stopExecution = async () => {
+    if (!window.commandAPI) return;
+    try {
+      await window.commandAPI.stopStreaming(widgetId);
+      setIsRunning(false);
+    } catch (err) {
+      console.error('Failed to stop execution:', err);
+    }
+  };
+
+  // Listen for command output
+  useEffect(() => {
+    if (!window.commandAPI) return;
+
+    const handleOutput = ({ widgetId: eventWidgetId, output: text }) => {
+      if (eventWidgetId === widgetId) {
+        setOutput(prev => prev + text);
+      }
+    };
+
+    const handleExit = ({ widgetId: eventWidgetId, code: code }) => {
+      if (eventWidgetId === widgetId) {
+        setIsRunning(false);
+        setExitCode(code);
+        const duration = startTime ? Date.now() - startTime : 0;
+        setExecutionTime(duration);
+      }
+    };
+
+    const handleError = ({ widgetId: eventWidgetId, error: errorMsg }) => {
+      if (eventWidgetId === widgetId) {
+        setOutput(prev => prev + `\nError: ${errorMsg}`);
+        setIsRunning(false);
+        setExitCode(1);
+        const duration = startTime ? Date.now() - startTime : 0;
+        setExecutionTime(duration);
+      }
+    };
+
+    const outputHandler = window.commandAPI.onOutput(handleOutput);
+    const exitHandler = window.commandAPI.onExit(handleExit);
+    const errorHandler = window.commandAPI.onError(handleError);
+
+    return () => {
+      window.commandAPI.offOutput(outputHandler);
+      window.commandAPI.offExit(exitHandler);
+      window.commandAPI.offError(errorHandler);
+    };
+  }, [widgetId, startTime]);
+
+  // Configure Monaco theme on mount
+  useEffect(() => {
+    if (monacoInstance) {
+      monacoInstance.editor.defineTheme('dashboard-dark', {
+        base: 'vs-dark',
+        inherit: true,
+        rules: [],
+        colors: {
+          'editor.background': theme.bgApp || '#0d1117',
+          'editor.foreground': theme.textColor || '#c9d1d9',
+          'editorLineNumber.foreground': theme.textColor ? `${theme.textColor}60` : '#c9d1d960',
+          'editor.selectionBackground': theme.accent ? `${theme.accent}40` : '#58a6ff40',
+          'editor.inactiveSelectionBackground': theme.accent ? `${theme.accent}20` : '#58a6ff20',
+        }
+      });
+      monacoInstance.editor.setTheme('dashboard-dark');
+    }
+  }, [monacoInstance, theme]);
+
+  // Get Monaco language mode
+  const getMonacoLanguage = () => {
+    const langConfig = LANGUAGE_CONFIG[language];
+    return langConfig ? langConfig.monacoLang : language;
+  };
+
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      {/* Header with controls */}
+      <div className="widget-label" style={{
+        fontFamily: theme.textBody,
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        flexShrink: 0,
+        gap: 8
+      }}>
+        <span>{config.label || 'Code Editor'}</span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {/* Language selector */}
+          <select
+            value={language}
+            onChange={(e) => setLanguage(e.target.value)}
+            style={{
+              background: 'rgba(255,255,255,0.1)',
+              border: `1px solid ${theme.accent}44`,
+              borderRadius: 4,
+              padding: '4px 8px',
+              color: theme.textColor,
+              fontSize: '0.7rem',
+              cursor: 'pointer'
+            }}
+          >
+            {Object.keys(LANGUAGE_CONFIG).sort().map(lang => (
+              <option key={lang} value={lang}>{lang}</option>
+            ))}
+          </select>
+
+          {/* Run/Stop button */}
+          <button
+            onClick={isRunning ? stopExecution : runCode}
+            style={{
+              background: isRunning ? theme.negative : theme.positive,
+              border: 'none',
+              borderRadius: 4,
+              padding: '4px 12px',
+              color: '#fff',
+              cursor: 'pointer',
+              fontSize: '0.7rem',
+              fontWeight: 600
+            }}
+          >
+            {isRunning ? 'Stop' : 'Run'}
+          </button>
+        </div>
+      </div>
+
+      {/* Monaco Editor */}
+      <div style={{ flex: '1 1 50%', minHeight: 0, overflow: 'hidden' }}>
+        <Editor
+          height="100%"
+          language={getMonacoLanguage()}
+          value={code}
+          onChange={(value) => setCode(value || '')}
+          theme="vs-dark"
+          onMount={(editor, monaco) => setMonacoInstance(monaco)}
+          loading=""
+          options={{
+            minimap: { enabled: config.minimap !== false },
+            fontSize: 13,
+            lineNumbers: config.showLineNumbers !== false ? 'on' : 'off',
+            readOnly: config.readOnly || false,
+            automaticLayout: true,
+            scrollBeyondLastLine: false,
+            wordWrap: 'on',
+            tabSize: 2,
+            renderValidationDecorations: 'off',
+            quickSuggestions: false,
+          }}
+        />
+      </div>
+
+      {/* Output area */}
+      <div style={{
+        flex: '1 1 50%',
+        minHeight: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        borderTop: `1px solid ${theme.accent}44`,
+        marginTop: 8,
+        paddingTop: 8,
+        overflow: 'hidden'
+      }}>
+        <div style={{
+          fontSize: '0.75rem',
+          fontWeight: 600,
+          marginBottom: 6,
+          color: theme.textColor,
+          opacity: 0.8
+        }}>
+          Output
+        </div>
+
+        <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+          {/* Output display */}
+          {(isRunning || output) ? (
+            <div style={{
+              fontFamily: 'monospace',
+              fontSize: '0.7rem',
+              color: theme.textColor,
+              background: 'rgba(0,0,0,0.3)',
+              padding: 8,
+              borderRadius: 4,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              border: exitCode !== null ? `1px solid ${exitCode === 0 ? theme.positive : theme.negative}44` : 'none'
+            }}>
+              {/* Status header */}
+              <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                marginBottom: 4,
+                fontSize: '0.65rem',
+                opacity: 0.8
+              }}>
+                <span>
+                  {isRunning ? (
+                    <span style={{ color: theme.accent }}>▶ Running...</span>
+                  ) : exitCode !== null ? (
+                    exitCode === 0 ? (
+                      <span style={{ color: theme.positive }}>✓ Success</span>
+                    ) : (
+                      <span style={{ color: theme.negative }}>✗ Exit {exitCode}</span>
+                    )
+                  ) : null}
+                </span>
+                {executionTime !== null && (
+                  <span>{executionTime}ms</span>
+                )}
+              </div>
+              {/* Output content */}
+              {parseAnsiToReact(output || '')}
+            </div>
+          ) : (
+            <div style={{
+              color: theme.textColor,
+              opacity: 0.5,
+              fontSize: '0.75rem',
+              textAlign: 'center',
+              padding: 20
+            }}>
+              Click "Run" to execute your code
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function FlippableTest({ theme, config }) {
   const [isFlipped, setIsFlipped] = useState(false);
 
@@ -1970,6 +2319,320 @@ function formatToolDescription(toolName, input) {
   }
 }
 
+// Question prompt component for plan mode
+function QuestionPrompt({ question, theme, onAnswer, showSubmit = true }) {
+  const [selectedOptions, setSelectedOptions] = useState([]);
+  const [customAnswer, setCustomAnswer] = useState('');
+  const [showCustomInput, setShowCustomInput] = useState(!question.options || question.options.length === 0);
+
+  // When showSubmit is false and custom input is being used, report answer as user types
+  useEffect(() => {
+    if (!showSubmit && showCustomInput && customAnswer.trim()) {
+      onAnswer(customAnswer);
+    }
+  }, [customAnswer, showSubmit, showCustomInput, onAnswer]);
+
+  const handleOptionClick = (option) => {
+    let newOptions;
+    if (question.allowMultiple) {
+      newOptions = selectedOptions.includes(option)
+        ? selectedOptions.filter(o => o !== option)
+        : [...selectedOptions, option];
+      setSelectedOptions(newOptions);
+    } else {
+      newOptions = [option];
+      setSelectedOptions(newOptions);
+    }
+
+    // If showSubmit is false, immediately report the answer
+    if (!showSubmit) {
+      if (question.allowMultiple) {
+        onAnswer(newOptions);
+      } else {
+        onAnswer(option);
+      }
+    }
+  };
+
+  const handleSubmit = () => {
+    if (showCustomInput) {
+      onAnswer(customAnswer);
+    } else if (question.allowMultiple) {
+      onAnswer(selectedOptions);
+    } else {
+      onAnswer(selectedOptions[0] || '');
+    }
+  };
+
+  const canSubmit = showCustomInput ? customAnswer.trim() : selectedOptions.length > 0;
+
+  return (
+    <div style={{
+      padding: '16px',
+      margin: '12px 0',
+      backgroundColor: `${theme.accent}11`,
+      border: `2px solid ${theme.accent}`,
+      borderRadius: '12px',
+      fontFamily: theme.textBody
+    }}>
+      <div style={{
+        fontSize: '0.9rem',
+        fontWeight: 'bold',
+        marginBottom: '12px',
+        color: theme.accent
+      }}>
+        ❓ Question
+      </div>
+
+      <div style={{
+        fontSize: '0.85rem',
+        marginBottom: '16px',
+        lineHeight: '1.5',
+        color: theme.textColor
+      }}>
+        {question.question}
+      </div>
+
+      {!showCustomInput && question.options && question.options.length > 0 && (
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '8px',
+          marginBottom: '12px'
+        }}>
+          {question.options.map((option, idx) => (
+            <button
+              key={idx}
+              onClick={() => handleOptionClick(option)}
+              style={{
+                padding: '10px 14px',
+                backgroundColor: selectedOptions.includes(option)
+                  ? `${theme.accent}33`
+                  : 'rgba(255,255,255,0.05)',
+                border: `1px solid ${selectedOptions.includes(option) ? theme.accent : 'rgba(255,255,255,0.1)'}`,
+                borderRadius: '8px',
+                color: theme.textColor,
+                cursor: 'pointer',
+                fontFamily: theme.textBody,
+                fontSize: '0.8rem',
+                textAlign: 'left',
+                transition: 'all 0.2s ease'
+              }}
+              onMouseEnter={(e) => {
+                if (!selectedOptions.includes(option)) {
+                  e.target.style.backgroundColor = 'rgba(255,255,255,0.08)';
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!selectedOptions.includes(option)) {
+                  e.target.style.backgroundColor = 'rgba(255,255,255,0.05)';
+                }
+              }}
+            >
+              {selectedOptions.includes(option) && (question.allowMultiple ? '☑' : '●')} {option}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {question.allowCustom && question.options && question.options.length > 0 && !showCustomInput && (
+        <button
+          onClick={() => setShowCustomInput(true)}
+          style={{
+            padding: '8px 12px',
+            backgroundColor: 'rgba(255,255,255,0.05)',
+            border: '1px dashed rgba(255,255,255,0.2)',
+            borderRadius: '6px',
+            color: theme.textColor,
+            cursor: 'pointer',
+            fontFamily: theme.textBody,
+            fontSize: '0.75rem',
+            marginBottom: '12px',
+            width: '100%'
+          }}
+        >
+          ✏️ Type my own answer
+        </button>
+      )}
+
+      {showCustomInput && (
+        <textarea
+          value={customAnswer}
+          onChange={(e) => setCustomAnswer(e.target.value)}
+          placeholder="Type your answer here..."
+          style={{
+            width: '100%',
+            minHeight: '80px',
+            padding: '10px',
+            backgroundColor: 'rgba(0,0,0,0.3)',
+            border: `1px solid ${theme.accent}44`,
+            borderRadius: '8px',
+            color: theme.textColor,
+            fontFamily: theme.textBody,
+            fontSize: '0.8rem',
+            resize: 'vertical',
+            marginBottom: '12px'
+          }}
+          autoFocus
+        />
+      )}
+
+      {showSubmit && (
+        <div style={{
+          display: 'flex',
+          gap: '8px',
+          justifyContent: 'flex-end'
+        }}>
+          {showCustomInput && question.options && question.options.length > 0 && (
+            <button
+              onClick={() => {
+                setShowCustomInput(false);
+                setCustomAnswer('');
+              }}
+              style={{
+                padding: '8px 16px',
+                backgroundColor: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.2)',
+                borderRadius: '6px',
+                color: theme.textColor,
+                cursor: 'pointer',
+                fontFamily: theme.textBody,
+                fontSize: '0.75rem'
+              }}
+            >
+              Back to options
+            </button>
+          )}
+          <button
+            onClick={handleSubmit}
+            disabled={!canSubmit}
+            style={{
+              padding: '8px 20px',
+              backgroundColor: canSubmit ? theme.accent : 'rgba(255,255,255,0.1)',
+              border: 'none',
+              borderRadius: '6px',
+              color: canSubmit ? theme.bgApp : 'rgba(255,255,255,0.3)',
+              cursor: canSubmit ? 'pointer' : 'not-allowed',
+              fontFamily: theme.textBody,
+              fontSize: '0.8rem',
+              fontWeight: 'bold',
+              opacity: canSubmit ? 1 : 0.5
+            }}
+          >
+            Submit Answer
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Multi-question prompt component for asking multiple questions at once
+function MultiQuestionPrompt({ questions, theme, onAnswer }) {
+  const [answers, setAnswers] = useState({});
+
+  const handleQuestionAnswer = useCallback((questionId, answer) => {
+    console.log('Question answered:', questionId, answer);
+    setAnswers(prev => {
+      const newAnswers = { ...prev, [questionId]: answer };
+      console.log('Updated answers:', newAnswers);
+      return newAnswers;
+    });
+  }, []);
+
+  const answeredCount = Object.keys(answers).length;
+  const allQuestionsAnswered = questions.every(q => answers[q.id] !== undefined);
+
+  const handleSubmitAll = () => {
+    onAnswer(answers);
+  };
+
+  return (
+    <div style={{
+      padding: '16px',
+      margin: '12px 0',
+      backgroundColor: `${theme.accent}11`,
+      border: `2px solid ${theme.accent}`,
+      borderRadius: '12px',
+      fontFamily: theme.textBody
+    }}>
+      <div style={{
+        fontSize: '0.9rem',
+        fontWeight: 'bold',
+        marginBottom: '16px',
+        color: theme.accent,
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center'
+      }}>
+        <span>❓ Questions</span>
+        <span style={{ fontSize: '0.75rem', opacity: 0.8 }}>
+          {answeredCount}/{questions.length} answered
+        </span>
+      </div>
+
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '16px'
+      }}>
+        {questions.map((q, idx) => (
+          <div key={q.id} style={{
+            padding: '12px',
+            backgroundColor: answers[q.id] !== undefined ? `${theme.accent}08` : 'transparent',
+            border: `1px solid ${answers[q.id] !== undefined ? theme.accent + '33' : 'rgba(255,255,255,0.1)'}`,
+            borderRadius: '8px'
+          }}>
+            <div style={{
+              fontSize: '0.75rem',
+              opacity: 0.6,
+              marginBottom: '8px',
+              textTransform: 'uppercase',
+              letterSpacing: '0.5px',
+              color: theme.textColor
+            }}>
+              Question {idx + 1}
+            </div>
+            <QuestionPrompt
+              question={q}
+              theme={theme}
+              onAnswer={(answer) => handleQuestionAnswer(q.id, answer)}
+              showSubmit={false}
+            />
+          </div>
+        ))}
+      </div>
+
+      <div style={{
+        display: 'flex',
+        justifyContent: 'flex-end',
+        marginTop: '16px',
+        paddingTop: '16px',
+        borderTop: `1px solid rgba(255,255,255,0.1)`
+      }}>
+        <button
+          onClick={handleSubmitAll}
+          disabled={!allQuestionsAnswered}
+          style={{
+            padding: '10px 24px',
+            backgroundColor: allQuestionsAnswered ? theme.accent : 'rgba(255,255,255,0.1)',
+            border: 'none',
+            borderRadius: '8px',
+            color: allQuestionsAnswered ? theme.bgApp : 'rgba(255,255,255,0.3)',
+            cursor: allQuestionsAnswered ? 'pointer' : 'not-allowed',
+            fontFamily: theme.textBody,
+            fontSize: '0.85rem',
+            fontWeight: 'bold',
+            opacity: allQuestionsAnswered ? 1 : 0.5
+          }}
+        >
+          Submit All Answers
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ChatMessage({ msg, theme }) {
   const components = {
     code({ node, inline, className, children, ...props }) {
@@ -2043,6 +2706,7 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
   const [conversations, setConversations] = useState([]);
   const [showConversations, setShowConversations] = useState(false);
   const [permissionMode, setPermissionMode] = useState('bypassPermissions'); // 'plan' or 'bypassPermissions', default to bypassPermissions
+  const [currentQuestion, setCurrentQuestion] = useState(null); // Active question from AskUserQuestion tool
   const messagesEndRef = useRef(null);
   const messagesContainerRef = useRef(null);
   const processedTextsRef = useRef(new Set()); // Track processed text content to avoid duplicates
@@ -2359,6 +3023,40 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
     };
   }, [backend, currentConversationId]);
 
+  // Listen for user questions from AskUserQuestion tool (plan mode only)
+  useEffect(() => {
+    if (backend !== 'claude' || !window.claudeAPI) return;
+
+    const handleQuestion = (questionData) => {
+      console.log('[Chat UI] Received question:', questionData);
+      setCurrentQuestion(questionData);
+      // Scroll to bottom when question appears
+      setTimeout(() => {
+        if (messagesContainerRef.current) {
+          messagesContainerRef.current.scrollTo({
+            top: messagesContainerRef.current.scrollHeight,
+            behavior: 'smooth'
+          });
+        }
+      }, 100); // Small delay to ensure DOM has updated
+    };
+
+    const questionHandler = window.claudeAPI.onUserQuestion(handleQuestion);
+
+    return () => {
+      window.claudeAPI.offUserQuestion(questionHandler);
+    };
+  }, [backend]);
+
+  // Handle answer submission
+  const handleAnswerSubmit = (answer) => {
+    if (!currentQuestion) return;
+
+    console.log('[Chat UI] Submitting answer:', answer);
+    window.claudeAPI.sendQuestionAnswer(currentQuestion.id, answer);
+    setCurrentQuestion(null); // Clear the question
+  };
+
   // Helper to save a message to backend
   const saveMessageToBackend = async (message) => {
     if (backend === 'claude' && window.claudeAPI && currentConversationId) {
@@ -2585,7 +3283,7 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
             theme={theme}
           />
         )}
-        {isStreaming && !currentStreamText && currentToolCalls.length === 0 && (
+        {isStreaming && !currentStreamText && currentToolCalls.length === 0 && !currentQuestion && (
           <div className="chat-bubble assistant" style={{
             fontFamily: theme.textBody,
             backgroundColor: `${theme.accent}22`,
@@ -2593,6 +3291,21 @@ function Chat({ theme, config, dashboardId, dashboard, widgetKey, currentConvers
             minHeight: '32px'
           }}>
           </div>
+        )}
+        {currentQuestion && (
+          currentQuestion.isMultiple && currentQuestion.questions?.length > 1 ? (
+            <MultiQuestionPrompt
+              questions={currentQuestion.questions}
+              theme={theme}
+              onAnswer={handleAnswerSubmit}
+            />
+          ) : (
+            <QuestionPrompt
+              question={currentQuestion.questions?.[0] || currentQuestion}
+              theme={theme}
+              onAnswer={handleAnswerSubmit}
+            />
+          )
         )}
         <div ref={messagesEndRef} />
       </div>
@@ -2658,6 +3371,7 @@ const widgetComponents = {
   errorTest: ErrorTestWidget,
   layoutSettings: LayoutSettings,
   commandRunner: CommandRunner,
+  codeEditor: CodeEditor,
   webView: WebView,
   flippableTest: FlippableTest,
 };
@@ -2864,6 +3578,7 @@ function Widget({ theme, config, clipPath, onResize, onDelete, dashboardId, dash
     diffList: { width: 300, height: 200 },
     layoutSettings: { width: 250, height: 200 },
     commandRunner: { width: 350, height: 250 },
+    codeEditor: { width: 600, height: 500 },
     webView: { width: 400, height: 400 },
   };
 
@@ -3575,6 +4290,9 @@ const globalChatInputs = new Map(); // conversationId -> input text
 
 // Global state manager for command outputs (persists across component unmounts)
 const globalCommandOutputs = new Map(); // widgetId -> output text
+
+// Global state for code editors (persists code and language)
+const globalCodeEditorStates = new Map(); // widgetId -> { code, language }
 
 // Set up global event handlers for Claude streaming (persists across component mounts/unmounts)
 if (typeof window !== 'undefined' && !window.__claudeStreamHandlersInitialized) {

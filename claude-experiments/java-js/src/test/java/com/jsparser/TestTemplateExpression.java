@@ -17,7 +17,7 @@ public class TestTemplateExpression {
 
     @Test
     public void testTemplateExpressionAfterBackslash() throws Exception {
-        String source = "return `\\\n${x}\ny`;";
+        String source = "function f() { return `\\\n${x}\ny`; }";
 
         System.out.println("=== Source (escaped) ===");
         System.out.println(source.replace("\n", "\\n"));

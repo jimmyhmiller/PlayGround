@@ -7,9 +7,10 @@ const { z } = require('zod');
  * @param {Object} dashboardContext - Contains dashboard config and file path
  * @param {Map} watchedPaths - Map of watched dashboard files for coordination
  * @param {Function} broadcastCallback - Function to call to broadcast dashboard updates to UI
+ * @param {string} permissionMode - The permission mode ('plan' or 'bypassPermissions')
  * @returns {Object} MCP server configuration with custom tools
  */
-function createDashboardTools(dashboardContext, watchedPaths, broadcastCallback) {
+function createDashboardTools(dashboardContext, watchedPaths, broadcastCallback, permissionMode = 'bypassPermissions') {
   const { config, filePath } = dashboardContext;
   const tools = [];
 
@@ -521,6 +522,92 @@ function createDashboardTools(dashboardContext, watchedPaths, broadcastCallback)
       }
     )
   );
+
+  // Plan mode only: Ask user a question with multiple choice or custom input
+  if (permissionMode === 'plan') {
+    tools.push(
+      tool(
+        'AskUserQuestion',
+        'Ask the user one or more questions during planning. Can ask a single question or multiple questions at once. All questions are shown together and all answers collected before returning. Use this when you need clarification before proposing a plan.',
+        {
+          questions: z.union([
+            // Single question (backward compatible)
+            z.object({
+              question: z.string().describe('The question to ask'),
+              options: z.array(z.string()).optional().describe('Optional predefined choices'),
+              allowMultiple: z.boolean().optional().default(false).describe('Allow multiple selections'),
+              allowCustom: z.boolean().optional().default(true).describe('Show "type my own answer" option')
+            }),
+            // Multiple questions
+            z.array(z.object({
+              id: z.string().describe('Unique ID for this question (e.g., "widget-type", "position")'),
+              question: z.string().describe('The question to ask'),
+              options: z.array(z.string()).optional().describe('Optional predefined choices'),
+              allowMultiple: z.boolean().optional().default(false).describe('Allow multiple selections'),
+              allowCustom: z.boolean().optional().default(true).describe('Show "type my own answer" option')
+            }))
+          ]).describe('Either a single question object or an array of question objects to ask together')
+        },
+        async ({ questions }) => {
+          try {
+            const { ipcMain, BrowserWindow } = require('electron');
+            const mainWindow = BrowserWindow.getAllWindows()[0];
+
+            if (!mainWindow) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: 'Error: No window available to display question'
+                }],
+                isError: true
+              };
+            }
+
+            // Normalize to array format
+            const questionArray = Array.isArray(questions)
+              ? questions
+              : [{ id: 'single', ...questions }];
+
+            // Send the questions to the renderer and wait for response
+            return new Promise((resolve) => {
+              // Set up one-time listener for the answer
+              const answerId = `question-${Date.now()}`;
+
+              ipcMain.once(`question-answer-${answerId}`, (event, answers) => {
+                // If it was a single question, return just the answer value
+                const result = Array.isArray(questions)
+                  ? answers
+                  : answers.single;
+
+                resolve({
+                  content: [{
+                    type: 'text',
+                    text: `User answered: ${JSON.stringify(result)}`
+                  }],
+                  isError: false
+                });
+              });
+
+              // Send questions to renderer
+              mainWindow.webContents.send('ask-user-question', {
+                id: answerId,
+                questions: questionArray,
+                isMultiple: Array.isArray(questions)
+              });
+            });
+          } catch (error) {
+            return {
+              content: [{
+                type: 'text',
+                text: `Error asking question: ${error.message}`
+              }],
+              isError: true
+            };
+          }
+        }
+      )
+    );
+  }
 
   // Create and return the MCP server
   return createSdkMcpServer({

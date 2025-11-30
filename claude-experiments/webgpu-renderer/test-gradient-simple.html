@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Simple Gradient Test</title>
+    <style>
+        body {
+            margin: 20px;
+            background: #1a1a1a;
+            color: white;
+            font-family: system-ui;
+        }
+        canvas {
+            border: 2px solid #444;
+            display: block;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Simple Gradient Test</h1>
+    <canvas id="canvas" width="400" height="300"></canvas>
+    <div id="status">Initializing...</div>
+
+    <script type="module">
+        import { WebGPURenderer } from './src/renderer/webgpu-renderer.js';
+        import { Scene, Quad, Background } from './src/core/primitives.js';
+        import { Bounds, Point, Size, Corners, Edges, Hsla } from './src/core/geometry.js';
+
+        async function test() {
+            try {
+                const canvas = document.getElementById('canvas');
+                const renderer = new WebGPURenderer(canvas);
+                await renderer.initialize();
+
+                const scene = new Scene();
+
+                // Test 1: Solid color (this should work)
+                const solid = new Quad();
+                solid.bounds = new Bounds(new Point(20, 20), new Size(150, 100));
+                solid.background = Background.Solid(Hsla.rgb(0.9, 0.2, 0.3, 1));
+                solid.cornerRadii = Corners.uniform(15);
+                solid.contentMask.bounds = new Bounds(new Point(0, 0), new Size(400, 300));
+                scene.insertQuad(solid);
+
+                // Test 2: Linear gradient (exact copy from working index.html)
+                const gradient = new Quad();
+                gradient.bounds = new Bounds(new Point(190, 20), new Size(150, 100));
+                gradient.background = Background.LinearGradient(45, [
+                    { color: Hsla.rgb(0.2, 0.5, 0.9, 1), position: 0 },
+                    { color: Hsla.rgb(0.8, 0.3, 0.6, 1), position: 1 }
+                ], 0);
+                gradient.cornerRadii = Corners.uniform(15);
+                gradient.borderWidths = Edges.uniform(3);
+                gradient.borderColor = Hsla.rgb(0.1, 0.2, 0.4, 1);
+                gradient.contentMask.bounds = new Bounds(new Point(0, 0), new Size(400, 300));
+                scene.insertQuad(gradient);
+
+                // Debug: log the background object
+                console.log('Solid background:', solid.background);
+                console.log('Gradient background:', gradient.background);
+                console.log('Gradient color stops:');
+                console.log('  Stop 0:', gradient.background.colors[0]);
+                console.log('  Stop 0 color:', gradient.background.colors[0].color);
+                console.log('  Stop 1:', gradient.background.colors[1]);
+                console.log('  Stop 1 color:', gradient.background.colors[1].color);
+
+                renderer.render(scene);
+                document.getElementById('status').textContent = 'Rendered 2 quads';
+            } catch (error) {
+                document.getElementById('status').textContent = 'Error: ' + error.message;
+                console.error(error);
+            }
+        }
+
+        test();
+    </script>
+</body>
+</html>
