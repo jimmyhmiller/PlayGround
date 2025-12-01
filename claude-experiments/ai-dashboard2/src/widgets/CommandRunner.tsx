@@ -124,9 +124,10 @@ export const CommandRunner: FC<BaseWidgetComponentProps> = (props) => {
     const errorHandler = (window as any).commandAPI.onError(handleError);
 
     return () => {
-      (window as any).commandAPI.offOutput(outputHandler);
-      (window as any).commandAPI.offExit(exitHandler);
-      (window as any).commandAPI.offError(errorHandler);
+      // Call cleanup functions directly (they already remove the listeners)
+      outputHandler();
+      exitHandler();
+      errorHandler();
     };
   }, [widgetId]);
 

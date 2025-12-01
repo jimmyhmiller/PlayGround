@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { Dashboard } from './src/types';
+import { validateWidget, formatValidationErrorForAI } from './src/validation';
 
 interface DashboardContext {
   config: Dashboard;
@@ -315,6 +316,31 @@ export function createDashboardTools(
       );
     }
   });
+
+  // Add validation tool (available for all dashboards)
+  tools.push(
+    tool(
+      'validate_widget',
+      'Validate a widget configuration before adding it to the dashboard. Use this to check if your widget config is correct and get helpful error messages if not.',
+      {
+        widgetConfig: z.object({}).passthrough().describe('The widget configuration object to validate')
+      },
+      async ({ widgetConfig }: { widgetConfig: any }) => {
+        const result = validateWidget(widgetConfig);
+        const formatted = formatValidationErrorForAI(result);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: formatted
+            }
+          ],
+          isError: !result.valid
+        };
+      }
+    )
+  );
 
   // Create the MCP server with these tools
   return createSdkMcpServer({

@@ -3,6 +3,9 @@ import Editor from '@monaco-editor/react';
 import type { BaseWidgetComponentProps } from '../components/ui/Widget';
 import { globalCodeEditorStates, LANGUAGE_CONFIG, parseAnsiToReact } from './helpers';
 
+// Global map to store runCode functions by widgetId
+const globalRunCodeFunctions = new Map<string, () => void>();
+
 interface CodeEditorConfig {
   id: string;
   type: 'codeEditor' | 'code-editor';
@@ -62,6 +65,7 @@ export const CodeEditor: FC<BaseWidgetComponentProps> = (props) => {
 
   // Run code
   const runCode = async () => {
+    console.log(`[CodeEditor ${widgetId}] runCode called`);
     if (!code.trim() || !(window as any).commandAPI) return;
 
     setIsRunning(true);
@@ -111,6 +115,17 @@ export const CodeEditor: FC<BaseWidgetComponentProps> = (props) => {
     }
   };
 
+  // Register runCode function globally for keyboard shortcuts
+  useEffect(() => {
+    console.log(`[CodeEditor ${widgetId}] Registering runCode function`);
+    globalRunCodeFunctions.set(widgetId, runCode);
+
+    return () => {
+      console.log(`[CodeEditor ${widgetId}] Unregistering runCode function`);
+      globalRunCodeFunctions.delete(widgetId);
+    };
+  }, [widgetId, code, language, isRunning, startTime]);
+
   // Stop execution
   const stopExecution = async () => {
     if (!(window as any).commandAPI) return;
@@ -156,9 +171,10 @@ export const CodeEditor: FC<BaseWidgetComponentProps> = (props) => {
     const errorHandler = (window as any).commandAPI.onError(handleError);
 
     return () => {
-      (window as any).commandAPI.offOutput(outputHandler);
-      (window as any).commandAPI.offExit(exitHandler);
-      (window as any).commandAPI.offError(errorHandler);
+      // Call cleanup functions directly (they already remove the listeners)
+      outputHandler();
+      exitHandler();
+      errorHandler();
     };
   }, [widgetId, startTime]);
 
@@ -250,8 +266,21 @@ export const CodeEditor: FC<BaseWidgetComponentProps> = (props) => {
             setMonacoInstance(monaco);
 
             // Add Command+Enter (Mac) or Ctrl+Enter (Windows/Linux) to run code
-            editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
-              runCode();
+            // Use addAction instead of addCommand to scope to this editor instance
+            editor.addAction({
+              id: `run-code-${widgetId}`,
+              label: 'Run Code',
+              keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
+              contextMenuGroupId: 'navigation',
+              run: () => {
+                console.log(`[CodeEditor ${widgetId}] Cmd+Enter pressed in editor, running code...`);
+                const runFn = globalRunCodeFunctions.get(widgetId);
+                if (runFn) {
+                  runFn();
+                } else {
+                  console.error(`[CodeEditor ${widgetId}] No runCode function found!`);
+                }
+              }
             });
           }}
           loading=""

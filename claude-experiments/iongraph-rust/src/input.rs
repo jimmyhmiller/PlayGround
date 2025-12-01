@@ -49,8 +49,7 @@ pub fn extract_pass(ion_json: &IonJSON, function_name: Option<&str>, pass_name: 
 pub fn is_ion_json(content: &str) -> bool {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
         if let Some(obj) = value.as_object() {
-            return obj.contains_key("functions") || 
-                   (obj.contains_key("mir") && obj.contains_key("lir"));
+            return obj.contains_key("functions");
         }
     }
     false
@@ -100,11 +99,11 @@ mod tests {
     #[test]
     fn test_extract_pass() {
         let ion_json = create_complex_ion_json();
-        
+
         // Extract specific pass
-        let pass = extract_pass(&ion_json, Some("test_function"), Some("test_pass")).unwrap();
-        assert_eq!(pass.name, "test_pass");
-        
+        let pass = extract_pass(&ion_json, Some("test_function"), Some("ComplexPass")).unwrap();
+        assert_eq!(pass.name, "ComplexPass");
+
         // Extract default (last) pass
         let pass = extract_pass(&ion_json, None, None).unwrap();
         assert!(!pass.name.is_empty());

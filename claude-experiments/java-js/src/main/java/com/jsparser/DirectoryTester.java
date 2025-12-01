@@ -233,6 +233,7 @@ public class DirectoryTester {
                         if (mismatchedFiles.size() < 20) {
                             mismatchedFiles.add(relativePath);
                         }
+
                     }
                 }
             } catch (Exception e) {
@@ -380,11 +381,25 @@ public class DirectoryTester {
             Map<String, Object> actMap = (Map<String, Object>) actual;
 
             if ("Literal".equals(expMap.get("type")) && expMap.containsKey("regex")) {
+                // Normalize the empty value map to null
                 if (expMap.get("value") == null && actMap.get("value") instanceof Map) {
                     Map<?, ?> actValue = (Map<?, ?>) actMap.get("value");
                     if (actValue.isEmpty()) {
                         actMap.put("value", null);
                     }
+                }
+
+                // Normalize regex field: both Acorn and our parser have it, ensure they match
+                Object expRegex = expMap.get("regex");
+                Object actRegex = actMap.get("regex");
+
+                if (expRegex instanceof Map && actRegex instanceof Map) {
+                    Map<String, Object> expRegexMap = (Map<String, Object>) expRegex;
+                    Map<String, Object> actRegexMap = (Map<String, Object>) actRegex;
+
+                    // Both should have pattern and flags
+                    // If they match, we're good. The comparison will handle this.
+                    // No normalization needed if structures are identical.
                 }
             }
 

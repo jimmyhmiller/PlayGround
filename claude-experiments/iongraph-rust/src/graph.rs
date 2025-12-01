@@ -19,52 +19,71 @@ const HEADER_HEIGHT: f64 = 30.0;
 // Calculate block size based on instruction content
 fn calculate_block_size(block: &Block) -> Vec2 {
     if let Some(mir_block) = &block.mir_block {
-        // TypeScript uses fixed column layout:
-        // - Number column at x=8
-        // - Opcode column at x=30
-        // - Type column at x = 30 + (max_opcode_chars * CHAR_WIDTH) + 8
-        // Width = type_column_x + (max_type_chars * CHAR_WIDTH) + padding
+        // TypeScript PureSVGTextLayoutProvider formula (lines 263-273):
+        // width = padding + maxNumWidth + 8 + maxOpcodeWidth + 8 + maxTypeWidth + padding
+        // width = max(headerWidth + padding * 2, calculatedWidth, 150)
 
         let mut max_opcode_chars = 0;
         let mut max_type_chars = 0;
 
         for ins in &mir_block.instructions {
-            // Count chars in the RENDERED opcode - must match rendering logic exactly!
-            // Rendering does: replace arrows FIRST, then HTML escape
+            // Count DISPLAY chars (after arrow replacement, before HTML escaping)
+            // TypeScript uses textContent.length which counts display chars, not HTML entities
             let opcode_with_arrows = ins.opcode.replace("->", "→").replace("<-", "←");
-            let opcode_rendered = html_escape(&opcode_with_arrows);
-            max_opcode_chars = max_opcode_chars.max(opcode_rendered.chars().count());
+            max_opcode_chars = max_opcode_chars.max(opcode_with_arrows.chars().count());
 
             if ins.instruction_type != "None" {
                 max_type_chars = max_type_chars.max(ins.instruction_type.chars().count());
             }
         }
 
-        // Column positions with dynamic spacing based on number column width
-        // TypeScript formula: opcode_x = padding + maxNumWidth + 8
+        // Calculate column widths
         let max_num_chars = mir_block.instructions.iter()
             .map(|ins| format!("{}", ins.id).len())
             .max()
             .unwrap_or(1);
-        let opcode_x = 8.0 + (max_num_chars as f64 * CHAR_WIDTH) + 8.0;
-        let type_x = opcode_x + (max_opcode_chars as f64 * CHAR_WIDTH) + 8.0;
 
-        // Width is type column end position + padding
-        let width = (type_x + (max_type_chars as f64 * CHAR_WIDTH) + 8.0).max(100.0);
+        let max_num_width = max_num_chars as f64 * CHAR_WIDTH;
+        let max_opcode_width = max_opcode_chars as f64 * CHAR_WIDTH;
+        let max_type_width = max_type_chars as f64 * CHAR_WIDTH;
+
+        // TypeScript formula: padding + maxNumWidth + 8 + maxOpcodeWidth + 8 + maxTypeWidth + padding
+        let calculated_width = PADDING + max_num_width + 8.0 + max_opcode_width + 8.0 + max_type_width + PADDING;
+
+        // Also consider header width (e.g., "Block 12" = 8 chars * 7 = 56)
+        let header_text = format!("Block {}", block.number.0);
+        let header_width = header_text.len() as f64 * CHAR_WIDTH + PADDING * 2.0;
+
+        // Width is max of header width, calculated width, and absolute minimum 150
+        let width = calculated_width.max(header_width).max(150.0);
         let height = HEADER_HEIGHT + (mir_block.instructions.len() as f64 * CHAR_HEIGHT) + PADDING * 2.0;
 
         Vec2::new(width, height)
     } else if let Some(lir_block) = &block.lir_block {
         // Similar calculation for LIR blocks - use same formula as MIR
-        let mut max_opcode_width = 0;
+        let mut max_opcode_chars = 0;
 
         for ins in &lir_block.instructions {
-            max_opcode_width = max_opcode_width.max(ins.opcode.chars().count());
+            // Count display chars, not HTML entity length
+            let opcode_with_arrows = ins.opcode.replace("->", "→").replace("<-", "←");
+            max_opcode_chars = max_opcode_chars.max(opcode_with_arrows.chars().count());
         }
 
-        // Same TypeScript formula as MIR blocks
-        let content_width = (max_opcode_width as f64 * CHAR_WIDTH) + (PADDING * 2.0) + 74.0;
-        let width = content_width.max(100.0);
+        let max_num_chars = lir_block.instructions.iter()
+            .map(|ins| format!("{}", ins.id).len())
+            .max()
+            .unwrap_or(1);
+
+        let max_num_width = max_num_chars as f64 * CHAR_WIDTH;
+        let max_opcode_width = max_opcode_chars as f64 * CHAR_WIDTH;
+
+        // LIR blocks don't have types, so: padding + num + 8 + opcode + padding
+        let calculated_width = PADDING + max_num_width + 8.0 + max_opcode_width + PADDING;
+
+        let header_text = format!("Block {}", block.number.0);
+        let header_width = header_text.len() as f64 * CHAR_WIDTH + PADDING * 2.0;
+
+        let width = calculated_width.max(header_width).max(150.0);
         let height = HEADER_HEIGHT + (lir_block.instructions.len() as f64 * CHAR_HEIGHT) + PADDING * 2.0;
 
         Vec2::new(width, height)
@@ -82,22 +101,12 @@ pub struct Graph {
     pub blocks_by_id: HashMap<BlockID, Block>,
     pub loops: Vec<Loop>,
     pub viewport_size: Vec2,
-    pub translation: Vec2,
-    pub zoom: f64,
-    pub target_translation: Vec2,
-    pub target_zoom: f64,
-    pub animating: bool,
 }
 
 impl Graph {
     pub fn new(viewport_size: Vec2, pass: Pass) -> Self {
         let mut graph = Self {
             viewport_size,
-            translation: Vec2::new(0.0, 0.0),
-            zoom: 1.0,
-            target_translation: Vec2::new(0.0, 0.0),
-            target_zoom: 1.0,
-            animating: false,
             blocks: vec![],
             blocks_in_order: vec![],
             blocks_by_num: HashMap::new(),
@@ -162,7 +171,7 @@ impl Graph {
                 // Recalculate size with LIR data
                 block.size = calculate_block_size(block);
             } else {
-                let mut block = Block {
+                let block = Block {
                     id: lir_block.id,
                     number: lir_number,
                     mir_block: None,
@@ -267,12 +276,19 @@ impl Graph {
             }
         }
 
-        // Assign loop_id from the stack
+        // Assign loop_id and loop_num from the stack
         {
             let block = self.blocks_by_num.get_mut(&block_num).unwrap();
             let loop_depth = block.loop_depth as usize;
             if loop_depth < new_loop_ids_by_depth.len() {
                 block.loop_id = new_loop_ids_by_depth[loop_depth];
+                // Also set loop_num to the block NUMBER of the loop header
+                if let Some(loop_header) = self.blocks_by_id.get(&new_loop_ids_by_depth[loop_depth]) {
+                    block.loop_num = loop_header.number.0;
+                    if block.number.0 == 32 {
+                        eprintln!("DEBUG: Block 32 loop_num set to {}, loop_depth={}", block.loop_num, loop_depth);
+                    }
+                }
             }
         }
 
@@ -351,7 +367,7 @@ impl Graph {
         }
 
         // Collect successors and determine which are outgoing edges
-        let (successors, outgoing, loop_id, loop_depth) = {
+        let (successors, outgoing, loop_id, _loop_depth) = {
             let block = self.blocks_by_num.get(&block_num).unwrap();
             let successors = block.successors.clone();
             let loop_depth = block.loop_depth;
@@ -478,36 +494,6 @@ impl Graph {
         self.loops = loops;
     }
 
-    // Helper method to check if there's a path from start to end
-    fn is_reachable_path(&self, start: &BlockNumber, end: &BlockNumber) -> bool {
-        if start == end {
-            return true;
-        }
-
-        let mut visited = std::collections::HashSet::new();
-        let mut to_visit = vec![*start];
-
-        while let Some(current) = to_visit.pop() {
-            if visited.contains(&current) {
-                continue;
-            }
-            visited.insert(current);
-
-            if let Some(block) = self.blocks_by_num.get(&current) {
-                for &successor in &block.successors {
-                    if successor == *end {
-                        return true;
-                    }
-                    if !visited.contains(&successor) {
-                        to_visit.push(successor);
-                    }
-                }
-            }
-        }
-
-        false
-    }
-
     // Layout algorithm phases will be implemented next
     pub fn layout(&mut self) -> (Vec<Vec<LayoutNode>>, Vec<f64>, Vec<f64>) {
         let mut nodes = self.make_layout_nodes();
@@ -614,7 +600,7 @@ impl Graph {
             for edge in &mut active_edges {
                 if let Some(&dummy_id) = dummies_by_dest.get(&edge.dst_block_number) {
                     // Update the dummy node to have this as a destination connection
-                    if let Some(dummy) = layout_nodes_by_layer[layer].iter_mut().find(|n| n.id == dummy_id) {
+                    if let Some(_dummy) = layout_nodes_by_layer[layer].iter_mut().find(|n| n.id == dummy_id) {
                         // The dummy should eventually connect to the target block
                         // This will be handled in the next layer when the target appears
                     }
@@ -730,7 +716,7 @@ impl Graph {
 
                 node_lookup.insert(node_id, layer);
                 layout_nodes_by_layer[layer].push(layout_node);
-                let block_node_id = node_id;
+                let _block_node_id = node_id;
                 node_id += 1;
 
                 // Create backedge dummy nodes for this block if it's the rightmost in any loops
@@ -841,6 +827,25 @@ impl Graph {
     }
 
     fn straighten_edges(&self, layout_nodes_by_layer: &mut Vec<Vec<LayoutNode>>) {
+        // DEBUG: Log Block 32's initial position and layer
+        for (layer_idx, layer) in layout_nodes_by_layer.iter().enumerate() {
+            for node in layer.iter() {
+                if let Some(block) = &node.block {
+                    if block.number.0 == 32 {
+                        eprintln!("DEBUG: Block 32 INITIAL position in straighten_edges: layer={}, x={}", layer_idx, node.pos.x);
+                    }
+                }
+            }
+            // DEBUG: Show layer 27 node order
+            if layer_idx == 27 {
+                eprintln!("DEBUG: Layer 27 nodes:");
+                for (idx, node) in layer.iter().enumerate() {
+                    eprintln!("  [{}] is_dummy={}, block={:?}, x={}", idx, node.is_dummy(),
+                        node.block.as_ref().map(|b| b.number), node.pos.x);
+                }
+            }
+        }
+
         // Helper function to push nodes to the right if they are too close together
         let push_neighbors = |nodes: &mut Vec<LayoutNode>| {
             for i in 0..nodes.len().saturating_sub(1) {
@@ -849,36 +854,59 @@ impl Graph {
                 let neighbor = &mut right[0];
 
                 let first_non_dummy = node.is_dummy() && !neighbor.is_dummy();
-                let node_right_plus_padding = node.pos.x + node.size.x 
-                    + if first_non_dummy { PORT_START } else { 0.0 } 
+                let node_right_plus_padding = node.pos.x + node.size.x
+                    + if first_non_dummy { PORT_START } else { 0.0 }
                     + BLOCK_GAP;
+
+                if let Some(neighbor_block) = &neighbor.block {
+                    if neighbor_block.number.0 == 32 {
+                        eprintln!("DEBUG: push_neighbors pushing Block 32: left is_dummy={}, flags={}, at x={}, width={}, node_right_plus_padding={}, Block 32 before={}",
+                            node.is_dummy(), node.flags, node.pos.x, node.size.x, node_right_plus_padding, neighbor.pos.x);
+                    }
+                }
+
+                let old_pos = neighbor.pos.x;
                 neighbor.pos.x = neighbor.pos.x.max(node_right_plus_padding);
+
+                if let Some(neighbor_block) = &neighbor.block {
+                    if neighbor_block.number.0 == 32 && old_pos != neighbor.pos.x {
+                        eprintln!("DEBUG: push_neighbors PUSHED Block 32 from {} to {}", old_pos, neighbor.pos.x);
+                    }
+                }
             }
         };
 
         // Push nodes to the right so they fit inside their loop
+        // TypeScript iongraph2: pushIntoLoops() - aligns blocks with their SPECIFIC loop header using loopID
         let push_into_loops = |nodes_by_layer: &mut Vec<Vec<LayoutNode>>| {
-            // Collect loop header positions first
-            let mut loop_header_positions: Vec<(u32, f64)> = Vec::new();
+            // First pass: collect loop header positions (block_id -> x position)
+            let mut loop_header_positions: HashMap<BlockID, f64> = HashMap::new();
             for layer in nodes_by_layer.iter() {
                 for node in layer.iter() {
                     if let Some(block) = &node.block {
                         if block.attributes.contains(&"loopheader".to_string()) {
-                            loop_header_positions.push((block.loop_depth, node.pos.x));
+                            loop_header_positions.insert(block.id, node.pos.x);
                         }
                     }
                 }
             }
 
-            // Now apply constraints
+            // Second pass: apply constraints
             for layer in nodes_by_layer.iter_mut() {
                 for node in layer.iter_mut() {
                     if let Some(block) = &node.block {
-                        // Check if this block is in a loop and needs alignment
-                        if block.loop_depth > 0 {
-                            for &(header_depth, header_x) in &loop_header_positions {
-                                if header_depth < block.loop_depth {
-                                    node.pos.x = node.pos.x.max(header_x);
+                        // TypeScript iongraph2: if (node.block.loopID !== null)
+                        // In Rust, BlockID(0) is the default/invalid value (like null)
+                        if block.loop_id.0 != 0 {
+                            // TypeScript iongraph2: const loopHeaderNode = loopHeader.layoutNode;
+                            // TypeScript iongraph2: node.pos.x = Math.max(node.pos.x, loopHeaderNode.pos.x);
+                            if let Some(&header_x) = loop_header_positions.get(&block.loop_id) {
+                                if block.number.0 == 32 {
+                                    eprintln!("DEBUG: Block 32 push_into_loops: loop_id={:?}, header_x={}, before pos.x={}", block.loop_id, header_x, node.pos.x);
+                                }
+                                node.pos.x = node.pos.x.max(header_x);
+                                if block.number.0 == 32 {
+                                    eprintln!("DEBUG: Block 32 after push_into_loops: pos.x={}", node.pos.x);
                                 }
                             }
                         }
@@ -929,34 +957,53 @@ impl Graph {
             for layer_idx in 0..nodes_by_layer.len().saturating_sub(1) {
                 push_neighbors(&mut nodes_by_layer[layer_idx]);
 
-                // Track which destinations we've already positioned to avoid repositioning
-                let mut positioned: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                // Track the last shifted index to prevent shifting nodes to the left
+                let mut last_shifted: i32 = -1;
 
-                // Collect position changes to apply them after iteration
-                let mut position_changes: Vec<(usize, f64)> = Vec::new();
+                // Clone current layer's node data to avoid borrow conflicts
+                let current_layer_nodes: Vec<(LayoutNodeID, Vec<Option<LayoutNodeID>>, f64, Option<Block>)> = nodes_by_layer[layer_idx]
+                    .iter()
+                    .map(|n| (n.id, n.dst_nodes.clone(), n.pos.x, n.block.clone()))
+                    .collect();
 
-                for (_node_idx, node) in nodes_by_layer[layer_idx].iter().enumerate() {
-                    for (src_port, dst_id_opt) in node.dst_nodes.iter().enumerate() {
+                for (node_id, dst_nodes, node_x, node_block) in current_layer_nodes {
+                    for (src_port, dst_id_opt) in dst_nodes.iter().enumerate() {
                         if let Some(dst_id) = dst_id_opt {
                             // Find destination node in next layer
                             if let Some((dst_idx, dst_node)) = nodes_by_layer[layer_idx + 1]
-                                .iter()
+                                .iter_mut()
                                 .enumerate()
                                 .find(|(_, n)| n.id == *dst_id) {
 
-                                // Only position if we haven't already positioned this destination
-                                if !positioned.contains(&dst_idx) {
+                                // Only position if this destination is to the right of the last shifted node
+                                if (dst_idx as i32) > last_shifted {
                                     // Check if this is the first parent of the destination
-                                    if !dst_node.src_nodes.is_empty() && dst_node.src_nodes[0] == node.id {
+                                    if !dst_node.src_nodes.is_empty() && dst_node.src_nodes[0] == node_id {
                                         let src_port_offset = PORT_START + PORT_SPACING * src_port as f64;
                                         let dst_port_offset = PORT_START;
 
                                         let x_before = dst_node.pos.x;
-                                        let new_x = (node.pos.x + src_port_offset - dst_port_offset).max(dst_node.pos.x);
+                                        let new_x = (node_x + src_port_offset - dst_port_offset).max(dst_node.pos.x);
+
+                                        if let Some(dst_block) = &dst_node.block {
+                                            if dst_block.number.0 == 32 {
+                                                eprintln!("DEBUG: Block 32 straighten_children: parent Block {:?} at x={}, src_port={}, calculating new_x={} (was {})",
+                                                    node_block.as_ref().map(|b| b.number), node_x, src_port, new_x, x_before);
+                                            }
+                                        }
+                                        // DEBUG: Track layer 27 dummy positioning
+                                        if dst_node.is_dummy() && layer_idx + 1 == 27 && dst_idx == 0 {
+                                            eprintln!("DEBUG: Layer 27 dummy[0] straighten_children: parent Block {:?} at x={}, src_port={}, calculating new_x={} (was {})",
+                                                node_block.as_ref().map(|b| b.number), node_x, src_port, new_x, x_before);
+                                        }
 
                                         if new_x != x_before {
-                                            position_changes.push((dst_idx, new_x));
-                                            positioned.insert(dst_idx);
+                                            dst_node.pos.x = new_x;  // Apply immediately!
+                                            last_shifted = dst_idx as i32;
+                                            // DEBUG: Track dummy positioning
+                                            if dst_node.is_dummy() {
+                                                eprintln!("DEBUG: Dummy at idx {} in layer {} positioned from {} to {}", dst_idx, layer_idx + 1, x_before, new_x);
+                                            }
                                         }
                                     }
                                 }
@@ -964,24 +1011,343 @@ impl Graph {
                         }
                     }
                 }
+            }
+        };
 
-                // Apply position changes
-                for (idx, new_x) in position_changes {
-                    nodes_by_layer[layer_idx + 1][idx].pos.x = new_x;
+        // Straighten edges that are nearly straight by aligning nodes within threshold
+        let straighten_nearly_straight_edges_up = |nodes_by_layer: &mut Vec<Vec<LayoutNode>>| {
+            for layer_idx in (0..nodes_by_layer.len()).rev() {
+                push_neighbors(&mut nodes_by_layer[layer_idx]);
+
+                for node_idx in 0..nodes_by_layer[layer_idx].len() {
+                    let src_node_ids: Vec<LayoutNodeID> = nodes_by_layer[layer_idx][node_idx].src_nodes.clone();
+
+                    for &src_id in &src_node_ids {
+                        // Find source node (could be in any previous layer)
+                        let mut src_is_block = false;
+                        let mut src_x = 0.0;
+
+                        for prev_layer in 0..layer_idx {
+                            if let Some(src_node) = nodes_by_layer[prev_layer].iter().find(|n| n.id == src_id) {
+                                src_is_block = src_node.block.is_some();
+                                src_x = src_node.pos.x;
+                                break;
+                            }
+                        }
+
+                        // Only align dummies (skip block-to-block edges)
+                        if src_is_block {
+                            continue;
+                        }
+
+                        let node_x = nodes_by_layer[layer_idx][node_idx].pos.x;
+                        let wiggle = (src_x - node_x).abs();
+
+                        if wiggle <= NEARLY_STRAIGHT {
+                            // Update both src and dst to align
+                            let max_x = src_x.max(node_x);
+
+                            // Update source node
+                            for prev_layer in 0..layer_idx {
+                                if let Some(src_node) = nodes_by_layer[prev_layer].iter_mut().find(|n| n.id == src_id) {
+                                    src_node.pos.x = max_x;
+                                    break;
+                                }
+                            }
+
+                            // Update current node
+                            nodes_by_layer[layer_idx][node_idx].pos.x = max_x;
+                        }
+                    }
                 }
             }
         };
 
-        // The main pass sequence (simplified version of the original)
+        let straighten_nearly_straight_edges_down = |nodes_by_layer: &mut Vec<Vec<LayoutNode>>| {
+            for layer_idx in 0..nodes_by_layer.len() {
+                push_neighbors(&mut nodes_by_layer[layer_idx]);
+
+                for node_idx in 0..nodes_by_layer[layer_idx].len() {
+                    let dst_nodes = nodes_by_layer[layer_idx][node_idx].dst_nodes.clone();
+
+                    if dst_nodes.is_empty() {
+                        continue;
+                    }
+
+                    if let Some(Some(dst_id)) = dst_nodes.get(0) {
+                        // Find destination node in next layer
+                        if layer_idx + 1 < nodes_by_layer.len() {
+                            if let Some(dst_node) = nodes_by_layer[layer_idx + 1].iter().find(|n| n.id == *dst_id) {
+                                // Only align dummies
+                                if dst_node.block.is_some() {
+                                    continue;
+                                }
+
+                                let node_x = nodes_by_layer[layer_idx][node_idx].pos.x;
+                                let dst_x = dst_node.pos.x;
+                                let wiggle = (dst_x - node_x).abs();
+
+                                if wiggle <= NEARLY_STRAIGHT {
+                                    let max_x = dst_x.max(node_x);
+
+                                    // Update both nodes
+                                    nodes_by_layer[layer_idx][node_idx].pos.x = max_x;
+
+                                    if let Some(dst_node_mut) = nodes_by_layer[layer_idx + 1].iter_mut().find(|n| n.id == *dst_id) {
+                                        dst_node_mut.pos.x = max_x;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        // The main pass sequence (matching TypeScript exactly)
+        // First: layoutIterations x (straightenChildren, pushIntoLoops, straightenDummyRuns)
         for _ in 0..LAYOUT_ITERATIONS {
             straighten_children(layout_nodes_by_layer);
             push_into_loops(layout_nodes_by_layer);
             straighten_dummy_runs(layout_nodes_by_layer);
         }
-        
+
         straighten_dummy_runs(layout_nodes_by_layer);
 
-        // Additional passes could be added here for nearly straight edges, etc.
+        // Conservative straightening: align nodes with parents/children without causing overlap
+        let straighten_conservative = |nodes_by_layer: &mut Vec<Vec<LayoutNode>>| {
+            // Build a position lookup first to avoid borrow issues
+            let mut node_positions: HashMap<LayoutNodeID, f64> = HashMap::new();
+            for layer in nodes_by_layer.iter() {
+                for node in layer {
+                    node_positions.insert(node.id, node.pos.x);
+                }
+            }
+
+            for layer_idx in 0..nodes_by_layer.len() {
+                let layer_len = nodes_by_layer[layer_idx].len();
+
+                // Walk right to left
+                for i in (0..layer_len).rev() {
+                    // Only process block nodes, not backedges
+                    let is_block = nodes_by_layer[layer_idx][i].block.is_some();
+                    let is_backedge = nodes_by_layer[layer_idx][i].block.as_ref()
+                        .map_or(false, |b| b.attributes.contains(&"backedge".to_string()));
+
+                    if !is_block || is_backedge {
+                        continue;
+                    }
+
+                    let current_node_id = nodes_by_layer[layer_idx][i].id;
+                    let current_node_x = nodes_by_layer[layer_idx][i].pos.x;
+                    let mut deltas_to_try: Vec<f64> = Vec::new();
+
+                    // Calculate deltas to align with parents
+                    let src_nodes = nodes_by_layer[layer_idx][i].src_nodes.clone();
+                    for &parent_id in &src_nodes {
+                        let parent_x = node_positions.get(&parent_id).copied().unwrap_or(0.0);
+
+                        // Find which port connects to current node
+                        let mut port_in_parent = 0;
+                        'find_port: for layer in nodes_by_layer.iter() {
+                            for node in layer {
+                                if node.id == parent_id {
+                                    for (port, dst_opt) in node.dst_nodes.iter().enumerate() {
+                                        if let Some(dst_id) = dst_opt {
+                                            if *dst_id == current_node_id {
+                                                port_in_parent = port;
+                                                break 'find_port;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let src_port_offset = PORT_START + port_in_parent as f64 * PORT_SPACING;
+                        let dst_port_offset = PORT_START;
+                        let delta = (parent_x + src_port_offset) - (current_node_x + dst_port_offset);
+                        deltas_to_try.push(delta);
+                    }
+
+                    // Calculate deltas to align with children
+                    let dst_nodes = nodes_by_layer[layer_idx][i].dst_nodes.clone();
+                    for (src_port, dst_id_opt) in dst_nodes.iter().enumerate() {
+                        if let Some(dst_id) = dst_id_opt {
+                            let dst_x = node_positions.get(dst_id).copied().unwrap_or(0.0);
+
+                            // Check if it's a backedge dummy
+                            let mut is_backedge_dummy = false;
+                            for layer in nodes_by_layer.iter() {
+                                for node in layer {
+                                    if node.id == *dst_id {
+                                        is_backedge_dummy = node.is_dummy() &&
+                                            node.dst_block.as_ref().map_or(false, |b| b.attributes.contains(&"backedge".to_string()));
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if is_backedge_dummy {
+                                continue;
+                            }
+
+                            let src_port_offset = PORT_START + src_port as f64 * PORT_SPACING;
+                            let dst_port_offset = PORT_START;
+                            let delta = (dst_x + dst_port_offset) - (current_node_x + src_port_offset);
+                            deltas_to_try.push(delta);
+                        }
+                    }
+
+                    // If already aligned (delta == 0), skip
+                    if deltas_to_try.iter().any(|&d| d.abs() < 0.1) {
+                        continue;
+                    }
+
+                    // Filter to positive deltas and sort
+                    deltas_to_try.retain(|&d| d > 0.0);
+                    deltas_to_try.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+                    // Try each delta, taking the first that doesn't cause overlap
+                    for delta in deltas_to_try {
+                        let mut overlaps_any = false;
+
+                        // Check for overlap with nodes to the right
+                        for j in (i + 1)..layer_len {
+                            // Ignore rightmost dummies
+                            if (nodes_by_layer[layer_idx][j].flags & RIGHTMOST_DUMMY) != 0 {
+                                continue;
+                            }
+
+                            let a1 = current_node_x + delta;
+                            let a2 = a1 + nodes_by_layer[layer_idx][i].size.x;
+                            let b1 = nodes_by_layer[layer_idx][j].pos.x - BLOCK_GAP;
+                            let b2 = nodes_by_layer[layer_idx][j].pos.x + nodes_by_layer[layer_idx][j].size.x + BLOCK_GAP;
+
+                            if a2 >= b1 && a1 <= b2 {
+                                overlaps_any = true;
+                                break;
+                            }
+                        }
+
+                        if !overlaps_any {
+                            nodes_by_layer[layer_idx][i].pos.x += delta;
+                            node_positions.insert(current_node_id, nodes_by_layer[layer_idx][i].pos.x);
+                            break;
+                        }
+                    }
+                }
+
+                push_neighbors(&mut nodes_by_layer[layer_idx]);
+            }
+        };
+
+        // Second: nearlyStraightIterations x (straightenNearlyStraightEdgesUp, Down)
+        for _ in 0..NEARLY_STRAIGHT_ITERATIONS {
+            straighten_nearly_straight_edges_up(layout_nodes_by_layer);
+            straighten_nearly_straight_edges_down(layout_nodes_by_layer);
+        }
+
+        // Suck in leftmost dummies: pull them right without exceeding parent/destination positions
+        let suck_in_leftmost_dummies = |nodes_by_layer: &mut Vec<Vec<LayoutNode>>| {
+            // Pre-build lookup maps to avoid borrow issues
+            let mut node_positions: HashMap<LayoutNodeID, f64> = HashMap::new();
+            let mut node_to_port_map: HashMap<(LayoutNodeID, LayoutNodeID), usize> = HashMap::new(); // (src_id, dst_id) -> port
+            let mut block_positions: HashMap<BlockNumber, f64> = HashMap::new();
+
+            for layer in nodes_by_layer.iter() {
+                for node in layer {
+                    node_positions.insert(node.id, node.pos.x);
+
+                    if let Some(block) = &node.block {
+                        block_positions.insert(block.number, node.pos.x);
+                    }
+
+                    // Map dst nodes to ports
+                    for (port, dst_opt) in node.dst_nodes.iter().enumerate() {
+                        if let Some(dst_id) = dst_opt {
+                            node_to_port_map.insert((node.id, *dst_id), port);
+                        }
+                    }
+                }
+            }
+
+            let mut dummy_run_positions: HashMap<BlockNumber, f64> = HashMap::new();
+
+            for layer_idx in 0..nodes_by_layer.len() {
+                // Find leftmost non-dummy node
+                let mut first_non_dummy_idx = nodes_by_layer[layer_idx].len();
+                let mut next_x = 0.0;
+
+                for (i, node) in nodes_by_layer[layer_idx].iter().enumerate() {
+                    if (node.flags & LEFTMOST_DUMMY) == 0 {
+                        first_non_dummy_idx = i;
+                        next_x = node.pos.x;
+                        break;
+                    }
+                }
+
+                // Walk backward through leftmost dummies
+                if first_non_dummy_idx > 0 {
+                    next_x -= BLOCK_GAP + PORT_START;
+
+                    for i in (0..first_non_dummy_idx).rev() {
+                        let mut max_safe_x = next_x;
+
+                        // Check parent constraints
+                        let src_node_ids = nodes_by_layer[layer_idx][i].src_nodes.clone();
+                        let dummy_id = nodes_by_layer[layer_idx][i].id;
+
+                        for &src_id in &src_node_ids {
+                            let src_x = node_positions.get(&src_id).copied().unwrap_or(0.0);
+                            let port_idx = node_to_port_map.get(&(src_id, dummy_id)).copied().unwrap_or(0);
+
+                            let src_x_with_port = src_x + (port_idx as f64 * PORT_SPACING);
+                            if src_x_with_port < max_safe_x {
+                                max_safe_x = src_x_with_port;
+                            }
+                        }
+
+                        // Check destination block constraint
+                        if let Some(dst_block) = &nodes_by_layer[layer_idx][i].dst_block {
+                            if let Some(&block_x) = block_positions.get(&dst_block.number) {
+                                if block_x < max_safe_x {
+                                    max_safe_x = block_x;
+                                }
+                            }
+
+                            // Track minimum position for this backedge run
+                            let current_min = dummy_run_positions.get(&dst_block.number).copied().unwrap_or(f64::INFINITY);
+                            dummy_run_positions.insert(dst_block.number, current_min.min(max_safe_x));
+                        }
+
+                        nodes_by_layer[layer_idx][i].pos.x = max_safe_x;
+                        node_positions.insert(dummy_id, max_safe_x);
+                        next_x = max_safe_x - BLOCK_GAP;
+                    }
+                }
+            }
+
+            // Apply minimum positions to all leftmost dummies in each run
+            for layer in nodes_by_layer.iter_mut() {
+                for node in layer.iter_mut() {
+                    if (node.flags & LEFTMOST_DUMMY) != 0 {
+                        if let Some(dst_block) = &node.dst_block {
+                            if let Some(&min_x) = dummy_run_positions.get(&dst_block.number) {
+                                node.pos.x = min_x;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        // Third: straightenConservative
+        straighten_conservative(layout_nodes_by_layer);
+        straighten_dummy_runs(layout_nodes_by_layer);
+
+        // Fourth: suckInLeftmostDummies
+        suck_in_leftmost_dummies(layout_nodes_by_layer);
     }
 
     fn finangle_joints(&self, layout_nodes_by_layer: &mut Vec<Vec<LayoutNode>>) -> Vec<f64> {
@@ -1005,9 +1371,16 @@ impl Graph {
                 }
             }
 
+            // Collect next layer node IDs for filtering forward edges
+            let next_layer_ids: std::collections::HashSet<LayoutNodeID> = if layer_idx + 1 < layout_nodes_by_layer.len() {
+                layout_nodes_by_layer[layer_idx + 1].iter().map(|n| n.id).collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+
             // Second pass: build joints and update joint offsets
             let mut joints: Vec<Joint> = Vec::new();
-            
+
             for node in layout_nodes_by_layer[layer_idx].iter_mut() {
                 node.joint_offsets = vec![0.0; node.dst_nodes.len()];
 
@@ -1020,7 +1393,14 @@ impl Graph {
 
                 for (src_port, dst_id_opt) in node.dst_nodes.iter().enumerate() {
                     if let Some(dst_id) = dst_id_opt {
-                        let dst_x = node_positions.get(dst_id).copied().unwrap_or(0.0);
+                        // Only create joints for forward edges to the next layer
+                        // Skip backedges or edges to other layers
+                        if !next_layer_ids.contains(dst_id) {
+                            continue;
+                        }
+
+                        let dst_x = node_positions.get(dst_id).copied()
+                            .expect(&format!("Failed to find destination node {} in positions map", dst_id));
 
                         let x1 = node.pos.x + PORT_START + PORT_SPACING * src_port as f64;
                         let x2 = dst_x + PORT_START;
@@ -1042,6 +1422,25 @@ impl Graph {
             }
 
             joints.sort_by(|a, b| a.x1.partial_cmp(&b.x1).unwrap());
+
+            if layer_idx == 26 {
+                eprintln!("DEBUG layer 26 nodes:");
+                for (i, node) in layout_nodes_by_layer[26].iter().enumerate() {
+                    eprintln!("  [{}] id={}, x={}, is_dummy={}, block={:?}",
+                        i, node.id, node.pos.x, node.is_dummy(), node.block.as_ref().map(|b| b.number));
+                }
+                eprintln!("DEBUG layer 27 nodes:");
+                for (i, node) in layout_nodes_by_layer[27].iter().enumerate() {
+                    eprintln!("  [{}] id={}, x={}, is_dummy={}, block={:?}",
+                        i, node.id, node.pos.x, node.is_dummy(), node.block.as_ref().map(|b| b.number));
+                }
+                eprintln!("DEBUG finangle_joints: layer 26 has {} joints", joints.len());
+                for (i, joint) in joints.iter().enumerate() {
+                    eprintln!("  joint {}: x1={}, x2={}, src_id={}, dst_id={}, direction={}",
+                        i, joint.x1, joint.x2, joint.src_id, joint.dst_id,
+                        if joint.x2 - joint.x1 >= 0.0 { "rightward" } else { "leftward" });
+                }
+            }
 
             // Greedily sort joints into "tracks" based on whether they overlap horizontally
             let mut rightward_tracks: Vec<Vec<Joint>> = Vec::new();
@@ -1095,6 +1494,14 @@ impl Graph {
 
             // Use track info to apply joint offsets to nodes for rendering
             let tracks_height = ((rightward_tracks.len() + leftward_tracks.len()).max(1) - 1) as f64 * JOINT_SPACING;
+
+            if layer_idx == 26 {
+                eprintln!("DEBUG finangle_joints: layer 26 - rightward_tracks.len()={}, leftward_tracks.len()={}, tracks_height={}",
+                    rightward_tracks.len(), leftward_tracks.len(), tracks_height);
+                eprintln!("  rightward_tracks: {:?}", rightward_tracks.iter().map(|t| t.len()).collect::<Vec<_>>());
+                eprintln!("  leftward_tracks: {:?}", leftward_tracks.iter().map(|t| t.len()).collect::<Vec<_>>());
+            }
+
             let mut track_offset = -tracks_height / 2.0;
 
             rightward_tracks.reverse();
@@ -1129,12 +1536,22 @@ impl Graph {
             for node in layer.iter_mut() {
                 node.pos.y = next_layer_y;
                 max_node_height = max_node_height.max(node.size.y);
+                if let Some(block) = &node.block {
+                    if block.number.0 == 32 {
+                        eprintln!("DEBUG verticalize: Block 32 at layer {} set to y={}", i, next_layer_y);
+                    }
+                }
             }
 
-            // Layer height is the maximum of node height and track height
+            // Layer height is just the maximum node height (track height is added separately)
             let track_height = track_heights.get(i).copied().unwrap_or(0.0);
-            let layer_height = max_node_height.max(track_height);
+            let layer_height = max_node_height;
             layer_heights[i] = layer_height;
+
+            if i >= 25 && i <= 28 {
+                eprintln!("DEBUG verticalize: layer {} - max_node_height={}, track_height={}, layer_height={}, next_layer_y before={}, after={}",
+                    i, max_node_height, track_height, layer_height, next_layer_y, next_layer_y + layer_height + TRACK_PADDING + track_height + TRACK_PADDING);
+            }
 
             next_layer_y += layer_height + TRACK_PADDING + track_height + TRACK_PADDING;
         }
@@ -1157,9 +1574,10 @@ impl Graph {
             }
         }
 
-        // Add CONTENT_PADDING twice: once for right/bottom padding, once for port rendering offset
-        let width = (max_x + CONTENT_PADDING * 2.0) as i32;
-        let height = (max_y + CONTENT_PADDING * 2.0) as i32;
+        // TypeScript: createRenderingSurface gets maxX/maxY, then adds 40 in generate script
+        // See generate-svg-function.mjs lines 32-33: width = Math.ceil(graphSize.x + 40)
+        let width = (max_x + 40.0).ceil() as i32;
+        let height = (max_y + 40.0).ceil() as i32;
 
         let mut svg = String::new();
         // Match TypeScript attribute order: xmlns width height viewBox
@@ -1191,8 +1609,9 @@ impl Graph {
             }
         }
 
-        // Start outer wrapper for all arrows
-        svg.push_str("    <g>\n");
+        // Track if we render any arrows (TypeScript uses <g/> if empty)
+        let mut has_arrows = false;
+        let mut arrows_content = String::new();
 
         // Render arrows for all nodes
         for (layer_idx, layer) in nodes_by_layer.iter().enumerate() {
@@ -1205,7 +1624,8 @@ impl Graph {
                         // Render loop header arrow (handled specially)
                         if let Some(&dst_id) = node.dst_nodes.get(0).and_then(|id| id.as_ref()) {
                             if let Some(dst_node) = node_lookup.get(&dst_id) {
-                                self.render_loop_header_arrow(svg, node, dst_node);
+                                self.render_loop_header_arrow(&mut arrows_content, node, dst_node);
+                                has_arrows = true;
                             }
                         }
                         continue; // Skip normal arrow rendering for backedge blocks
@@ -1220,7 +1640,8 @@ impl Graph {
                         if let Some(backedge_layout_node) = nodes_by_layer.iter()
                             .flat_map(|layer| layer.iter())
                             .find(|n| n.block.as_ref().map_or(false, |b| b.number == backedge_block.number)) {
-                            self.render_arrow_to_backedge(svg, node, backedge_layout_node);
+                            self.render_arrow_to_backedge(&mut arrows_content, node, backedge_layout_node);
+                            has_arrows = true;
                         }
                     }
                     continue; // Skip normal arrow rendering
@@ -1239,14 +1660,17 @@ impl Graph {
                                 // Special handling for arrows to backedge dummies
                                 if node.is_dummy() {
                                     // Dummy-to-dummy: draw upward arrow
-                                    self.render_upward_arrow_between_dummies(svg, node, dst_node, port_idx);
+                                    self.render_upward_arrow_between_dummies(&mut arrows_content, node, dst_node, port_idx);
+                                    has_arrows = true;
                                 } else {
                                     // Block-to-dummy: draw arrow from block to backedge dummy
-                                    self.render_arrow_to_backedge_dummy(svg, node, dst_node, port_idx, layer_idx, layer_heights, track_heights);
+                                    self.render_arrow_to_backedge_dummy(&mut arrows_content, node, dst_node, port_idx, layer_idx, layer_heights, track_heights);
+                                    has_arrows = true;
                                 }
                             } else {
                                 // Normal arrow
-                                self.render_single_arrow_ts_format(svg, node, dst_node, port_idx, layer_idx, layer_heights, track_heights);
+                                self.render_single_arrow_ts_format(&mut arrows_content, node, dst_node, port_idx, layer_idx, layer_heights, track_heights);
+                                has_arrows = true;
                             }
                         }
                     }
@@ -1254,8 +1678,14 @@ impl Graph {
             }
         }
 
-        // Close outer wrapper for all arrows
-        svg.push_str("    </g>\n");
+        // Emit <g/> if no arrows, otherwise <g>content</g> (TypeScript behavior)
+        if has_arrows {
+            svg.push_str("    <g>\n");
+            svg.push_str(&arrows_content);
+            svg.push_str("    </g>\n");
+        } else {
+            svg.push_str("    <g/>\n");
+        }
     }
 
     fn render_single_arrow_ts_format(&self, svg: &mut String, src_node: &LayoutNode, dst_node: &LayoutNode, port_idx: usize, layer_idx: usize, layer_heights: &[f64], track_heights: &[f64]) {
@@ -1376,7 +1806,7 @@ impl Graph {
         let x1 = src_node.pos.x;  // Backedge block left edge
         let y1 = src_node.pos.y + HEADER_ARROW_PUSHDOWN;
         let x2 = dst_node.pos.x + dst_node.size.x;  // Loop header right edge
-        let y2 = dst_node.pos.y + HEADER_ARROW_PUSHDOWN;
+        let _y2 = dst_node.pos.y + HEADER_ARROW_PUSHDOWN;
 
         // Pixel alignment for crisp 1px strokes
         let y_aligned = y1 + 0.5;
@@ -1587,10 +2017,9 @@ impl Graph {
                             .unwrap_or(1);
 
                         for ins in &mir_block.instructions {
-                            // Must match calculate_block_size logic!
+                            // Must match calculate_block_size logic - count display chars, not HTML entities!
                             let opcode_with_arrows = ins.opcode.replace("->", "→").replace("<-", "←");
-                            let opcode_rendered = html_escape(&opcode_with_arrows);
-                            max_opcode_chars = max_opcode_chars.max(opcode_rendered.chars().count());
+                            max_opcode_chars = max_opcode_chars.max(opcode_with_arrows.chars().count());
                         }
 
                         // Column positions matching TypeScript's formula
@@ -1643,338 +2072,8 @@ impl Graph {
         }
     }
 
-    fn render_blocks(&self, svg: &mut String, nodes_by_layer: &[Vec<LayoutNode>]) {
-        for layer in nodes_by_layer {
-            for node in layer {
-                if node.is_dummy() {
-                    // Skip rendering dummy nodes - they're just for layout
-                    continue;
-                } else if let Some(block) = &node.block {
-                    // Create a group for this block positioned at its location
-                    svg.push_str(&format!(r#"<g transform="translate({}, {})">"#,
-                        node.pos.x, node.pos.y));
-
-                    // Determine header color based on attributes
-                    let header_color = if block.attributes.contains(&"loopheader".to_string()) {
-                        "#1fa411"  // Green for loop headers
-                    } else if block.attributes.contains(&"backedge".to_string()) {
-                        "#1fa411"  // Green for backedges
-                    } else {
-                        "#0c0c0d"  // Black for normal blocks
-                    };
-
-                    // Render outer rectangle (block border)
-                    svg.push_str(&format!(
-                        r##"<rect x="0" y="0" width="{}" height="{}" fill="#f9f9f9" stroke="#0c0c0d" stroke-width="1"/>"##,
-                        node.size.x, node.size.y
-                    ));
-
-                    // Render block header
-                    let header_height = 28.0;
-                    svg.push_str(&format!(
-                        r##"<rect x="0" y="0" width="{}" height="{}" fill="{}"/>"##,
-                        node.size.x, header_height, header_color
-                    ));
-
-                    // Add block header text
-                    let desc = if block.attributes.contains(&"loopheader".to_string()) {
-                        " (loop header)"
-                    } else if block.attributes.contains(&"backedge".to_string()) {
-                        " (backedge)"
-                    } else {
-                        ""
-                    };
-
-                    svg.push_str(&format!(
-                        r##"<text x="{}" y="18" font-family="monospace" font-size="12" fill="white" font-weight="bold" text-anchor="middle">Block {}{}</text>"##,
-                        node.size.x / 2.0, block.id.0, desc
-                    ));
-
-                    // Render MIR instructions if present
-                    if let Some(mir_block) = &block.mir_block {
-                        let mut y = header_height + 12.0;  // Start below header with padding
-                        for ins in &mir_block.instructions {
-                            // Render instruction number
-                            svg.push_str(&format!(
-                                r##"<text x="8" y="{}" font-family="monospace" font-size="11" fill="#777">{}</text>"##,
-                                y, ins.id
-                            ));
-
-                            // Render opcode (replace ASCII arrows with Unicode before escaping)
-                            let opcode_with_arrows = ins.opcode.replace("->", "→").replace("<-", "←");
-                            let opcode = html_escape(&opcode_with_arrows);
-                            svg.push_str(&format!(
-                                r##"<text x="23" y="{}" font-family="monospace" font-size="11" fill="black">{}</text>"##,
-                                y, opcode
-                            ));
-
-                            // Render type (if not None)
-                            if ins.instruction_type != "None" {
-                                let type_x = node.size.x - 45.0;  // Right-aligned
-                                svg.push_str(&format!(
-                                    r##"<text x="{}" y="{}" font-family="monospace" font-size="11" fill="#1048af">{}</text>"##,
-                                    type_x, y, ins.instruction_type
-                                ));
-                            }
-
-                            y += 14.0;  // Move down for next instruction
-                        }
-                    }
-
-                    // Render edge labels for binary branches
-                    if block.successors.len() == 2 {
-                        let label_y = node.size.y + 12.0;  // Below the block
-                        for (i, label) in [1, 0].iter().enumerate() {
-                            let label_x = PORT_START + PORT_SPACING * i as f64;
-                            svg.push_str(&format!(
-                                r##"<text x="{}" y="{}" font-family="monospace" font-size="9" fill="#777">{}</text>"##,
-                                label_x, label_y, label
-                            ));
-                        }
-                    }
-
-                    svg.push_str("</g>\n");
-                }
-            }
-        }
-    }
-    
-    fn render_arrows(&self, svg: &mut String, nodes_by_layer: &[Vec<LayoutNode>]) {
-        // Build a lookup map for nodes by ID
-        let mut node_lookup: std::collections::HashMap<LayoutNodeID, &LayoutNode> = std::collections::HashMap::new();
-        for layer in nodes_by_layer {
-            for node in layer {
-                node_lookup.insert(node.id, node);
-            }
-        }
-        
-        // Render arrows for all nodes
-        for layer in nodes_by_layer {
-            for node in layer {
-                // Render each outgoing connection
-                for (port_idx, dst_id_opt) in node.dst_nodes.iter().enumerate() {
-                    if let Some(dst_id) = dst_id_opt {
-                        if let Some(dst_node) = node_lookup.get(dst_id) {
-                            self.render_single_arrow(svg, node, dst_node, port_idx);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn render_single_arrow(&self, svg: &mut String, src_node: &LayoutNode, dst_node: &LayoutNode, port_idx: usize) {
-        // Calculate arrow start and end points
-        let start_x = if src_node.is_dummy() {
-            // For dummy nodes, start from center
-            src_node.pos.x
-        } else {
-            // For real blocks, start from port position
-            src_node.pos.x + PORT_START + (PORT_SPACING * port_idx as f64).min(src_node.size.x - PORT_START - 10.0)
-        };
-        
-        let start_y = src_node.pos.y + src_node.size.y;
-        
-        let end_x = if dst_node.is_dummy() {
-            // For dummy nodes, end at center
-            dst_node.pos.x
-        } else {
-            // For real blocks, end at left edge + PORT_START
-            dst_node.pos.x + PORT_START
-        };
-        
-        let end_y = dst_node.pos.y;
-        
-        // Get joint offset for this port if available
-        let joint_offset = src_node.joint_offsets.get(port_idx).copied().unwrap_or(0.0);
-        
-        // Determine if this is a backedge (going backwards in layers)
-        let is_backedge = src_node.layer > dst_node.layer;
-        
-        // Determine arrow style class
-        let mut arrow_class = "arrow".to_string();
-        if is_backedge {
-            arrow_class.push_str(" backedge");
-        }
-        
-        // Check if we need a curved or straight arrow
-        let horizontal_distance = (end_x - start_x).abs();
-        let needs_curve = horizontal_distance > 2.0 * ARROW_RADIUS || joint_offset != 0.0;
-        
-        if !needs_curve && !is_backedge {
-            // Simple straight arrow
-            svg.push_str(&format!(
-                r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" class="{}"/>"#,
-                start_x, start_y, end_x, end_y, arrow_class
-            ));
-        } else {
-            // Curved arrow with joints
-            let mut path = format!("M {:.1} {:.1}", start_x, start_y);
-            
-            if is_backedge {
-                // Backedges curve around to avoid crossing forward edges
-                let control_y = start_y + JOINT_SPACING + joint_offset;
-                let return_y = end_y - JOINT_SPACING;
-                
-                // Curve around the right side if going backwards
-                let curve_x = start_x.max(end_x) + 30.0 + joint_offset;
-                
-                path.push_str(&format!(" L {:.1} {:.1}", start_x, control_y));
-                path.push_str(&format!(" L {:.1} {:.1}", curve_x, control_y));
-                path.push_str(&format!(" L {:.1} {:.1}", curve_x, return_y));
-                path.push_str(&format!(" L {:.1} {:.1}", end_x, return_y));
-                path.push_str(&format!(" L {:.1} {:.1}", end_x, end_y));
-            } else {
-                // Normal forward arrow with potential horizontal routing
-                let mid_y = start_y + JOINT_SPACING + joint_offset;
-                
-                path.push_str(&format!(" L {:.1} {:.1}", start_x, mid_y));
-                path.push_str(&format!(" L {:.1} {:.1}", end_x, mid_y));
-                path.push_str(&format!(" L {:.1} {:.1}", end_x, end_y));
-            }
-            
-            svg.push_str(&format!(
-                r#"<path d="{}" class="{}" fill="none"/>"#,
-                path, arrow_class
-            ));
-        }
-    }
-
-    // Navigation methods
-    pub fn set_selection(&mut self, _block_ids: Vec<BlockID>, _last_selected: Option<BlockID>) {
-        // TODO: Implement selection state management
-    }
-
-    pub fn navigate(&mut self, _direction: NavigationDirection) {
-        // TODO: Implement navigation logic
-    }
-
-    // Animation methods
-    pub async fn go_to_coordinates(&mut self, pos: Vec2, zoom: f64, animate: bool) -> Result<(), String> {
-        if !animate {
-            self.translation = Vec2::new(-pos.x * zoom, -pos.y * zoom);
-            self.zoom = zoom;
-            return Ok(());
-        }
-
-        if self.animating {
-            return Ok(()); // Don't start another animation
-        }
-
-        self.animating = true;
-        self.target_translation = Vec2::new(-pos.x * zoom, -pos.y * zoom);
-        self.target_zoom = zoom;
-
-        // TODO: Implement actual animation loop with requestAnimationFrame equivalent
-        // For now, just set the target values
-        self.translation = self.target_translation.clone();
-        self.zoom = self.target_zoom;
-        self.animating = false;
-
-        Ok(())
-    }
 }
 
-#[derive(Debug, Clone)]
-pub enum NavigationDirection {
-    Up,
-    Down,
-    Left,
-    Right,
-}
-
-// Snapshot test data structures to match TypeScript original
-#[derive(Debug, Clone, serde::Serialize)]
-struct LayoutMetrics {
-    block_count: usize,
-    layer_count: usize,
-    graph_size: Vec2,
-    viewport_size: Vec2,
-    block_sizes: Vec<BlockSize>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct BlockSize {
-    number: u32,
-    size: Vec2,
-    layer: usize,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct ArrowAnalysis {
-    total_arrows: usize,
-    arrow_types: Vec<ArrowType>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct ArrowType {
-    index: usize,
-    path_count: usize,
-    has_arrowhead: bool,
-    main_path_data: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct PathAnalysis {
-    index: usize,
-    has_move_to: bool,
-    has_line_to: bool,
-    has_arc: bool,
-    has_curve: bool,
-    path_length: usize,
-    is_horizontal: bool,
-}
-
-fn calculate_graph_size(nodes_by_layer: &[Vec<LayoutNode>]) -> Vec2 {
-    let mut max_x: f64 = 0.0;
-    let mut max_y: f64 = 0.0;
-    
-    for layer in nodes_by_layer {
-        for node in layer {
-            // Include all nodes in size calculation, including dummy nodes
-            // This matches TypeScript behavior where dummy nodes contribute to graph bounds
-            max_x = max_x.max(node.pos.x + node.size.x);
-            max_y = max_y.max(node.pos.y + node.size.y);
-        }
-    }
-    
-    // Add content padding
-    Vec2::new(max_x + CONTENT_PADDING, max_y + CONTENT_PADDING)
-}
-
-fn analyze_svg_arrows(svg: &str) -> ArrowAnalysis {
-    // Parse SVG and extract arrow information
-    let line_count = svg.matches("<line").count();
-    let path_count = svg.matches("<path").count();
-    
-    let mut arrow_types = Vec::new();
-    
-    // Analyze line elements (straight arrows)
-    for (index, _) in svg.match_indices("<line").enumerate() {
-        arrow_types.push(ArrowType {
-            index,
-            path_count: 1,
-            has_arrowhead: true, // All our arrows have arrowheads from CSS
-            main_path_data: format!("Line arrow {}", index),
-        });
-    }
-    
-    // Analyze path elements (curved arrows)  
-    for (index, _) in svg.match_indices("<path").enumerate() {
-        let start_idx = index + line_count;
-        arrow_types.push(ArrowType {
-            index: start_idx,
-            path_count: 1,
-            has_arrowhead: true,
-            main_path_data: format!("Path arrow {}", start_idx),
-        });
-    }
-    
-    ArrowAnalysis {
-        total_arrows: line_count + path_count,
-        arrow_types,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2020,15 +2119,15 @@ mod tests {
         let pass = create_simple_pass();
         let mut graph = Graph::new(Vec2::new(800.0, 600.0), pass);
         let svg = graph.render_svg();
-        
+
         // Should contain basic SVG structure
         assert!(svg.contains("<svg"));
         assert!(svg.contains("</svg>"));
         assert!(svg.contains("<rect"));
-        
-        // Should contain our two blocks  
-        assert!(svg.contains("B0"));
-        assert!(svg.contains("B1"));
+
+        // Should contain our two blocks
+        assert!(svg.contains("Block 0"));
+        assert!(svg.contains("Block 1"));
     }
     
     #[test]
@@ -2036,16 +2135,15 @@ mod tests {
         let pass = create_complex_pass();
         let mut graph = Graph::new(Vec2::new(800.0, 600.0), pass);
         let svg = graph.render_svg();
-        
+
         // Should contain all 5 blocks
-        assert!(svg.contains("B0"));
-        assert!(svg.contains("B1"));
-        assert!(svg.contains("B2"));
-        assert!(svg.contains("B3"));
-        assert!(svg.contains("B4"));
-        
-        // Should have arrows
+        assert!(svg.contains("Block 0"));
+        assert!(svg.contains("Block 1"));
+        assert!(svg.contains("Block 2"));
+        assert!(svg.contains("Block 3"));
+        assert!(svg.contains("Block 4"));
+
+        // Should have arrows (path elements)
         assert!(svg.contains("<path"));
-        assert!(svg.contains("arrow"));
     }
 }

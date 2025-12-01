@@ -91,6 +91,16 @@ public class TestTopLevelAwait {
         assertNull(awaitExpr.argument());
     }
 
+    @Test
+    public void testAwaitExpressionInClassFieldRejected() {
+        // AwaitExpression not allowed in class field initializers, even in async context
+        String code = "async () => class { x = await foo };";
+
+        assertThrows(Exception.class, () -> {
+            Parser.parse(code, true);
+        });
+    }
+
     // Note: Nested function await validation is complex and requires tracking
     // function nesting depth. This is a known limitation that doesn't affect
     // the primary use case (actual top-level await in modules).

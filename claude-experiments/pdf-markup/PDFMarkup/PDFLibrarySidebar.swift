@@ -63,35 +63,37 @@ struct PDFLibrarySidebar: View {
     var folderList: some View {
         List(selection: $selectedFolder) {
             ForEach(library.sortedFolders, id: \.self) { folder in
-                Section {
-                    if expandedFolders.contains(folder) {
+                DisclosureGroup(
+                    isExpanded: Binding(
+                        get: { expandedFolders.contains(folder) },
+                        set: { isExpanded in
+                            if isExpanded {
+                                expandedFolders.insert(folder)
+                            } else {
+                                expandedFolders.remove(folder)
+                            }
+                        }
+                    )
+                ) {
+                    // Lazy load PDFs when folder is expanded
+                    LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(library.pdfs(in: folder)) { pdf in
                             PDFListItem(pdf: pdf)
-                                .tag(pdf as PDFMetadata?)
+                                .contentShape(Rectangle())
                                 .onTapGesture {
                                     selectedPDF = pdf
                                 }
                         }
                     }
-                } header: {
+                } label: {
                     HStack {
-                        Image(systemName: expandedFolders.contains(folder) ? "folder.fill" : "folder")
+                        Image(systemName: "folder")
                         Text(folder)
                             .font(.headline)
                         Spacer()
                         Text("\(library.pdfs(in: folder).count)")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                    }
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation {
-                            if expandedFolders.contains(folder) {
-                                expandedFolders.remove(folder)
-                            } else {
-                                expandedFolders.insert(folder)
-                            }
-                        }
                     }
                 }
             }

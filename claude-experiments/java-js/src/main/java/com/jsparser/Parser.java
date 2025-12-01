@@ -2444,6 +2444,34 @@ public class Parser {
                                    !checkAhead(1, TokenType.MINUS_ASSIGN);
             }
 
+            // Class field initializer validation: reject AwaitExpression patterns
+            // Even though we won't parse it as AwaitExpression, we need to detect and reject the pattern
+            if (inClassFieldInitializer && !shouldParseAsAwait) {
+                // Check if 'await' is followed by what looks like an AwaitExpression argument
+                // Reject patterns like: await foo, await x.y, await (expr), await func(), etc.
+                // Allow patterns like: await; await = x, await: label
+                boolean looksLikeAwaitExpression = checkAhead(1, TokenType.IDENTIFIER) ||
+                                                   checkAhead(1, TokenType.LPAREN) ||
+                                                   checkAhead(1, TokenType.LBRACKET) ||
+                                                   checkAhead(1, TokenType.THIS) ||
+                                                   checkAhead(1, TokenType.SUPER) ||
+                                                   checkAhead(1, TokenType.NEW) ||
+                                                   checkAhead(1, TokenType.CLASS) ||
+                                                   checkAhead(1, TokenType.FUNCTION) ||
+                                                   checkAhead(1, TokenType.ASYNC) ||
+                                                   checkAhead(1, TokenType.STRING) ||
+                                                   checkAhead(1, TokenType.NUMBER) ||
+                                                   checkAhead(1, TokenType.TRUE) ||
+                                                   checkAhead(1, TokenType.FALSE) ||
+                                                   checkAhead(1, TokenType.NULL);
+
+                if (looksLikeAwaitExpression) {
+                    Token awaitToken = peek();
+                    throw new ParseException("SyntaxError", awaitToken, null, null,
+                        "Cannot use keyword 'await' outside an async function");
+                }
+            }
+
             if (shouldParseAsAwait) {
                 Token awaitToken = advance();
 

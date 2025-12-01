@@ -16,7 +16,8 @@ struct PDFMetadata: Codable, Identifiable, Hashable {
     let ocr_title: String?
     let ocr_author: String?
 
-    var id: String { hash }
+    // Use path as ID since it's unique, not hash (which can be same in different folders)
+    var id: String { path }
 
     var displayTitle: String {
         ocr_title ?? title ?? fileName.replacingOccurrences(of: "_original.pdf", with: "")
@@ -54,12 +55,23 @@ struct PDFMetadata: Codable, Identifiable, Hashable {
 struct PDFLibrary {
     let pdfs: [PDFMetadata]
 
+    // Cache the grouped folders to avoid recalculating
+    private let _folders: [String: [PDFMetadata]]
+    private let _sortedFolders: [String]
+
+    init(pdfs: [PDFMetadata]) {
+        self.pdfs = pdfs
+        // Pre-calculate folders once
+        self._folders = Dictionary(grouping: pdfs, by: { $0.folder })
+        self._sortedFolders = _folders.keys.sorted()
+    }
+
     var folders: [String: [PDFMetadata]] {
-        Dictionary(grouping: pdfs, by: { $0.folder })
+        _folders
     }
 
     var sortedFolders: [String] {
-        folders.keys.sorted()
+        _sortedFolders
     }
 
     func search(query: String) -> [PDFMetadata] {
@@ -74,6 +86,6 @@ struct PDFLibrary {
     }
 
     func pdfs(in folder: String) -> [PDFMetadata] {
-        folders[folder] ?? []
+        _folders[folder] ?? []
     }
 }

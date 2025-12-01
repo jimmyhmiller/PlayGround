@@ -225,12 +225,16 @@
       "x": 0,
       "y": 532,
       "width": 380,
-      "height": 380,
+      "height": 408,
       "label": "Bugs",
       "items": [
         {
-          "text": "Sometimes replies from claude disappear if we are on a different dashboard when received",
+          "text": "Assistant messages disappear on reload - only user messages are saved",
           "done": true
+        },
+        {
+          "text": "Sometimes replies from claude disappear if we are on a different dashboard when received",
+          "done": false
         },
         {
           "text": "Sizes of components and location should be in terms of the grid, not pixels",
@@ -263,16 +267,6 @@
       ]
     },
     {
-      "id": "code-editor-plan",
-      "type": "markdown",
-      "x": 784,
-      "y": 532,
-      "width": 548,
-      "height": 408,
-      "label": "Code Editor Widget Planning",
-      "filePath": "CODE_EDITOR_WIDGET_PLAN.md"
-    },
-    {
       "id": "layout-settings",
       "type": "layoutSettings",
       "x": 1344,
@@ -285,7 +279,7 @@
       "id": "code-editor-demo",
       "type": "codeEditor",
       "x": 0,
-      "y": 924,
+      "y": 952,
       "width": 772,
       "height": 600,
       "label": "JavaScript Playground",
@@ -333,6 +327,16 @@
       "content": "# This editor uses a custom command!\n# The command is: echo 'Running custom...' && cat {file} && bash {file}\n\necho \"Hello from a custom command!\"\necho \"File path was: {file}\"\necho \"You can replace this with YOUR custom language compiler!\"\n\n# For example:\n# \"./my-compiler {file} --run\"\n# \"beagle-run {file}\"\n# \"my-lang compile {file} && my-lang execute\"",
       "minimap": false,
       "showLineNumbers": true
+    },
+    {
+      "id": "component-composition-ideas",
+      "type": "markdown",
+      "x": 784,
+      "y": 560,
+      "width": 548,
+      "height": 408,
+      "label": "Component Composition",
+      "filePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/.ai-dashboard/component-composition.md"
     }
   ],
   "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/.ai-dashboard/dashboard.json"

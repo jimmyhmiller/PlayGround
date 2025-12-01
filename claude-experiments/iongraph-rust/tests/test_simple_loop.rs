@@ -36,7 +36,7 @@ fn test_simple_loop_exit() {
     let func = &ion_json.functions[0];
     let pass = func.passes[0].clone();
     
-    let mut graph = Graph::new(Vec2::new(1000.0, 1000.0), pass);
+    let graph = Graph::new(Vec2::new(1000.0, 1000.0), pass);
     
     println!("\n=== Rust Block layer assignments ===");
     for block in &graph.blocks {

@@ -6,6 +6,7 @@ import { spawn, ChildProcess, SpawnOptionsWithoutStdio } from 'child_process';
 import { query, type Query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { createDashboardTools } from './dashboard-tools';
 import * as projectUtils from './project-utils';
+import { validateWidget } from './src/validation';
 import type {
   Dashboard,
   WidgetConfig,
@@ -391,7 +392,21 @@ ipcMain.handle('update-widget', async (_event: IpcMainInvokeEvent, { dashboardId
       return { success: false, error: 'Widget not found' };
     }
 
-    entry.dashboard.widgets[widgetIndex] = { ...config, id: widgetId } as WidgetConfig;
+    // Validate the widget configuration before updating
+    const widgetConfig = { ...config, id: widgetId };
+    const validationResult = validateWidget(widgetConfig);
+    if (!validationResult.valid) {
+      const errorMsg = validationResult.errors?.map(e => `${e.field}: ${e.message}`).join(', ') || 'Invalid widget configuration';
+      console.error('[Widget Validation] Failed:', errorMsg);
+      return {
+        success: false,
+        error: `Widget validation failed: ${errorMsg}`,
+        validationErrors: validationResult.errors,
+        suggestion: validationResult.suggestion
+      };
+    }
+
+    entry.dashboard.widgets[widgetIndex] = widgetConfig as WidgetConfig;
     entry.lastWriteTime = Date.now();
     fs.writeFileSync(targetPath, JSON.stringify(entry.dashboard, null, 2), 'utf-8');
 
@@ -653,6 +668,10 @@ ${widgetToolsList}
 
         activeChats.set(chatId, { query: result });
 
+        // Track assistant message parts during streaming
+        let assistantText = '';
+        let assistantToolCalls: any[] = [];
+
         for await (const msg of result) {
           console.log(`[Claude] Received message type: ${msg.type}`);
           console.log(util.inspect(msg, { depth: null, colors: true }));
@@ -679,6 +698,22 @@ ${widgetToolsList}
               console.log(`[Claude] Content blocks: ${content.length}`);
               content.forEach((block: any, idx: number) => {
                 console.log(`[Claude] Block ${idx}: type=${block.type}, name=${block.name}`);
+
+                // Collect text blocks for saving
+                if (block.type === 'text' && block.text) {
+                  const needsSpace = assistantText && !assistantText.endsWith(' ') && !assistantText.endsWith('\n');
+                  assistantText += (needsSpace ? ' ' : '') + block.text;
+                }
+
+                // Collect tool calls for saving
+                if (block.type === 'tool_use' && block.name) {
+                  assistantToolCalls.push({
+                    name: block.name,
+                    id: block.id || block.name,
+                    input: block.input
+                  });
+                }
+
                 if (block.type === 'tool_use' && block.name === 'TodoWrite' && block.input?.todos) {
                   console.log(`[Claude] ✓ Received TodoWrite for ${chatId}:`, block.input.todos);
                   conversationTodos.set(chatId, block.input.todos);
@@ -700,6 +735,24 @@ ${widgetToolsList}
         }
 
         console.log(`[Claude] Streaming complete for ${chatId}`);
+
+        // Save the assistant's response to chat history
+        if (assistantText || assistantToolCalls.length > 0) {
+          const assistantMessage: any = {
+            from: 'assistant',
+            text: assistantText
+          };
+          if (assistantToolCalls.length > 0) {
+            assistantMessage.toolCalls = assistantToolCalls;
+          }
+
+          if (!chatMessages.has(chatId)) {
+            chatMessages.set(chatId, []);
+          }
+          chatMessages.get(chatId)!.push(assistantMessage);
+          saveChatHistory();
+          console.log(`[Claude] Saved assistant message for ${chatId}, text length: ${assistantText.length}, tool calls: ${assistantToolCalls.length}`);
+        }
 
         mainWindow?.webContents.send('claude-chat-complete', {
           chatId,

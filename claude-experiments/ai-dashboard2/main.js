@@ -592,6 +592,9 @@ ${widgetToolsList}
                     }
                 });
                 activeChats.set(chatId, { query: result });
+                // Track assistant message parts during streaming
+                let assistantText = '';
+                let assistantToolCalls = [];
                 for await (const msg of result) {
                     console.log(`[Claude] Received message type: ${msg.type}`);
                     console.log(util.inspect(msg, { depth: null, colors: true }));
@@ -615,6 +618,19 @@ ${widgetToolsList}
                             console.log(`[Claude] Content blocks: ${content.length}`);
                             content.forEach((block, idx) => {
                                 console.log(`[Claude] Block ${idx}: type=${block.type}, name=${block.name}`);
+                                // Collect text blocks for saving
+                                if (block.type === 'text' && block.text) {
+                                    const needsSpace = assistantText && !assistantText.endsWith(' ') && !assistantText.endsWith('\n');
+                                    assistantText += (needsSpace ? ' ' : '') + block.text;
+                                }
+                                // Collect tool calls for saving
+                                if (block.type === 'tool_use' && block.name) {
+                                    assistantToolCalls.push({
+                                        name: block.name,
+                                        id: block.id || block.name,
+                                        input: block.input
+                                    });
+                                }
                                 if (block.type === 'tool_use' && block.name === 'TodoWrite' && block.input?.todos) {
                                     console.log(`[Claude] ✓ Received TodoWrite for ${chatId}:`, block.input.todos);
                                     conversationTodos.set(chatId, block.input.todos);
@@ -633,6 +649,22 @@ ${widgetToolsList}
                     });
                 }
                 console.log(`[Claude] Streaming complete for ${chatId}`);
+                // Save the assistant's response to chat history
+                if (assistantText || assistantToolCalls.length > 0) {
+                    const assistantMessage = {
+                        from: 'assistant',
+                        text: assistantText
+                    };
+                    if (assistantToolCalls.length > 0) {
+                        assistantMessage.toolCalls = assistantToolCalls;
+                    }
+                    if (!chatMessages.has(chatId)) {
+                        chatMessages.set(chatId, []);
+                    }
+                    chatMessages.get(chatId).push(assistantMessage);
+                    saveChatHistory();
+                    console.log(`[Claude] Saved assistant message for ${chatId}, text length: ${assistantText.length}, tool calls: ${assistantToolCalls.length}`);
+                }
                 mainWindow?.webContents.send('claude-chat-complete', {
                     chatId,
                     responseId

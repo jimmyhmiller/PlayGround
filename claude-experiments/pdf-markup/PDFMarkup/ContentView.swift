@@ -130,19 +130,32 @@ struct ContentView: View {
         isLoadingLibrary = true
         defer { isLoadingLibrary = false }
 
-        // Load S3 state first
-        S3StateManager.shared.loadState()
-
         let indexPath = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/reading-tools/pdf-indexer/pdf-index.json"
 
-        do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: indexPath))
-            let pdfs = try JSONDecoder().decode([PDFMetadata].self, from: data)
-            library = PDFLibrary(pdfs: pdfs)
-        } catch {
-            errorMessage = "Failed to load PDF library: \(error.localizedDescription)"
-            print("Error loading library: \(error)")
-        }
+        // Do heavy work off main thread
+        await Task.detached {
+            // Load S3 state first (off main thread)
+            S3StateManager.shared.loadState()
+
+            do {
+                let data = try Data(contentsOf: URL(fileURLWithPath: indexPath))
+                let pdfs = try JSONDecoder().decode([PDFMetadata].self, from: data)
+
+                // Only keep PDFs that are in S3
+                let s3PDFs = pdfs.filter { pdf in
+                    S3StateManager.shared.s3Key(for: pdf.hash) != nil
+                }
+
+                await MainActor.run {
+                    self.library = PDFLibrary(pdfs: s3PDFs)
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = "Failed to load PDF library: \(error.localizedDescription)"
+                    print("Error loading library: \(error)")
+                }
+            }
+        }.value
     }
 
     func loadPDF(metadata: PDFMetadata) async {
@@ -159,65 +172,49 @@ struct ContentView: View {
 struct PDFMarkupView: View {
     let pdfDocument: PDFDocument
     @Binding var selectedColor: Color
-    @State private var currentPage: Int = 0
 
     var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                if let page = pdfDocument.page(at: currentPage) {
-                    PDFPageView(page: page, selectedColor: $selectedColor)
-                }
+        ScrollView {
+            LazyVStack(spacing: 20) {
+                ForEach(0..<pdfDocument.pageCount, id: \.self) { pageIndex in
+                    if let page = pdfDocument.page(at: pageIndex) {
+                        VStack(spacing: 8) {
+                            // Page number indicator
+                            HStack {
+                                Text("Page \(pageIndex + 1)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 4)
+                                    .background(Color(.systemGray5))
+                                    .cornerRadius(12)
+                                Spacer()
+                            }
+                            .padding(.horizontal)
 
-                // Page navigation
-                VStack {
-                    Spacer()
-                    HStack {
-                        Button(action: { previousPage() }) {
-                            Image(systemName: "chevron.left.circle.fill")
-                                .font(.system(size: 44))
+                            // PDF page with PencilKit overlay
+                            PDFPageView(page: page, selectedColor: $selectedColor, pageIndex: pageIndex)
+                                .aspectRatio(page.bounds(for: .mediaBox).width / page.bounds(for: .mediaBox).height, contentMode: .fit)
+                                .frame(maxWidth: 800)
+                                .shadow(color: Color.black.opacity(0.1), radius: 8, x: 0, y: 4)
+                                .frame(minHeight: 600) // Ensure minimum height for each page
                         }
-                        .disabled(currentPage == 0)
-
-                        Spacer()
-
-                        Text("Page \(currentPage + 1) of \(pdfDocument.pageCount)")
-                            .padding(8)
-                            .background(.ultraThinMaterial)
-                            .cornerRadius(8)
-
-                        Spacer()
-
-                        Button(action: { nextPage() }) {
-                            Image(systemName: "chevron.right.circle.fill")
-                                .font(.system(size: 44))
-                        }
-                        .disabled(currentPage >= pdfDocument.pageCount - 1)
                     }
-                    .padding()
                 }
             }
+            .padding()
         }
-    }
-
-    func nextPage() {
-        if currentPage < pdfDocument.pageCount - 1 {
-            currentPage += 1
-        }
-    }
-
-    func previousPage() {
-        if currentPage > 0 {
-            currentPage -= 1
-        }
+        .scrollIndicators(.visible)
     }
 }
 
 struct PDFPageView: UIViewRepresentable {
     let page: PDFPage
     @Binding var selectedColor: Color
+    let pageIndex: Int
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(selectedColor: $selectedColor)
+        Coordinator(selectedColor: $selectedColor, pageIndex: pageIndex)
     }
 
     func makeUIView(context: Context) -> UIView {
@@ -234,10 +231,27 @@ struct PDFPageView: UIViewRepresentable {
 
         // PencilKit canvas overlay
         let canvasView = PKCanvasView()
+
+        // On iPad: only allow Apple Pencil, not finger/mouse
+        // On Mac Catalyst: allow any input
+        #if targetEnvironment(macCatalyst)
         canvasView.drawingPolicy = .anyInput
+        #else
+        canvasView.drawingPolicy = .pencilOnly
+        #endif
+
         canvasView.isOpaque = false
         canvasView.backgroundColor = .clear
         canvasView.translatesAutoresizingMaskIntoConstraints = false
+
+        // Allow scroll gestures to pass through to the parent ScrollView
+        canvasView.isUserInteractionEnabled = true
+
+        // Important: Allow simultaneous gestures so scrolling still works
+        if let scrollView = canvasView.subviews.first(where: { $0 is UIScrollView }) as? UIScrollView {
+            scrollView.isScrollEnabled = false
+        }
+
         containerView.addSubview(canvasView)
 
         // Setup tool with initial color
@@ -245,6 +259,7 @@ struct PDFPageView: UIViewRepresentable {
         canvasView.tool = ink
 
         context.coordinator.canvasView = canvasView
+        context.coordinator.containerView = containerView
 
         NSLayoutConstraint.activate([
             pdfView.topAnchor.constraint(equalTo: containerView.topAnchor),
@@ -257,6 +272,9 @@ struct PDFPageView: UIViewRepresentable {
             canvasView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
             canvasView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor)
         ])
+
+        // Load any saved drawings for this page
+        context.coordinator.loadDrawing()
 
         return containerView
     }
@@ -272,9 +290,28 @@ struct PDFPageView: UIViewRepresentable {
     class Coordinator: NSObject {
         @Binding var selectedColor: Color
         weak var canvasView: PKCanvasView?
+        weak var containerView: UIView?
+        let pageIndex: Int
 
-        init(selectedColor: Binding<Color>) {
+        // Store drawings per page
+        static var pageDrawings: [Int: PKDrawing] = [:]
+
+        init(selectedColor: Binding<Color>, pageIndex: Int) {
             self._selectedColor = selectedColor
+            self.pageIndex = pageIndex
+            super.init()
+        }
+
+        func saveDrawing() {
+            if let canvas = canvasView {
+                Coordinator.pageDrawings[pageIndex] = canvas.drawing
+            }
+        }
+
+        func loadDrawing() {
+            if let canvas = canvasView, let drawing = Coordinator.pageDrawings[pageIndex] {
+                canvas.drawing = drawing
+            }
         }
     }
 }

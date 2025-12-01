@@ -344,10 +344,10 @@ export const Chat: FC<BaseWidgetComponentProps> = (props) => {
     return () => {
       console.log('[Chat UI] Cleaning up event listeners for conversationId:', currentConversationId);
       // Note: Global stream manager handles saving, even if component unmounts
-      // Remove only this instance's listeners
-      (window as any).claudeAPI.offMessage(messageHandler);
-      (window as any).claudeAPI.offComplete(completeHandler);
-      (window as any).claudeAPI.offError(errorHandler);
+      // Call cleanup functions directly (they already remove the listeners)
+      messageHandler();
+      completeHandler();
+      errorHandler();
     };
   }, [backend, currentConversationId]);
 
@@ -372,7 +372,8 @@ export const Chat: FC<BaseWidgetComponentProps> = (props) => {
     const questionHandler = (window as any).claudeAPI.onUserQuestion(handleQuestion);
 
     return () => {
-      (window as any).claudeAPI.offUserQuestion(questionHandler);
+      // Call cleanup function directly
+      questionHandler();
     };
   }, [backend]);
 
