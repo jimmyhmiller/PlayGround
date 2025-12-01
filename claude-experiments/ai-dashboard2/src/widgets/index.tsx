@@ -1,56 +1,57 @@
 import { FC } from 'react';
-import type { Theme, WidgetConfig, Dashboard, LayoutSettings } from '../types';
+import type { Theme, WidgetConfig, Dashboard, LayoutSettings as LayoutSettingsType } from '../types';
+import type { BaseWidgetComponentProps } from '../components/ui/Widget';
 
-export interface WidgetProps {
-  theme: Theme;
-  config: WidgetConfig;
-  dashboardId?: string;
-  dashboard?: Dashboard;
-  layout?: LayoutSettings;
-  widgetKey?: string;
-  currentConversationId?: string | null;
-  setCurrentConversationId?: (id: string | null) => void;
-  widgetConversations?: Record<string, string | null>;
-  reloadTrigger?: number;
-}
+// Import ALL widget implementations
+import { Stat } from './Stat';
+import { Progress } from './Progress';
+import { TodoList } from './TodoList';
+import { FileList } from './FileList';
+import { KeyValue } from './KeyValue';
+import { DiffList } from './DiffList';
+import { Markdown } from './Markdown';
+import { BarChart } from './BarChart';
+import { Chat } from './Chat';
+import { CodeEditor } from './CodeEditor';
+import { CommandRunner } from './CommandRunner';
+import { ClaudeTodoList } from './ClaudeTodoList';
+import { ErrorTest } from './ErrorTest';
+import { FlippableTest } from './FlippableTest';
+import { JsonViewer } from './JsonViewer';
+import { LayoutSettings } from './LayoutSettings';
+import { TestResults } from './TestResults';
+import { WebView } from './WebView';
 
-// Placeholder widget component for migration
-const PlaceholderWidget: FC<WidgetProps & { widgetType: string }> = ({ theme, widgetType }) => (
-  <div style={{
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: '100%',
-    fontFamily: theme.textBody,
-    color: theme.accent,
-    fontSize: '1.2rem'
-  }}>
-    {widgetType} (Under Migration)
-  </div>
-);
+// Re-export them all
+export {
+  Stat,
+  Progress,
+  TodoList,
+  FileList,
+  KeyValue,
+  DiffList,
+  Markdown,
+  BarChart,
+  Chat,
+  CodeEditor,
+  CommandRunner,
+  ClaudeTodoList,
+  ErrorTest,
+  FlippableTest,
+  JsonViewer,
+  LayoutSettings,
+  TestResults,
+  WebView
+};
 
-// Widget implementations (stubs for now)
-export const BarChart: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="BarChart" />;
-export const Chat: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="Chat" />;
-export const CodeEditor: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="CodeEditor" />;
-export const CommandRunner: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="CommandRunner" />;
-export const DiffList: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="DiffList" />;
-export const ErrorTest: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="ErrorTest" />;
-export const FileList: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="FileList" />;
-export const FlippableTest: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="FlippableTest" />;
-export const JsonViewer: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="JsonViewer" />;
-export const KeyValue: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="KeyValue" />;
-export const LayoutSettingsWidget: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="LayoutSettings" />;
-export const Markdown: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="Markdown" />;
-export const Progress: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="Progress" />;
-export const Stat: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="Stat" />;
-export const TestResults: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="TestResults" />;
-export const TodoList: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="TodoList" />;
-export const ClaudeTodoList: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="ClaudeTodoList" />;
-export const WebView: FC<WidgetProps> = (props) => <PlaceholderWidget {...props} widgetType="WebView" />;
+export type WidgetProps = BaseWidgetComponentProps;
 
-// Widget Registry
+// Alias for LayoutSettings to match registry key
+export const LayoutSettingsWidget = LayoutSettings;
+
+// Widget Registry - supports both kebab-case and camelCase
 export const WIDGET_REGISTRY: Record<string, FC<WidgetProps>> = {
+  // Kebab-case (legacy)
   'bar-chart': BarChart,
   'chat': Chat,
   'code-editor': CodeEditor,
@@ -69,4 +70,20 @@ export const WIDGET_REGISTRY: Record<string, FC<WidgetProps>> = {
   'todo-list': TodoList,
   'claude-todo-list': ClaudeTodoList,
   'webview': WebView,
+
+  // CamelCase (current standard)
+  'barChart': BarChart,
+  'codeEditor': CodeEditor,
+  'commandRunner': CommandRunner,
+  'diffList': DiffList,
+  'errorTest': ErrorTest,
+  'fileList': FileList,
+  'flippableTest': FlippableTest,
+  'jsonViewer': JsonViewer,
+  'keyValue': KeyValue,
+  'layoutSettings': LayoutSettingsWidget,
+  'testResults': TestResults,
+  'todoList': TodoList,
+  'claudeTodos': ClaudeTodoList,
+  'webView': WebView,
 };

@@ -24,23 +24,33 @@ public class DirectoryTester {
 
     public static void main(String[] args) throws IOException {
         if (args.length == 0) {
-            System.err.println("Usage: java DirectoryTester <directory-path> [--max-failures=N] [--max-mismatches=N]");
+            System.err.println("Usage: java DirectoryTester <directory-path> [--max-failures=N] [--max-mismatches=N] [--max-too-permissive=N]");
             System.err.println("");
             System.err.println("Examples:");
             System.err.println("  java DirectoryTester ../my-project");
             System.err.println("  java DirectoryTester ~/code/app");
             System.err.println("  java DirectoryTester ../my-project --max-failures=10");
             System.err.println("  java DirectoryTester ../my-project --max-failures=10 --max-mismatches=10");
+            System.err.println("  java DirectoryTester ../my-project --max-failures=5 --max-too-permissive=5");
             System.err.println("");
             System.err.println("Options:");
-            System.err.println("  --max-failures=N    Stop after N parse failures (default: unlimited)");
-            System.err.println("  --max-mismatches=N  Stop after N AST mismatches (default: unlimited)");
+            System.err.println("  --max-failures=N        Stop after N Java parser failures (Acorn succeeded but Java failed) (default: unlimited)");
+            System.err.println("  --max-mismatches=N      Stop after N AST mismatches (both succeeded but different ASTs) (default: unlimited)");
+            System.err.println("  --max-too-permissive=N  Stop after N cases where Java is too permissive (Java succeeded but Acorn failed) (default: unlimited)");
+            System.err.println("");
+            System.err.println("Categories:");
+            System.err.println("  - Both succeeded + matched: Perfect agreement");
+            System.err.println("  - Both succeeded + AST mismatch: Parsing succeeded but ASTs differ");
+            System.err.println("  - Both failed: Both agree code is invalid");
+            System.err.println("  - Java failed, Acorn succeeded: Java parser bug (real failure)");
+            System.err.println("  - Java succeeded, Acorn failed: Java is too permissive (warning)");
             System.exit(1);
         }
 
         String dirPath = args[0];
         int maxFailures = Integer.MAX_VALUE;
         int maxMismatches = Integer.MAX_VALUE;
+        int maxTooPermissive = Integer.MAX_VALUE;
 
         // Parse arguments
         for (int i = 1; i < args.length; i++) {
@@ -56,6 +66,13 @@ public class DirectoryTester {
                     maxMismatches = Integer.parseInt(args[i].substring("--max-mismatches=".length()));
                 } catch (NumberFormatException e) {
                     System.err.println("Invalid value for --max-mismatches: " + args[i]);
+                    System.exit(1);
+                }
+            } else if (args[i].startsWith("--max-too-permissive=")) {
+                try {
+                    maxTooPermissive = Integer.parseInt(args[i].substring("--max-too-permissive=".length()));
+                } catch (NumberFormatException e) {
+                    System.err.println("Invalid value for --max-too-permissive: " + args[i]);
                     System.exit(1);
                 }
             }
@@ -90,41 +107,53 @@ public class DirectoryTester {
         AtomicInteger javaFailed = new AtomicInteger(0);
         AtomicInteger matched = new AtomicInteger(0);
         AtomicInteger mismatched = new AtomicInteger(0);
-        AtomicInteger skipped = new AtomicInteger(0);
+        AtomicInteger bothFailed = new AtomicInteger(0); // Both parsers agree code is invalid
+        AtomicInteger javaFailedAcornSucceeded = new AtomicInteger(0); // Java failed, Acorn succeeded
+        AtomicInteger javaSucceededAcornFailed = new AtomicInteger(0); // Java succeeded, Acorn failed (too permissive)
 
-        List<String> failedFiles = new ArrayList<>();
+        List<String> javaFailedFiles = new ArrayList<>();
+        List<String> javaSucceededAcornFailedFiles = new ArrayList<>();
         List<String> mismatchedFiles = new ArrayList<>();
         Map<String, Integer> errorMessages = new HashMap<>();
 
         System.out.println("Testing files (parsing with both Acorn and Java)...");
-        if (maxFailures < Integer.MAX_VALUE || maxMismatches < Integer.MAX_VALUE) {
-            if (maxFailures < Integer.MAX_VALUE && maxMismatches < Integer.MAX_VALUE) {
-                System.out.println("Will stop after " + maxFailures + " parse failures or " + maxMismatches + " AST mismatches\n");
-            } else if (maxFailures < Integer.MAX_VALUE) {
-                System.out.println("Will stop after " + maxFailures + " parse failures\n");
-            } else {
-                System.out.println("Will stop after " + maxMismatches + " AST mismatches\n");
+        if (maxFailures < Integer.MAX_VALUE || maxMismatches < Integer.MAX_VALUE || maxTooPermissive < Integer.MAX_VALUE) {
+            List<String> limits = new ArrayList<>();
+            if (maxFailures < Integer.MAX_VALUE) {
+                limits.add(maxFailures + " Java failures");
             }
+            if (maxMismatches < Integer.MAX_VALUE) {
+                limits.add(maxMismatches + " AST mismatches");
+            }
+            if (maxTooPermissive < Integer.MAX_VALUE) {
+                limits.add(maxTooPermissive + " too-permissive cases");
+            }
+            System.out.println("Will stop after " + String.join(" or ", limits) + "\n");
         } else {
             System.out.println();
         }
 
         for (Path file : jsFiles) {
-            // Check if we've hit max failures or mismatches
-            if (javaFailed.get() >= maxFailures) {
-                System.out.println("\n⚠ Reached maximum failure limit (" + maxFailures + "), stopping early");
+            // Check if we've hit max failures, mismatches, or too-permissive
+            if (javaFailedAcornSucceeded.get() >= maxFailures) {
+                System.out.println("\n⚠ Reached maximum Java failure limit (" + maxFailures + "), stopping early");
                 break;
             }
             if (mismatched.get() >= maxMismatches) {
                 System.out.println("\n⚠ Reached maximum mismatch limit (" + maxMismatches + "), stopping early");
                 break;
             }
+            if (javaSucceededAcornFailed.get() >= maxTooPermissive) {
+                System.out.println("\n⚠ Reached maximum too-permissive limit (" + maxTooPermissive + "), stopping early");
+                break;
+            }
 
             processed.incrementAndGet();
 
             if (processed.get() % 100 == 0) {
-                System.out.printf("Progress: %d/%d (%d matched, %d mismatched, %d Java failed, %d Acorn failed)%n",
-                    processed.get(), jsFiles.size(), matched.get(), mismatched.get(), javaFailed.get(), acornFailed.get());
+                System.out.printf("Progress: %d/%d (%d matched, %d mismatched, %d Java failed, %d Java too permissive, %d both failed)%n",
+                    processed.get(), jsFiles.size(), matched.get(), mismatched.get(),
+                    javaFailedAcornSucceeded.get(), javaSucceededAcornFailed.get(), bothFailed.get());
             }
 
             String relativePath = targetDir.relativize(file).toString();
@@ -134,67 +163,82 @@ public class DirectoryTester {
 
                 // Parse with Acorn
                 AcornResult acornResult = parseWithAcorn(source, file);
+                boolean acornSucceeded = acornResult.success;
 
-                if (!acornResult.success) {
+                if (acornSucceeded) {
+                    acornSuccess.incrementAndGet();
+                } else {
                     acornFailed.incrementAndGet();
-                    skipped.incrementAndGet();
-                    continue;
                 }
-
-                acornSuccess.incrementAndGet();
 
                 // Parse with Java
-                boolean isModule = acornResult.sourceType.equals("module");
-                Program javaAst;
+                boolean isModule = acornSucceeded ? acornResult.sourceType.equals("module") :
+                    (file.toString().endsWith(".mjs") || source.contains("import ") || source.contains("export "));
+
+                Program javaAst = null;
+                boolean javaSucceeded = false;
+                String javaError = null;
+
                 try {
                     javaAst = Parser.parse(source, isModule);
+                    javaSucceeded = true;
+                    javaSuccess.incrementAndGet();
                 } catch (ParseException e) {
                     javaFailed.incrementAndGet();
-                    String errorMsg = e.getMessage();
-                    if (errorMsg != null && errorMsg.length() > 100) {
-                        errorMsg = errorMsg.substring(0, 100);
+                    javaError = e.getMessage();
+                    if (javaError != null && javaError.length() > 100) {
+                        javaError = javaError.substring(0, 100);
                     }
-                    if (errorMsg != null) {
-                        errorMessages.merge(errorMsg, 1, Integer::sum);
-                    }
-                    if (failedFiles.size() < 50) {
-                        failedFiles.add(relativePath + ": " + errorMsg);
-                    }
-                    continue;
                 } catch (Exception e) {
                     javaFailed.incrementAndGet();
-                    if (failedFiles.size() < 50) {
-                        failedFiles.add(relativePath + ": " + e.getMessage());
-                    }
-                    continue;
+                    javaError = e.getMessage();
                 }
 
-                javaSuccess.incrementAndGet();
-
-                // Compare ASTs
-                String acornJson = acornResult.astJson;
-                String javaJson = mapper.writeValueAsString(javaAst);
-
-                // Parse both for structural comparison
-                Object acornObj = mapper.readValue(acornJson, Object.class);
-                Object javaObj = mapper.readValue(javaJson, Object.class);
-
-                // Normalize
-                normalizeRegexValues(acornObj, javaObj);
-                normalizeBigIntValues(acornObj, javaObj);
-
-                if (Objects.deepEquals(acornObj, javaObj)) {
-                    matched.incrementAndGet();
+                // Analyze outcomes
+                if (!acornSucceeded && !javaSucceeded) {
+                    // Both parsers failed - they agree the code is invalid
+                    bothFailed.incrementAndGet();
+                } else if (acornSucceeded && !javaSucceeded) {
+                    // Acorn succeeded but Java failed - Java parser bug
+                    javaFailedAcornSucceeded.incrementAndGet();
+                    if (javaError != null) {
+                        errorMessages.merge(javaError, 1, Integer::sum);
+                    }
+                    if (javaFailedFiles.size() < 50) {
+                        javaFailedFiles.add(relativePath + ": " + javaError);
+                    }
+                } else if (!acornSucceeded && javaSucceeded) {
+                    // Java succeeded but Acorn failed - Java is too permissive
+                    javaSucceededAcornFailed.incrementAndGet();
+                    if (javaSucceededAcornFailedFiles.size() < 50) {
+                        javaSucceededAcornFailedFiles.add(relativePath);
+                    }
                 } else {
-                    mismatched.incrementAndGet();
-                    if (mismatchedFiles.size() < 20) {
-                        mismatchedFiles.add(relativePath);
+                    // Both succeeded - compare ASTs
+                    String acornJson = acornResult.astJson;
+                    String javaJson = mapper.writeValueAsString(javaAst);
+
+                    // Parse both for structural comparison
+                    Object acornObj = mapper.readValue(acornJson, Object.class);
+                    Object javaObj = mapper.readValue(javaJson, Object.class);
+
+                    // Normalize
+                    normalizeRegexValues(acornObj, javaObj);
+                    normalizeBigIntValues(acornObj, javaObj);
+
+                    if (Objects.deepEquals(acornObj, javaObj)) {
+                        matched.incrementAndGet();
+                    } else {
+                        mismatched.incrementAndGet();
+                        if (mismatchedFiles.size() < 20) {
+                            mismatchedFiles.add(relativePath);
+                        }
                     }
                 }
             } catch (Exception e) {
-                javaFailed.incrementAndGet();
-                if (failedFiles.size() < 50) {
-                    failedFiles.add(relativePath + ": [Comparison error] " + e.getMessage());
+                javaFailedAcornSucceeded.incrementAndGet();
+                if (javaFailedFiles.size() < 50) {
+                    javaFailedFiles.add(relativePath + ": [Comparison error] " + e.getMessage());
                 }
             }
         }
@@ -202,39 +246,48 @@ public class DirectoryTester {
         // Print results
         System.out.println("\n=== Results ===");
         System.out.printf("Total files: %d%n", jsFiles.size());
-        System.out.printf("Skipped (Acorn failed): %d%n", skipped.get());
+
+        System.out.println("\nParser outcomes:");
+        System.out.printf("  ✓ Both succeeded + matched: %d (%.2f%%)%n",
+            matched.get(), (matched.get() * 100.0 / jsFiles.size()));
+        System.out.printf("  ⚠ Both succeeded + AST mismatch: %d (%.2f%%)%n",
+            mismatched.get(), (mismatched.get() * 100.0 / jsFiles.size()));
+        System.out.printf("  ✓ Both failed (agree invalid): %d (%.2f%%)%n",
+            bothFailed.get(), (bothFailed.get() * 100.0 / jsFiles.size()));
+        System.out.printf("  ✗ Java failed, Acorn succeeded: %d (%.2f%%)%n",
+            javaFailedAcornSucceeded.get(), (javaFailedAcornSucceeded.get() * 100.0 / jsFiles.size()));
+        System.out.printf("  ⚠ Java succeeded, Acorn failed (too permissive): %d (%.2f%%)%n",
+            javaSucceededAcornFailed.get(), (javaSucceededAcornFailed.get() * 100.0 / jsFiles.size()));
+
         System.out.println("\nAcorn results:");
         System.out.printf("  ✓ Successfully parsed: %d (%.2f%%)%n",
             acornSuccess.get(), (acornSuccess.get() * 100.0 / jsFiles.size()));
         System.out.printf("  ✗ Failed to parse: %d (%.2f%%)%n",
             acornFailed.get(), (acornFailed.get() * 100.0 / jsFiles.size()));
 
-        System.out.println("\nJava parser results (on files Acorn succeeded):");
-        int acornSuccessCount = acornSuccess.get();
+        System.out.println("\nJava parser results:");
         System.out.printf("  ✓ Successfully parsed: %d (%.2f%%)%n",
-            javaSuccess.get(), acornSuccessCount > 0 ? (javaSuccess.get() * 100.0 / acornSuccessCount) : 0);
+            javaSuccess.get(), (javaSuccess.get() * 100.0 / jsFiles.size()));
         System.out.printf("  ✗ Failed to parse: %d (%.2f%%)%n",
-            javaFailed.get(), acornSuccessCount > 0 ? (javaFailed.get() * 100.0 / acornSuccessCount) : 0);
-
-        System.out.println("\nComparison (on files both parsers succeeded):");
-        int totalSuccess = javaSuccess.get();
-        System.out.printf("  ✓ Exact matches: %d (%.2f%%)%n",
-            matched.get(), totalSuccess > 0 ? (matched.get() * 100.0 / totalSuccess) : 0);
-        System.out.printf("  ✗ AST mismatches: %d (%.2f%%)%n",
-            mismatched.get(), totalSuccess > 0 ? (mismatched.get() * 100.0 / totalSuccess) : 0);
+            javaFailed.get(), (javaFailed.get() * 100.0 / jsFiles.size()));
 
         if (!mismatchedFiles.isEmpty()) {
-            System.out.println("\nFirst 20 mismatched files:");
+            System.out.println("\nFirst 20 AST mismatches (both parsers succeeded but different ASTs):");
             mismatchedFiles.forEach(f -> System.out.println("  " + f));
         }
 
-        if (!failedFiles.isEmpty()) {
-            System.out.println("\nFirst 50 failed files:");
-            failedFiles.forEach(f -> System.out.println("  " + f));
+        if (!javaFailedFiles.isEmpty()) {
+            System.out.println("\nFirst 50 Java parser failures (Acorn succeeded):");
+            javaFailedFiles.forEach(f -> System.out.println("  " + f));
+        }
+
+        if (!javaSucceededAcornFailedFiles.isEmpty()) {
+            System.out.println("\nFirst 50 files where Java is too permissive (Acorn failed):");
+            javaSucceededAcornFailedFiles.forEach(f -> System.out.println("  " + f));
         }
 
         if (!errorMessages.isEmpty()) {
-            System.out.println("\nError messages:");
+            System.out.println("\nJava parser error messages:");
             errorMessages.entrySet().stream()
                 .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
                 .limit(20)
@@ -262,7 +315,9 @@ public class DirectoryTester {
             String sourceType = "script";
             if (filePath.toString().endsWith(".mjs") ||
                 source.contains("import ") ||
-                source.contains("export ")) {
+                source.contains("export ") ||
+                source.contains("flags:\n  - module") ||
+                source.contains("flags: [module]")) {
                 sourceType = "module";
             }
 

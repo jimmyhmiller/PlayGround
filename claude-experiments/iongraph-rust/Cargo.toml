@@ -11,3 +11,7 @@ clap = { version = "4.0", features = ["derive"] }
 [dev-dependencies]
 insta = { version = "1.34", features = ["yaml"] }
 futures = "0.3"
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true

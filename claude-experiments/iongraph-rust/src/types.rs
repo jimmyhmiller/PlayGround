@@ -124,7 +124,7 @@ pub struct LayoutNode {
     pub size: Vec2,
     pub block: Option<Block>,
     pub src_nodes: Vec<LayoutNodeID>, // References to source nodes by ID
-    pub dst_nodes: Vec<LayoutNodeID>, // References to destination nodes by ID
+    pub dst_nodes: Vec<Option<LayoutNodeID>>, // Indexed by port number - None means unfilled
     pub joint_offsets: Vec<f64>,
     pub flags: u32, // NodeFlags
     pub dst_block: Option<Block>, // For dummy nodes
@@ -139,13 +139,14 @@ pub const IMMINENT_BACKEDGE_DUMMY: NodeFlags = 1 << 2;
 impl LayoutNode {
     pub fn new_block_node(id: LayoutNodeID, block: Block, layer: usize) -> Self {
         let size = block.size.clone(); // Use the calculated block size
+        let num_successors = block.successors.len();
         Self {
             id,
             pos: Vec2::new(CONTENT_PADDING, CONTENT_PADDING),
             size,  // Use the block's calculated size
             block: Some(block),
             src_nodes: vec![],
-            dst_nodes: vec![],
+            dst_nodes: vec![None; num_successors], // Pre-allocate with None
             joint_offsets: vec![],
             flags: 0,
             dst_block: None,
@@ -160,7 +161,7 @@ impl LayoutNode {
             size: Vec2::new(0.0, 0.0), // Dummy nodes have no size
             block: None,
             src_nodes: vec![],
-            dst_nodes: vec![],
+            dst_nodes: vec![None; 1], // Dummy has one outgoing edge (port 0)
             joint_offsets: vec![],
             flags: 0,
             dst_block: Some(dst_block),
@@ -346,3 +347,4 @@ pub const NEARLY_STRAIGHT_ITERATIONS: usize = 8;
 pub const JOINT_SPACING: f64 = 16.0;
 pub const TRACK_PADDING: f64 = 36.0;
 pub const CONTENT_PADDING: f64 = 20.0;
+pub const HEADER_ARROW_PUSHDOWN: f64 = 16.0;

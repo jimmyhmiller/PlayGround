@@ -11,7 +11,7 @@ interface DashboardContext {
 interface WatchedPathEntry {
   dashboard: Dashboard;
   lastWriteTime: number | null;
-  watcher?: any;
+  watcher?: fs.FSWatcher | fs.StatWatcher;
   projectId?: string;
 }
 
@@ -34,7 +34,7 @@ export function createDashboardTools(
   permissionMode: PermissionMode = 'bypassPermissions'
 ) {
   const { config, filePath } = dashboardContext;
-  const tools: any[] = [];
+  const tools: Array<ReturnType<typeof tool<any>>> = [];
 
   // Helper function to safely update dashboard JSON
   function updateDashboard(updater: (dashboard: Dashboard) => UpdateResult): UpdateResult {
@@ -72,10 +72,9 @@ export function createDashboardTools(
     const widgetId = widget.id;
     const widgetType = widget.type;
     const widgetLabel = Array.isArray(widget.label) ? widget.label.join(' - ') : widget.label || widgetId;
-    const widgetConfig = widget as any;
 
     // Skip read-only widgets
-    if (widgetConfig.readOnly || widgetConfig.derived || widgetType === 'claude-todo-list') {
+    if (widget.readOnly || widget.derived || widgetType === 'claude-todo-list') {
       console.log(`[Dashboard Tools] Skipping read-only/derived widget: ${widgetId} (${widgetType})`);
       return;
     }
@@ -91,11 +90,13 @@ export function createDashboardTools(
           },
           async ({ value }: { value: string }) => {
             const result = updateDashboard((dashboard) => {
-              const targetWidget = dashboard.widgets.find(w => w.id === widgetId) as any;
+              const targetWidget = dashboard.widgets.find(w => w.id === widgetId);
               if (!targetWidget) {
                 return { error: `Widget ${widgetId} not found` };
               }
-              targetWidget.value = value;
+              if ('value' in targetWidget) {
+                targetWidget.value = value;
+              }
               return { message: `Updated ${widgetLabel} to: ${value}` };
             });
 
@@ -124,11 +125,13 @@ export function createDashboardTools(
           },
           async ({ data }: { data: number[] }) => {
             const result = updateDashboard((dashboard) => {
-              const targetWidget = dashboard.widgets.find(w => w.id === widgetId) as any;
+              const targetWidget = dashboard.widgets.find(w => w.id === widgetId);
               if (!targetWidget) {
                 return { error: `Widget ${widgetId} not found` };
               }
-              targetWidget.data = data;
+              if ('data' in targetWidget) {
+                targetWidget.data = data;
+              }
               return { message: `Updated ${widgetLabel} with ${data.length} data points` };
             });
 
@@ -158,12 +161,14 @@ export function createDashboardTools(
           },
           async ({ value, text }: { value: number; text?: string }) => {
             const result = updateDashboard((dashboard) => {
-              const targetWidget = dashboard.widgets.find(w => w.id === widgetId) as any;
+              const targetWidget = dashboard.widgets.find(w => w.id === widgetId);
               if (!targetWidget) {
                 return { error: `Widget ${widgetId} not found` };
               }
-              targetWidget.value = value;
-              if (text !== undefined) {
+              if ('value' in targetWidget) {
+                targetWidget.value = value;
+              }
+              if (text !== undefined && 'text' in targetWidget) {
                 targetWidget.text = text;
               }
               return { message: `Updated ${widgetLabel} to ${value}%` };
@@ -195,9 +200,12 @@ export function createDashboardTools(
           },
           async ({ text, done }: { text: string; done?: boolean }) => {
             const result = updateDashboard((dashboard) => {
-              const targetWidget = dashboard.widgets.find(w => w.id === widgetId) as any;
+              const targetWidget = dashboard.widgets.find(w => w.id === widgetId);
               if (!targetWidget) {
                 return { error: `Widget ${widgetId} not found` };
+              }
+              if (targetWidget.type !== 'todo-list') {
+                return { error: `Widget ${widgetId} is not a todo-list widget` };
               }
               if (!targetWidget.items) {
                 targetWidget.items = [];
@@ -228,16 +236,23 @@ export function createDashboardTools(
           },
           async ({ index }: { index: number }) => {
             const result = updateDashboard((dashboard) => {
-              const targetWidget = dashboard.widgets.find(w => w.id === widgetId) as any;
-              if (!targetWidget || !targetWidget.items) {
-                return { error: `Widget ${widgetId} not found or has no items` };
+              const targetWidget = dashboard.widgets.find(w => w.id === widgetId);
+              if (!targetWidget) {
+                return { error: `Widget ${widgetId} not found` };
+              }
+              if (targetWidget.type !== 'todo-list') {
+                return { error: `Widget ${widgetId} is not a todo-list widget` };
+              }
+              if (!targetWidget.items || targetWidget.items.length === 0) {
+                return { error: `Widget ${widgetId} has no items` };
               }
               if (index >= targetWidget.items.length) {
                 return { error: `Todo index ${index} out of range (max: ${targetWidget.items.length - 1})` };
               }
-              targetWidget.items[index].done = !targetWidget.items[index].done;
-              const status = targetWidget.items[index].done ? 'completed' : 'incomplete';
-              return { message: `Marked todo "${targetWidget.items[index].text}" as ${status}` };
+              const item = targetWidget.items[index];
+              item.done = !item.done;
+              const status = item.done ? 'completed' : 'incomplete';
+              return { message: `Marked todo "${item.text}" as ${status}` };
             });
 
             return {
@@ -266,14 +281,17 @@ export function createDashboardTools(
           },
           async ({ key, value }: { key: string; value: string }) => {
             const result = updateDashboard((dashboard) => {
-              const targetWidget = dashboard.widgets.find(w => w.id === widgetId) as any;
+              const targetWidget = dashboard.widgets.find(w => w.id === widgetId);
               if (!targetWidget) {
                 return { error: `Widget ${widgetId} not found` };
+              }
+              if (targetWidget.type !== 'key-value') {
+                return { error: `Widget ${widgetId} is not a key-value widget` };
               }
               if (!targetWidget.items) {
                 targetWidget.items = [];
               }
-              const existing = targetWidget.items.find((item: any) => item.key === key);
+              const existing = targetWidget.items.find(item => item.key === key);
               if (existing) {
                 existing.value = value;
                 return { message: `Updated ${key} = ${value} in ${widgetLabel}` };

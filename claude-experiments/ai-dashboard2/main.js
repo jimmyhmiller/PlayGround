@@ -42,6 +42,8 @@ const claude_agent_sdk_1 = require("@anthropic-ai/claude-agent-sdk");
 const dashboard_tools_1 = require("./dashboard-tools");
 const projectUtils = __importStar(require("./project-utils"));
 const isDev = process.env.NODE_ENV === 'development';
+// Set app name to ensure consistent userData path in dev and prod
+electron_1.app.setName('ai-dashboard2');
 let mainWindow = null;
 // Global state Maps with proper types
 const watchedPaths = new Map();
@@ -54,17 +56,25 @@ const webContentsViews = new Map();
 const activeChats = new Map();
 const runningCommands = new Map();
 // File paths
-const configFilePath = path.join(electron_1.app.getPath('userData'), 'dashboard-paths.json');
-const projectsPath = path.join(electron_1.app.getPath('userData'), 'projects.json');
+const userDataPath = electron_1.app.getPath('userData');
+const configFilePath = path.join(userDataPath, 'dashboard-paths.json');
+const projectsPath = path.join(userDataPath, 'projects.json');
+console.log('[App] userData path:', userDataPath);
+console.log('[App] Config file path:', configFilePath);
+console.log('[App] Projects file path:', projectsPath);
 const chatStoragePath = path.join(electron_1.app.getPath('userData'), 'chat-history.json');
 const conversationsPath = path.join(electron_1.app.getPath('userData'), 'conversations.json');
 // Load saved config paths
 function loadSavedPaths() {
     try {
+        console.log('[loadSavedPaths] Checking if file exists:', configFilePath);
+        console.log('[loadSavedPaths] File exists:', fs.existsSync(configFilePath));
         if (fs.existsSync(configFilePath)) {
             const data = JSON.parse(fs.readFileSync(configFilePath, 'utf-8'));
+            console.log('[loadSavedPaths] Loaded data:', data);
             return data.paths || [];
         }
+        console.log('[loadSavedPaths] Config file does not exist');
     }
     catch (e) {
         console.error('Error loading saved paths:', e);
@@ -143,12 +153,18 @@ function saveConversations() {
 // Load projects from disk
 function loadProjects() {
     try {
+        console.log('[loadProjects] Checking if file exists:', projectsPath);
+        console.log('[loadProjects] File exists:', fs.existsSync(projectsPath));
         if (fs.existsSync(projectsPath)) {
             const data = JSON.parse(fs.readFileSync(projectsPath, 'utf-8'));
+            console.log('[loadProjects] Loaded raw data, keys:', Object.keys(data));
             Object.entries(data).forEach(([projectId, project]) => {
                 projects.set(projectId, project);
             });
             console.log(`[Projects] Loaded ${projects.size} projects`);
+        }
+        else {
+            console.log('[loadProjects] Projects file does not exist');
         }
     }
     catch (e) {
@@ -314,15 +330,15 @@ electron_1.ipcMain.handle('update-widget-dimensions', async (_event, { dashboard
         if (!widget) {
             return { success: false, error: 'Widget not found' };
         }
-        const widgetAny = widget;
+        // Update widget dimensions (all widgets have these optional properties)
         if (dimensions.width !== undefined)
-            widgetAny.width = dimensions.width;
+            widget.width = dimensions.width;
         if (dimensions.height !== undefined)
-            widgetAny.height = dimensions.height;
+            widget.height = dimensions.height;
         if (dimensions.x !== undefined)
-            widgetAny.x = dimensions.x;
+            widget.x = dimensions.x;
         if (dimensions.y !== undefined)
-            widgetAny.y = dimensions.y;
+            widget.y = dimensions.y;
         entry.lastWriteTime = Date.now();
         fs.writeFileSync(targetPath, JSON.stringify(entry.dashboard, null, 2), 'utf-8');
         return { success: true };
@@ -1265,7 +1281,7 @@ electron_1.ipcMain.handle('regenerate-widget', async (_event, { dashboardId, wid
                         if (match) {
                             const name = `${match[1]}::${match[2]}`;
                             const result = match[3];
-                            let status;
+                            let status = 'passed';
                             if (result === 'PASSED') {
                                 status = 'passed';
                             }
@@ -1374,33 +1390,40 @@ electron_1.ipcMain.handle('regenerate-widget', async (_event, { dashboardId, wid
                 }
                 try {
                     switch (widget.type) {
-                        case 'barChart':
-                            widget.data = data;
+                        case 'bar-chart':
+                            if ('data' in widget)
+                                widget.data = data;
                             break;
                         case 'stat':
-                            widget.value = data;
+                            if ('value' in widget)
+                                widget.value = data;
                             break;
                         case 'progress':
-                            if (typeof data === 'object' && data.value !== undefined) {
-                                widget.value = data.value;
-                                if (data.text !== undefined)
-                                    widget.text = data.text;
+                            if ('value' in widget) {
+                                if (typeof data === 'object' && data.value !== undefined) {
+                                    widget.value = data.value;
+                                    if ('text' in widget && data.text !== undefined)
+                                        widget.text = data.text;
+                                }
+                                else {
+                                    widget.value = data;
+                                }
                             }
-                            else {
-                                widget.value = data;
-                            }
                             break;
-                        case 'diffList':
-                        case 'fileList':
-                        case 'todoList':
-                        case 'keyValue':
-                            widget.items = data;
+                        case 'diff-list':
+                        case 'file-list':
+                        case 'todo-list':
+                        case 'key-value':
+                            if ('items' in widget)
+                                widget.items = data;
                             break;
-                        case 'testResults':
-                            widget.tests = data;
+                        case 'test-results':
+                            if ('tests' in widget)
+                                widget.tests = data;
                             break;
-                        case 'jsonViewer':
-                            widget.data = data;
+                        case 'json-viewer':
+                            if ('data' in widget)
+                                widget.data = data;
                             break;
                         default:
                             if ('data' in widget) {
@@ -1464,8 +1487,10 @@ electron_1.ipcMain.handle('regenerate-all-widgets', async (event, { dashboardId 
             });
             results.push({
                 widgetId: widget.id,
-                label: Array.isArray(widget.label) ? widget.label.join(' - ') : widget.label,
-                ...result
+                label: Array.isArray(widget.label) ? widget.label.join(' - ') : widget.label || widget.id,
+                success: result?.success || false,
+                error: result?.error,
+                message: result?.message
             });
         }
         const successCount = results.filter(r => r.success).length;
@@ -1530,7 +1555,7 @@ electron_1.ipcMain.handle('project-add', async (_event, { projectPath, type, nam
         // Create a Project object that includes both structure type and project type
         const project = {
             ...projectConfig,
-            type: type || projectConfig.type
+            type: (type || projectConfig.type)
         };
         projects.set(project.id, project);
         saveProjects();
@@ -1724,29 +1749,19 @@ Example good SVG (notice NO color attributes):
         let responseText = '';
         for await (const message of queryInstance) {
             console.log('[Projects] Received message:', JSON.stringify(message, null, 2));
-            if (message.type === 'result') {
-                // Try different ways to get the response text from the SDK
-                if (message.result) {
-                    responseText = message.result;
-                }
-                else if (message.content && Array.isArray(message.content)) {
-                    const textBlocks = message.content.filter((block) => block.type === 'text');
-                    responseText = textBlocks.map((block) => block.text).join('');
-                }
-                else if (message.text) {
-                    responseText = message.text;
-                }
-                console.log('[Projects] Got response text:', responseText.substring(0, 100) + '...');
-                if (responseText) {
-                    break;
-                }
+            if (message.type === 'result' && message.subtype === 'success') {
+                // SDKResultMessage with success subtype has a result field
+                responseText = message.result;
+                console.log('[Projects] Got response text from result:', responseText.substring(0, 100) + '...');
+                break;
             }
             else if (message.type === 'assistant' && message.message?.content) {
+                // SDKAssistantMessage has APIAssistantMessage with content array
                 const content = message.message.content;
                 if (Array.isArray(content)) {
-                    const textBlocks = content.filter((block) => block.type === 'text');
+                    const textBlocks = content.filter((block) => typeof block === 'object' && block !== null && 'type' in block && block.type === 'text');
                     if (textBlocks.length > 0) {
-                        responseText = textBlocks.map((block) => block.text).join('');
+                        responseText = textBlocks.map(block => block.text).join('');
                         console.log('[Projects] Got response text from assistant message:', responseText.substring(0, 100) + '...');
                         break;
                     }
@@ -1780,28 +1795,47 @@ Example good SVG (notice NO color attributes):
     }
 });
 electron_1.app.whenReady().then(() => {
+    console.log('[App] Starting dashboard loading...');
     const savedPaths = loadSavedPaths();
+    console.log(`[App] Found ${savedPaths.length} saved paths:`, savedPaths);
     savedPaths.forEach(watchFile);
     loadChatHistory();
     loadConversations();
     loadProjects();
+    console.log(`[App] Loaded ${projects.size} projects`);
     projects.forEach((project) => {
+        console.log(`[Projects] Processing project ${project.name} (${project.id})`);
         if (project.dashboards && Array.isArray(project.dashboards)) {
+            console.log(`[Projects] Project has ${project.dashboards.length} dashboards`);
             project.dashboards.forEach(dashboardPath => {
                 console.log(`[Projects] Watching dashboard from project ${project.id}: ${dashboardPath}`);
                 watchFile(dashboardPath);
                 const entry = watchedPaths.get(dashboardPath);
                 if (entry) {
                     entry.projectId = project.id;
+                    console.log(`[Projects] Successfully linked dashboard to project`);
+                }
+                else {
+                    console.error(`[Projects] Failed to watch dashboard: ${dashboardPath}`);
                 }
             });
         }
+        else {
+            console.log(`[Projects] Project has no dashboards array`);
+        }
     });
+    console.log(`[App] Total watched paths: ${watchedPaths.size}`);
+    const allDashboards = getAllDashboards();
+    console.log(`[App] Total dashboards available: ${allDashboards.length}`);
     createWindow();
 });
 electron_1.app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
-        watchedPaths.forEach((entry) => entry.watcher?.close());
+        watchedPaths.forEach((entry) => {
+            if (entry.watcher && 'close' in entry.watcher) {
+                entry.watcher.close();
+            }
+        });
         electron_1.app.quit();
     }
 });

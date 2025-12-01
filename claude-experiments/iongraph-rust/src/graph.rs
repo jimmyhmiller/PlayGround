@@ -11,7 +11,7 @@ fn html_escape(s: &str) -> String {
 }
 
 // Font metrics for monospace text (matching PureSVGTextLayoutProvider)
-const CHAR_WIDTH: f64 = 7.0;
+const CHAR_WIDTH: f64 = 7.0; // TypeScript PureSVGTextLayoutProvider uses charWidth = 7
 const CHAR_HEIGHT: f64 = 14.0;
 const PADDING: f64 = 8.0;
 const HEADER_HEIGHT: f64 = 30.0;
@@ -19,59 +19,52 @@ const HEADER_HEIGHT: f64 = 30.0;
 // Calculate block size based on instruction content
 fn calculate_block_size(block: &Block) -> Vec2 {
     if let Some(mir_block) = &block.mir_block {
-        let mut max_num_width = 0;
-        let mut max_opcode_width = 0;
-        let mut max_type_width = 0;
+        // TypeScript uses fixed column layout:
+        // - Number column at x=8
+        // - Opcode column at x=30
+        // - Type column at x = 30 + (max_opcode_chars * CHAR_WIDTH) + 8
+        // Width = type_column_x + (max_type_chars * CHAR_WIDTH) + padding
+
+        let mut max_opcode_chars = 0;
+        let mut max_type_chars = 0;
 
         for ins in &mir_block.instructions {
-            // Measure instruction number width
-            let num_text = format!("{}", ins.id);
-            max_num_width = max_num_width.max(num_text.chars().count());
+            // Count chars in the RENDERED opcode - must match rendering logic exactly!
+            // Rendering does: replace arrows FIRST, then HTML escape
+            let opcode_with_arrows = ins.opcode.replace("->", "→").replace("<-", "←");
+            let opcode_rendered = html_escape(&opcode_with_arrows);
+            max_opcode_chars = max_opcode_chars.max(opcode_rendered.chars().count());
 
-            // Measure opcode width - use RENDERED length (after escape and ← replacement)
-            // IMPORTANT: Use .chars().count() not .len() because ← is 3 bytes but 1 character!
-            let opcode_rendered = html_escape(&ins.opcode).replace("&lt;-", "←");
-            max_opcode_width = max_opcode_width.max(opcode_rendered.chars().count());
-
-            // Measure type width
             if ins.instruction_type != "None" {
-                max_type_width = max_type_width.max(ins.instruction_type.chars().count());
+                max_type_chars = max_type_chars.max(ins.instruction_type.chars().count());
             }
         }
 
-        // Also consider header width
-        let header_text = if block.attributes.contains(&"loopheader".to_string()) {
-            format!("Block {} (loop header)", block.id.0)
-        } else if block.attributes.contains(&"backedge".to_string()) {
-            format!("Block {} (backedge)", block.id.0)
-        } else {
-            format!("Block {}", block.id.0)
-        };
-        let header_width = header_text.chars().count() as f64 * CHAR_WIDTH;
+        // Column positions with dynamic spacing based on number column width
+        // TypeScript formula: opcode_x = padding + maxNumWidth + 8
+        let max_num_chars = mir_block.instructions.iter()
+            .map(|ins| format!("{}", ins.id).len())
+            .max()
+            .unwrap_or(1);
+        let opcode_x = 8.0 + (max_num_chars as f64 * CHAR_WIDTH) + 8.0;
+        let type_x = opcode_x + (max_opcode_chars as f64 * CHAR_WIDTH) + 8.0;
 
-        // Calculate total width: padding + num + gap + opcode + gap + type + padding
-        let content_width = PADDING +
-            (max_num_width as f64 * CHAR_WIDTH) + 8.0 +
-            (max_opcode_width as f64 * CHAR_WIDTH) + 8.0 +
-            (max_type_width as f64 * CHAR_WIDTH) + PADDING;
-
-        let width = content_width.max(header_width + PADDING * 2.0).max(150.0);
+        // Width is type column end position + padding
+        let width = (type_x + (max_type_chars as f64 * CHAR_WIDTH) + 8.0).max(100.0);
         let height = HEADER_HEIGHT + (mir_block.instructions.len() as f64 * CHAR_HEIGHT) + PADDING * 2.0;
 
         Vec2::new(width, height)
     } else if let Some(lir_block) = &block.lir_block {
-        // Similar calculation for LIR blocks
+        // Similar calculation for LIR blocks - use same formula as MIR
         let mut max_opcode_width = 0;
 
         for ins in &lir_block.instructions {
-            max_opcode_width = max_opcode_width.max(ins.opcode.len());
+            max_opcode_width = max_opcode_width.max(ins.opcode.chars().count());
         }
 
-        let header_text = format!("Block {}", block.id.0);
-        let header_width = header_text.len() as f64 * CHAR_WIDTH;
-
-        let content_width = PADDING + (max_opcode_width as f64 * CHAR_WIDTH) + PADDING;
-        let width = content_width.max(header_width + PADDING * 2.0).max(150.0);
+        // Same TypeScript formula as MIR blocks
+        let content_width = (max_opcode_width as f64 * CHAR_WIDTH) + (PADDING * 2.0) + 74.0;
+        let width = content_width.max(100.0);
         let height = HEADER_HEIGHT + (lir_block.instructions.len() as f64 * CHAR_HEIGHT) + PADDING * 2.0;
 
         Vec2::new(width, height)
@@ -340,7 +333,9 @@ impl Graph {
             while let Some(loop_id) = current_loop_id {
                 if let Some(loop_header) = self.blocks_by_id.get(&loop_id) {
                     let header_num = loop_header.number;
-                    let header_layer = loop_header.layer;
+
+                    // Get the header's CURRENT layer from blocks_by_num, not the stale blocks_by_id
+                    let header_layer = self.blocks_by_num.get(&header_num).unwrap().layer;
                     let block_layer = self.blocks_by_num.get(&block_num).unwrap().layer;
                     let new_height = block_layer - header_layer + 1;
 
@@ -545,6 +540,9 @@ impl Graph {
         }
         let mut active_edges: Vec<IncompleteEdge> = Vec::new();
 
+        // Track latest backedge dummy for each backedge block (for chaining)
+        let mut latest_dummies_for_backedges: HashMap<BlockNumber, LayoutNodeID> = HashMap::new();
+
         // Process each layer
         for layer in 0..=max_layer {
             let empty_vec = vec![];
@@ -573,11 +571,14 @@ impl Graph {
                     if let Some(dummy_layer) = node_lookup.get(&dummy_id) {
                         if let Some(dummy) = layout_nodes_by_layer[*dummy_layer].iter_mut().find(|n| n.id == dummy_id) {
                             dummy.src_nodes.push(edge.src_id);
-                            // Update source node's dst_nodes
+                            // Update source node's dst_nodes using port index
                             for src_layer_idx in 0..*dummy_layer {
                                 if let Some(src_node) = layout_nodes_by_layer[src_layer_idx].iter_mut()
                                     .find(|n| n.id == edge.src_id) {
-                                    src_node.dst_nodes.push(dummy_id);
+                                    // Use direct index assignment with port number
+                                    if edge.src_port < src_node.dst_nodes.len() {
+                                        src_node.dst_nodes[edge.src_port] = Some(dummy_id);
+                                    }
                                     break;
                                 }
                             }
@@ -586,21 +587,24 @@ impl Graph {
                 } else {
                     // Create new dummy node
                     let dummy_block = self.blocks_by_num.get(&edge.dst_block_number).unwrap().clone();
-                    let mut dummy = LayoutNode::new_dummy_node(node_id, dummy_block, layer);
+                    let mut dummy = LayoutNode::new_dummy_node(node_id, dummy_block.clone(), layer);
                     dummy.src_nodes.push(edge.src_id);
-                    
+
                     dummies_by_dest.insert(edge.dst_block_number, node_id);
                     node_lookup.insert(node_id, layer);
-                    
-                    // Update source node's dst_nodes
+
+                    // Update source node's dst_nodes using port index
                     for src_layer_idx in 0..layer {
                         if let Some(src_node) = layout_nodes_by_layer[src_layer_idx].iter_mut()
                             .find(|n| n.id == edge.src_id) {
-                            src_node.dst_nodes.push(node_id);
+                            // Use direct index assignment with port number
+                            if edge.src_port < src_node.dst_nodes.len() {
+                                src_node.dst_nodes[edge.src_port] = Some(node_id);
+                            }
                             break;
                         }
                     }
-                    
+
                     layout_nodes_by_layer[layer].push(dummy);
                     node_id += 1;
                 }
@@ -619,45 +623,101 @@ impl Graph {
                 }
             }
 
+            // Track which blocks will get backedge dummy nodes
+            // (the rightmost block in each active loop at this layer)
+            struct PendingLoopDummy {
+                loop_id: BlockID,
+                block_number: BlockNumber,
+            }
+            let mut pending_loop_dummies: Vec<PendingLoopDummy> = Vec::new();
+
+            for block in blocks_in_layer {
+                // For each block, walk up its loop hierarchy
+                if block.loop_id != BlockID(0) {
+                    let mut current_loop_id = block.loop_id;
+                    loop {
+                        // Check if we've seen this loop before
+                        if let Some(existing) = pending_loop_dummies.iter_mut().find(|d| d.loop_id == current_loop_id) {
+                            // Update to the rightmost block for this loop
+                            existing.block_number = block.number;
+                        } else {
+                            // First block we've seen for this loop
+                            pending_loop_dummies.push(PendingLoopDummy {
+                                loop_id: current_loop_id,
+                                block_number: block.number,
+                            });
+                        }
+
+                        // Walk to parent loop
+                        if let Some(loop_block) = self.blocks_by_id.get(&current_loop_id) {
+                            if loop_block.loop_id != BlockID(0) && loop_block.loop_id != current_loop_id {
+                                current_loop_id = loop_block.loop_id;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Track edges to backedge blocks (to be connected after dummies are created)
+            let mut backedge_edges: Vec<IncompleteEdge> = Vec::new();
+
             // Create real nodes for blocks in this layer
             for block in blocks_in_layer {
                 let mut layout_node = LayoutNode::new_block_node(node_id, (*block).clone(), layer);
-                
+
                 // Connect terminating edges to this block
                 for edge in &terminating_edges {
                     if edge.dst_block_number == block.number {
                         layout_node.src_nodes.push(edge.src_id);
                         // Also update the source node to point to this destination
-                        // Find and update the source node's dst_nodes
+                        // Find and update the source node's dst_nodes using port index
                         for layer_idx in 0..layer {
                             if let Some(src_node) = layout_nodes_by_layer[layer_idx].iter_mut()
                                 .find(|n| n.id == edge.src_id) {
-                                src_node.dst_nodes.push(node_id);
+                                // Use direct index assignment with port number
+                                if edge.src_port < src_node.dst_nodes.len() {
+                                    src_node.dst_nodes[edge.src_port] = Some(node_id);
+                                }
                                 break;
                             }
                         }
                     }
                 }
 
-                // Add outgoing edges to active edges (except backedges)
-                for (port, &successor) in block.successors.iter().enumerate() {
-                    if let Some(succ_block) = self.blocks_by_num.get(&successor) {
-                        if succ_block.attributes.contains(&"backedge".to_string()) {
-                            // Handle backedges immediately (connect directly)
-                            if let Some(header_block) = self.blocks_by_num.get(&successor) {
-                                // Find the header's layout node (it should be in an earlier layer)
-                                for earlier_layer in 0..layer {
-                                    if let Some(header_node) = layout_nodes_by_layer[earlier_layer].iter_mut()
-                                        .find(|n| n.block.as_ref().map_or(false, |b| b.number == header_block.number)) {
-                                        layout_node.dst_nodes.push(header_node.id);
-                                        header_node.src_nodes.push(layout_node.id);
-                                        break;
-                                    }
+                // Handle outgoing edges
+                let is_backedge_block = block.attributes.contains(&"backedge".to_string());
+
+                if is_backedge_block {
+                    // Backedge block: connect directly to loop header (like TypeScript does)
+                    for (port, &successor) in block.successors.iter().enumerate() {
+                        for target_layer in 0..=layer {
+                            if let Some(target_node) = layout_nodes_by_layer[target_layer].iter_mut()
+                                .find(|n| n.block.as_ref().map_or(false, |b| b.number == successor)) {
+                                if port < layout_node.dst_nodes.len() {
+                                    layout_node.dst_nodes[port] = Some(target_node.id);
                                 }
+                                target_node.src_nodes.push(node_id);
+                                break;
                             }
-                        } else {
-                            // Regular edge - add to active edges if it doesn't terminate immediately
-                            if succ_block.layer > layer {
+                        }
+                    }
+                } else {
+                    // Regular block: add edges to active edges or defer if targeting backedge
+                    for (port, &successor) in block.successors.iter().enumerate() {
+                        if let Some(succ_block) = self.blocks_by_num.get(&successor) {
+                            if succ_block.attributes.contains(&"backedge".to_string()) {
+                                // Defer this edge - will be connected to backedge dummy later
+                                backedge_edges.push(IncompleteEdge {
+                                    src_id: node_id,
+                                    src_port: port,
+                                    dst_block_number: successor,
+                                });
+                            } else if succ_block.layer > layer {
+                                // Normal forward edge
                                 active_edges.push(IncompleteEdge {
                                     src_id: node_id,
                                     src_port: port,
@@ -670,7 +730,89 @@ impl Graph {
 
                 node_lookup.insert(node_id, layer);
                 layout_nodes_by_layer[layer].push(layout_node);
+                let block_node_id = node_id;
                 node_id += 1;
+
+                // Create backedge dummy nodes for this block if it's the rightmost in any loops
+                for pending_dummy in &pending_loop_dummies {
+                    if pending_dummy.block_number == block.number {
+                        // Find the backedge block for this loop
+                        if let Some(loop_header) = self.blocks_by_id.get(&pending_dummy.loop_id) {
+                            // Find the backedge block that points to this loop header
+                            let backedge_block = self.blocks.iter()
+                                .find(|b| b.attributes.contains(&"backedge".to_string())
+                                    && b.successors.contains(&loop_header.number));
+
+                            if let Some(backedge) = backedge_block {
+                                // Create a dummy node for the backedge path
+                                let mut backedge_dummy = LayoutNode::new_dummy_node(
+                                    node_id,
+                                    backedge.clone(),
+                                    layer
+                                );
+
+                                // Connect this dummy to the previous dummy in the chain (if any)
+                                // or directly to the backedge block's layout node
+                                if let Some(&prev_dummy_id) = latest_dummies_for_backedges.get(&backedge.number) {
+                                    // Chain to previous dummy - new dummy points DOWN to previous dummy
+                                    if !backedge_dummy.dst_nodes.is_empty() {
+                                        backedge_dummy.dst_nodes[0] = Some(prev_dummy_id);
+                                    }
+                                    // Update previous dummy to have new dummy as source
+                                    for prev_layer in 0..layer {
+                                        if let Some(prev_dummy) = layout_nodes_by_layer[prev_layer].iter_mut()
+                                            .find(|n| n.id == prev_dummy_id) {
+                                            prev_dummy.src_nodes.push(node_id);
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    // First dummy - mark for immediate connection and connect to loop header
+                                    backedge_dummy.flags |= IMMINENT_BACKEDGE_DUMMY;
+                                    // Connect dummy to loop header
+                                    for header_layer in 0..=layer {
+                                        if let Some(header_node) = layout_nodes_by_layer[header_layer].iter_mut()
+                                            .find(|n| n.block.as_ref().map_or(false, |b| b.number == loop_header.number)) {
+                                            if !backedge_dummy.dst_nodes.is_empty() {
+                                                backedge_dummy.dst_nodes[0] = Some(header_node.id);
+                                            }
+                                            header_node.src_nodes.push(node_id);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                node_lookup.insert(node_id, layer);
+                                layout_nodes_by_layer[layer].push(backedge_dummy);
+                                latest_dummies_for_backedges.insert(backedge.number, node_id);
+                                node_id += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // After all block nodes (and their backedge dummies) are created,
+            // connect the deferred backedge edges
+            for edge in &backedge_edges {
+                if let Some(&dummy_id) = latest_dummies_for_backedges.get(&edge.dst_block_number) {
+                    // Connect to the latest backedge dummy
+                    for layer_idx in 0..=layer {
+                        if let Some(src_node) = layout_nodes_by_layer[layer_idx].iter_mut()
+                            .find(|n| n.id == edge.src_id) {
+                            if edge.src_port < src_node.dst_nodes.len() {
+                                src_node.dst_nodes[edge.src_port] = Some(dummy_id);
+                            }
+                            break;
+                        }
+                    }
+
+                    // Add src connection to dummy
+                    if let Some(dummy) = layout_nodes_by_layer[layer].iter_mut()
+                        .find(|n| n.id == dummy_id) {
+                        dummy.src_nodes.push(edge.src_id);
+                    }
+                }
             }
         }
 
@@ -787,31 +929,35 @@ impl Graph {
             for layer_idx in 0..nodes_by_layer.len().saturating_sub(1) {
                 push_neighbors(&mut nodes_by_layer[layer_idx]);
 
-                let mut last_shifted = 0;
-                
+                // Track which destinations we've already positioned to avoid repositioning
+                let mut positioned: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
                 // Collect position changes to apply them after iteration
                 let mut position_changes: Vec<(usize, f64)> = Vec::new();
-                
-                for (_node_idx, node) in nodes_by_layer[layer_idx].iter().enumerate() {
-                    for (src_port, dst_id) in node.dst_nodes.iter().enumerate() {
-                        // Find destination node in next layer
-                        if let Some((dst_idx, dst_node)) = nodes_by_layer[layer_idx + 1]
-                            .iter()
-                            .enumerate()
-                            .find(|(_, n)| n.id == *dst_id) {
-                            
-                            if dst_idx > last_shifted {
-                                // Check if this is the first parent of the destination
-                                if !dst_node.src_nodes.is_empty() && dst_node.src_nodes[0] == node.id {
-                                    let src_port_offset = PORT_START + PORT_SPACING * src_port as f64;
-                                    let dst_port_offset = PORT_START;
 
-                                    let x_before = dst_node.pos.x;
-                                    let new_x = (node.pos.x + src_port_offset - dst_port_offset).max(dst_node.pos.x);
-                                    
-                                    if new_x != x_before {
-                                        position_changes.push((dst_idx, new_x));
-                                        last_shifted = dst_idx;
+                for (_node_idx, node) in nodes_by_layer[layer_idx].iter().enumerate() {
+                    for (src_port, dst_id_opt) in node.dst_nodes.iter().enumerate() {
+                        if let Some(dst_id) = dst_id_opt {
+                            // Find destination node in next layer
+                            if let Some((dst_idx, dst_node)) = nodes_by_layer[layer_idx + 1]
+                                .iter()
+                                .enumerate()
+                                .find(|(_, n)| n.id == *dst_id) {
+
+                                // Only position if we haven't already positioned this destination
+                                if !positioned.contains(&dst_idx) {
+                                    // Check if this is the first parent of the destination
+                                    if !dst_node.src_nodes.is_empty() && dst_node.src_nodes[0] == node.id {
+                                        let src_port_offset = PORT_START + PORT_SPACING * src_port as f64;
+                                        let dst_port_offset = PORT_START;
+
+                                        let x_before = dst_node.pos.x;
+                                        let new_x = (node.pos.x + src_port_offset - dst_port_offset).max(dst_node.pos.x);
+
+                                        if new_x != x_before {
+                                            position_changes.push((dst_idx, new_x));
+                                            positioned.insert(dst_idx);
+                                        }
                                     }
                                 }
                             }
@@ -872,24 +1018,26 @@ impl Graph {
                     }
                 }
 
-                for (src_port, dst_id) in node.dst_nodes.iter().enumerate() {
-                    let dst_x = node_positions.get(dst_id).copied().unwrap_or(0.0);
+                for (src_port, dst_id_opt) in node.dst_nodes.iter().enumerate() {
+                    if let Some(dst_id) = dst_id_opt {
+                        let dst_x = node_positions.get(dst_id).copied().unwrap_or(0.0);
 
-                    let x1 = node.pos.x + PORT_START + PORT_SPACING * src_port as f64;
-                    let x2 = dst_x + PORT_START;
+                        let x1 = node.pos.x + PORT_START + PORT_SPACING * src_port as f64;
+                        let x2 = dst_x + PORT_START;
 
-                    if (x2 - x1).abs() < 2.0 * ARROW_RADIUS {
-                        // Ignore edges that are narrow enough not to render with a joint
-                        continue;
+                        if (x2 - x1).abs() < 2.0 * ARROW_RADIUS {
+                            // Ignore edges that are narrow enough not to render with a joint
+                            continue;
+                        }
+
+                        joints.push(Joint {
+                            x1,
+                            x2,
+                            src_id: node.id,
+                            src_port,
+                            dst_id: *dst_id,
+                        });
                     }
-
-                    joints.push(Joint {
-                        x1,
-                        x2,
-                        src_id: node.id,
-                        src_port,
-                        dst_id: *dst_id,
-                    });
                 }
             }
 
@@ -996,7 +1144,7 @@ impl Graph {
 
     // SVG rendering methods
     pub fn render_svg(&mut self) -> String {
-        let (nodes_by_layer, _layer_heights, _track_heights) = self.layout();
+        let (nodes_by_layer, layer_heights, track_heights) = self.layout();
 
         // Calculate total SVG dimensions
         let mut max_x: f64 = 0.0;
@@ -1009,8 +1157,9 @@ impl Graph {
             }
         }
 
-        let width = (max_x + CONTENT_PADDING) as i32;
-        let height = (max_y + CONTENT_PADDING) as i32;
+        // Add CONTENT_PADDING twice: once for right/bottom padding, once for port rendering offset
+        let width = (max_x + CONTENT_PADDING * 2.0) as i32;
+        let height = (max_y + CONTENT_PADDING * 2.0) as i32;
 
         let mut svg = String::new();
         // Match TypeScript attribute order: xmlns width height viewBox
@@ -1026,14 +1175,14 @@ impl Graph {
         self.render_blocks_ts_format(&mut svg, &nodes_by_layer);
 
         // Render arrows
-        self.render_arrows_ts_format(&mut svg, &nodes_by_layer);
+        self.render_arrows_ts_format(&mut svg, &nodes_by_layer, &layer_heights, &track_heights);
 
         svg.push_str("  </g>\n");
         svg.push_str("</svg>");
         svg
     }
 
-    fn render_arrows_ts_format(&self, svg: &mut String, nodes_by_layer: &[Vec<LayoutNode>]) {
+    fn render_arrows_ts_format(&self, svg: &mut String, nodes_by_layer: &[Vec<LayoutNode>], layer_heights: &[f64], track_heights: &[f64]) {
         // Build a lookup map for nodes by ID
         let mut node_lookup: HashMap<LayoutNodeID, &LayoutNode> = HashMap::new();
         for layer in nodes_by_layer {
@@ -1042,22 +1191,76 @@ impl Graph {
             }
         }
 
+        // Start outer wrapper for all arrows
+        svg.push_str("    <g>\n");
+
         // Render arrows for all nodes
-        for layer in nodes_by_layer {
+        for (layer_idx, layer) in nodes_by_layer.iter().enumerate() {
             for node in layer {
-                // Render each outgoing connection
-                for (port_idx, &dst_id) in node.dst_nodes.iter().enumerate() {
-                    if let Some(dst_node) = node_lookup.get(&dst_id) {
-                        self.render_single_arrow_ts_format(svg, node, dst_node, port_idx);
+                // Check for special arrow types first (like TypeScript does)
+
+                // 1. Backedge block - renders horizontal loop header arrow
+                if let Some(block) = &node.block {
+                    if block.attributes.contains(&"backedge".to_string()) {
+                        // Render loop header arrow (handled specially)
+                        if let Some(&dst_id) = node.dst_nodes.get(0).and_then(|id| id.as_ref()) {
+                            if let Some(dst_node) = node_lookup.get(&dst_id) {
+                                self.render_loop_header_arrow(svg, node, dst_node);
+                            }
+                        }
+                        continue; // Skip normal arrow rendering for backedge blocks
+                    }
+                }
+
+                // 2. IMMINENT_BACKEDGE_DUMMY - renders arrow to backedge block
+                if (node.flags & IMMINENT_BACKEDGE_DUMMY) != 0 {
+                    // Find the backedge block's layout node
+                    if let Some(backedge_block) = &node.dst_block {
+                        // Find the layout node for the backedge block
+                        if let Some(backedge_layout_node) = nodes_by_layer.iter()
+                            .flat_map(|layer| layer.iter())
+                            .find(|n| n.block.as_ref().map_or(false, |b| b.number == backedge_block.number)) {
+                            self.render_arrow_to_backedge(svg, node, backedge_layout_node);
+                        }
+                    }
+                    continue; // Skip normal arrow rendering
+                }
+
+                // 3. Check for arrows to backedge dummies (TypeScript line 1150)
+                for (port_idx, dst_id_opt) in node.dst_nodes.iter().enumerate() {
+                    if let Some(dst_id) = dst_id_opt {
+                        if let Some(dst_node) = node_lookup.get(dst_id) {
+                            // Check if destination is a backedge dummy
+                            let is_backedge_dummy = dst_node.is_dummy() &&
+                                dst_node.dst_block.as_ref()
+                                    .map_or(false, |b| b.attributes.contains(&"backedge".to_string()));
+
+                            if is_backedge_dummy {
+                                // Special handling for arrows to backedge dummies
+                                if node.is_dummy() {
+                                    // Dummy-to-dummy: draw upward arrow
+                                    self.render_upward_arrow_between_dummies(svg, node, dst_node, port_idx);
+                                } else {
+                                    // Block-to-dummy: draw arrow from block to backedge dummy
+                                    self.render_arrow_to_backedge_dummy(svg, node, dst_node, port_idx, layer_idx, layer_heights, track_heights);
+                                }
+                            } else {
+                                // Normal arrow
+                                self.render_single_arrow_ts_format(svg, node, dst_node, port_idx, layer_idx, layer_heights, track_heights);
+                            }
+                        }
                     }
                 }
             }
         }
+
+        // Close outer wrapper for all arrows
+        svg.push_str("    </g>\n");
     }
 
-    fn render_single_arrow_ts_format(&self, svg: &mut String, src_node: &LayoutNode, dst_node: &LayoutNode, port_idx: usize) {
+    fn render_single_arrow_ts_format(&self, svg: &mut String, src_node: &LayoutNode, dst_node: &LayoutNode, port_idx: usize, layer_idx: usize, layer_heights: &[f64], track_heights: &[f64]) {
         // Calculate arrow start and end points
-        let x1 = if src_node.is_dummy() {
+        let mut x1 = if src_node.is_dummy() {
             src_node.pos.x
         } else {
             src_node.pos.x + PORT_START + (PORT_SPACING * port_idx as f64).min(src_node.size.x - PORT_START - 10.0)
@@ -1065,13 +1268,23 @@ impl Graph {
 
         let y1 = src_node.pos.y + src_node.size.y;
 
-        let x2 = if dst_node.is_dummy() {
-            dst_node.pos.x
+        let mut x2 = if dst_node.is_dummy() {
+            dst_node.pos.x + PORT_START  // Dummies also use PORT_START for arrow rendering
         } else {
             dst_node.pos.x + PORT_START
         };
 
-        let y2 = dst_node.pos.y;
+        // Check if destination is a backedge dummy
+        let is_backedge_dummy = dst_node.is_dummy() &&
+            dst_node.dst_block.as_ref()
+                .map_or(false, |b| b.attributes.contains(&"backedge".to_string()));
+
+        // Y2 coordinate depends on whether it's an IMMINENT_BACKEDGE_DUMMY
+        let y2 = if is_backedge_dummy && (dst_node.flags & IMMINENT_BACKEDGE_DUMMY) != 0 {
+            dst_node.pos.y + HEADER_ARROW_PUSHDOWN + ARROW_RADIUS
+        } else {
+            dst_node.pos.y
+        };
 
         // Get joint offset for this port if available
         let joint_offset = src_node.joint_offsets.get(port_idx).copied().unwrap_or(0.0);
@@ -1082,20 +1295,36 @@ impl Graph {
         // Check if destination is a real block (for arrowhead)
         let do_arrowhead = !dst_node.is_dummy();
 
-        svg.push_str("    <g>\n");
+        // Align stroke to pixels (for crisp 1px lines)
+        let stroke = 1;
+        if stroke % 2 == 1 {
+            x1 += 0.5;
+            x2 += 0.5;
+        }
+
+        svg.push_str("      <g>\n");
 
         if !is_backedge {
             // Normal downward arrow
-            let ym = y1 + TRACK_PADDING + joint_offset;
+            // TypeScript: const ym = (y1 - node.size.y) + layerHeights[layer] + TRACK_PADDING + trackHeights[layer] / 2 + node.jointOffsets[i];
+            let layer_height = layer_heights.get(layer_idx).copied().unwrap_or(0.0);
+            let track_height = track_heights.get(layer_idx).copied().unwrap_or(0.0);
+            let mut ym = (y1 - src_node.size.y) + layer_height + TRACK_PADDING + track_height / 2.0 + joint_offset;
+
+            // Align ym coordinate for crisp rendering
+            if stroke % 2 == 1 {
+                ym += 0.5;
+            }
 
             // Check if we need arc-based or bezier-based path
             let horizontal_dist = (x2 - x1).abs();
 
             if horizontal_dist < 2.0 * ARROW_RADIUS {
-                // Narrow arrow - use cubic bezier
-                svg.push_str(&format!("      <path d=\"M {} {} C {} {} {} {} {} {}\" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
-                    x1, y1,
-                    x1, y1 + (y2 - y1) / 3.0,
+                // Narrow arrow - use cubic bezier with destination x-coordinate throughout
+                // This makes the arrow perfectly vertical aligned with the destination
+                svg.push_str(&format!("        <path d=\"M {} {} C {} {} {} {} {} {} \" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
+                    x2, y1,
+                    x2, y1 + (y2 - y1) / 3.0,
                     x2, y1 + 2.0 * (y2 - y1) / 3.0,
                     x2, y2));
             } else {
@@ -1103,41 +1332,219 @@ impl Graph {
                 let dir = (x2 - x1).signum();
                 let r = ARROW_RADIUS;
 
-                svg.push_str(&format!("      <path d=\"M {} {} L {} {} A {} {} 0 0 {} {} {} L {} {} A {} {} 0 0 {} {} {} L {} {} \" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
+                svg.push_str(&format!("        <path d=\"M {} {} L {} {} A {} {} 0 0 {} {} {} L {} {} A {} {} 0 0 {} {} {} L {} {} \" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
                     x1, y1,
                     x1, ym - r,
                     r, r, if dir > 0.0 { "0" } else { "1" }, x1 + r * dir, ym,
                     x2 - r * dir, ym,
-                    r, r, if dir > 0.0 { "0" } else { "1" }, x2, ym + r,
+                    r, r, if dir > 0.0 { "1" } else { "0" }, x2, ym + r,
                     x2, y2));
             }
 
             // Add arrowhead
             if do_arrowhead {
-                svg.push_str(&format!("      <path d=\"M 0 0 L -5 7.5 L 5 7.5 Z\" transform=\"translate({}, {}) rotate(180)\"/>\n",
+                svg.push_str(&format!("        <path d=\"M 0 0 L -5 7.5 L 5 7.5 Z\" transform=\"translate({}, {}) rotate(180)\"/>\n",
                     x2, y2));
             }
         } else {
-            // Backedge arrow - simplified for now
-            svg.push_str(&format!("      <path d=\"M {} {} L {} {}\" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
-                x1, y1, x2, y2));
+            // Backedge arrow - use cubic bezier for vertical backedge returns
+            // TypeScript: path += `C ${x1} ${y1 + (y2 - y1) / 3} ${x2} ${y1 + 2 * (y2 - y1) / 3} ${x2} ${y2} `;
+            svg.push_str(&format!("        <path d=\"M {} {} C {} {} {} {} {} {} \" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
+                x1, y1,
+                x1, y1 + (y2 - y1) / 3.0,
+                x2, y1 + 2.0 * (y2 - y1) / 3.0,
+                x2, y2));
 
             if do_arrowhead {
                 let angle = ((y2 - y1).atan2(x2 - x1) * 180.0 / std::f64::consts::PI) + 180.0;
-                svg.push_str(&format!("      <path d=\"M 0 0 L -5 7.5 L 5 7.5 Z\" transform=\"translate({}, {}) rotate({})\"/>\n",
+                svg.push_str(&format!("        <path d=\"M 0 0 L -5 7.5 L 5 7.5 Z\" transform=\"translate({}, {}) rotate({})\"/>\n",
                     x2, y2, angle));
             }
         }
 
-        svg.push_str("    </g>\n");
+        svg.push_str("      </g>\n");
+    }
+
+    fn render_loop_header_arrow(&self, svg: &mut String, src_node: &LayoutNode, dst_node: &LayoutNode) {
+        // Horizontal arrow from backedge block (src_node) to loop header (dst_node)
+        // Arrow goes LEFT from backedge to loop header
+        // TypeScript: const x1 = node.pos.x;  (backedge block left edge)
+        // TypeScript: const y1 = node.pos.y + HEADER_ARROW_PUSHDOWN;
+        // TypeScript: const x2 = header.layoutNode.pos.x + header.size.x;  (loop header right edge)
+        // TypeScript: const y2 = header.layoutNode.pos.y + HEADER_ARROW_PUSHDOWN;
+
+        let x1 = src_node.pos.x;  // Backedge block left edge
+        let y1 = src_node.pos.y + HEADER_ARROW_PUSHDOWN;
+        let x2 = dst_node.pos.x + dst_node.size.x;  // Loop header right edge
+        let y2 = dst_node.pos.y + HEADER_ARROW_PUSHDOWN;
+
+        // Pixel alignment for crisp 1px strokes
+        let y_aligned = y1 + 0.5;
+
+        svg.push_str("      <g>\n");
+        svg.push_str(&format!("        <path d=\"M {} {} L {} {} \" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
+            x1, y_aligned, x2, y_aligned));
+        // Arrowhead pointing left
+        svg.push_str(&format!("        <path d=\"M 0 0 L -5 7.5 L 5 7.5 Z\" transform=\"translate({}, {}) rotate(270)\"/>\n",
+            x2, y_aligned));
+        svg.push_str("      </g>\n");
+    }
+
+    fn render_arrow_to_backedge(&self, svg: &mut String, src_node: &LayoutNode, backedge_node: &LayoutNode) {
+        // Arrow from IMMINENT_BACKEDGE_DUMMY to backedge block
+        // TypeScript: const x1 = node.pos.x + PORT_START;
+        // TypeScript: const y1 = node.pos.y + HEADER_ARROW_PUSHDOWN + ARROW_RADIUS;
+        // TypeScript: const x2 = backedge.layoutNode.pos.x + backedge.size.x;
+        // TypeScript: const y2 = backedge.layoutNode.pos.y + HEADER_ARROW_PUSHDOWN;
+
+        let mut x1 = src_node.pos.x + PORT_START;
+        let y1 = src_node.pos.y + HEADER_ARROW_PUSHDOWN + ARROW_RADIUS;
+        let x2 = backedge_node.pos.x + backedge_node.size.x;  // No pixel alignment for x2
+        let y2 = backedge_node.pos.y + HEADER_ARROW_PUSHDOWN;
+
+        // Pixel alignment for x1 only
+        x1 += 0.5;
+
+        let r = ARROW_RADIUS;
+        let mut ym = (y1 - r).max(y2);
+
+        // Pixel alignment for ym
+        ym += 0.5;
+
+        svg.push_str("      <g>\n");
+
+        // Path with arc routing - goes directly from start to arc, no initial line segment
+        svg.push_str(&format!("        <path d=\"M {} {} A {} {} 0 0 0 {} {} L {} {} \" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
+            x1, y1,
+            r, r,
+            x1 - r, ym,
+            x2, ym));
+
+        // Arrowhead pointing left
+        svg.push_str(&format!("        <path d=\"M 0 0 L -5 7.5 L 5 7.5 Z\" transform=\"translate({}, {}) rotate(270)\"/>\n",
+            x2, ym));
+
+        svg.push_str("      </g>\n");
+    }
+
+    fn render_upward_arrow_between_dummies(&self, svg: &mut String, src_node: &LayoutNode, dst_node: &LayoutNode, port_idx: usize) {
+        // TypeScript line 1154-1156: Draw upward arrow between dummies
+        // const ym = y1 - TRACK_PADDING; // this really shouldn't matter because we should straighten all these out
+        // this.layoutProvider.drawUpwardArrow(x1, y1, x2, y2, ym, false);
+
+        let mut x1 = src_node.pos.x + PORT_START + (PORT_SPACING * port_idx as f64);
+        let y1 = src_node.pos.y + src_node.size.y;
+        let mut x2 = dst_node.pos.x + PORT_START;
+        let y2 = if (dst_node.flags & IMMINENT_BACKEDGE_DUMMY) != 0 {
+            dst_node.pos.y + HEADER_ARROW_PUSHDOWN + ARROW_RADIUS
+        } else {
+            dst_node.pos.y
+        };
+
+        let mut ym = y1 - TRACK_PADDING;
+
+        // Pixel alignment for crisp 1px strokes
+        x1 += 0.5;
+        x2 += 0.5;
+        ym += 0.5;
+
+        svg.push_str("      <g>\n");
+
+        // Match TypeScript createUpwardArrowSVG (line 415-433)
+        let r = ARROW_RADIUS;
+        let horizontal_dist = (x2 - x1).abs();
+
+        if horizontal_dist < 2.0 * r {
+            // Narrow arrow - use cubic bezier with destination x-coordinate (TypeScript line 422)
+            svg.push_str(&format!("        <path d=\"M {} {} C {} {} {} {} {} {} \" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
+                x2, y1,
+                x2, y1 + (y2 - y1) / 3.0,
+                x2, y1 + 2.0 * (y2 - y1) / 3.0,
+                x2, y2));
+        } else {
+            // Wide arrow - use arc routing (TypeScript line 425)
+            let dir = (x2 - x1).signum();
+            svg.push_str(&format!("        <path d=\"M {} {} L {} {} A {} {} 0 0 {} {} {} L {} {} A {} {} 0 0 {} {} {} L {} {} \" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
+                x1, y1,
+                x1, ym + r,
+                r, r, if dir > 0.0 { "1" } else { "0" }, x1 + r * dir, ym,
+                x2 - r * dir, ym,
+                r, r, if dir > 0.0 { "0" } else { "1" }, x2, ym - r,
+                x2, y2));
+        }
+
+        // No arrowhead for dummy-to-dummy (hasArrowhead = false in TypeScript)
+        svg.push_str("      </g>\n");
+    }
+
+    fn render_arrow_to_backedge_dummy(&self, svg: &mut String, src_node: &LayoutNode, dst_node: &LayoutNode, port_idx: usize, layer_idx: usize, layer_heights: &[f64], track_heights: &[f64]) {
+        // TypeScript line 1158-1160: Draw arrow from block to backedge dummy
+        // const ym = (y1 - node.size.y) + layerHeights[layer] + TRACK_PADDING + trackHeights[layer] / 2 + node.jointOffsets[i];
+        // this.layoutProvider.drawArrowFromBlockToBackedgeDummy(x1, y1, x2, y2, ym);
+
+        let mut x1 = src_node.pos.x + PORT_START + (PORT_SPACING * port_idx as f64).min(src_node.size.x - PORT_START - 10.0);
+        let y1 = src_node.pos.y + src_node.size.y;
+        let mut x2 = dst_node.pos.x + PORT_START;
+        let y2 = if (dst_node.flags & IMMINENT_BACKEDGE_DUMMY) != 0 {
+            dst_node.pos.y + HEADER_ARROW_PUSHDOWN + ARROW_RADIUS
+        } else {
+            dst_node.pos.y
+        };
+
+        let joint_offset = src_node.joint_offsets.get(port_idx).copied().unwrap_or(0.0);
+        let layer_height = layer_heights.get(layer_idx).copied().unwrap_or(0.0);
+        let track_height = track_heights.get(layer_idx).copied().unwrap_or(0.0);
+        let mut ym = (y1 - src_node.size.y) + layer_height + TRACK_PADDING + track_height / 2.0 + joint_offset;
+
+        // Pixel alignment for crisp 1px strokes
+        x1 += 0.5;
+        x2 += 0.5;
+        ym += 0.5;
+
+        svg.push_str("      <g>\n");
+
+        // Draw path with arc routing
+        // Note: When ym > y1, the arrow makes a downward detour before going up
+        // TypeScript: L x1 ym-r, arc to ym, horizontal, arc to ym-r, L x2 y2
+        let r = ARROW_RADIUS;
+        let horizontal_dist = (x2 - x1).abs();
+
+        if horizontal_dist < 2.0 * r {
+            // Narrow arrow - use cubic bezier with destination x-coordinate
+            svg.push_str(&format!("        <path d=\"M {} {} C {} {} {} {} {} {} \" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
+                x2, y1, x2, ym, x2, ym, x2, y2));
+        } else {
+            // Wide arrow - use arc routing with ym-r for both vertical segments
+            // This creates a downward detour when ym > y1
+            let dir = (x2 - x1).signum();
+            svg.push_str(&format!("        <path d=\"M {} {} L {} {} A {} {} 0 0 {} {} {} L {} {} A {} {} 0 0 {} {} {} L {} {} \" fill=\"none\" stroke=\"black\" stroke-width=\"1 \"/>\n",
+                x1, y1,
+                x1, ym - r,
+                r, r, if dir > 0.0 { "0" } else { "1" }, x1 + r * dir, ym,
+                x2 - r * dir, ym,
+                r, r, if dir > 0.0 { "0" } else { "1" }, x2, ym - r,
+                x2, y2));
+        }
+
+        // No arrowhead for arrows to backedge dummies
+        svg.push_str("      </g>\n");
     }
 
     fn render_blocks_ts_format(&self, svg: &mut String, nodes_by_layer: &[Vec<LayoutNode>]) {
-        for layer in nodes_by_layer {
-            for node in layer {
-                if node.is_dummy() {
-                    continue; // Skip dummy nodes
-                }
+        // Collect all non-dummy nodes from all layers
+        let mut all_nodes: Vec<&LayoutNode> = nodes_by_layer
+            .iter()
+            .flat_map(|layer| layer.iter())
+            .filter(|node| !node.is_dummy())
+            .collect();
+
+        // Sort by block ID globally (matching TypeScript behavior)
+        all_nodes.sort_by_key(|node| {
+            node.block.as_ref().map(|b| b.id.0).unwrap_or(u32::MAX)
+        });
+
+        // Render blocks in sorted order
+        for node in all_nodes {
 
                 if let Some(block) = &node.block {
                     // Start block group with decimal coordinates (no rounding)
@@ -1160,35 +1567,36 @@ impl Graph {
 
                     // Block header text
                     let header_x = node.size.x / 2.0;
-                    svg.push_str(&format!("      <text x=\"{}\" y=\"18\" font-family=\"monospace\" font-size=\"12\" fill=\"white\" font-weight=\"bold\" text-anchor=\"middle\">Block {}</text>\n",
-                        header_x, block.id.0));
+                    let header_label = if block.attributes.contains(&"loopheader".to_string()) {
+                        format!("Block {} (loop header)", block.id.0)
+                    } else if block.attributes.contains(&"backedge".to_string()) {
+                        format!("Block {} (backedge)", block.id.0)
+                    } else {
+                        format!("Block {}", block.id.0)
+                    };
+                    svg.push_str(&format!("      <text x=\"{}\" y=\"18\" font-family=\"monospace\" font-size=\"12\" fill=\"white\" font-weight=\"bold\" text-anchor=\"middle\">{}</text>\n",
+                        header_x, header_label));
 
-                    // Render instructions with dynamic column positions
+                    // Render instructions with dynamic column positions (matching TypeScript)
                     if let Some(mir_block) = &block.mir_block {
-                        // First pass: measure column widths (in pixels, not characters)
-                        // IMPORTANT: Measure the RENDERED text (after escape/replace), not the raw JSON text
-                        let mut max_num_width: f64 = 0.0;
-                        let mut max_opcode_width: f64 = 0.0;
-                        let mut max_type_width: f64 = 0.0;
+                        // Calculate column positions using same formula as calculate_block_size
+                        let mut max_opcode_chars = 0;
+                        let max_num_chars = mir_block.instructions.iter()
+                            .map(|ins| format!("{}", ins.id).len())
+                            .max()
+                            .unwrap_or(1);
 
                         for ins in &mir_block.instructions {
-                            let num_text = format!("{}", ins.id);
-                            max_num_width = max_num_width.max(num_text.chars().count() as f64 * CHAR_WIDTH);
-
-                            // Measure the transformed opcode (after escape and ← replacement)
-                            // IMPORTANT: Use .chars().count() not .len() because ← is 3 bytes but 1 character!
-                            let opcode_rendered = html_escape(&ins.opcode).replace("&lt;-", "←");
-                            max_opcode_width = max_opcode_width.max(opcode_rendered.chars().count() as f64 * CHAR_WIDTH);
-
-                            if ins.instruction_type != "None" {
-                                max_type_width = max_type_width.max(ins.instruction_type.chars().count() as f64 * CHAR_WIDTH);
-                            }
+                            // Must match calculate_block_size logic!
+                            let opcode_with_arrows = ins.opcode.replace("->", "→").replace("<-", "←");
+                            let opcode_rendered = html_escape(&opcode_with_arrows);
+                            max_opcode_chars = max_opcode_chars.max(opcode_rendered.chars().count());
                         }
 
-                        // Calculate column positions dynamically
-                        let num_x = PADDING;
-                        let opcode_x = PADDING + max_num_width + 8.0;
-                        let type_x = opcode_x + max_opcode_width + 8.0;
+                        // Column positions matching TypeScript's formula
+                        let num_x = 8.0;
+                        let opcode_x = 8.0 + (max_num_chars as f64 * CHAR_WIDTH) + 8.0;
+                        let type_x = opcode_x + (max_opcode_chars as f64 * CHAR_WIDTH) + 8.0;
 
                         // Second pass: render instructions
                         let mut y = 40; // Start after header (28px) + padding
@@ -1201,21 +1609,22 @@ impl Graph {
                             let opcode_color = if has_movable { "#1048af" } else { "black" };
                             let decoration = if has_guard { " text-decoration=\"underline\"" } else { "" };
 
-                            // Escape opcode text and replace <- with ←
-                            let opcode = html_escape(&ins.opcode).replace("&lt;-", "←");
+                            // Replace ASCII arrows with Unicode before HTML-escaping
+                            let opcode_with_arrows = ins.opcode.replace("->", "→").replace("<-", "←");
+                            let opcode = html_escape(&opcode_with_arrows);
 
                             // Render instruction number at dynamic position
                             svg.push_str(&format!("      <text x=\"{}\" y=\"{}\" font-family=\"monospace\" font-size=\"11\" fill=\"#777\">{}</text>\n",
-                                num_x as i32, y, ins.id));
+                                num_x, y, ins.id));
 
                             // Render opcode at dynamic position
                             svg.push_str(&format!("      <text x=\"{}\" y=\"{}\" font-family=\"monospace\" font-size=\"11\" fill=\"{}\"{}>{}</text>\n",
-                                opcode_x as i32, y, opcode_color, decoration, opcode));
+                                opcode_x, y, opcode_color, decoration, opcode));
 
                             // Render type if not None at dynamic position
                             if ins.instruction_type != "None" {
                                 svg.push_str(&format!("      <text x=\"{}\" y=\"{}\" font-family=\"monospace\" font-size=\"11\" fill=\"#1048af\">{}</text>\n",
-                                    type_x as i32, y, ins.instruction_type));
+                                    type_x, y, ins.instruction_type));
                             }
 
                             y += 14; // Move to next line
@@ -1231,7 +1640,6 @@ impl Graph {
 
                     svg.push_str("    </g>\n");
                 }
-            }
         }
     }
 
@@ -1292,8 +1700,9 @@ impl Graph {
                                 y, ins.id
                             ));
 
-                            // Render opcode
-                            let opcode = html_escape(&ins.opcode);
+                            // Render opcode (replace ASCII arrows with Unicode before escaping)
+                            let opcode_with_arrows = ins.opcode.replace("->", "→").replace("<-", "←");
+                            let opcode = html_escape(&opcode_with_arrows);
                             svg.push_str(&format!(
                                 r##"<text x="23" y="{}" font-family="monospace" font-size="11" fill="black">{}</text>"##,
                                 y, opcode
@@ -1343,15 +1752,17 @@ impl Graph {
         for layer in nodes_by_layer {
             for node in layer {
                 // Render each outgoing connection
-                for (port_idx, &dst_id) in node.dst_nodes.iter().enumerate() {
-                    if let Some(dst_node) = node_lookup.get(&dst_id) {
-                        self.render_single_arrow(svg, node, dst_node, port_idx);
+                for (port_idx, dst_id_opt) in node.dst_nodes.iter().enumerate() {
+                    if let Some(dst_id) = dst_id_opt {
+                        if let Some(dst_node) = node_lookup.get(dst_id) {
+                            self.render_single_arrow(svg, node, dst_node, port_idx);
+                        }
                     }
                 }
             }
         }
     }
-    
+
     fn render_single_arrow(&self, svg: &mut String, src_node: &LayoutNode, dst_node: &LayoutNode, port_idx: usize) {
         // Calculate arrow start and end points
         let start_x = if src_node.is_dummy() {

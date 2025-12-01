@@ -1,14 +1,14 @@
 import { useState, useEffect } from 'react';
-import type { BaseWidgetConfig } from '../types';
+import type { WidgetConfig } from '../types';
 
-interface UseWidgetDataResult<T = any> {
+interface UseWidgetDataResult<T> {
   data: T | null;
   loading: boolean;
   error: string | null;
 }
 
-export function useWidgetData<T = any>(
-  config: BaseWidgetConfig,
+export function useWidgetData<T = unknown>(
+  config: WidgetConfig,
   reloadTrigger?: number
 ): UseWidgetDataResult<T> {
   const [data, setData] = useState<T | null>(null);
@@ -16,9 +16,9 @@ export function useWidgetData<T = any>(
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // If data is provided inline, use it directly
-    if (config.data !== undefined) {
-      setData(config.data);
+    // Check if widget has inline data (type narrowing)
+    if ('data' in config && config.data !== undefined) {
+      setData(config.data as T);
       setLoading(false);
       setError(null);
       return;
@@ -33,7 +33,7 @@ export function useWidgetData<T = any>(
       if (window.dashboardAPI && window.dashboardAPI.loadDataFile) {
         window.dashboardAPI.loadDataFile(config.dataSource)
           .then(loadedData => {
-            setData(loadedData);
+            setData(loadedData as T);
             setLoading(false);
           })
           .catch(err => {
@@ -49,7 +49,7 @@ export function useWidgetData<T = any>(
             return response.json();
           })
           .then(loadedData => {
-            setData(loadedData);
+            setData(loadedData as T);
             setLoading(false);
           })
           .catch(err => {
@@ -59,7 +59,7 @@ export function useWidgetData<T = any>(
           });
       }
     }
-  }, [config.data, config.dataSource, reloadTrigger]);
+  }, [config, reloadTrigger]);
 
   return { data, loading, error };
 }

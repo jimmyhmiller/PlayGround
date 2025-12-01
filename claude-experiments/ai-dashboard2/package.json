@@ -4,9 +4,11 @@
   "description": "AI Dashboard with dynamic JSON configuration",
   "main": "main.js",
   "scripts": {
-    "dev": "concurrently \"npm run dev:vite\" \"npm run dev:electron\"",
+    "dev": "concurrently \"npm run dev:vite\" \"npm run dev:main:watch\" \"npm run dev:electron\"",
     "dev:vite": "vite",
-    "dev:electron": "wait-on http://localhost:5173 && NODE_ENV=development electron -r ts-node/register main.ts",
+    "dev:main": "tsc -p tsconfig.json && cp dist-main/main.js dist-main/preload.js ./",
+    "dev:main:watch": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "dev:electron": "wait-on http://localhost:5173 dist-main/main.js dist-main/preload.js && cp dist-main/main.js dist-main/preload.js ./ && NODE_ENV=development electron main.dev.js",
     "build": "npm run build:renderer && npm run build:main && electron-builder",
     "build:renderer": "tsc -p tsconfig.renderer.json && vite build",
     "build:main": "tsc -p tsconfig.json",
@@ -38,6 +40,7 @@
     "electron": "^39.2.3",
     "electron-builder": "^26.0.12",
     "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "wait-on": "^9.0.3"
   },

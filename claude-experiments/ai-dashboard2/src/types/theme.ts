@@ -4,6 +4,7 @@ export interface Theme {
   bgApp?: string;
   bgSecondary?: string;
   widgetBg?: string;
+  widgetBorder?: string;
   widgetRadius?: string;
   textBody?: string;
   textHeader?: string;

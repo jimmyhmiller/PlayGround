@@ -26,7 +26,7 @@ const dashboardAPI: DashboardAPI = {
   addConfigPath: (filePath: string) => ipcRenderer.invoke('add-config-path', filePath),
   removeConfigPath: (filePath: string) => ipcRenderer.invoke('remove-config-path', filePath),
   getWatchedPaths: () => ipcRenderer.invoke('get-watched-paths'),
-  updateWidgetDimensions: (dashboardId: string, widgetId: string, dimensions: WidgetDimensions) =>
+  updateWidgetDimensions: (dashboardId: string, widgetId: string, dimensions: Partial<WidgetDimensions>) =>
     ipcRenderer.invoke('update-widget-dimensions', { dashboardId, widgetId, dimensions }),
   updateWidget: (dashboardId: string, widgetId: string, config: Partial<WidgetConfig>) =>
     ipcRenderer.invoke('update-widget', { dashboardId, widgetId, config }),

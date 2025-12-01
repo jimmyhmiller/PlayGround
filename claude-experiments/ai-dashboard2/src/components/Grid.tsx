@@ -122,6 +122,7 @@ export const Grid = ({
     return maxZIndexRef.current;
   }, []);
 
+  // Calculate content size based on items
   const calculateContentSize = useCallback(() => {
     if (items.size === 0) {
       return { width: 0, height: 0 };
@@ -142,32 +143,13 @@ export const Grid = ({
 
   const contentSize = calculateContentSize();
 
-  const getOverflowStyles = (): CSSProperties => {
-    const parseHeight = (h: string | number) => {
-      if (typeof h === 'string' && h.includes('calc')) {
-        return h;
-      }
-      return h;
-    };
-
-    const parsedHeight = parseHeight(height);
-
+  // Apply overflow based on mode
+  const getOverflowStyle = (): Pick<CSSProperties, 'overflowX' | 'overflowY' | 'overflow' | 'cursor'> => {
     switch (mode) {
       case 'vertical-scroll':
-        return {
-          overflowY: 'auto',
-          overflowX: 'hidden',
-          height: parsedHeight,
-          minHeight: contentSize.height * 1.5 + 400
-        };
+        return { overflowY: 'auto', overflowX: 'hidden' };
       case 'horizontal-scroll':
-        return {
-          overflowX: 'auto',
-          overflowY: 'hidden',
-          height: parsedHeight,
-          width: width,
-          minWidth: contentSize.width * 1.5 + 400
-        };
+        return { overflowX: 'auto', overflowY: 'hidden' };
       case 'infinite-canvas':
         return {
           overflow: 'hidden',
@@ -175,50 +157,13 @@ export const Grid = ({
         };
       case 'single-pane':
       default:
-        return {
-          overflow: 'hidden'
-        };
+        return { overflow: 'hidden' };
     }
-  };
-
-  const overflowStyles = getOverflowStyles();
-
-  const containerStyle: CSSProperties = {
-    position: 'relative',
-    width: mode === 'horizontal-scroll' ? overflowStyles.minWidth : '100%',
-    height: mode === 'vertical-scroll' ? 'auto' : '100%',
-    minWidth: mode === 'horizontal-scroll' ? overflowStyles.minWidth : undefined,
-    minHeight: mode === 'vertical-scroll' ? overflowStyles.minHeight : undefined,
-    transform: mode === 'infinite-canvas' ? `translate(${panOffset.x}px, ${panOffset.y}px)` : 'none',
-    transition: isPanning ? 'none' : 'transform 0.1s ease-out',
-    backgroundImage: showGrid
-      ? `
-        linear-gradient(to right, rgba(0,0,0,0.05) ${cellSize}px, transparent ${cellSize}px),
-        linear-gradient(to bottom, rgba(0,0,0,0.05) ${cellSize}px, transparent ${cellSize}px)
-      `
-      : 'none',
-    backgroundSize: showGrid ? `${cellSize + actualGapX}px ${cellSize + actualGapY}px` : 'auto',
-    backgroundPosition: showGrid ? `${panOffset.x}px ${panOffset.y}px` : '0 0',
-  };
-
-  const gridStyle: CSSProperties = {
-    position: 'relative',
-    width: overflowStyles.width || width,
-    height: overflowStyles.height || height,
-    minWidth: overflowStyles.minWidth,
-    minHeight: overflowStyles.minHeight,
-    overflowX: overflowStyles.overflowX,
-    overflowY: overflowStyles.overflowY,
-    overflow: overflowStyles.overflow,
-    cursor: overflowStyles.cursor,
   };
 
   const handleMouseDown = (e: MouseEvent<HTMLDivElement>) => {
     if (mode !== 'infinite-canvas') return;
-
-    if (!e.altKey) {
-      return;
-    }
+    if (!e.altKey) return;
 
     e.preventDefault();
     setIsPanning(true);
@@ -285,6 +230,28 @@ export const Grid = ({
     };
   }, [mode]);
 
+  const gridStyle: CSSProperties = {
+    position: 'relative',
+    width: mode === 'horizontal-scroll' ? 'auto' : width,
+    height: mode === 'vertical-scroll' ? 'auto' : height,
+    minWidth: mode === 'horizontal-scroll' ? contentSize.width + 100 : width,
+    minHeight: mode === 'vertical-scroll' ? contentSize.height + 100 : height,
+    ...getOverflowStyle(),
+    backgroundImage: showGrid
+      ? `
+        linear-gradient(to right, rgba(0,0,0,0.05) ${cellSize}px, transparent ${cellSize}px),
+        linear-gradient(to bottom, rgba(0,0,0,0.05) ${cellSize}px, transparent ${cellSize}px)
+      `
+      : 'none',
+    backgroundSize: showGrid ? `${cellSize + actualGapX}px ${cellSize + actualGapY}px` : 'auto',
+    backgroundPosition: showGrid ? `${panOffset.x}px ${panOffset.y}px` : '0 0',
+  };
+
+  const containerStyle: CSSProperties = mode === 'infinite-canvas' ? {
+    transform: `translate(${panOffset.x}px, ${panOffset.y}px)`,
+    transition: isPanning ? 'none' : 'transform 0.1s ease-out',
+  } : {};
+
   return (
     <GridContext.Provider value={{
       cellSize,
@@ -298,7 +265,7 @@ export const Grid = ({
       items,
       getNextZIndex
     }}>
-      <div className={`grid-container ${className}`} style={gridStyle} onMouseDown={handleMouseDown}>
+      <div className={`grid-container ${className} mode-${mode}`} style={gridStyle} onMouseDown={handleMouseDown}>
         <div style={containerStyle}>
           {children}
         </div>

@@ -168,8 +168,9 @@ impl LayoutOutput {
                 blocks.push(layout_block);
 
                 // Create edges for this node's destinations
-                for (port_idx, &dst_id) in node.dst_nodes.iter().enumerate() {
-                    if let Some(dst_node) = node_lookup.get(&dst_id) {
+                for (port_idx, dst_id_opt) in node.dst_nodes.iter().enumerate() {
+                    if let Some(dst_id) = dst_id_opt {
+                        if let Some(dst_node) = node_lookup.get(dst_id) {
                         let joint_offset = node.joint_offsets.get(port_idx).copied().unwrap_or(0.0);
                         let is_backedge = node.layer > dst_node.layer;
                         
@@ -205,6 +206,7 @@ impl LayoutOutput {
                             is_backedge,
                             path_type,
                         });
+                        }
                     }
                 }
             }

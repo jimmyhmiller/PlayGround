@@ -1,13 +1,26 @@
 import { FC, useState, useEffect, MouseEvent } from 'react';
-import type { Theme, WidgetConfig, Dashboard, LayoutSettings } from '../../types';
+import type { Theme, WidgetConfig, Dashboard, LayoutSettings, WidgetDimensions } from '../../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { GridItem } from '../GridItem';
+
+export interface BaseWidgetComponentProps {
+  theme: Theme;
+  config: WidgetConfig;
+  dashboardId: string;
+  dashboard?: Dashboard;
+  layout?: LayoutSettings;
+  widgetKey?: string;
+  currentConversationId?: string | null;
+  setCurrentConversationId?: (id: string | null) => void;
+  widgetConversations?: Record<string, string | null>;
+  reloadTrigger?: number;
+}
 
 interface WidgetProps {
   theme: Theme;
   config: WidgetConfig;
   clipPath?: string;
-  onResize?: (dashboardId: string, widgetId: string, dimensions: any) => void;
+  onResize?: (dashboardId: string, widgetId: string, dimensions: Partial<WidgetDimensions>) => void;
   onDelete?: (dashboardId: string, widgetId: string) => void;
   dashboardId: string;
   dashboard?: Dashboard;
@@ -16,7 +29,7 @@ interface WidgetProps {
   widgetConversations: Record<string, string | null>;
   setWidgetConversations: (update: (prev: Record<string, string | null>) => Record<string, string | null>) => void;
   reloadTrigger?: number;
-  widgetComponents: Record<string, FC<any>>;
+  widgetComponents: Record<string, FC<BaseWidgetComponentProps>>;
 }
 
 const defaultWidgetDimensions: Record<string, { w: number; h: number }> = {
@@ -98,7 +111,10 @@ export const Widget: FC<WidgetProps> = ({
 
   const isChat = config.type === 'chat';
   const widgetKey = `${dashboardId}-${config.id}`;
-  const hasRegenerate = !!(config as any).regenerateCommand || !!(config as any).regenerateScript || !!(config as any).regenerate;
+  const hasRegenerate =
+    ('regenerateCommand' in config && !!config.regenerateCommand) ||
+    ('regenerateScript' in config && !!config.regenerateScript) ||
+    ('regenerate' in config && !!config.regenerate);
 
   const handleDrag = ({ x, y }: { x?: number; y?: number; width?: number; height?: number }) => {
     if (onResize && dashboardId && (x !== undefined || y !== undefined)) {
@@ -168,7 +184,7 @@ export const Widget: FC<WidgetProps> = ({
       onContextMenu={handleContextMenu}
       style={{
         background: theme.widgetBg,
-        border: (theme as any).widgetBorder,
+        border: theme.widgetBorder,
         borderRadius: theme.widgetRadius,
         clipPath: clipPath,
         width: '100%',
@@ -231,15 +247,15 @@ export const Widget: FC<WidgetProps> = ({
   );
 
   const defaults = defaultWidgetDimensions[config.type] || { w: 250, h: 200 };
-  const configWithDimensions = (config.dimensions || config) as any;
+  const dims = config.dimensions || config;
 
   // Always use GridItem for draggable/resizable widgets
   return (
     <GridItem
-      x={configWithDimensions.x || 0}
-      y={configWithDimensions.y || 0}
-      width={parseSize(configWithDimensions.w || configWithDimensions.width, defaults.w)}
-      height={parseSize(configWithDimensions.h || configWithDimensions.height, defaults.h)}
+      x={dims.x || 0}
+      y={dims.y || 0}
+      width={parseSize(dims.w || dims.width, defaults.w)}
+      height={parseSize(dims.h || dims.height, defaults.h)}
       resizable={true}
       draggable={true}
       onDrag={handleDrag}

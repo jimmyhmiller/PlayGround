@@ -3,16 +3,25 @@
     "target": "ES2022",
     "module": "commonjs",
     "lib": ["ES2022"],
-    "outDir": ".",
-    "rootDir": ".",
+    "outDir": "./dist-main",
+    "rootDir": "./",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "moduleResolution": "node",
     "resolveJsonModule": true,
-    "types": ["node"]
+    "types": ["node"],
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
   },
-  "include": ["main.ts", "preload.ts", "dashboard-tools.ts", "project-utils.ts", "scripts/**/*"],
+  "ts-node": {
+    "transpileOnly": true,
+    "compilerOptions": {
+      "module": "commonjs"
+    }
+  },
+  "files": ["main.ts", "preload.ts", "dashboard-tools.ts", "project-utils.ts"],
   "exclude": ["node_modules", "dist", "src"]
 }

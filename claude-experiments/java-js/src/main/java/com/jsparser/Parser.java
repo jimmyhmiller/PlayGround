@@ -993,9 +993,12 @@ public class Parser {
                 if (match(TokenType.ASSIGN)) {
                     // Class field initializers are not in async context
                     boolean oldInClassFieldInitializer = inClassFieldInitializer;
+                    boolean oldInAsyncContext = inAsyncContext;
                     inClassFieldInitializer = true;
+                    inAsyncContext = false;  // Reset async context for class field initializers
                     value = parseAssignment();
                     inClassFieldInitializer = oldInClassFieldInitializer;
+                    inAsyncContext = oldInAsyncContext;
                 }
 
                 // Consume optional semicolon
@@ -2414,29 +2417,50 @@ public class Parser {
         }
 
         // Await expressions (contextual keyword)
-        // Only parse as await expression in async context (or module top-level for top-level await)
-        // and not followed by colon (labeled statement), semicolon, or assignment
-        // BUT: await is NOT allowed in class field initializers, even if the class is in an async context
-        if ((inAsyncContext || forceModuleMode) && !inClassFieldInitializer &&
-            check(TokenType.IDENTIFIER) && peek().lexeme().equals("await") &&
-            !checkAhead(1, TokenType.COLON) && !checkAhead(1, TokenType.SEMICOLON) &&
-            !checkAhead(1, TokenType.ASSIGN) && !checkAhead(1, TokenType.PLUS_ASSIGN) &&
-            !checkAhead(1, TokenType.MINUS_ASSIGN)) {
-            Token awaitToken = advance();
+        // In async context, await is a keyword (use minimal lookahead for top-level await in modules)
+        // In script mode (non-async), use lookahead to distinguish from identifier usage
+        if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("await")) {
+            boolean shouldParseAsAwait = false;
 
-            // Check if there's an argument (not standalone await)
-            // Don't consume the argument if it's a semicolon, closing delimiter, binary operator, etc.
-            Expression argument = null;
-            if (!check(TokenType.SEMICOLON) && !check(TokenType.RBRACE) && !check(TokenType.EOF) &&
-                !check(TokenType.RPAREN) && !check(TokenType.COMMA) && !check(TokenType.RBRACKET) &&
-                !check(TokenType.INSTANCEOF) && !check(TokenType.IN) &&
-                !check(TokenType.QUESTION) && !check(TokenType.COLON)) {
-                argument = parseUnary();  // Right-associative
+            if (inAsyncContext && !inClassFieldInitializer) {
+                // Async context: await is ALWAYS a keyword, parse as AwaitExpression
+                // No lookahead needed - await is unambiguous in async contexts
+                shouldParseAsAwait = true;
+            } else if (!inAsyncContext && forceModuleMode && !inClassFieldInitializer) {
+                // Module mode (top-level await): await is a keyword, but use minimal lookahead
+                // to avoid parsing await labels/assignments
+                // Only exclude the cases that are syntactically impossible as AwaitExpression
+                shouldParseAsAwait = !checkAhead(1, TokenType.COLON) &&
+                                   !checkAhead(1, TokenType.ASSIGN) &&
+                                   !checkAhead(1, TokenType.PLUS_ASSIGN) &&
+                                   !checkAhead(1, TokenType.MINUS_ASSIGN);
+            } else if (!inAsyncContext && !forceModuleMode) {
+                // Script mode (non-async): use full lookahead to distinguish identifier from expression
+                // Avoid parsing "await = x", "await: label", or standalone "await;" as AwaitExpression
+                shouldParseAsAwait = !checkAhead(1, TokenType.COLON) &&
+                                   !checkAhead(1, TokenType.SEMICOLON) &&
+                                   !checkAhead(1, TokenType.ASSIGN) &&
+                                   !checkAhead(1, TokenType.PLUS_ASSIGN) &&
+                                   !checkAhead(1, TokenType.MINUS_ASSIGN);
             }
 
-            Token endToken = previous();
-            SourceLocation loc = createLocation(awaitToken, endToken);
-            return new AwaitExpression(getStart(awaitToken), getEnd(endToken), loc, argument);
+            if (shouldParseAsAwait) {
+                Token awaitToken = advance();
+
+                // Check if there's an argument (not standalone await)
+                // Don't consume the argument if it's a semicolon, closing delimiter, binary operator, etc.
+                Expression argument = null;
+                if (!check(TokenType.SEMICOLON) && !check(TokenType.RBRACE) && !check(TokenType.EOF) &&
+                    !check(TokenType.RPAREN) && !check(TokenType.COMMA) && !check(TokenType.RBRACKET) &&
+                    !check(TokenType.INSTANCEOF) && !check(TokenType.IN) &&
+                    !check(TokenType.QUESTION) && !check(TokenType.COLON)) {
+                    argument = parseUnary();  // Right-associative
+                }
+
+                Token endToken = previous();
+                SourceLocation loc = createLocation(awaitToken, endToken);
+                return new AwaitExpression(getStart(awaitToken), getEnd(endToken), loc, argument);
+            }
         }
 
         // Unary operators
@@ -2791,10 +2815,14 @@ public class Parser {
 
                 advance();
 
-                // In module mode, 'await' is a reserved keyword and cannot be used as an identifier
-                if (forceModuleMode && token.lexeme().equals("await")) {
+                // In module/async mode, 'await' is a reserved keyword
+                // If we reach here, it means the AwaitExpression check didn't catch it
+                // This can only happen in error cases (e.g., trying to assign to await)
+                // Exception: class field initializers reset the async context, so 'await' can be an identifier there
+                if ((forceModuleMode || inAsyncContext) && !inClassFieldInitializer && token.lexeme().equals("await")) {
+                    String context = forceModuleMode ? "module code" : "async function";
                     throw new ParseException("SyntaxError", token, null, null,
-                        "Cannot use keyword 'await' outside an async function");
+                        "Unexpected use of 'await' as identifier in " + context);
                 }
 
                 SourceLocation loc = createLocation(token, token);

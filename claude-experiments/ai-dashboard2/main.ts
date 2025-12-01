@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as util from 'util';
 import { spawn, ChildProcess, SpawnOptionsWithoutStdio } from 'child_process';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, type Query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { createDashboardTools } from './dashboard-tools';
 import * as projectUtils from './project-utils';
 import type {
@@ -21,18 +21,21 @@ import type {
 
 const isDev = process.env.NODE_ENV === 'development';
 
+// Set app name to ensure consistent userData path in dev and prod
+app.setName('ai-dashboard2');
+
 let mainWindow: BrowserWindow | null = null;
 
 // Typed interfaces for Map entries
 interface WatchedPathEntry {
-  watcher?: any;
+  watcher?: fs.FSWatcher | fs.StatWatcher;
   dashboard: Dashboard;
   lastWriteTime: number | null;
   projectId?: string;
 }
 
 interface ActiveChat {
-  query: any; // Claude SDK query instance
+  query: Query;
 }
 
 interface RunningCommand {
@@ -58,18 +61,26 @@ const activeChats = new Map<string, ActiveChat>();
 const runningCommands = new Map<string, RunningCommand>();
 
 // File paths
-const configFilePath = path.join(app.getPath('userData'), 'dashboard-paths.json');
-const projectsPath = path.join(app.getPath('userData'), 'projects.json');
+const userDataPath = app.getPath('userData');
+const configFilePath = path.join(userDataPath, 'dashboard-paths.json');
+const projectsPath = path.join(userDataPath, 'projects.json');
+console.log('[App] userData path:', userDataPath);
+console.log('[App] Config file path:', configFilePath);
+console.log('[App] Projects file path:', projectsPath);
 const chatStoragePath = path.join(app.getPath('userData'), 'chat-history.json');
 const conversationsPath = path.join(app.getPath('userData'), 'conversations.json');
 
 // Load saved config paths
 function loadSavedPaths(): string[] {
   try {
+    console.log('[loadSavedPaths] Checking if file exists:', configFilePath);
+    console.log('[loadSavedPaths] File exists:', fs.existsSync(configFilePath));
     if (fs.existsSync(configFilePath)) {
       const data = JSON.parse(fs.readFileSync(configFilePath, 'utf-8'));
+      console.log('[loadSavedPaths] Loaded data:', data);
       return data.paths || [];
     }
+    console.log('[loadSavedPaths] Config file does not exist');
   } catch (e) {
     console.error('Error loading saved paths:', e);
   }
@@ -148,12 +159,17 @@ function saveConversations(): void {
 // Load projects from disk
 function loadProjects(): void {
   try {
+    console.log('[loadProjects] Checking if file exists:', projectsPath);
+    console.log('[loadProjects] File exists:', fs.existsSync(projectsPath));
     if (fs.existsSync(projectsPath)) {
       const data = JSON.parse(fs.readFileSync(projectsPath, 'utf-8'));
+      console.log('[loadProjects] Loaded raw data, keys:', Object.keys(data));
       Object.entries(data).forEach(([projectId, project]) => {
         projects.set(projectId, project as Project);
       });
       console.log(`[Projects] Loaded ${projects.size} projects`);
+    } else {
+      console.log('[loadProjects] Projects file does not exist');
     }
   } catch (e) {
     console.error('Error loading projects:', e);
@@ -333,11 +349,11 @@ ipcMain.handle('update-widget-dimensions', async (_event: IpcMainInvokeEvent, { 
       return { success: false, error: 'Widget not found' };
     }
 
-    const widgetAny = widget as any;
-    if (dimensions.width !== undefined) widgetAny.width = dimensions.width;
-    if (dimensions.height !== undefined) widgetAny.height = dimensions.height;
-    if (dimensions.x !== undefined) widgetAny.x = dimensions.x;
-    if (dimensions.y !== undefined) widgetAny.y = dimensions.y;
+    // Update widget dimensions (all widgets have these optional properties)
+    if (dimensions.width !== undefined) widget.width = dimensions.width;
+    if (dimensions.height !== undefined) widget.height = dimensions.height;
+    if (dimensions.x !== undefined) widget.x = dimensions.x;
+    if (dimensions.y !== undefined) widget.y = dimensions.y;
 
     entry.lastWriteTime = Date.now();
     fs.writeFileSync(targetPath, JSON.stringify(entry.dashboard, null, 2), 'utf-8');
@@ -1372,17 +1388,20 @@ ipcMain.handle('regenerate-widget', async (_event: IpcMainInvokeEvent, { dashboa
       return { success: false, error: 'Dashboard not found' };
     }
 
-    const widget = entry.dashboard.widgets.find(w => w.id === widgetId) as any;
+    const widget = entry.dashboard.widgets.find(w => w.id === widgetId);
     if (!widget) {
       return { success: false, error: 'Widget not found' };
     }
 
+    // Type for test results
+    type TestResult = { name: string; status: 'passed' | 'failed' | 'skipped'; duration?: number; error?: string };
+
     // Built-in test runners with parsers
-    const testRunners: Record<string, { command: string; parser: (output: string) => any[] }> = {
+    const testRunners: Record<string, { command: string; parser: (output: string) => TestResult[] }> = {
       cargo: {
         command: 'cargo test 2>&1',
         parser: (output: string) => {
-          const tests = [];
+          const tests: TestResult[] = [];
           const lines = output.split('\n');
 
           for (const line of lines) {
@@ -1391,7 +1410,7 @@ ipcMain.handle('regenerate-widget', async (_event: IpcMainInvokeEvent, { dashboa
               const name = match[1];
               const result = match[2];
 
-              let status;
+              let status: 'passed' | 'failed' | 'skipped';
               if (result === 'ok') {
                 status = 'passed';
               } else if (result === 'FAILED') {
@@ -1436,7 +1455,7 @@ ipcMain.handle('regenerate-widget', async (_event: IpcMainInvokeEvent, { dashboa
       pytest: {
         command: 'pytest --tb=short -v 2>&1',
         parser: (output: string) => {
-          const tests = [];
+          const tests: TestResult[] = [];
           const lines = output.split('\n');
 
           for (const line of lines) {
@@ -1445,7 +1464,7 @@ ipcMain.handle('regenerate-widget', async (_event: IpcMainInvokeEvent, { dashboa
               const name = `${match[1]}::${match[2]}`;
               const result = match[3];
 
-              let status;
+              let status: 'passed' | 'failed' | 'skipped' = 'passed';
               if (result === 'PASSED') {
                 status = 'passed';
               } else if (result === 'FAILED') {
@@ -1567,31 +1586,33 @@ ipcMain.handle('regenerate-widget', async (_event: IpcMainInvokeEvent, { dashboa
 
         try {
           switch (widget.type) {
-            case 'barChart':
-              widget.data = data;
+            case 'bar-chart':
+              if ('data' in widget) widget.data = data;
               break;
             case 'stat':
-              widget.value = data;
+              if ('value' in widget) widget.value = data;
               break;
             case 'progress':
-              if (typeof data === 'object' && data.value !== undefined) {
-                widget.value = data.value;
-                if (data.text !== undefined) widget.text = data.text;
-              } else {
-                widget.value = data;
+              if ('value' in widget) {
+                if (typeof data === 'object' && data.value !== undefined) {
+                  widget.value = data.value;
+                  if ('text' in widget && data.text !== undefined) widget.text = data.text;
+                } else {
+                  widget.value = data;
+                }
               }
               break;
-            case 'diffList':
-            case 'fileList':
-            case 'todoList':
-            case 'keyValue':
-              widget.items = data;
+            case 'diff-list':
+            case 'file-list':
+            case 'todo-list':
+            case 'key-value':
+              if ('items' in widget) widget.items = data;
               break;
-            case 'testResults':
-              widget.tests = data;
+            case 'test-results':
+              if ('tests' in widget) widget.tests = data;
               break;
-            case 'jsonViewer':
-              widget.data = data;
+            case 'json-viewer':
+              if ('data' in widget) widget.data = data;
               break;
             default:
               if ('data' in widget) {
@@ -1661,12 +1682,14 @@ ipcMain.handle('regenerate-all-widgets', async (event: IpcMainInvokeEvent, { das
       });
       results.push({
         widgetId: widget.id,
-        label: Array.isArray((widget as any).label) ? (widget as any).label.join(' - ') : (widget as any).label,
-        ...(result as any)
+        label: Array.isArray(widget.label) ? widget.label.join(' - ') : widget.label || widget.id,
+        success: result?.success || false,
+        error: result?.error,
+        message: result?.message
       });
     }
 
-    const successCount = results.filter(r => (r as any).success).length;
+    const successCount = results.filter(r => r.success).length;
     const failureCount = results.length - successCount;
 
     return {
@@ -1740,7 +1763,7 @@ ipcMain.handle('project-add', async (_event: IpcMainInvokeEvent, { projectPath, 
     // Create a Project object that includes both structure type and project type
     const project: Project = {
       ...projectConfig,
-      type: type || projectConfig.type as any
+      type: (type || projectConfig.type) as ProjectType
     };
 
     projects.set(project.id, project);
@@ -1968,28 +1991,20 @@ Example good SVG (notice NO color attributes):
     for await (const message of queryInstance) {
       console.log('[Projects] Received message:', JSON.stringify(message, null, 2));
 
-      if (message.type === 'result') {
-        // Try different ways to get the response text from the SDK
-        if ((message as any).result) {
-          responseText = (message as any).result;
-        } else if ((message as any).content && Array.isArray((message as any).content)) {
-          const textBlocks = (message as any).content.filter((block: any) => block.type === 'text');
-          responseText = textBlocks.map((block: any) => block.text).join('');
-        } else if ((message as any).text) {
-          responseText = (message as any).text;
-        }
-
-        console.log('[Projects] Got response text:', responseText.substring(0, 100) + '...');
-
-        if (responseText) {
-          break;
-        }
-      } else if (message.type === 'assistant' && (message as any).message?.content) {
-        const content = (message as any).message.content;
+      if (message.type === 'result' && message.subtype === 'success') {
+        // SDKResultMessage with success subtype has a result field
+        responseText = message.result;
+        console.log('[Projects] Got response text from result:', responseText.substring(0, 100) + '...');
+        break;
+      } else if (message.type === 'assistant' && message.message?.content) {
+        // SDKAssistantMessage has APIAssistantMessage with content array
+        const content = message.message.content;
         if (Array.isArray(content)) {
-          const textBlocks = content.filter((block: any) => block.type === 'text');
+          const textBlocks = content.filter((block): block is { type: 'text'; text: string } =>
+            typeof block === 'object' && block !== null && 'type' in block && block.type === 'text'
+          );
           if (textBlocks.length > 0) {
-            responseText = textBlocks.map((block: any) => block.text).join('');
+            responseText = textBlocks.map(block => block.text).join('');
             console.log('[Projects] Got response text from assistant message:', responseText.substring(0, 100) + '...');
             break;
           }
@@ -2027,31 +2042,50 @@ Example good SVG (notice NO color attributes):
 });
 
 app.whenReady().then(() => {
+  console.log('[App] Starting dashboard loading...');
   const savedPaths = loadSavedPaths();
+  console.log(`[App] Found ${savedPaths.length} saved paths:`, savedPaths);
   savedPaths.forEach(watchFile);
+
   loadChatHistory();
   loadConversations();
   loadProjects();
+  console.log(`[App] Loaded ${projects.size} projects`);
 
   projects.forEach((project) => {
+    console.log(`[Projects] Processing project ${project.name} (${project.id})`);
     if (project.dashboards && Array.isArray(project.dashboards)) {
+      console.log(`[Projects] Project has ${project.dashboards.length} dashboards`);
       project.dashboards.forEach(dashboardPath => {
         console.log(`[Projects] Watching dashboard from project ${project.id}: ${dashboardPath}`);
         watchFile(dashboardPath);
         const entry = watchedPaths.get(dashboardPath);
         if (entry) {
           entry.projectId = project.id;
+          console.log(`[Projects] Successfully linked dashboard to project`);
+        } else {
+          console.error(`[Projects] Failed to watch dashboard: ${dashboardPath}`);
         }
       });
+    } else {
+      console.log(`[Projects] Project has no dashboards array`);
     }
   });
+
+  console.log(`[App] Total watched paths: ${watchedPaths.size}`);
+  const allDashboards = getAllDashboards();
+  console.log(`[App] Total dashboards available: ${allDashboards.length}`);
 
   createWindow();
 });
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
-    watchedPaths.forEach((entry) => entry.watcher?.close());
+    watchedPaths.forEach((entry) => {
+      if (entry.watcher && 'close' in entry.watcher) {
+        entry.watcher.close();
+      }
+    });
     app.quit();
   }
 });

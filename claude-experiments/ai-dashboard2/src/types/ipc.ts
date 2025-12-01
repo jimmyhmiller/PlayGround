@@ -9,7 +9,7 @@ export interface DashboardAPI {
   addConfigPath: (filePath: string) => Promise<void>;
   removeConfigPath: (filePath: string) => Promise<void>;
   getWatchedPaths: () => Promise<string[]>;
-  updateWidgetDimensions: (dashboardId: string, widgetId: string, dimensions: WidgetDimensions) => Promise<void>;
+  updateWidgetDimensions: (dashboardId: string, widgetId: string, dimensions: Partial<WidgetDimensions>) => Promise<void>;
   updateWidget: (dashboardId: string, widgetId: string, config: Partial<WidgetConfig>) => Promise<void>;
   deleteWidget: (dashboardId: string, widgetId: string) => Promise<void>;
   regenerateWidget: (dashboardId: string, widgetId: string) => Promise<void>;
@@ -17,7 +17,7 @@ export interface DashboardAPI {
   updateLayoutSettings: (dashboardId: string, settings: LayoutSettings) => Promise<void>;
   onDashboardUpdate: (callback: (dashboards: Dashboard[]) => void) => void;
   onError: (callback: (error: string) => void) => void;
-  loadDataFile: (filePath: string) => Promise<any>;
+  loadDataFile: (filePath: string) => Promise<unknown>;
   loadTextFile: (filePath: string) => Promise<string>;
   writeCodeFile: (filePath: string, content: string) => Promise<{ success: boolean }>;
 }
@@ -42,9 +42,9 @@ export interface CommandAPI {
   onOutput: (callback: (data: CommandOutput) => void) => () => void;
   onExit: (callback: (data: CommandExit) => void) => () => void;
   onError: (callback: (data: CommandOutput) => void) => () => void;
-  offOutput: (handler: any) => void;
-  offExit: (handler: any) => void;
-  offError: (handler: any) => void;
+  offOutput: (handler: (data: CommandOutput) => void) => void;
+  offExit: (handler: (data: CommandExit) => void) => void;
+  offError: (handler: (data: CommandOutput) => void) => void;
 }
 
 // Claude API
@@ -83,11 +83,11 @@ export interface ClaudeAPI {
   onTodoUpdate: (callback: (data: { conversationId: string; todos: Todo[] }) => void) => () => void;
   onUserQuestion: (callback: (data: UserQuestion) => void) => () => void;
   sendQuestionAnswer: (questionId: string, answer: Record<string, string | string[]>) => void;
-  offMessage: (handler: any) => void;
-  offComplete: (handler: any) => void;
-  offError: (handler: any) => void;
-  offTodoUpdate: (handler: any) => void;
-  offUserQuestion: (handler: any) => void;
+  offMessage: (handler: (data: { chatId: string; message: ChatMessage }) => void) => void;
+  offComplete: (handler: (data: { chatId: string }) => void) => void;
+  offError: (handler: (data: { chatId: string; error: string }) => void) => void;
+  offTodoUpdate: (handler: (data: { conversationId: string; todos: Todo[] }) => void) => void;
+  offUserQuestion: (handler: (data: UserQuestion) => void) => void;
   removeAllListeners: () => void;
 }
 
@@ -109,7 +109,7 @@ export interface WebContentsViewAPI {
   updateBounds: (widgetId: string, bounds: WebViewBounds) => Promise<void>;
   destroy: (widgetId: string) => Promise<void>;
   onNavigated: (callback: (data: { widgetId: string; url: string }) => void) => () => void;
-  offNavigated: (handler: any) => void;
+  offNavigated: (handler: (data: { widgetId: string; url: string }) => void) => void;
 }
 
 // Project API

@@ -44,6 +44,7 @@ body {
 .window-frame {
   flex: 1;
   display: flex;
+  height: 100vh;
   overflow: hidden;
 }
 
@@ -166,6 +167,15 @@ body {
   gap: 15px;
   flex: 1;
   position: relative;
+}
+
+/* Grid container modes */
+.grid-container.mode-horizontal-scroll {
+  min-width: max-content;
+}
+
+.grid-container.mode-vertical-scroll {
+  min-height: max-content;
 }
 
 .chat-widget {
