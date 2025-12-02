@@ -661,7 +661,8 @@ impl Graph {
                         layout_node.src_nodes.push(edge.src_id);
                         // Also update the source node to point to this destination
                         // Find and update the source node's dst_nodes using port index
-                        for layer_idx in 0..layer {
+                        // Include current layer (0..=layer) to handle edges within the same layer
+                        for layer_idx in 0..=layer {
                             if let Some(src_node) = layout_nodes_by_layer[layer_idx].iter_mut()
                                 .find(|n| n.id == edge.src_id) {
                                 // Use direct index assignment with port number
