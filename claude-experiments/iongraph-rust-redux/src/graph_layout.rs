@@ -802,8 +802,11 @@ impl<P: LayoutProvider> Graph<P> {
         for (idx, block) in self.blocks.iter().enumerate() {
             let loop_id = block.loop_id;
             if let Some(&loop_header_idx) = self.blocks_by_id.get(&loop_id) {
-                if let Some(loop_header_layout_node) = self.blocks[loop_header_idx].layout_node {
-                    block_to_loop_header.insert(idx, loop_header_layout_node);
+                // Only include actual loop headers (TypeScript uses asLH which checks this)
+                if self.blocks[loop_header_idx].attributes.contains(&"loopheader".to_string()) {
+                    if let Some(loop_header_layout_node) = self.blocks[loop_header_idx].layout_node {
+                        block_to_loop_header.insert(idx, loop_header_layout_node);
+                    }
                 }
             }
         }
@@ -896,6 +899,11 @@ impl<P: LayoutProvider> Graph<P> {
                     }
                 }
 
+                if layer_idx == 9 && first_block_idx > 0 {
+                    eprintln!("suck_in_leftmost_dummies layer 9: first_block at idx={}, x={}, will start at x={}",
+                             first_block_idx, next_x, next_x - BLOCK_GAP - PORT_START);
+                }
+
                 // Walk backward through leftmost dummies
                 next_x -= BLOCK_GAP + PORT_START;
                 for i in (0..first_block_idx).rev() {
@@ -910,6 +918,10 @@ impl<P: LayoutProvider> Graph<P> {
                     };
 
                     let mut max_safe_x = next_x;
+
+                    if layer_idx == 9 {
+                        eprintln!("  Processing dummy {}: next_x={}, src_nodes={:?}", dummy_id, next_x, src_nodes);
+                    }
 
                     // Don't let dummies go to the right of their source nodes (TypeScript lines 794-799)
                     if layer_idx > 0 {
@@ -928,8 +940,13 @@ impl<P: LayoutProvider> Graph<P> {
 
                                 if src_node_id == src_id {
                                     // Calculate source port position (TypeScript line 795)
+                                    // NOTE: TypeScript does NOT add PORT_START here, only PORT_SPACING!
+                                    // TypeScript: srcX = src.pos.x + src.dstNodes.indexOf(dummy) * PORT_SPACING
                                     if let Some(port_idx) = src_dst_nodes.iter().position(|&id| id == dummy_id) {
-                                        let src_port_x = src_x + PORT_START + (port_idx as f64) * PORT_SPACING;
+                                        let src_port_x = src_x + (port_idx as f64) * PORT_SPACING;
+                                        if layer_idx == 9 {
+                                            eprintln!("    Found src node {} at x={}, port_idx={}, src_port_x={}", src_id, src_x, port_idx, src_port_x);
+                                        }
                                         if src_port_x < max_safe_x {
                                             max_safe_x = src_port_x;
                                         }
@@ -942,6 +959,9 @@ impl<P: LayoutProvider> Graph<P> {
 
                     // Update dummy position
                     if let LayoutNode::DummyNode(dummy) = &mut layout_nodes[layer_idx][i] {
+                        if layer_idx == 9 {
+                            eprintln!("  Layer 9 dummy {}: old x={}, max_safe_x={}, setting to x={}", dummy.id, dummy.pos.x, max_safe_x, max_safe_x);
+                        }
                         dummy.pos.x = max_safe_x;
                         // TypeScript line 801: nextX = dummy.pos.x - BLOCK_GAP (no PORT_START!)
                         next_x = dummy.pos.x - BLOCK_GAP;
@@ -986,6 +1006,32 @@ impl<P: LayoutProvider> Graph<P> {
                     };
 
                     for (src_port, &dst_global_idx) in dst_nodes.iter().enumerate() {
+                        // Skip if dst is a backedge dummy (TypeScript presumably doesn't connect these as dst_nodes)
+                        // We need to check the destination node's flags
+                        let mut dst_is_backedge_dummy = false;
+                        let mut global_count = 0;
+                        for (dst_layer_idx, dst_layer_nodes) in layout_nodes.iter().enumerate() {
+                            for (dst_node_idx, dst_node) in dst_layer_nodes.iter().enumerate() {
+                                if global_count == dst_global_idx {
+                                    if let LayoutNode::DummyNode(d) = dst_node {
+                                        // Check if this is a backedge dummy (IMMINENT_BACKEDGE_DUMMY flag)
+                                        use crate::graph::IMMINENT_BACKEDGE_DUMMY;
+                                        if (d.flags & IMMINENT_BACKEDGE_DUMMY) != 0 {
+                                            dst_is_backedge_dummy = true;
+                                        }
+                                    }
+                                    break;
+                                }
+                                global_count += 1;
+                            }
+                            if dst_is_backedge_dummy {
+                                break;
+                            }
+                        }
+
+                        if dst_is_backedge_dummy {
+                            continue;
+                        }
                         // Convert global index to layer-local index
                         let mut current_count = 0;
                         let mut dst_layer = 0;
@@ -1371,14 +1417,35 @@ impl<P: LayoutProvider> Graph<P> {
             }
         };
 
+        // Helper to print layer 2 positions
+        let print_layer2 = |label: &str, layout_nodes: &[Vec<LayoutNode>]| {
+            if layout_nodes.len() > 2 {
+                eprintln!("{}: Layer 2:", label);
+                for (i, node) in layout_nodes[2].iter().enumerate() {
+                    match node {
+                        LayoutNode::BlockNode(n) => eprintln!("  [{}] Block {}: x={}, src_nodes={:?}", i, n.block, n.pos.x, n.src_nodes),
+                        LayoutNode::DummyNode(n) => eprintln!("  [{}] Dummy (flags={:#b}): x={}, src_nodes={:?}", i, n.flags, n.pos.x, n.src_nodes),
+                    }
+                }
+            }
+        };
+
+        print_layer2("BEFORE straightening", layout_nodes_by_layer);
+
         // Run the passes in order (mimicking TypeScript)
-        for _ in 0..LAYOUT_ITERATIONS {
+        for iter in 0..LAYOUT_ITERATIONS {
             straighten_children(layout_nodes_by_layer);
+            print_layer2(&format!("After straighten_children iter {}", iter), layout_nodes_by_layer);
+
             push_into_loops(layout_nodes_by_layer, &block_to_loop_header);
+            print_layer2(&format!("After push_into_loops iter {}", iter), layout_nodes_by_layer);
+
             straighten_dummy_runs(layout_nodes_by_layer);
+            print_layer2(&format!("After straighten_dummy_runs iter {}", iter), layout_nodes_by_layer);
         }
 
         straighten_dummy_runs(layout_nodes_by_layer);
+        print_layer2("After final straighten_dummy_runs", layout_nodes_by_layer);
 
         for iter in 0..NEARLY_STRAIGHT_ITERATIONS {
             straighten_nearly_straight_edges_up(layout_nodes_by_layer);
@@ -1411,6 +1478,7 @@ impl<P: LayoutProvider> Graph<P> {
         }
 
         straighten_conservative(layout_nodes_by_layer, &is_backedge_block, &is_backedge_dst);
+        print_layer2("After straighten_conservative", layout_nodes_by_layer);
         // Check layer 8 after straighten_conservative
         if let Some(layer8) = layout_nodes_by_layer.get(8) {
             if layer8.len() == 4 {

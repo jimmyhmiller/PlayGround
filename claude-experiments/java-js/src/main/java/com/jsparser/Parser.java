@@ -1891,18 +1891,9 @@ public class Parser {
             // Convert left side to pattern if it's a destructuring target
             Node leftNode = convertToPatternIfNeeded(left);
 
-            // Use right.end() and accurate location for template literals and complex expressions
-            int assignEnd;
-            SourceLocation loc;
-            if (right instanceof TemplateLiteral) {
-                assignEnd = right.end();
-                SourceLocation.Position startPos = new SourceLocation.Position(startToken.line(), startToken.column());
-                SourceLocation.Position endPos = getPositionFromOffset(assignEnd);
-                loc = new SourceLocation(startPos, endPos);
-            } else {
-                assignEnd = getEnd(endToken);
-                loc = createLocation(startToken, endToken);
-            }
+            // Use endToken for accurate end position (handles parenthesized expressions correctly)
+            int assignEnd = getEnd(endToken);
+            SourceLocation loc = createLocation(startToken, endToken);
 
             return new AssignmentExpression(getStart(startToken), assignEnd, loc, operator.lexeme(), leftNode, right);
         }

@@ -48,7 +48,9 @@ impl LinearScan {
         let lifetimes = Self::compute_lifetimes(&instructions);
 
         // Use ARM64 callee-saved registers (x19-x28)
-        // These are safe to use across function calls
+        // These are safe to use across function calls (trampolines for LoadVar, etc.)
+        // We have 10 registers which should be enough for most cases
+        // TODO: Implement proper register spilling for cases with >10 live values
         let physical_registers: Vec<VirtualRegister> = (19..=28).map(physical).collect();
         let max_registers = physical_registers.len();
 
@@ -60,6 +62,17 @@ impl LinearScan {
             max_registers,
             spill_locations: HashMap::new(),
             next_stack_slot: num_locals,
+        }
+    }
+
+    /// Mark a register as live until the end (for result registers)
+    pub fn mark_live_until_end(&mut self, register: VirtualRegister) {
+        let end_index = self.instructions.len().saturating_sub(1);
+        if let Some((start, _)) = self.lifetimes.get(&register) {
+            self.lifetimes.insert(register, (*start, end_index));
+        } else {
+            // Register not seen - make it live for the whole function
+            self.lifetimes.insert(register, (0, end_index));
         }
     }
 
@@ -176,6 +189,9 @@ impl LinearScan {
     ///    - If all registers are in use, spill
     ///    - Otherwise, allocate a free register
     pub fn allocate(&mut self) {
+        eprintln!("DEBUG LinearScan: {} virtual registers, {} physical registers available",
+                  self.lifetimes.len(), self.max_registers);
+
         // Create sorted list of intervals (start, end, register)
         let mut intervals: Vec<(usize, usize, VirtualRegister)> = self
             .lifetimes
@@ -196,6 +212,7 @@ impl LinearScan {
 
             // Check if we need to spill
             if active.len() >= self.max_registers {
+                eprintln!("DEBUG: Spilling needed at inst {}, active={}, max={}", start, active.len(), self.max_registers);
                 self.spill_at_interval(start, end, vreg, &mut active);
             } else {
                 // Allocate a free register
@@ -205,13 +222,113 @@ impl LinearScan {
                     active.sort_by_key(|(_, end, _)| *end);
                 } else {
                     // This shouldn't happen if active.len() < max_registers
-                    panic!("No free registers available!");
+                    panic!("No free registers available! active={}, max={}", active.len(), self.max_registers);
                 }
             }
         }
 
-        // Replace virtual registers with allocated physical registers in instructions
-        self.apply_allocation();
+        // Replace spilled registers with Spill values, then replace allocated registers
+        self.replace_spilled_registers();
+        self.replace_allocated_registers();
+    }
+
+    /// Replace spilled registers with Spill IR values
+    fn replace_spilled_registers(&mut self) {
+        for inst in self.instructions.iter_mut() {
+            Self::replace_spilled_in_instruction(inst, &self.spill_locations);
+        }
+    }
+
+    /// Replace allocated registers with physical registers
+    fn replace_allocated_registers(&mut self) {
+        for inst in self.instructions.iter_mut() {
+            Self::replace_registers_in_instruction(inst, &self.allocated_registers);
+        }
+    }
+
+    /// Replace spilled registers in an instruction with Spill values
+    fn replace_spilled_in_instruction(
+        inst: &mut Instruction,
+        spill_locations: &HashMap<VirtualRegister, usize>,
+    ) {
+        let replace = |val: &mut IrValue| {
+            if let IrValue::Register(vreg) = val {
+                if let Some(&stack_offset) = spill_locations.get(vreg) {
+                    *val = IrValue::Spill(*vreg, stack_offset);
+                }
+            }
+        };
+
+        match inst {
+            Instruction::AddInt(dst, src1, src2)
+            | Instruction::Sub(dst, src1, src2)
+            | Instruction::Mul(dst, src1, src2)
+            | Instruction::Div(dst, src1, src2) => {
+                replace(dst);
+                replace(src1);
+                replace(src2);
+            }
+
+            Instruction::Compare(dst, src1, src2, _) => {
+                replace(dst);
+                replace(src1);
+                replace(src2);
+            }
+
+            Instruction::Tag(dst, src, _) => {
+                replace(dst);
+                replace(src);
+            }
+
+            Instruction::Untag(dst, src) => {
+                replace(dst);
+                replace(src);
+            }
+
+            Instruction::LoadConstant(dst, _)
+            | Instruction::LoadVar(dst, _)
+            | Instruction::LoadTrue(dst)
+            | Instruction::LoadFalse(dst) => {
+                replace(dst);
+            }
+
+            Instruction::StoreVar(var_ptr, value) => {
+                replace(var_ptr);
+                replace(value);
+            }
+
+            Instruction::Assign(dst, src) => {
+                replace(dst);
+                replace(src);
+            }
+
+            Instruction::JumpIf(_, _, val1, val2) => {
+                replace(val1);
+                replace(val2);
+            }
+
+            Instruction::Ret(val) => {
+                replace(val);
+            }
+
+            Instruction::Label(_) | Instruction::Jump(_) => {
+                // No registers
+            }
+
+            Instruction::PushBinding(var_ptr, value) => {
+                replace(var_ptr);
+                replace(value);
+            }
+
+            Instruction::PopBinding(var_ptr) => {
+                replace(var_ptr);
+            }
+
+            Instruction::SetVar(var_ptr, value) => {
+                replace(var_ptr);
+                replace(value);
+            }
+        }
     }
 
     /// Expire old intervals - free registers that are no longer live
@@ -287,13 +404,6 @@ impl LinearScan {
         let slot = self.next_stack_slot;
         self.next_stack_slot += 1;
         slot
-    }
-
-    /// Apply the register allocation to instructions
-    fn apply_allocation(&mut self) {
-        for inst in self.instructions.iter_mut() {
-            Self::replace_registers_in_instruction(inst, &self.allocated_registers);
-        }
     }
 
     /// Replace virtual registers with allocated physical registers in an instruction

@@ -21,6 +21,9 @@ pub struct Arm64CodeGen {
 
     /// Pending jump fixups: (code_index, label)
     pending_fixups: Vec<(usize, Label)>,
+
+    /// Pool of temporary registers for spill loads (x9, x10, x11)
+    temp_register_pool: Vec<usize>,
 }
 
 impl Arm64CodeGen {
@@ -31,6 +34,7 @@ impl Arm64CodeGen {
             next_physical_reg: 0,
             label_positions: HashMap::new(),
             pending_fixups: Vec::new(),
+            temp_register_pool: vec![11, 10, 9],  // Start with x11, x10, x9 available
         }
     }
 
@@ -45,6 +49,14 @@ impl Arm64CodeGen {
 
         // Run linear scan register allocation
         let mut allocator = LinearScan::new(instructions.to_vec(), 0);
+
+        // Mark result register as live until the end
+        // This is critical - without this, the register allocator may reuse
+        // the physical register for the result, causing wrong values to be returned
+        if let IrValue::Register(vreg) = result_reg {
+            allocator.mark_live_until_end(*vreg);
+        }
+
         allocator.allocate();
 
         // Find the physical register for the result (before consuming allocator)
@@ -56,11 +68,24 @@ impl Arm64CodeGen {
             return Err(format!("Expected register for result, got {:?}", result_reg));
         };
 
+        // Count spills to determine stack space needed
+        let num_stack_slots = allocator.next_stack_slot;
+        let num_spills = allocator.spill_locations.len();
+        let stack_space = num_stack_slots * 8;  // 8 bytes per slot
+
+        eprintln!("DEBUG: {} spills, {} total stack slots, {} bytes", num_spills, num_stack_slots, stack_space);
+
         let allocated_instructions = allocator.finish();
 
         // Emit function prologue (save FP and LR)
         self.emit_stp(29, 30, 31, -2);  // stp x29, x30, [sp, #-16]!
         self.emit_mov(29, 31);           // mov x29, sp (set frame pointer)
+
+        // Allocate stack space for spills if needed
+        if stack_space > 0 {
+            // sub sp, sp, #stack_space
+            self.emit_sub_sp_imm(stack_space as i64);
+        }
 
         // Compile each instruction (now with physical registers)
         for inst in &allocated_instructions {
@@ -77,6 +102,12 @@ impl Arm64CodeGen {
         // Untag the result (shift right by 3)
         self.emit_asr_imm(0, 0, 3);
 
+        // Deallocate stack space for spills if needed
+        if stack_space > 0 {
+            // add sp, sp, #stack_space
+            self.emit_add_sp_imm(stack_space as i64);
+        }
+
         // Emit function epilogue (restore FP and LR)
         self.emit_ldp(29, 30, 31, 2);    // ldp x29, x30, [sp], #16
 
@@ -89,7 +120,8 @@ impl Arm64CodeGen {
     fn compile_instruction(&mut self, inst: &Instruction) -> Result<(), String> {
         match inst {
             Instruction::LoadConstant(dst, value) => {
-                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 match value {
                     IrValue::TaggedConstant(c) => {
                         self.emit_mov_imm(dst_reg, *c as i64);
@@ -105,6 +137,7 @@ impl Arm64CodeGen {
                     }
                     _ => return Err(format!("Invalid constant: {:?}", value)),
                 }
+                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::LoadVar(dst, var_ptr) => {
@@ -114,7 +147,8 @@ impl Arm64CodeGen {
                 // - x0 = return value (tagged)
                 // - x30 = link register (return address)
                 // - x19-x28 are callee-saved (our allocator uses these, so they're safe)
-                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
                 match var_ptr {
                     IrValue::TaggedConstant(tagged_ptr) => {
@@ -136,13 +170,14 @@ impl Arm64CodeGen {
                     }
                     _ => return Err(format!("LoadVar requires constant var pointer: {:?}", var_ptr)),
                 }
+                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::StoreVar(var_ptr, value) => {
                 // StoreVar: store value into var at runtime
                 // Var layout: [header(8)] [ns_ptr(8)] [symbol_ptr(8)] [value(8)]
                 // We want to write to field 2 (value) which is at offset 24 bytes (3 * 8)
-                let value_reg = self.get_physical_reg_for_irvalue(value)?;
+                let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
 
                 match var_ptr {
                     IrValue::TaggedConstant(tagged_ptr) => {
@@ -164,63 +199,81 @@ impl Arm64CodeGen {
             }
 
             Instruction::LoadTrue(dst) => {
-                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 self.emit_mov_imm(dst_reg, 1);
+                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::LoadFalse(dst) => {
-                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 self.emit_mov_imm(dst_reg, 0);
+                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::Untag(dst, src) => {
-                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
-                let src_reg = self.get_physical_reg_for_irvalue(src)?;
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
                 // Untag: arithmetic right shift by 3
                 self.emit_asr_imm(dst_reg, src_reg, 3);
+                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::Tag(dst, src, _tag) => {
-                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
-                let src_reg = self.get_physical_reg_for_irvalue(src)?;
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
                 // Tag: left shift by 3 (int tag is 000)
                 self.emit_lsl_imm(dst_reg, src_reg, 3);
+                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::AddInt(dst, src1, src2) => {
-                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
-                let src1_reg = self.get_physical_reg_for_irvalue(src1)?;
-                let src2_reg = self.get_physical_reg_for_irvalue(src2)?;
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
                 self.emit_add(dst_reg, src1_reg, src2_reg);
+                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::Sub(dst, src1, src2) => {
-                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
-                let src1_reg = self.get_physical_reg_for_irvalue(src1)?;
-                let src2_reg = self.get_physical_reg_for_irvalue(src2)?;
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
                 self.emit_sub(dst_reg, src1_reg, src2_reg);
+                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::Mul(dst, src1, src2) => {
-                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
-                let src1_reg = self.get_physical_reg_for_irvalue(src1)?;
-                let src2_reg = self.get_physical_reg_for_irvalue(src2)?;
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
                 self.emit_mul(dst_reg, src1_reg, src2_reg);
+                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::Div(dst, src1, src2) => {
-                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
-                let src1_reg = self.get_physical_reg_for_irvalue(src1)?;
-                let src2_reg = self.get_physical_reg_for_irvalue(src2)?;
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
                 self.emit_sdiv(dst_reg, src1_reg, src2_reg);
+                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::Assign(dst, src) => {
-                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
-                let src_reg = self.get_physical_reg_for_irvalue(src)?;
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
                 if dst_reg != src_reg {
                     self.emit_mov(dst_reg, src_reg);
                 }
+                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::PushBinding(var_ptr, value) => {
@@ -233,7 +286,7 @@ impl Arm64CodeGen {
                 match var_ptr {
                     IrValue::TaggedConstant(tagged_ptr) => {
                         // Get the value register
-                        let value_reg = self.get_physical_reg_for_irvalue(value)?;
+                        let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
 
                         // Load tagged var_ptr into x0 (first argument)
                         self.emit_mov_imm(0, *tagged_ptr as i64);
@@ -292,7 +345,7 @@ impl Arm64CodeGen {
                 match var_ptr {
                     IrValue::TaggedConstant(tagged_ptr) => {
                         // Get the value register
-                        let value_reg = self.get_physical_reg_for_irvalue(value)?;
+                        let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
 
                         // Load tagged var_ptr into x0 (first argument)
                         self.emit_mov_imm(0, *tagged_ptr as i64);
@@ -332,8 +385,8 @@ impl Arm64CodeGen {
 
             Instruction::JumpIf(label, cond, src1, src2) => {
                 // Compare src1 and src2
-                let src1_reg = self.get_physical_reg_for_irvalue(src1)?;
-                let src2_reg = self.get_physical_reg_for_irvalue(src2)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
 
                 // Emit CMP instruction
                 self.emit_cmp(src1_reg, src2_reg);
@@ -358,9 +411,10 @@ impl Arm64CodeGen {
 
             Instruction::Compare(dst, src1, src2, cond) => {
                 // Compare and set result to true/false
-                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
-                let src1_reg = self.get_physical_reg_for_irvalue(src1)?;
-                let src2_reg = self.get_physical_reg_for_irvalue(src2)?;
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
 
                 // CMP src1, src2
                 self.emit_cmp(src1_reg, src2_reg);
@@ -379,26 +433,46 @@ impl Arm64CodeGen {
                 let inverted_cond = cond_code ^ 1; // Invert the condition
                 let instruction = 0x9A9F07E0 | (inverted_cond << 12) | (dst_reg as u32);
                 self.code.push(instruction);
+                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::Ret(value) => {
                 // Move result to x0 (return register)
-                let src_reg = self.get_physical_reg_for_irvalue(value)?;
+                let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
                 if src_reg != 0 {
                     self.emit_mov(0, src_reg);
                 }
             }
         }
 
+        // Clear temporary registers after each instruction (like Beagle does)
+        self.clear_temp_registers();
+
         Ok(())
     }
 
-    fn get_physical_reg_for_irvalue(&mut self, value: &IrValue) -> Result<usize, String> {
+    /// Get physical register for an IR value
+    /// If is_dest=true and value is Spill, returns temp register without loading
+    /// If is_dest=false and value is Spill, loads from stack into temp register
+    fn get_physical_reg_for_irvalue(&mut self, value: &IrValue, is_dest: bool) -> Result<usize, String> {
         match value {
             IrValue::Register(vreg) => {
                 Ok(self.get_physical_reg(vreg))
             }
-            _ => Err(format!("Expected register, got {:?}", value)),
+            IrValue::Spill(_vreg, stack_offset) => {
+                // Allocate a temporary register from the pool
+                let temp_reg = self.allocate_temp_register();
+
+                if !is_dest {
+                    // Load spilled value from stack
+                    // Slots are at [fp, #-(slot+1)*8]: slot 0 at -8, slot 1 at -16, etc.
+                    let offset = -((*stack_offset as i32) + 1) * 8;
+                    self.emit_load_from_fp(temp_reg, offset);
+                }
+                // For destination, just return temp_reg without loading
+                Ok(temp_reg)
+            }
+            _ => Err(format!("Expected register or spill, got {:?}", value)),
         }
     }
 
@@ -406,6 +480,35 @@ impl Arm64CodeGen {
         // After linear scan allocation, all registers are already physical
         // Just return the register index directly
         vreg.index
+    }
+
+    /// Check if a destination is a spill and return its stack offset
+    fn dest_spill(&self, dest: &IrValue) -> Option<usize> {
+        match dest {
+            IrValue::Spill(_, stack_offset) => Some(*stack_offset),
+            _ => None,
+        }
+    }
+
+    /// Store a register to its spill location if needed
+    fn store_spill(&mut self, src_reg: usize, dest_spill: Option<usize>) {
+        if let Some(stack_offset) = dest_spill {
+            // Slots are at [fp, #-(slot+1)*8]: slot 0 at -8, slot 1 at -16, etc.
+            let offset = -((stack_offset as i32) + 1) * 8;
+            self.emit_store_to_fp(src_reg, offset);
+        }
+    }
+
+    /// Allocate a temporary register for loading spills
+    fn allocate_temp_register(&mut self) -> usize {
+        self.temp_register_pool
+            .pop()
+            .expect("Out of temporary registers! Need to clear temps between instructions")
+    }
+
+    /// Reset temporary register pool (called after each instruction)
+    fn clear_temp_registers(&mut self) {
+        self.temp_register_pool = vec![11, 10, 9];
     }
 
     fn apply_fixups(&mut self) -> Result<(), String> {
@@ -492,6 +595,18 @@ impl Arm64CodeGen {
         self.code.push(instruction);
     }
 
+    fn emit_sub_sp_imm(&mut self, imm: i64) {
+        // SUB sp, sp, #imm
+        let instruction = 0xD10003FF | ((imm as u32 & 0xFFF) << 10);
+        self.code.push(instruction);
+    }
+
+    fn emit_add_sp_imm(&mut self, imm: i64) {
+        // ADD sp, sp, #imm
+        let instruction = 0x910003FF | ((imm as u32 & 0xFFF) << 10);
+        self.code.push(instruction);
+    }
+
     fn emit_mul(&mut self, dst: usize, src1: usize, src2: usize) {
         // MUL Xd, Xn, Xm (MADD with XZR)
         let instruction = 0x9B007C00 | ((src2 as u32) << 16) | ((src1 as u32) << 5) | (dst as u32);
@@ -543,6 +658,22 @@ impl Arm64CodeGen {
         // Offset is in bytes, needs to be divided by 8 for encoding (unsigned 12-bit)
         let offset_scaled = (offset / 8) as u32;
         let instruction = 0xF9000000 | (offset_scaled << 10) | ((base as u32) << 5) | (src as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_load_from_fp(&mut self, dst: usize, offset: i32) {
+        // LDR Xd, [x29, #offset] with signed offset
+        // Using LDUR for signed 9-bit offset
+        let offset_bits = (offset as u32) & 0x1FF; // 9-bit signed
+        let instruction = 0xF8400000 | (offset_bits << 12) | (29 << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_store_to_fp(&mut self, src: usize, offset: i32) {
+        // STR Xt, [x29, #offset] with signed offset
+        // Using STUR for signed 9-bit offset
+        let offset_bits = (offset as u32) & 0x1FF; // 9-bit signed
+        let instruction = 0xF8000000 | (offset_bits << 12) | (29 << 5) | (src as u32);
         self.code.push(instruction);
     }
 

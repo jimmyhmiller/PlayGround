@@ -494,12 +494,12 @@ impl<P: LayoutProvider> Graph<P> {
         let mut max_x: f64 = 0.0;
         let mut max_y: f64 = 0.0;
 
-        eprintln!("Rust calculating graph.size.y:");
-        for layer in &nodes_by_layer {
+        eprintln!("Rust calculating graph.size:");
+        for (layer_idx, layer) in nodes_by_layer.iter().enumerate() {
             for node in layer {
-                let (pos, size, block_id) = match node {
-                    LayoutNode::BlockNode(n) => (n.pos, n.size, Some(self.blocks[n.block].id)),
-                    LayoutNode::DummyNode(n) => (n.pos, n.size, None),
+                let (pos, size, block_id, flags) = match node {
+                    LayoutNode::BlockNode(n) => (n.pos, n.size, Some(self.blocks[n.block].id), n.flags),
+                    LayoutNode::DummyNode(n) => (n.pos, n.size, None, n.flags),
                 };
                 let candidate_y = pos.y + size.y + CONTENT_PADDING;
                 if candidate_y > max_y {
@@ -508,10 +508,17 @@ impl<P: LayoutProvider> Graph<P> {
                     }
                     max_y = candidate_y;
                 }
-                max_x = max_x.max(pos.x + size.x + CONTENT_PADDING);
+                let candidate_x = pos.x + size.x + CONTENT_PADDING;
+                if candidate_x > max_x {
+                    eprintln!("Layer {}, {}: pos.x={}, size.x={}, candidate_x={}, flags={:#b}",
+                             layer_idx,
+                             if let Some(bid) = block_id { format!("Block {}", bid.0) } else { "Dummy".to_string() },
+                             pos.x, size.x, candidate_x, flags);
+                    max_x = candidate_x;
+                }
             }
         }
-        eprintln!("Rust graph.size.y = {}", max_y);
+        eprintln!("Rust graph.size = ({}, {})", max_x, max_y);
 
         // Create container for arrows
         let mut arrows_container = self.layout_provider.create_svg_element("g");

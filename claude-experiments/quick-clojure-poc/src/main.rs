@@ -304,7 +304,129 @@ fn disassemble_arm64(inst: u32) -> String {
     }
 }
 
+/// Execute a Clojure script file (like `clojure script.clj`)
+/// Prints results of top-level expressions, but not def/ns/use
+fn run_script(filename: &str) {
+    use std::fs;
+    use std::io::BufRead;
+
+    // Read file
+    let file = match fs::File::open(filename) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Error reading file '{}': {}", filename, e);
+            std::process::exit(1);
+        }
+    };
+
+    // Create runtime with GC
+    let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
+    trampoline::set_runtime(runtime.clone());
+
+    // Create compiler
+    let mut compiler = Compiler::new(runtime.clone());
+
+    // Read and accumulate lines until we have a complete expression
+    let reader = std::io::BufReader::new(file);
+    let mut accumulated = String::new();
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Error reading line: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        // Skip comments and empty lines
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with(';') {
+            continue;
+        }
+
+        accumulated.push_str(&line);
+        accumulated.push('\n');
+
+        // Try to read an expression
+        match read(&accumulated) {
+            Ok(val) => {
+                // We got a complete expression, analyze and execute it
+                match analyze(&val) {
+                    Ok(ast) => {
+                        // Compile and execute
+                        match compiler.compile(&ast) {
+                            Ok(result_reg) => {
+                                let instructions = compiler.take_instructions();
+                                let mut codegen = Arm64CodeGen::new();
+
+                                match codegen.compile(&instructions, &result_reg) {
+                                    Ok(_) => {
+                                        match codegen.execute() {
+                                            Ok(result) => {
+                                                // Only print result for non-def/ns/use expressions
+                                                // This matches Clojure's behavior in script mode
+                                                if !matches!(ast,
+                                                    Expr::Def { .. } |
+                                                    Expr::Ns { .. } |
+                                                    Expr::Use { .. }
+                                                ) {
+                                                    // Result is already untagged by codegen
+                                                    println!("{}", result);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                eprintln!("Execution error: {}", e);
+                                                std::process::exit(1);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Codegen error: {}", e);
+                                        std::process::exit(1);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Compile error: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Analysis error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+
+                // Clear accumulated for next expression
+                accumulated.clear();
+            }
+            Err(_) => {
+                // Not a complete expression yet, continue accumulating
+                continue;
+            }
+        }
+    }
+
+    // Check if there's any remaining incomplete expression
+    if !accumulated.trim().is_empty() {
+        eprintln!("Error: Incomplete expression at end of file");
+        std::process::exit(1);
+    }
+}
+
 fn main() {
+    // Check for file argument (script mode)
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.len() > 1 {
+        // Script mode: execute file without REPL interface
+        run_script(&args[1]);
+        return;
+    }
+
+    // REPL mode
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║  Clojure → ARM64 JIT Compiler                               ║");
     println!("║  Multi-stage compilation: Reader → AST → IR → Machine Code  ║");

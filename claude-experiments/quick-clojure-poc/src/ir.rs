@@ -54,6 +54,7 @@ pub enum IrValue {
     True,
     False,
     Null,
+    Spill(VirtualRegister, usize),  // Spilled register with stack offset
 }
 
 pub type Label = String;
