@@ -63,7 +63,7 @@ impl PureSVGTextLayoutProvider {
     }
 
     // Helper to get attribute value from Vec
-    fn get_attribute<'a>(attributes: &'a Vec<(String, String)>, name: &str) -> Option<&'a String> {
+    fn get_attribute<'a>(attributes: &'a [(String, String)], name: &str) -> Option<&'a String> {
         attributes.iter().find(|(k, _)| k == name).map(|(_, v)| v)
     }
 
@@ -359,11 +359,11 @@ impl PureSVGTextLayoutProvider {
 
     fn find_instruction_rows(&self, node: &SVGTextNode) -> Vec<InstructionRow> {
         let mut rows = Vec::new();
-        self.find_instruction_rows_recursive(node, &mut rows);
+        Self::find_instruction_rows_recursive(node, &mut rows);
         rows
     }
 
-    fn find_instruction_rows_recursive(&self, node: &SVGTextNode, rows: &mut Vec<InstructionRow>) {
+    fn find_instruction_rows_recursive(node: &SVGTextNode, rows: &mut Vec<InstructionRow>) {
         if node.class_list.contains("ig-ins") {
             let mut row = InstructionRow {
                 num_text: None,
@@ -396,7 +396,7 @@ impl PureSVGTextLayoutProvider {
         }
 
         for child in &node.children {
-            self.find_instruction_rows_recursive(&child.borrow(), rows);
+            Self::find_instruction_rows_recursive(&child.borrow(), rows);
         }
     }
 
@@ -449,13 +449,14 @@ impl PureSVGTextLayoutProvider {
         result
     }
 
-    fn count_instructions(&self, element: &SVGTextNode) -> usize {
+    #[allow(dead_code)]
+    fn count_instructions(element: &SVGTextNode) -> usize {
         let mut count = 0;
         if element.class_list.contains("ig-instruction") {
             count += 1;
         }
         for child in &element.children {
-            count += self.count_instructions(&child.borrow());
+            count += Self::count_instructions(&child.borrow());
         }
         count
     }

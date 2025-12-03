@@ -547,7 +547,7 @@ impl<P: LayoutProvider> Graph<P> {
         let mut max_x: f64 = 0.0;
         let mut max_y: f64 = 0.0;
 
-        for (_layer_idx, layer) in nodes_by_layer.iter().enumerate() {
+        for layer in nodes_by_layer.iter() {
             for node in layer {
                 let (pos, size, _block_id, _flags) = match node {
                     LayoutNode::BlockNode(n) => {
@@ -811,6 +811,7 @@ impl<P: LayoutProvider> Graph<P> {
 }
 
 // Arrow rendering functions
+#[allow(clippy::too_many_arguments)]
 fn downward_arrow<P: LayoutProvider>(
     layout_provider: &mut P,
     x1: f64,
@@ -888,6 +889,7 @@ fn downward_arrow<P: LayoutProvider>(
     g
 }
 
+#[allow(clippy::too_many_arguments)]
 fn upward_arrow<P: LayoutProvider>(
     layout_provider: &mut P,
     x1: f64,

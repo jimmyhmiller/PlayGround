@@ -55,6 +55,7 @@ interface GridItemProps {
   onDrag?: (pos: { x: number; y: number }) => void;
   onDragEnd?: (pos: { x: number; y: number }) => void;
   onResize?: (size: { width: number; height: number }) => void;
+  onResizeEnd?: (size: { width: number; height: number }) => void;
   onDragOverNested?: (targetWidgetId: string) => void;
   onDragLeaveNested?: () => void;
   onDropIntoNested?: (targetWidgetId: string) => void;
@@ -78,6 +79,7 @@ export const GridItem = ({
   onDrag,
   onDragEnd,
   onResize,
+  onResizeEnd,
   onDragOverNested,
   onDragLeaveNested,
   onDropIntoNested,
@@ -388,6 +390,12 @@ export const GridItem = ({
         setIsResizing(false);
         resizeEdgeRef.current = null;
         setCurrentCursor(draggable ? 'grab' : 'default');
+
+        // Call onResizeEnd when resize completes
+        if (onResizeEnd) {
+          onResizeEnd({ width: size.width, height: size.height });
+        }
+
         setTimeout(() => {
           isManualResizeRef.current = false;
         }, 100);
@@ -401,7 +409,7 @@ export const GridItem = ({
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isDragging, isResizing, snapToGrid, snapSize, position, minWidth, minHeight, intrinsicSize, draggable, onDrag, onDragEnd, onResize]);
+  }, [isDragging, isResizing, snapToGrid, snapSize, position, size, minWidth, minHeight, intrinsicSize, draggable, onDrag, onDragEnd, onResize, onResizeEnd]);
 
   const itemStyle: CSSProperties = {
     position: 'absolute',

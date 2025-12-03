@@ -55,13 +55,14 @@ fn bench_svg_rendering(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new("function", func_idx),
                 &(nodes_by_layer, layer_heights, track_heights),
-                |b, (nodes, heights, tracks)| {
+                |b, (_nodes, _heights, _tracks)| {
                     b.iter(|| {
                         // Re-create graph to benchmark rendering only
                         let layout_provider = PureSVGTextLayoutProvider::new();
                         let mut graph = Graph::new(layout_provider, pass.clone(), options.clone());
                         let (n, h, t) = graph.layout();
-                        black_box(graph.render(n, h, t));
+                        graph.render(n, h, t);
+                        black_box(());
                     });
                 },
             );
@@ -89,7 +90,8 @@ fn bench_end_to_end(c: &mut Criterion) {
                     let mut graph =
                         Graph::new(layout_provider, black_box(pass.clone()), options.clone());
                     let (nodes_by_layer, layer_heights, track_heights) = graph.layout();
-                    black_box(graph.render(nodes_by_layer, layer_heights, track_heights));
+                    graph.render(nodes_by_layer, layer_heights, track_heights);
+                    black_box(());
                 });
             });
         }

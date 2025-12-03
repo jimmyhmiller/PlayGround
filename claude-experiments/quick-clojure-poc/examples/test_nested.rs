@@ -10,7 +10,7 @@ fn main() {
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     let mut compiler = compiler::Compiler::new(runtime);
     let result_reg = compiler.compile(&ast).unwrap();
-    let instructions = compiler.finish();
+    let instructions = compiler.take_instructions();
 
     println!("IR instructions:");
     for (i, inst) in instructions.iter().enumerate() {

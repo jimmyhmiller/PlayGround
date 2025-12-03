@@ -219,18 +219,10 @@ impl<P: LayoutProvider> Graph<P> {
             to_idx: usize,
         ) {
             // Calculate global index for destination
-            let mut global_to = 0;
-            for i in 0..to_layer {
-                global_to += layout_nodes[i].len();
-            }
-            global_to += to_idx;
+            let global_to = layout_nodes.iter().take(to_layer).map(|layer| layer.len()).sum::<usize>() + to_idx;
 
             // Calculate global index for source
-            let mut global_from = 0;
-            for i in 0..from_layer {
-                global_from += layout_nodes[i].len();
-            }
-            global_from += from_idx;
+            let global_from = layout_nodes.iter().take(from_layer).map(|layer| layer.len()).sum::<usize>() + from_idx;
 
             // Set destination on source node
             match &mut layout_nodes[from_layer][from_idx] {
@@ -640,17 +632,13 @@ impl<P: LayoutProvider> Graph<P> {
                 };
 
                 // Calculate global index for this node
-                let mut global_self = 0;
-                for i in 0..layer {
-                    global_self += layout_nodes[i].len();
-                }
-                global_self += node_idx;
+                let global_self = layout_nodes.iter().take(layer).map(|layer| layer.len()).sum::<usize>() + node_idx;
 
                 // Remove this node from all its destinations' src_nodes
                 for &global_dst in &dst_nodes {
                     // Find the destination layer and index
                     let mut remaining = global_dst;
-                    for (_dst_layer, nodes) in layout_nodes.iter_mut().enumerate() {
+                    for nodes in layout_nodes.iter_mut() {
                         if remaining < nodes.len() {
                             match &mut nodes[remaining] {
                                 LayoutNode::BlockNode(n) => {
@@ -693,11 +681,7 @@ impl<P: LayoutProvider> Graph<P> {
 
                 loop {
                     // Calculate global ID
-                    let mut global_id = 0;
-                    for i in 0..current_layer {
-                        global_id += layout_nodes_by_layer[i].len();
-                    }
-                    global_id += current_idx;
+                    let global_id = layout_nodes_by_layer.iter().take(current_layer).map(|layer| layer.len()).sum::<usize>() + current_idx;
 
                     // Check if this is a dummy with no sources
                     let (is_dummy, src_count, dst_nodes) = match &layout_nodes_by_layer
@@ -1023,8 +1007,8 @@ impl<P: LayoutProvider> Graph<P> {
                         // We need to check the destination node's flags
                         let mut dst_is_backedge_dummy = false;
                         let mut global_count = 0;
-                        for (_dst_layer_idx, dst_layer_nodes) in layout_nodes.iter().enumerate() {
-                            for (_dst_node_idx, dst_node) in dst_layer_nodes.iter().enumerate() {
+                        for dst_layer_nodes in layout_nodes.iter() {
+                            for dst_node in dst_layer_nodes.iter() {
                                 if global_count == dst_global_idx {
                                     if let LayoutNode::DummyNode(d) = dst_node {
                                         // Check if this is a backedge dummy (IMMINENT_BACKEDGE_DUMMY flag)
@@ -1250,6 +1234,7 @@ impl<P: LayoutProvider> Graph<P> {
         }
 
         // Helper: Conservative straightening without causing overlaps
+        #[allow(clippy::type_complexity)]
         let straighten_conservative =
             |layout_nodes: &mut [Vec<LayoutNode>],
              backedge_blocks: &std::collections::HashSet<usize>,
@@ -1379,9 +1364,9 @@ impl<P: LayoutProvider> Graph<P> {
 
                         for delta in deltas_to_try {
                             let mut overlaps_any = false;
-                            for j in (i + 1)..nodes.len() {
+                            for node in nodes.iter().skip(i + 1) {
                                 // Ignore rightmost dummies
-                                let is_rightmost = match &nodes[j] {
+                                let is_rightmost = match node {
                                     LayoutNode::DummyNode(n) => (n.flags & RIGHTMOST_DUMMY) != 0,
                                     _ => false,
                                 };
@@ -1390,7 +1375,7 @@ impl<P: LayoutProvider> Graph<P> {
                                     continue;
                                 }
 
-                                let (other_pos, other_size) = match &nodes[j] {
+                                let (other_pos, other_size) = match node {
                                     LayoutNode::BlockNode(n) => (n.pos.x, n.size.x),
                                     LayoutNode::DummyNode(n) => (n.pos.x, n.size.x),
                                 };
@@ -1460,7 +1445,7 @@ impl<P: LayoutProvider> Graph<P> {
 
         let mut track_heights = Vec::new();
 
-        for (_layer_idx, nodes) in layout_nodes_by_layer.iter_mut().enumerate() {
+        for nodes in layout_nodes_by_layer.iter_mut() {
             // First pass: collect node data
             let mut node_data: Vec<(usize, f64, Vec<usize>, bool)> = Vec::new(); // (id, pos.x, dst_nodes, is_backedge)
 

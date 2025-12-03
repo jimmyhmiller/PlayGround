@@ -1,7 +1,6 @@
 mod value;
 mod reader;
 mod clojure_ast;
-mod eval;
 
 // Our own IR and compiler
 mod ir;

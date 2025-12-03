@@ -46,18 +46,7 @@ pub enum Value {
     },
 }
 
-impl Value {
-    /// Check if value is truthy in Clojure semantics
-    /// Only nil and false are falsy, everything else is truthy
-    pub fn is_truthy(&self) -> bool {
-        !matches!(self, Value::Nil | Value::Bool(false))
-    }
-
-    /// Check if value is nil
-    pub fn is_nil(&self) -> bool {
-        matches!(self, Value::Nil)
-    }
-}
+impl Value {}
 
 // Implement Hash for Value (needed for HashMap keys)
 impl std::hash::Hash for Value {
@@ -149,7 +138,7 @@ impl fmt::Display for Value {
                 // Display the inner value (metadata is invisible in output)
                 write!(f, "{}", inner)
             }
-            Value::Function { name, params, .. } => {
+            Value::Function { name, .. } => {
                 write!(f, "#<fn {}>", name.as_deref().unwrap_or("anonymous"))
             }
             Value::Namespace { name, mappings, .. } => {
@@ -162,15 +151,6 @@ impl fmt::Display for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_truthiness() {
-        assert!(!Value::Nil.is_truthy());
-        assert!(!Value::Bool(false).is_truthy());
-        assert!(Value::Bool(true).is_truthy());
-        assert!(Value::Int(0).is_truthy()); // 0 is truthy in Clojure!
-        assert!(Value::String("".to_string()).is_truthy()); // empty string is truthy
-    }
 
     #[test]
     fn test_display() {

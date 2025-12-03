@@ -128,12 +128,11 @@ impl Compiler {
     fn compile_var(&mut self, namespace: &Option<String>, name: &str) -> Result<IrValue, String> {
         // First, check if this is a local variable (from let)
         // Only unqualified names can be locals
-        if namespace.is_none() {
-            if let Some(register) = self.lookup_local(name) {
+        if namespace.is_none()
+            && let Some(register) = self.lookup_local(name) {
                 // Local variable - just return the register directly
                 return Ok(register);
             }
-        }
 
         // Not a local - look up as a global var
         // SAFETY: Single-threaded REPL - no concurrent access during compilation
@@ -161,8 +160,8 @@ impl Compiler {
             let current_ns_name = rt.namespace_name(self.current_namespace_ptr);
             if let Some(used) = self.used_namespaces.get(&current_ns_name) {
                 for used_ns in used {
-                    if let Some(&used_ns_ptr) = self.namespace_registry.get(used_ns) {
-                        if let Some(var_ptr) = rt.namespace_lookup(used_ns_ptr, name) {
+                    if let Some(&used_ns_ptr) = self.namespace_registry.get(used_ns)
+                        && let Some(var_ptr) = rt.namespace_lookup(used_ns_ptr, name) {
                             // Emit LoadVar - will dereference at runtime!
                             let result = self.builder.new_register();
                             self.builder.emit(Instruction::LoadVar(
@@ -171,7 +170,6 @@ impl Compiler {
                             ));
                             return Ok(result);
                         }
-                    }
                 }
             }
 
@@ -262,48 +260,6 @@ impl Compiler {
 
         // def returns the value
         Ok(value_reg)
-    }
-
-    /// Store a runtime value in globals (called after execution)
-    /// Returns the var pointer (for printing #'user/x)
-    pub fn set_global(&mut self, name: String, value: isize) -> usize {
-        // SAFETY: Called after execution, single-threaded
-        unsafe {
-            let rt = &mut *self.runtime.get();
-
-            // Check if var already exists
-            if let Some(var_ptr) = rt.namespace_lookup(self.current_namespace_ptr, &name) {
-                // Update existing var's value
-                rt.var_set_value(var_ptr, value as usize);
-                return var_ptr;
-            }
-
-            // Create new var
-            let var_ptr = rt.allocate_var(
-                self.current_namespace_ptr,
-                &name,
-                value as usize,
-            ).unwrap();
-
-            // Add var to namespace (namespace stores var pointers, not values!)
-            let new_ns_ptr = rt
-                .namespace_add_binding(self.current_namespace_ptr, &name, var_ptr)
-                .unwrap();
-
-            // Update current namespace pointer if it moved
-            if new_ns_ptr != self.current_namespace_ptr {
-                self.current_namespace_ptr = new_ns_ptr;
-
-                // Update in registry
-                let ns_name = rt.namespace_name(new_ns_ptr);
-                self.namespace_registry.insert(ns_name.clone(), new_ns_ptr);
-
-                // Update GC root
-                rt.add_namespace_root(ns_name, new_ns_ptr);
-            }
-
-            var_ptr  // Return var pointer
-        }
     }
 
     /// Get current namespace name (for REPL prompt)
@@ -799,11 +755,6 @@ impl Compiler {
         Ok(result)
     }
 
-    /// Get the generated IR instructions (consumes the compiler)
-    pub fn finish(self) -> Vec<Instruction> {
-        self.builder.finish()
-    }
-
     /// Get the generated IR instructions without consuming the compiler
     /// This clears the instruction buffer, allowing the compiler to be reused
     pub fn take_instructions(&mut self) -> Vec<Instruction> {
@@ -826,7 +777,7 @@ mod tests {
         let ast = analyze(&val).unwrap();
 
         compiler.compile(&ast).unwrap();
-        let instructions = compiler.finish();
+        let instructions = compiler.take_instructions();
 
         // Should generate:
         // 1. LoadConstant for 1
@@ -851,7 +802,7 @@ mod tests {
         let ast = analyze(&val).unwrap();
 
         compiler.compile(&ast).unwrap();
-        let instructions = compiler.finish();
+        let instructions = compiler.take_instructions();
 
         println!("\nGenerated {} IR instructions for (+ (* 2 3) 4):", instructions.len());
         for (i, inst) in instructions.iter().enumerate() {

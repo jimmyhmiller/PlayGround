@@ -259,11 +259,10 @@ impl LinearScan {
         spill_locations: &HashMap<VirtualRegister, usize>,
     ) {
         let replace = |val: &mut IrValue| {
-            if let IrValue::Register(vreg) = val {
-                if let Some(&stack_offset) = spill_locations.get(vreg) {
+            if let IrValue::Register(vreg) = val
+                && let Some(&stack_offset) = spill_locations.get(vreg) {
                     *val = IrValue::Spill(*vreg, stack_offset);
                 }
-            }
         };
 
         match inst {
@@ -348,9 +347,9 @@ impl LinearScan {
         active.sort_by_key(|(_, end, _)| *end);
 
         // Remove intervals that have expired
-        let mut i = 0;
-        while i < active.len() {
-            let (_, end, vreg) = active[i];
+        // Keep removing element 0 until we hit an active interval
+        while !active.is_empty() {
+            let (_, end, vreg) = active[0];
 
             if end >= current_start {
                 // This interval is still active
@@ -362,7 +361,7 @@ impl LinearScan {
                 self.free_register(physical_reg);
             }
 
-            active.remove(i);
+            active.remove(0);
         }
     }
 
@@ -424,11 +423,10 @@ impl LinearScan {
         allocation: &BTreeMap<VirtualRegister, VirtualRegister>,
     ) {
         let replace = |val: &mut IrValue| {
-            if let IrValue::Register(vreg) = val {
-                if let Some(&physical) = allocation.get(vreg) {
+            if let IrValue::Register(vreg) = val
+                && let Some(&physical) = allocation.get(vreg) {
                     *val = IrValue::Register(physical);
                 }
-            }
         };
 
         match inst {
@@ -530,7 +528,7 @@ mod tests {
         builder.emit(Instruction::Tag(r2, r2, IrValue::TaggedConstant(0)));
         builder.emit(Instruction::Ret(r2));
 
-        let instructions = builder.finish();
+        let instructions = builder.take_instructions();
         let mut allocator = LinearScan::new(instructions, 0);
         allocator.allocate();
 
@@ -575,7 +573,7 @@ mod tests {
 
         builder.emit(Instruction::Ret(sum));
 
-        let instructions = builder.finish();
+        let instructions = builder.take_instructions();
         let mut allocator = LinearScan::new(instructions, 0);
         allocator.allocate();
 

@@ -44,7 +44,7 @@ fn main() {
 
     let mut compiler = Compiler::new(runtime);
     let result_reg = compiler.compile(&ast).unwrap();
-    let instructions = compiler.finish();
+    let instructions = compiler.take_instructions();
 
     println!("=== IR Instructions ===");
     for (i, inst) in instructions.iter().enumerate() {

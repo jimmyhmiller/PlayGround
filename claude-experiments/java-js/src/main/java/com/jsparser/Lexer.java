@@ -62,6 +62,7 @@ public class Lexer {
                     Token token = scanTemplateContinuation();
                     if (token != null) {
                         tokens.add(token);
+                        updateContext(lastTokenType, token);
                         lastTokenType = token.type();
                     }
                     continue;

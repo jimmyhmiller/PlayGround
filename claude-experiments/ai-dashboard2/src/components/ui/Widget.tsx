@@ -1,4 +1,4 @@
-import { FC, useState, useEffect, MouseEvent } from 'react';
+import { FC, useState, useEffect, MouseEvent, memo } from 'react';
 import type { Theme, WidgetConfig, Dashboard, LayoutSettings, WidgetDimensions } from '../../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { GridItem } from '../GridItem';
@@ -57,7 +57,7 @@ function parseSize(size: string | number | undefined, defaultSize: number): numb
   return size;
 }
 
-export const Widget: FC<WidgetProps> = ({
+const WidgetComponent: FC<WidgetProps> = ({
   theme,
   config,
   clipPath,
@@ -117,12 +117,24 @@ export const Widget: FC<WidgetProps> = ({
     ('regenerate' in config && !!config.regenerate);
 
   const handleDrag = ({ x, y }: { x?: number; y?: number; width?: number; height?: number }) => {
+    // Don't persist during drag - only update visual position
+    // This is handled by GridItem's local state
+  };
+
+  const handleDragEnd = ({ x, y }: { x?: number; y?: number; width?: number; height?: number }) => {
+    // Persist position to file when drag completes
     if (onResize && dashboardId && (x !== undefined || y !== undefined)) {
       onResize(dashboardId, config.id, { x, y });
     }
   };
 
+  const handleResize = ({ width, height }: { x?: number; y?: number; width?: number; height?: number }) => {
+    // Don't persist during resize - only update visual size
+    // This is handled by GridItem's local state
+  };
+
   const handleResizeEnd = ({ width, height }: { x?: number; y?: number; width?: number; height?: number }) => {
+    // Persist size to file when resize completes
     if (onResize && dashboardId && (width !== undefined || height !== undefined)) {
       onResize(dashboardId, config.id, { width, height });
     }
@@ -286,8 +298,9 @@ export const Widget: FC<WidgetProps> = ({
       draggable={true}
       dragMode="modifier"
       onDrag={handleDrag}
-      onDragEnd={handleDrag}
-      onResize={handleResizeEnd}
+      onDragEnd={handleDragEnd}
+      onResize={handleResize}
+      onResizeEnd={handleResizeEnd}
       onDragOverNested={handleDragOverNested}
       onDragLeaveNested={handleDragLeaveNested}
       onDropIntoNested={handleDropIntoNested}
@@ -296,3 +309,41 @@ export const Widget: FC<WidgetProps> = ({
     </GridItem>
   );
 };
+
+// Memoize Widget to prevent unnecessary re-renders
+// Only re-render if the widget's own config or relevant props change
+export const Widget = memo(WidgetComponent, (prevProps, nextProps) => {
+  // Re-render if config object reference changed AND content is different
+  if (prevProps.config !== nextProps.config) {
+    // Deep check key properties that affect rendering
+    const configChanged =
+      prevProps.config.id !== nextProps.config.id ||
+      prevProps.config.type !== nextProps.config.type ||
+      prevProps.config.x !== nextProps.config.x ||
+      prevProps.config.y !== nextProps.config.y ||
+      prevProps.config.width !== nextProps.config.width ||
+      prevProps.config.height !== nextProps.config.height ||
+      JSON.stringify(prevProps.config) !== JSON.stringify(nextProps.config);
+
+    if (configChanged) return false; // Props changed, re-render
+  }
+
+  // Re-render if reloadTrigger changed (explicit refresh)
+  if (prevProps.reloadTrigger !== nextProps.reloadTrigger) {
+    return false; // Props changed, re-render
+  }
+
+  // Re-render if theme changed
+  if (prevProps.theme !== nextProps.theme) {
+    return false; // Props changed, re-render
+  }
+
+  // Re-render if conversation state changed for this widget
+  const widgetKey = `${prevProps.dashboardId}-${prevProps.config.id}`;
+  if (prevProps.widgetConversations[widgetKey] !== nextProps.widgetConversations[widgetKey]) {
+    return false; // Props changed, re-render
+  }
+
+  // Otherwise, skip re-render
+  return true; // Props are equal, skip re-render
+});

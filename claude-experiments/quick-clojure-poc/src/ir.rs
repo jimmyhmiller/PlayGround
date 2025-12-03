@@ -26,13 +26,6 @@ impl VirtualRegister {
             is_argument: false,
         }
     }
-
-    pub fn arg(index: usize) -> Self {
-        VirtualRegister {
-            index,
-            is_argument: true,
-        }
-    }
 }
 
 impl Ord for VirtualRegister {
@@ -105,6 +98,12 @@ pub struct IrBuilder {
     pub instructions: Vec<Instruction>,
 }
 
+impl Default for IrBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IrBuilder {
     pub fn new() -> Self {
         IrBuilder {
@@ -130,10 +129,6 @@ impl IrBuilder {
         self.instructions.push(instruction);
     }
 
-    pub fn finish(self) -> Vec<Instruction> {
-        self.instructions
-    }
-
     /// Take the instructions without consuming the builder, clearing the buffer
     pub fn take_instructions(&mut self) -> Vec<Instruction> {
         std::mem::take(&mut self.instructions)
@@ -155,9 +150,8 @@ mod tests {
         builder.emit(Instruction::LoadConstant(r0, IrValue::TaggedConstant(42)));
         builder.emit(Instruction::LoadConstant(r1, IrValue::TaggedConstant(10)));
         builder.emit(Instruction::AddInt(r2, r0, r1));
-        builder.emit(Instruction::Ret(r2));
 
-        let instructions = builder.finish();
-        assert_eq!(instructions.len(), 4);
+        let instructions = builder.take_instructions();
+        assert_eq!(instructions.len(), 3);
     }
 }

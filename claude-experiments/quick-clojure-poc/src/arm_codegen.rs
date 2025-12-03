@@ -26,6 +26,12 @@ pub struct Arm64CodeGen {
     temp_register_pool: Vec<usize>,
 }
 
+impl Default for Arm64CodeGen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Arm64CodeGen {
     pub fn new() -> Self {
         Arm64CodeGen {
@@ -568,7 +574,7 @@ impl Arm64CodeGen {
             let offset = (*target_pos as isize) - (*code_index as isize);
 
             // Check if offset fits in the instruction encoding
-            if offset < -1048576 || offset > 1048575 {
+            if !(-1048576..=1048575).contains(&offset) {
                 return Err(format!("Jump offset too large: {}", offset));
             }
 
@@ -705,19 +711,7 @@ impl Arm64CodeGen {
         let shift = shift & 0x3F; // 6 bits
         let immr = (64 - shift) & 0x3F;
         let imms = 63 - shift;
-        let instruction = 0xD3400000 | ((immr as u32) << 16) | ((imms as u32) << 10) | ((src as u32) << 5) | (dst as u32);
-        self.code.push(instruction);
-    }
-
-    fn emit_orr_imm(&mut self, dst: usize, src: usize, imm: u32) {
-        // ORR Xd, Xn, #imm (logical OR with immediate)
-        // For small immediates like 3, we can use the logical immediate encoding
-        // The immediate must be encodable as a bitmask (3 = 0b11 is valid)
-        // For imm=3: N=0, immr=62, imms=1 encodes the pattern 0b11
-        let n = 0;
-        let immr = 62; // Rotation
-        let imms = 1;  // Size (pattern 0b11)
-        let instruction = 0xB2400000 | ((n as u32) << 22) | ((immr as u32) << 16) | ((imms as u32) << 10) | ((src as u32) << 5) | (dst as u32);
+        let instruction = 0xD3400000 | (immr << 16) | (imms << 10) | ((src as u32) << 5) | (dst as u32);
         self.code.push(instruction);
     }
 
@@ -726,21 +720,13 @@ impl Arm64CodeGen {
         // This is SBFM (Signed Bitfield Move)
         // ASR #shift is: SBFM Xd, Xn, #shift, #63
         let shift = shift & 0x3F; // 6 bits
-        let instruction = 0x9340FC00 | ((shift as u32) << 16) | ((src as u32) << 5) | (dst as u32);
+        let instruction = 0x9340FC00 | (shift << 16) | ((src as u32) << 5) | (dst as u32);
         self.code.push(instruction);
     }
 
     fn emit_cmp(&mut self, src1: usize, src2: usize) {
         // CMP Xn, Xm (compare - this is SUBS XZR, Xn, Xm)
         let instruction = 0xEB00001F | ((src2 as u32) << 16) | ((src1 as u32) << 5);
-        self.code.push(instruction);
-    }
-
-    fn emit_ldr_offset(&mut self, dst: usize, base: usize, offset: i32) {
-        // LDR Xd, [Xn, #offset]
-        // Offset is in bytes, needs to be divided by 8 for encoding (unsigned 12-bit)
-        let offset_scaled = (offset / 8) as u32;
-        let instruction = 0xF9400000 | (offset_scaled << 10) | ((base as u32) << 5) | (dst as u32);
         self.code.push(instruction);
     }
 
@@ -884,7 +870,7 @@ mod tests {
         let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
         let mut compiler = Compiler::new(runtime);
         let result_reg = compiler.compile(&ast).unwrap();
-        let instructions = compiler.finish();
+        let instructions = compiler.take_instructions();
 
         let mut codegen = Arm64CodeGen::new();
         let machine_code = codegen.compile(&instructions, &result_reg, 0).unwrap();
@@ -908,7 +894,7 @@ mod tests {
         let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
         let mut compiler = Compiler::new(runtime);
         let result_reg = compiler.compile(&ast).unwrap();
-        let instructions = compiler.finish();
+        let instructions = compiler.take_instructions();
 
         let mut codegen = Arm64CodeGen::new();
         let machine_code = codegen.compile(&instructions, &result_reg, 0).unwrap();

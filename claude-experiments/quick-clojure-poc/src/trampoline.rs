@@ -8,7 +8,7 @@
 ///
 /// Based on Beagle's trampoline implementation
 
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{dealloc, Layout};
 use crate::gc_runtime::GCRuntime;
 use std::cell::UnsafeCell;
 use std::sync::Arc;
@@ -236,18 +236,6 @@ impl Trampoline {
         }
     }
 
-    fn allocate_stack(&mut self) {
-        unsafe {
-            let layout = Layout::from_size_align(self.stack_size, 16).unwrap();
-            let ptr = alloc(layout);
-            if ptr.is_null() {
-                panic!("Failed to allocate trampoline stack");
-            }
-            // Stack grows downward, so return pointer to end
-            self.stack_ptr = ptr.add(self.stack_size);
-        }
-    }
-
     /// Execute JIT code through the trampoline
     ///
     /// # Safety
@@ -265,67 +253,6 @@ impl Trampoline {
         }
     }
 
-    // ARM64 instruction emission helpers
-
-    fn emit_stp(&mut self, rt: usize, rt2: usize, rn: usize, offset: i32) {
-        let offset_scaled = ((offset & 0x7F) as u32) << 15;
-        let instruction = 0xA9800000 | offset_scaled | ((rt2 as u32) << 10) | ((rn as u32) << 5) | (rt as u32);
-        self.code.push(instruction);
-    }
-
-    fn emit_ldp(&mut self, rt: usize, rt2: usize, rn: usize, offset: i32) {
-        let offset_scaled = ((offset & 0x7F) as u32) << 15;
-        let instruction = 0xA8C00000 | offset_scaled | ((rt2 as u32) << 10) | ((rn as u32) << 5) | (rt as u32);
-        self.code.push(instruction);
-    }
-
-    fn emit_mov(&mut self, dst: usize, src: usize) {
-        let instruction = 0xAA0003E0 | ((src as u32) << 16) | (dst as u32);
-        self.code.push(instruction);
-    }
-
-    fn emit_str_offset(&mut self, rt: usize, rn: usize, offset: i32) {
-        let offset_scaled = ((offset / 8) as u32) & 0xFFF;
-        let instruction = 0xF9000000 | (offset_scaled << 10) | ((rn as u32) << 5) | (rt as u32);
-        self.code.push(instruction);
-    }
-
-    fn emit_ldr_offset(&mut self, rt: usize, rn: usize, offset: i32) {
-        let offset_scaled = ((offset / 8) as u32) & 0xFFF;
-        let instruction = 0xF9400000 | (offset_scaled << 10) | ((rn as u32) << 5) | (rt as u32);
-        self.code.push(instruction);
-    }
-
-    fn emit_str_pre(&mut self, rt: usize, rn: usize, offset: i32) {
-        let offset_9bit = (offset & 0x1FF) as u32;
-        let instruction = 0xF8000C00 | (offset_9bit << 12) | ((rn as u32) << 5) | (rt as u32);
-        self.code.push(instruction);
-    }
-
-    fn emit_ldr_post(&mut self, rt: usize, rn: usize, offset: i32) {
-        let offset_9bit = (offset & 0x1FF) as u32;
-        let instruction = 0xF8400400 | (offset_9bit << 12) | ((rn as u32) << 5) | (rt as u32);
-        self.code.push(instruction);
-    }
-
-    fn emit_sub_sp_imm(&mut self, imm: u32) {
-        let instruction = 0xD10003FF | ((imm & 0xFFF) << 10);
-        self.code.push(instruction);
-    }
-
-    fn emit_add_sp_imm(&mut self, imm: u32) {
-        let instruction = 0x910003FF | ((imm & 0xFFF) << 10);
-        self.code.push(instruction);
-    }
-
-    fn emit_blr(&mut self, rn: usize) {
-        let instruction = 0xD63F0000 | ((rn as u32) << 5);
-        self.code.push(instruction);
-    }
-
-    fn emit_ret(&mut self) {
-        self.code.push(0xD65F03C0);
-    }
 }
 
 impl Drop for Trampoline {

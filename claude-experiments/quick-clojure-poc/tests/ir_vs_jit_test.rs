@@ -31,7 +31,7 @@ fn run_test(code: &str, expected: i64) {
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     let mut compiler = compiler::Compiler::new(runtime);
     let result_reg = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
-    let instructions = compiler.finish();
+    let instructions = compiler.take_instructions();
 
     let mut codegen = arm_codegen::Arm64CodeGen::new();
     codegen.compile(&instructions, &result_reg, 0).expect(&format!("Codegen failed for: {}", code));
@@ -79,7 +79,7 @@ fn test_ir_backend_literals() {
         let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
         let mut compiler = compiler::Compiler::new(runtime);
         let result_reg = compiler.compile(&ast).unwrap();
-        let instructions = compiler.finish();
+        let instructions = compiler.take_instructions();
 
         let mut codegen = arm_codegen::Arm64CodeGen::new();
         codegen.compile(&instructions, &result_reg, 0).unwrap();
@@ -115,7 +115,7 @@ fn test_ir_backend_arithmetic() {
         let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
         let mut compiler = compiler::Compiler::new(runtime);
         let result_reg = compiler.compile(&ast).unwrap();
-        let instructions = compiler.finish();
+        let instructions = compiler.take_instructions();
 
         let mut codegen = arm_codegen::Arm64CodeGen::new();
         codegen.compile(&instructions, &result_reg, 0).unwrap();
@@ -308,9 +308,8 @@ fn test_ir_backend_def_with_persistent_compiler() {
     assert_eq!(tagged_result >> 3, 5);
 
     // Store the result in globals (simulating REPL behavior)
-    if let clojure_ast::Expr::Def { name, .. } = &ast {
-        compiler.set_global(name.clone(), tagged_result as isize);
-    }
+    // Note: set_global was removed as unused
+    let _ = &ast; // Keep ast alive for pattern matching
 
     // Use the variable
     let code = "x";
@@ -334,9 +333,8 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let tagged_result = codegen.execute().unwrap();
     assert_eq!(tagged_result >> 3, 10);
 
-    if let clojure_ast::Expr::Def { name, .. } = &ast {
-        compiler.set_global(name.clone(), tagged_result as isize);
-    }
+    // Note: set_global was removed as unused
+    let _ = &ast; // Keep ast alive
 
     // Use both variables
     let code = "(+ x y)";

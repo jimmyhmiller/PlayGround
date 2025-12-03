@@ -1,7 +1,0 @@
-(def *x* 10)
-*x*
-(binding [*x* 20] *x*)
-*x*
-(binding [*x* 30] (binding [*x* 40] *x*))
-*x*
-:quit

@@ -127,10 +127,6 @@ impl HeapObject {
         let header = self.read_header();
         8 + (header.size as usize * 8)
     }
-
-    pub fn pointer(&self) -> usize {
-        self.pointer
-    }
 }
 
 /// Built-in type tagging
@@ -179,6 +175,12 @@ pub struct GCRuntime {
     /// Set of vars that are marked as dynamic
     /// Only vars in this set can have thread-local bindings
     dynamic_vars: std::collections::HashSet<usize>,
+}
+
+impl Default for GCRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GCRuntime {
@@ -238,7 +240,7 @@ impl GCRuntime {
     /// Allocate a string on the heap
     pub fn allocate_string(&mut self, s: &str) -> Result<usize, String> {
         let bytes = s.as_bytes();
-        let words = (bytes.len() + 7) / 8;  // Round up to 8-byte words
+        let words = bytes.len().div_ceil(8);  // Round up to 8-byte words
 
         let ptr = self.allocate_raw(words, TYPE_ID_STRING)?;
 
@@ -553,13 +555,6 @@ impl GCRuntime {
         heap_obj.get_field(2)
     }
 
-    /// Set a new value in a var (mutation!)
-    pub fn var_set_value(&mut self, var_ptr: usize, new_value: usize) {
-        let untagged = BuiltInTypes::HeapObject.untag(var_ptr);
-        let mut heap_obj = HeapObject::from_untagged(untagged);
-        heap_obj.write_field(2, new_value);
-    }
-
     /// Mark a var as dynamic (allows thread-local bindings)
     pub fn mark_var_dynamic(&mut self, var_ptr: usize) {
         self.dynamic_vars.insert(var_ptr);
@@ -582,7 +577,7 @@ impl GCRuntime {
 
         self.dynamic_bindings
             .entry(var_ptr)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(value);
 
         Ok(())
@@ -604,12 +599,11 @@ impl GCRuntime {
     /// Set the value of a thread-local binding (for set!)
     /// Errors if no binding exists (can't set root with set!)
     pub fn set_binding(&mut self, var_ptr: usize, value: usize) -> Result<(), String> {
-        if let Some(stack) = self.dynamic_bindings.get_mut(&var_ptr) {
-            if let Some(last) = stack.last_mut() {
+        if let Some(stack) = self.dynamic_bindings.get_mut(&var_ptr)
+            && let Some(last) = stack.last_mut() {
                 *last = value;
                 return Ok(());
             }
-        }
 
         // No thread-local binding exists
         let (ns_name, symbol_name) = self.var_info(var_ptr);
@@ -622,11 +616,10 @@ impl GCRuntime {
     /// Get the current value of a var, checking dynamic bindings first
     pub fn var_get_value_dynamic(&self, var_ptr: usize) -> usize {
         // Check dynamic bindings first
-        if let Some(stack) = self.dynamic_bindings.get(&var_ptr) {
-            if let Some(&value) = stack.last() {
+        if let Some(stack) = self.dynamic_bindings.get(&var_ptr)
+            && let Some(&value) = stack.last() {
                 return value;
             }
-        }
 
         // Fall back to root value
         self.var_get_value(var_ptr)

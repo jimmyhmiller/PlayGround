@@ -359,8 +359,9 @@ ipcMain.handle('update-widget-dimensions', async (_event: IpcMainInvokeEvent, { 
     entry.lastWriteTime = Date.now();
     fs.writeFileSync(targetPath, JSON.stringify(entry.dashboard, null, 2), 'utf-8');
 
-    // Broadcast all dashboards to keep state consistent
-    broadcastDashboards();
+    // Don't broadcast during drag to prevent re-renders
+    // The file watcher will pick up external changes
+    // broadcastDashboards();
 
     return { success: true };
   } catch (error: any) {
