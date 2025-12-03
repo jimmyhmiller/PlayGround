@@ -197,7 +197,7 @@ export function createDashboardTools(
           `Add a todo item to the "${widgetLabel}" list`,
           {
             text: z.string().describe('The todo item text'),
-            done: z.boolean().optional().default(false).describe('Whether the todo is completed')
+            done: z.boolean().default(false).describe('Whether the todo is completed')
           },
           async ({ text, done }: { text: string; done?: boolean }) => {
             const result = updateDashboard((dashboard) => {
@@ -473,16 +473,16 @@ export function createDashboardTools(
           z.object({
             question: z.string().describe('The question to ask'),
             options: z.array(z.string()).optional().describe('Optional predefined choices'),
-            allowMultiple: z.boolean().optional().default(false).describe('Allow multiple selections'),
-            allowCustom: z.boolean().optional().default(true).describe('Show "type my own answer" option')
+            allowMultiple: z.boolean().default(false).describe('Allow multiple selections'),
+            allowCustom: z.boolean().default(true).describe('Show "type my own answer" option')
           }),
           // Multiple questions
           z.array(z.object({
             id: z.string().describe('Unique ID for this question (e.g., "widget-type", "position")'),
             question: z.string().describe('The question to ask'),
             options: z.array(z.string()).optional().describe('Optional predefined choices'),
-            allowMultiple: z.boolean().optional().default(false).describe('Allow multiple selections'),
-            allowCustom: z.boolean().optional().default(true).describe('Show "type my own answer" option')
+            allowMultiple: z.boolean().default(false).describe('Allow multiple selections'),
+            allowCustom: z.boolean().default(true).describe('Show "type my own answer" option')
           }))
         ]).describe('Either a single question object or an array of question objects to ask together')
       },

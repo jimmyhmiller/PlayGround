@@ -1,8 +1,8 @@
 ;; Edge Cases for Dynamic Bindings
 
-(def *x* 1)
-(def *y* 2)
-(def *z* 3)
+(def ^:dynamic *x* 1)
+(def ^:dynamic *y* 2)
+(def ^:dynamic *z* 3)
 
 ;; Test 1: Empty binding body
 (binding [*x* 100] nil)

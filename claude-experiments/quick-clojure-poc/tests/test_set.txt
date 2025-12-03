@@ -1,6 +1,6 @@
 ;; Test set! works within binding
 
-(def *x* 10)
+(def ^:dynamic *x* 10)
 *x*
 
 ;; set! within binding should work

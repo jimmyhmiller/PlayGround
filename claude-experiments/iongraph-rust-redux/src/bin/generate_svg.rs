@@ -77,9 +77,14 @@ fn main() {
     layout_provider = graph.layout_provider; // Take back the layout provider
     let mut svg_root = layout_provider.create_svg_element("svg");
     layout_provider.set_attribute(&mut svg_root, "xmlns", "http://www.w3.org/2000/svg");
-    layout_provider.set_attribute(&mut svg_root, "width", &graph.size.x.to_string());
-    layout_provider.set_attribute(&mut svg_root, "height", &graph.size.y.to_string());
-    layout_provider.set_attribute(&mut svg_root, "viewBox", &format!("0 0 {} {}", graph.size.x as i32, graph.size.y as i32));
+
+    // Add 40 pixels to width and height to match TypeScript (generate-svg-function.mjs:32-33)
+    let width = (graph.size.x + 40.0).ceil() as i32;
+    let height = (graph.size.y + 40.0).ceil() as i32;
+
+    layout_provider.set_attribute(&mut svg_root, "width", &width.to_string());
+    layout_provider.set_attribute(&mut svg_root, "height", &height.to_string());
+    layout_provider.set_attribute(&mut svg_root, "viewBox", &format!("0 0 {} {}", width, height));
     layout_provider.append_child(&mut svg_root, graph.graph_container);
 
     // Get the SVG output
@@ -92,5 +97,5 @@ fn main() {
     });
 
     eprintln!("✓ SVG generated: {}", output_path);
-    eprintln!("  Dimensions: {}x{}", graph.size.x as i32, graph.size.y as i32);
+    eprintln!("  Dimensions: {}x{}", width, height);
 }

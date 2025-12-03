@@ -1,5 +1,5 @@
 ;; Test 1: Basic binding
-(def *x* 10)
+(def ^:dynamic *x* 10)
 *x*
 (binding [*x* 20] *x*)
 *x*
@@ -9,7 +9,7 @@
 *x*
 
 ;; Test 3: Multiple vars in one binding
-(def *y* 100)
+(def ^:dynamic *y* 100)
 *y*
 (binding [*x* 50 *y* 200] (+ *x* *y*))
 *x*

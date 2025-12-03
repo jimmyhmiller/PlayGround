@@ -84,6 +84,11 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
             Ok(Expr::Literal(value.clone()))
         }
 
+        // WithMeta wraps a value with metadata - analyze the inner value
+        Value::WithMeta(_, inner) => {
+            analyze(inner)
+        }
+
         // Symbols become variable references
         // Parse qualified symbols: "user/foo" → Var { namespace: Some("user"), name: "foo" }
         // Special case: "/" is the division operator, not a qualified symbol
@@ -148,22 +153,19 @@ fn analyze_def(items: &im::Vector<Value>) -> Result<Expr, String> {
         return Err(format!("def requires 2 arguments, got {}", items.len() - 1));
     }
 
-    let name = match &items[1] {
-        Value::Symbol(s) => s.clone(),
+    // Extract name and metadata from the symbol (which might have metadata attached)
+    let (name, metadata) = match &items[1] {
+        Value::WithMeta(meta, inner) => {
+            match **inner {
+                Value::Symbol(ref s) => (s.clone(), Some(meta.clone())),
+                _ => return Err("def requires a symbol".to_string()),
+            }
+        }
+        Value::Symbol(s) => (s.clone(), None),
         _ => return Err("def requires a symbol as first argument".to_string()),
     };
 
     let value = analyze(&items[2])?;
-
-    // For now, use earmuff convention: *var* means dynamic
-    // In the future, we'll parse ^:dynamic metadata
-    let metadata = if name.starts_with('*') && name.ends_with('*') && name.len() > 2 {
-        let mut meta = im::HashMap::new();
-        meta.insert("dynamic".to_string(), Value::Bool(true));
-        Some(meta)
-    } else {
-        None
-    };
 
     Ok(Expr::Def {
         name,

@@ -59,6 +59,26 @@ pub fn edn_to_value(edn: &Edn) -> Result<Value, String> {
             Ok(Value::Set(result))
         }
 
+        // Handle metadata
+        Edn::Meta(meta_map, inner) => {
+            // Convert metadata map to HashMap<String, Value>
+            let mut metadata = hashmap!{};
+            for (k, v) in meta_map {
+                let key = match k {
+                    Edn::Key(s) => s.to_string(),
+                    Edn::Symbol(s) => s.to_string(),
+                    Edn::Str(s) => s.to_string(),
+                    _ => continue, // Skip non-string keys
+                };
+                metadata.insert(key, edn_to_value(v)?);
+            }
+
+            // Convert inner value
+            let inner_value = edn_to_value(inner)?;
+
+            Ok(Value::WithMeta(metadata, Box::new(inner_value)))
+        }
+
         // Handle other Edn types as needed
         _ => Err(format!("Unsupported EDN type: {:?}", edn)),
     }

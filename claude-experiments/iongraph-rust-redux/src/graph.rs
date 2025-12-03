@@ -494,16 +494,24 @@ impl<P: LayoutProvider> Graph<P> {
         let mut max_x: f64 = 0.0;
         let mut max_y: f64 = 0.0;
 
+        eprintln!("Rust calculating graph.size.y:");
         for layer in &nodes_by_layer {
             for node in layer {
-                let (pos, size) = match node {
-                    LayoutNode::BlockNode(n) => (n.pos, n.size),
-                    LayoutNode::DummyNode(n) => (n.pos, n.size),
+                let (pos, size, block_id) = match node {
+                    LayoutNode::BlockNode(n) => (n.pos, n.size, Some(self.blocks[n.block].id)),
+                    LayoutNode::DummyNode(n) => (n.pos, n.size, None),
                 };
+                let candidate_y = pos.y + size.y + CONTENT_PADDING;
+                if candidate_y > max_y {
+                    if let Some(bid) = block_id {
+                        eprintln!("Block {}: pos.y={}, size.y={}, candidate={}", bid.0, pos.y, size.y, candidate_y);
+                    }
+                    max_y = candidate_y;
+                }
                 max_x = max_x.max(pos.x + size.x + CONTENT_PADDING);
-                max_y = max_y.max(pos.y + size.y + CONTENT_PADDING);
             }
         }
+        eprintln!("Rust graph.size.y = {}", max_y);
 
         // Create container for arrows
         let mut arrows_container = self.layout_provider.create_svg_element("g");

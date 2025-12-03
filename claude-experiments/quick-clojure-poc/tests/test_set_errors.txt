@@ -1,6 +1,6 @@
 ;; set! Error Tests
 
-(def *x* 10)
+(def ^:dynamic *x* 10)
 
 ;; Test 1: set! outside binding should error
 (set! *x* 20)

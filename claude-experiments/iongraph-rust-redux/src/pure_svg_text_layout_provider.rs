@@ -95,7 +95,7 @@ impl PureSVGTextLayoutProvider {
             result.push_str(&self.render_node(&child.borrow(), 1));
         }
 
-        result.push_str("</svg>\n");
+        result.push_str("</svg>");
         result
     }
 
@@ -659,7 +659,7 @@ impl LayoutProvider for PureSVGTextLayoutProvider {
         // - Optional edge labels (if 2 successors)
 
         const BLOCK_PADDING: f64 = 8.0;  // Padding on each side
-        const HEADER_HEIGHT: f64 = LINE_HEIGHT + 8.0;  // Header text + padding
+        const HEADER_HEIGHT: f64 = 30.0;  // Header height to match TypeScript (30 + rows*14 + padding*2)
         const TABLE_HEADER_HEIGHT: f64 = LINE_HEIGHT + 4.0;  // Table header for LIR with samples
 
         // Calculate header width

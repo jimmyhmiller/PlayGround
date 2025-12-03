@@ -1,7 +1,7 @@
 ;; Comprehensive Dynamic Binding Tests
 
 ;; Test 1: Basic dynamic var behavior
-(def *x* 100)
+(def ^:dynamic *x* 100)
 *x*
 
 ;; Test 2: Simple binding
@@ -11,7 +11,7 @@
 *x*
 
 ;; Test 4: Multiple vars in one binding
-(def *y* 500)
+(def ^:dynamic *y* 500)
 (binding [*x* 1 *y* 2] (+ *x* *y*))
 
 ;; Test 5: Both vars back to root

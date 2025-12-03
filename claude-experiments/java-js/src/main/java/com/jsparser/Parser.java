@@ -893,8 +893,10 @@ public class Parser {
                 double value = Double.parseDouble(lexeme);
                 SourceLocation keyLoc = createLocation(dotToken, numToken);
                 key = new Literal(getStart(dotToken), getEnd(numToken), keyLoc, value, lexeme);
-            } else if (check(TokenType.IDENTIFIER) || check(TokenType.GET) || check(TokenType.SET) || isKeyword(peek())) {
-                // Regular identifier, get/set, or keyword as property name
+            } else if (check(TokenType.IDENTIFIER) || check(TokenType.GET) || check(TokenType.SET) ||
+                       check(TokenType.TRUE) || check(TokenType.FALSE) || check(TokenType.NULL) ||
+                       isKeyword(peek())) {
+                // Regular identifier, get/set, keyword, or boolean/null literal as property name
                 advance();
                 SourceLocation keyLoc = createLocation(keyToken, keyToken);
                 key = new Identifier(getStart(keyToken), getEnd(keyToken), keyLoc, keyToken.lexeme());

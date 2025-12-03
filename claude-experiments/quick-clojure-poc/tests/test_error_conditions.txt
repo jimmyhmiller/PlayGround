@@ -2,7 +2,7 @@
 ;; This file tests that proper errors are thrown
 
 ;; Setup
-(def *dynamic* 10)
+(def ^:dynamic *dynamic* 10)
 (def static 20)
 
 ;; Test 1: Binding non-dynamic var should error

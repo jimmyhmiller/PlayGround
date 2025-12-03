@@ -1265,6 +1265,7 @@ impl<P: LayoutProvider> Graph<P> {
     }
 
     fn finagle_joints(&mut self, layout_nodes_by_layer: &mut [Vec<LayoutNode>]) -> Vec<f64> {
+        eprintln!("DEBUG: finagle_joints START");
         use crate::graph::{ARROW_RADIUS, JOINT_SPACING, PORT_START, PORT_SPACING};
 
         // Build a global map of node positions by global INDEX (not ID)
@@ -1283,17 +1284,27 @@ impl<P: LayoutProvider> Graph<P> {
 
         let mut track_heights = Vec::new();
 
-        for nodes in layout_nodes_by_layer.iter_mut() {
+        for (layer_idx, nodes) in layout_nodes_by_layer.iter_mut().enumerate() {
             // First pass: collect node data
             let mut node_data: Vec<(usize, f64, Vec<usize>, bool)> = Vec::new(); // (id, pos.x, dst_nodes, is_backedge)
+
+            if layer_idx == 9 {
+                eprintln!("Layer 9 has {} nodes", nodes.len());
+            }
 
             for node in nodes.iter() {
                 match node {
                     LayoutNode::BlockNode(block_node) => {
                         let is_backedge = self.blocks[block_node.block].attributes.contains(&"backedge".to_string());
+                        if layer_idx == 9 {
+                            eprintln!("  BlockNode id={}, block={}, is_backedge={}", block_node.id, block_node.block, is_backedge);
+                        }
                         node_data.push((block_node.id, block_node.pos.x, block_node.dst_nodes.clone(), is_backedge));
                     }
                     LayoutNode::DummyNode(dummy_node) => {
+                        if layer_idx == 9 {
+                            eprintln!("  DummyNode id={}, flags={:?}", dummy_node.id, dummy_node.flags);
+                        }
                         node_data.push((dummy_node.id, dummy_node.pos.x, dummy_node.dst_nodes.clone(), false));
                     }
                 }
@@ -1302,7 +1313,7 @@ impl<P: LayoutProvider> Graph<P> {
             // Collect all joints
             let mut joints: Vec<Joint> = Vec::new();
 
-            for (node_idx, (_, pos_x, dst_nodes, is_backedge)) in node_data.iter().enumerate() {
+            for (node_idx, (node_id, pos_x, dst_nodes, is_backedge)) in node_data.iter().enumerate() {
                 if *is_backedge {
                     continue;
                 }
@@ -1311,15 +1322,34 @@ impl<P: LayoutProvider> Graph<P> {
                     let x1 = pos_x + PORT_START + PORT_SPACING * src_port as f64;
 
                     // Look up the dst position using the global map
-                    let x2 = match global_node_positions.get(&dst_global_idx) {
-                        Some(&x) => x + PORT_START,
-                        None => continue, // Skip if dst not found
+                    let dst_pos_x = match global_node_positions.get(&dst_global_idx) {
+                        Some(&x) => x,
+                        None => {
+                            if layer_idx == 9 {
+                                eprintln!("  Skipping joint: dst_global_idx={} not found", dst_global_idx);
+                            }
+                            continue; // Skip if dst not found
+                        }
                     };
+                    let x2 = dst_pos_x + PORT_START;
+
+                    if layer_idx == 9 {
+                        eprintln!("  Node {} (pos.x={}), src_port={}, dst_global={} (pos.x={})",
+                                  node_id, pos_x, src_port, dst_global_idx, dst_pos_x);
+                        eprintln!("    x1 = {} + {} + {}*{} = {}", pos_x, PORT_START, PORT_SPACING, src_port, x1);
+                        eprintln!("    x2 = {} + {} = {}", dst_pos_x, PORT_START, x2);
+                    }
 
                     if (x2 - x1).abs() < 2.0 * ARROW_RADIUS {
+                        if layer_idx == 9 {
+                            eprintln!("  Skipping joint: x1={}, x2={}, too narrow (diff={})", x1, x2, (x2-x1).abs());
+                        }
                         continue;
                     }
 
+                    if layer_idx == 9 {
+                        eprintln!("  Adding joint: x1={}, x2={}, dst_global={}", x1, x2, dst_global_idx);
+                    }
                     joints.push(Joint {
                         x1,
                         x2,
@@ -1344,6 +1374,13 @@ impl<P: LayoutProvider> Graph<P> {
 
             // Sort joints by x1
             joints.sort_by(|a, b| a.x1.partial_cmp(&b.x1).unwrap());
+
+            if layer_idx == 9 {
+                eprintln!("Layer 9: Found {} joints before track assignment", joints.len());
+                for (ji, joint) in joints.iter().enumerate() {
+                    eprintln!("  Joint {}: x1={:.1}, x2={:.1}", ji, joint.x1, joint.x2);
+                }
+            }
 
             // Greedily assign to tracks
             let mut rightward_tracks: Vec<Vec<Joint>> = Vec::new();
@@ -1395,7 +1432,15 @@ impl<P: LayoutProvider> Graph<P> {
             }
 
             // Apply joint offsets
-            let tracks_height = ((rightward_tracks.len() + leftward_tracks.len()).saturating_sub(1)) as f64 * JOINT_SPACING;
+            let num_rightward = rightward_tracks.len();
+            let num_leftward = leftward_tracks.len();
+            let tracks_height = ((num_rightward + num_leftward).saturating_sub(1)) as f64 * JOINT_SPACING;
+
+            if layer_idx == 9 {
+                eprintln!("Layer 9: After track assignment: rightward={}, leftward={}, tracks_height={}",
+                         num_rightward, num_leftward, tracks_height);
+            }
+
             let mut track_offset = -tracks_height / 2.0;
 
             let mut all_tracks = rightward_tracks;
@@ -1447,6 +1492,11 @@ impl<P: LayoutProvider> Graph<P> {
             }
 
             layer_heights[i] = layer_height;
+            if i == 9 {
+                eprintln!("Layer 9: layer_height={}, track_heights[9]={}, next_layer_y before={}, after={}",
+                         layer_height, track_heights[i], next_layer_y,
+                         next_layer_y + layer_height + TRACK_PADDING + track_heights[i] + TRACK_PADDING);
+            }
             next_layer_y += layer_height + TRACK_PADDING + track_heights[i] + TRACK_PADDING;
         }
 

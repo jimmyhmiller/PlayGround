@@ -26,6 +26,9 @@ pub enum Value {
     Map(HashMap<Value, Value>), // Clojure maps - key-value
     Set(im::HashSet<Value>),   // Clojure sets
 
+    // Metadata wrapper
+    WithMeta(HashMap<String, Value>, Box<Value>),
+
     // Functions (to be implemented in Stage 1)
     Function {
         name: Option<String>,
@@ -78,6 +81,10 @@ impl std::hash::Hash for Value {
             Value::Set(_) => {
                 // Sets are harder to hash consistently
                 "set".hash(state);
+            }
+            Value::WithMeta(_, inner) => {
+                // Hash the inner value, metadata doesn't affect hash
+                inner.hash(state);
             }
             Value::Function { name, .. } => name.hash(state),
             Value::Namespace { name, .. } => name.hash(state),
@@ -137,6 +144,10 @@ impl fmt::Display for Value {
                     write!(f, "{}", item)?;
                 }
                 write!(f, "}}")
+            }
+            Value::WithMeta(_, inner) => {
+                // Display the inner value (metadata is invisible in output)
+                write!(f, "{}", inner)
             }
             Value::Function { name, params, .. } => {
                 write!(f, "#<fn {}>", name.as_deref().unwrap_or("anonymous"))

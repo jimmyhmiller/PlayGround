@@ -1,7 +1,7 @@
 ;; Comprehensive set! Tests
 
-(def *x* 10)
-(def *y* 20)
+(def ^:dynamic *x* 10)
+(def ^:dynamic *y* 20)
 
 ;; Test 1: Basic set! within binding
 (binding [*x* 100]

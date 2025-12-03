@@ -8,6 +8,6 @@ name = "quick_clojure_poc"
 path = "src/lib.rs"
 
 [dependencies]
-clojure-reader = "0.4.0"
+clojure-reader = { path = "../clojure-reader-fork" }
 im = "15.1.0"
 libc = "0.2.178"

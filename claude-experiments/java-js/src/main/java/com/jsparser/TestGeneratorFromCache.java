@@ -312,9 +312,9 @@ public class TestGeneratorFromCache {
      * Sanitize a file path to create a valid Java method name
      */
     private String sanitizeMethodName(String path) {
-        return path.replaceAll("[^a-zA-Z0-9]", "_")
-                   .replaceAll("_{2,}", "_")
-                   .substring(0, Math.min(path.length(), 80));
+        String sanitized = path.replaceAll("[^a-zA-Z0-9]", "_")
+                               .replaceAll("_{2,}", "_");
+        return sanitized.substring(0, Math.min(sanitized.length(), 80));
     }
 
     /**
