@@ -1,5 +1,5 @@
 use iongraph_rust_redux::graph::{Graph, GraphOptions};
-use iongraph_rust_redux::iongraph::{IonJSON, Function, Pass};
+use iongraph_rust_redux::iongraph::{IonJSON, Pass};
 use iongraph_rust_redux::pure_svg_text_layout_provider::PureSVGTextLayoutProvider;
 use std::env;
 use std::fs;
@@ -9,10 +9,15 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: {} <input.json> [iterations] [function-index]", args[0]);
+        eprintln!(
+            "Usage: {} <input.json> [iterations] [function-index]",
+            args[0]
+        );
         eprintln!();
         eprintln!("This binary is optimized for profiling with samply:");
-        eprintln!("  samply record target/release/profile-render ion-examples/mega-complex.json 1000");
+        eprintln!(
+            "  samply record target/release/profile-render ion-examples/mega-complex.json 1000"
+        );
         eprintln!();
         eprintln!("Options:");
         eprintln!("  iterations: Number of times to render (default: 100)");
@@ -28,19 +33,21 @@ fn main() {
     let function_index = args.get(3).map(|s| s.as_str());
 
     // Load the JSON file
-    let json_str = fs::read_to_string(input_file)
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to read {}: {}", input_file, e);
-            process::exit(1);
-        });
+    let json_str = fs::read_to_string(input_file).unwrap_or_else(|e| {
+        eprintln!("Failed to read {}: {}", input_file, e);
+        process::exit(1);
+    });
 
-    let ion_json: IonJSON = serde_json::from_str(&json_str)
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to parse JSON: {}", e);
-            process::exit(1);
-        });
+    let ion_json: IonJSON = serde_json::from_str(&json_str).unwrap_or_else(|e| {
+        eprintln!("Failed to parse JSON: {}", e);
+        process::exit(1);
+    });
 
-    println!("Loaded {} functions from {}", ion_json.functions.len(), input_file);
+    println!(
+        "Loaded {} functions from {}",
+        ion_json.functions.len(),
+        input_file
+    );
     println!("Running {} iterations...", iterations);
     println!();
 
@@ -49,11 +56,16 @@ fn main() {
             // Render all functions
             for (idx, func) in ion_json.functions.iter().enumerate() {
                 for (pass_idx, pass) in func.passes.iter().enumerate() {
-                    let block_count = pass.mir.as_ref().map(|m| m.blocks.len())
+                    let block_count = pass
+                        .mir
+                        .as_ref()
+                        .map(|m| m.blocks.len())
                         .or_else(|| pass.lir.as_ref().map(|l| l.blocks.len()))
                         .unwrap_or(0);
-                    println!("Function {}: {} - Pass {}: {} ({} blocks)",
-                             idx, func.name, pass_idx, pass.name, block_count);
+                    println!(
+                        "Function {}: {} - Pass {}: {} ({} blocks)",
+                        idx, func.name, pass_idx, pass.name, block_count
+                    );
                     render_pass(pass.clone(), iterations);
                 }
             }
@@ -66,17 +78,26 @@ fn main() {
             });
 
             if idx >= ion_json.functions.len() {
-                eprintln!("Function index {} out of range (max: {})", idx, ion_json.functions.len() - 1);
+                eprintln!(
+                    "Function index {} out of range (max: {})",
+                    idx,
+                    ion_json.functions.len() - 1
+                );
                 process::exit(1);
             }
 
             let func = &ion_json.functions[idx];
             for (pass_idx, pass) in func.passes.iter().enumerate() {
-                let block_count = pass.mir.as_ref().map(|m| m.blocks.len())
+                let block_count = pass
+                    .mir
+                    .as_ref()
+                    .map(|m| m.blocks.len())
                     .or_else(|| pass.lir.as_ref().map(|l| l.blocks.len()))
                     .unwrap_or(0);
-                println!("Function {}: {} - Pass {}: {} ({} blocks)",
-                         idx, func.name, pass_idx, pass.name, block_count);
+                println!(
+                    "Function {}: {} - Pass {}: {} ({} blocks)",
+                    idx, func.name, pass_idx, pass.name, block_count
+                );
                 render_pass(pass.clone(), iterations);
             }
         }
@@ -111,5 +132,9 @@ fn render_pass(pass: Pass, iterations: usize) {
 
     let avg_ms = elapsed.as_secs_f64() * 1000.0 / iterations as f64;
     println!("  Average: {:.3} ms per render", avg_ms);
-    println!("  Total:   {:.3} ms ({} iterations)", elapsed.as_secs_f64() * 1000.0, iterations);
+    println!(
+        "  Total:   {:.3} ms ({} iterations)",
+        elapsed.as_secs_f64() * 1000.0,
+        iterations
+    );
 }

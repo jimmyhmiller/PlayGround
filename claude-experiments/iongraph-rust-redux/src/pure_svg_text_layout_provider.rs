@@ -21,7 +21,7 @@ struct InstructionRow {
 #[derive(Debug, Clone)]
 pub struct SVGTextNode {
     pub node_type: String,
-    pub attributes: Vec<(String, String)>,  // Changed from HashMap to preserve order
+    pub attributes: Vec<(String, String)>, // Changed from HashMap to preserve order
     pub children: Vec<Rc<RefCell<SVGTextNode>>>,
     pub text_content: Option<String>,
     pub class_list: HashSet<String>,
@@ -32,7 +32,7 @@ impl SVGTextNode {
     fn new(node_type: String) -> Self {
         SVGTextNode {
             node_type,
-            attributes: Vec::new(),  // Changed from HashMap::new()
+            attributes: Vec::new(), // Changed from HashMap::new()
             children: Vec::new(),
             text_content: None,
             class_list: HashSet::new(),
@@ -64,18 +64,22 @@ impl PureSVGTextLayoutProvider {
 
     // Helper to get attribute value from Vec
     fn get_attribute<'a>(attributes: &'a Vec<(String, String)>, name: &str) -> Option<&'a String> {
-        attributes.iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v)
+        attributes.iter().find(|(k, _)| k == name).map(|(_, v)| v)
     }
 
     pub fn to_svg_string(&self, root: &SVGTextNode) -> String {
         let mut result = String::new();
 
         // Get width/height/viewBox from root attributes if present
-        let width = Self::get_attribute(&root.attributes, "width").map(|s| s.as_str()).unwrap_or("");
-        let height = Self::get_attribute(&root.attributes, "height").map(|s| s.as_str()).unwrap_or("");
-        let viewbox = Self::get_attribute(&root.attributes, "viewBox").map(|s| s.as_str()).unwrap_or("");
+        let width = Self::get_attribute(&root.attributes, "width")
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let height = Self::get_attribute(&root.attributes, "height")
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let viewbox = Self::get_attribute(&root.attributes, "viewBox")
+            .map(|s| s.as_str())
+            .unwrap_or("");
 
         // Start with SVG opening tag
         result.push_str("<svg xmlns=\"http://www.w3.org/2000/svg\"");
@@ -149,7 +153,9 @@ impl PureSVGTextLayoutProvider {
 
         // Add inline styles
         if !node.style.is_empty() {
-            let styles: Vec<_> = node.style.iter()
+            let styles: Vec<_> = node
+                .style
+                .iter()
                 .map(|(k, v)| format!("{}: {}", k, v))
                 .collect();
             result.push_str(&format!(" style=\"{}\"", styles.join("; ")));
@@ -188,14 +194,21 @@ impl PureSVGTextLayoutProvider {
         let mut result = String::new();
 
         // Get block position from transform or default
-        let x = node.style.get("left")
+        let x = node
+            .style
+            .get("left")
             .and_then(|s| s.trim_end_matches("px").parse::<f64>().ok())
             .unwrap_or(0.0);
-        let y = node.style.get("top")
+        let y = node
+            .style
+            .get("top")
             .and_then(|s| s.trim_end_matches("px").parse::<f64>().ok())
             .unwrap_or(0.0);
 
-        result.push_str(&format!("{}<g transform=\"translate({}, {})\">\n", indent, x, y));
+        result.push_str(&format!(
+            "{}<g transform=\"translate({}, {})\">\n",
+            indent, x, y
+        ));
 
         // Render background rect
         let width = Self::get_attribute(&node.attributes, "data-width")
@@ -218,8 +231,10 @@ impl PureSVGTextLayoutProvider {
             if child_ref.class_list.contains("ig-block-header") {
                 if let Some(text) = &child_ref.text_content {
                     // Draw header background rectangle
-                    result.push_str(&format!("{}  <rect x=\"0\" y=\"0\" width=\"{}\" height=\"28\" fill=\"{}\"/>\n",
-                        indent, width, header_bg));
+                    result.push_str(&format!(
+                        "{}  <rect x=\"0\" y=\"0\" width=\"{}\" height=\"28\" fill=\"{}\"/>\n",
+                        indent, width, header_bg
+                    ));
                     // Draw header text (centered)
                     result.push_str(&format!("{}  <text x=\"{}\" y=\"18\" font-family=\"monospace\" font-size=\"12\" fill=\"white\" font-weight=\"bold\" text-anchor=\"middle\">{}</text>\n",
                         indent, width / 2.0, self.escape_xml(text)));
@@ -242,7 +257,9 @@ impl PureSVGTextLayoutProvider {
             if child_ref.class_list.contains("ig-edge-label") {
                 if let Some(text) = &child_ref.text_content {
                     // Get x position from left style (matches TypeScript line 421 getting from transform)
-                    let label_x = child_ref.style.get("left")
+                    let label_x = child_ref
+                        .style
+                        .get("left")
                         .and_then(|s| s.trim_end_matches("px").parse::<f64>().ok())
                         .unwrap_or(0.0);
                     let label_indent = format!("{}  ", indent);
@@ -258,7 +275,12 @@ impl PureSVGTextLayoutProvider {
         result
     }
 
-    fn render_instructions_table(&self, instructions_node: &SVGTextNode, depth: usize, start_y: f64) -> String {
+    fn render_instructions_table(
+        &self,
+        instructions_node: &SVGTextNode,
+        depth: usize,
+        start_y: f64,
+    ) -> String {
         let indent = "  ".repeat(depth + 1);
         let mut result = String::new();
         let mut current_y = start_y;
@@ -273,11 +295,19 @@ impl PureSVGTextLayoutProvider {
         for row in &rows {
             if let Some(num_text) = &row.num_text {
                 let width = num_text.chars().count() as f64 * CHARACTER_WIDTH;
-                max_num_width = if width > max_num_width { width } else { max_num_width };
+                max_num_width = if width > max_num_width {
+                    width
+                } else {
+                    max_num_width
+                };
             }
             if let Some(opcode_text) = &row.opcode_text {
                 let width = opcode_text.chars().count() as f64 * CHARACTER_WIDTH;
-                max_opcode_width = if width > max_opcode_width { width } else { max_opcode_width };
+                max_opcode_width = if width > max_opcode_width {
+                    width
+                } else {
+                    max_opcode_width
+                };
             }
         }
 
@@ -350,9 +380,15 @@ impl PureSVGTextLayoutProvider {
                     row.num_text = child_ref.text_content.clone();
                 } else if child_ref.class_list.contains("ig-ins-type") {
                     row.type_text = child_ref.text_content.clone();
-                } else if child_ref.node_type == "td" && !child_ref.class_list.contains("ig-ins-num") && !child_ref.class_list.contains("ig-ins-type") {
+                } else if child_ref.node_type == "td"
+                    && !child_ref.class_list.contains("ig-ins-num")
+                    && !child_ref.class_list.contains("ig-ins-type")
+                {
                     // Convert <- to ← and -> to → for measurement consistency
-                    row.opcode_text = child_ref.text_content.as_ref().map(|s| s.replace("<-", "←").replace("->", "→"));
+                    row.opcode_text = child_ref
+                        .text_content
+                        .as_ref()
+                        .map(|s| s.replace("<-", "←").replace("->", "→"));
                 }
             }
 
@@ -375,8 +411,12 @@ impl PureSVGTextLayoutProvider {
             let cell_ref = cell.borrow();
             if cell_ref.node_type == "td" {
                 if let Some(text) = &cell_ref.text_content {
-                    result.push_str(&format!("{}  <text x=\"{}\" y=\"0\">{}</text>\n",
-                        indent, x_offset, self.escape_xml(text)));
+                    result.push_str(&format!(
+                        "{}  <text x=\"{}\" y=\"0\">{}</text>\n",
+                        indent,
+                        x_offset,
+                        self.escape_xml(text)
+                    ));
                     x_offset += text.len() as f64 * CHARACTER_WIDTH;
                 }
             }
@@ -463,16 +503,28 @@ impl PureSVGTextLayoutProvider {
         for row in &rows {
             if let Some(num_text) = &row.num_text {
                 let width = num_text.chars().count() as f64 * CHARACTER_WIDTH;
-                max_num_width = if width > max_num_width { width } else { max_num_width };
+                max_num_width = if width > max_num_width {
+                    width
+                } else {
+                    max_num_width
+                };
             }
             if let Some(opcode_text) = &row.opcode_text {
                 let width = opcode_text.chars().count() as f64 * CHARACTER_WIDTH;
-                max_opcode_width = if width > max_opcode_width { width } else { max_opcode_width };
+                max_opcode_width = if width > max_opcode_width {
+                    width
+                } else {
+                    max_opcode_width
+                };
             }
             if let Some(type_text) = &row.type_text {
                 if type_text != "None" {
                     let width = type_text.chars().count() as f64 * CHARACTER_WIDTH;
-                    max_type_width = if width > max_type_width { width } else { max_type_width };
+                    max_type_width = if width > max_type_width {
+                        width
+                    } else {
+                        max_type_width
+                    };
                 }
             }
         }
@@ -489,14 +541,19 @@ impl PureSVGTextLayoutProvider {
         }
 
         // Calculate width: padding + num + gap + opcode + gap + type + padding
-        let calculated_width = PADDING + max_num_width + 8.0 + max_opcode_width + 8.0 + max_type_width + PADDING;
+        let calculated_width =
+            PADDING + max_num_width + 8.0 + max_opcode_width + 8.0 + max_type_width + PADDING;
 
         // Header width with padding
         let min_width_for_header = header_width + PADDING * 2.0;
 
         // Width is max of header width (with padding), calculated width, and minimum 150px
         let width = if min_width_for_header > calculated_width {
-            if min_width_for_header > 150.0 { min_width_for_header } else { 150.0 }
+            if min_width_for_header > 150.0 {
+                min_width_for_header
+            } else {
+                150.0
+            }
         } else if calculated_width > 150.0 {
             calculated_width
         } else {
@@ -535,7 +592,9 @@ impl LayoutProvider for PureSVGTextLayoutProvider {
         // Remove existing attribute with same name if present
         element.attributes.retain(|(k, _)| k != name);
         // Add new attribute (preserves insertion order)
-        element.attributes.push((name.to_string(), value.to_string()));
+        element
+            .attributes
+            .push((name.to_string(), value.to_string()));
     }
 
     fn set_inner_html(&mut self, element: &mut Self::Element, html: &str) {
@@ -580,20 +639,28 @@ impl LayoutProvider for PureSVGTextLayoutProvider {
     }
 
     fn set_style(&mut self, element: &mut Self::Element, property: &str, value: &str) {
-        element.style.insert(property.to_string(), value.to_string());
+        element
+            .style
+            .insert(property.to_string(), value.to_string());
     }
 
     fn set_css_property(&mut self, element: &mut Self::Element, property: &str, value: &str) {
-        element.style.insert(property.to_string(), value.to_string());
+        element
+            .style
+            .insert(property.to_string(), value.to_string());
     }
 
     fn get_bounding_client_rect(&self, element: &Self::Element) -> DOMRect {
         let (width, height) = self.measure_element(element);
 
-        let x = element.style.get("left")
+        let x = element
+            .style
+            .get("left")
             .and_then(|s| s.trim_end_matches("px").parse::<f64>().ok())
             .unwrap_or(0.0);
-        let y = element.style.get("top")
+        let y = element
+            .style
+            .get("top")
             .and_then(|s| s.trim_end_matches("px").parse::<f64>().ok())
             .unwrap_or(0.0);
 
@@ -619,7 +686,12 @@ impl LayoutProvider for PureSVGTextLayoutProvider {
         height
     }
 
-    fn add_event_listener(&mut self, _element: &mut Self::Element, _event_type: &str, _listener: Box<dyn Fn()>) {
+    fn add_event_listener(
+        &mut self,
+        _element: &mut Self::Element,
+        _event_type: &str,
+        _listener: Box<dyn Fn()>,
+    ) {
         // Noop for pure SVG
     }
 
@@ -633,7 +705,11 @@ impl LayoutProvider for PureSVGTextLayoutProvider {
         0
     }
 
-    fn observe_resize(&mut self, _element: &Self::Element, _callback: Box<dyn Fn(Vec2)>) -> Box<dyn Fn()> {
+    fn observe_resize(
+        &mut self,
+        _element: &Self::Element,
+        _callback: Box<dyn Fn(Vec2)>,
+    ) -> Box<dyn Fn()> {
         // Noop for pure SVG - return empty cleanup function
         Box::new(|| {})
     }
@@ -651,16 +727,22 @@ impl LayoutProvider for PureSVGTextLayoutProvider {
         false
     }
 
-    fn calculate_block_size(&self, block_id: &str, num_instructions: usize, has_lir: bool, has_samples: bool) -> Vec2 {
+    fn calculate_block_size(
+        &self,
+        block_id: &str,
+        num_instructions: usize,
+        has_lir: bool,
+        has_samples: bool,
+    ) -> Vec2 {
         // Calculate block size based on content
         // Block structure:
         // - Header: "Block X (description)"
         // - Table with instructions
         // - Optional edge labels (if 2 successors)
 
-        const BLOCK_PADDING: f64 = 8.0;  // Padding on each side
-        const HEADER_HEIGHT: f64 = 30.0;  // Header height to match TypeScript (30 + rows*14 + padding*2)
-        const TABLE_HEADER_HEIGHT: f64 = LINE_HEIGHT + 4.0;  // Table header for LIR with samples
+        const BLOCK_PADDING: f64 = 8.0; // Padding on each side
+        const HEADER_HEIGHT: f64 = 30.0; // Header height to match TypeScript (30 + rows*14 + padding*2)
+        const TABLE_HEADER_HEIGHT: f64 = LINE_HEIGHT + 4.0; // Table header for LIR with samples
 
         // Calculate header width
         // "Block " + block_id + potential description like " (loop header)"
@@ -680,7 +762,11 @@ impl LayoutProvider for PureSVGTextLayoutProvider {
         let avg_sample_width = 6.0 * CHARACTER_WIDTH; // "12345"
 
         let table_width = if has_lir && has_samples {
-            avg_id_width + avg_opcode_width + avg_sample_width + avg_sample_width + BLOCK_PADDING * 4.0
+            avg_id_width
+                + avg_opcode_width
+                + avg_sample_width
+                + avg_sample_width
+                + BLOCK_PADDING * 4.0
         } else if has_lir {
             avg_id_width + avg_opcode_width + BLOCK_PADDING * 2.0
         } else {

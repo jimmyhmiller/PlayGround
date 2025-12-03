@@ -16,7 +16,9 @@ struct Joint {
 impl<P: LayoutProvider> Graph<P> {
     pub fn layout(&mut self) -> (Vec<Vec<LayoutNode>>, Vec<f64>, Vec<f64>) {
         // Find roots (blocks with no predecessors)
-        let roots: Vec<usize> = self.blocks.iter()
+        let roots: Vec<usize> = self
+            .blocks
+            .iter()
             .enumerate()
             .filter(|(_, b)| b.predecessors.is_empty())
             .map(|(idx, _)| idx)
@@ -55,22 +57,29 @@ impl<P: LayoutProvider> Graph<P> {
             return;
         }
 
-        let is_loop_header = self.blocks[block_idx].attributes.contains(&"loopheader".to_string());
+        let is_loop_header = self.blocks[block_idx]
+            .attributes
+            .contains(&"loopheader".to_string());
 
         if is_loop_header {
             // This is a true loop header
             let parent_id = loop_ids[loop_ids.len() - 1];
 
             // Find or create loop header for this block
-            let current_loop_idx = self.loops.iter()
-                .position(|lh| lh.block_idx == block_idx);
+            let current_loop_idx = self.loops.iter().position(|lh| lh.block_idx == block_idx);
 
             let current_loop_idx = if let Some(idx) = current_loop_idx {
                 idx
             } else {
                 // Create new loop header
-                let backedge_idx = self.blocks[block_idx].predecessors.iter()
-                    .find(|&&pred_idx| self.blocks[pred_idx].attributes.contains(&"backedge".to_string()))
+                let backedge_idx = self.blocks[block_idx]
+                    .predecessors
+                    .iter()
+                    .find(|&&pred_idx| {
+                        self.blocks[pred_idx]
+                            .attributes
+                            .contains(&"backedge".to_string())
+                    })
                     .copied()
                     .unwrap_or(0);
 
@@ -86,8 +95,7 @@ impl<P: LayoutProvider> Graph<P> {
 
             // Set parent loop relationship
             if let Some(&parent_idx) = self.blocks_by_id.get(&parent_id) {
-                let parent_loop_idx = self.loops.iter()
-                    .position(|lh| lh.block_idx == parent_idx);
+                let parent_loop_idx = self.loops.iter().position(|lh| lh.block_idx == parent_idx);
                 self.loops[current_loop_idx].parent_loop = parent_loop_idx;
             }
 
@@ -106,7 +114,10 @@ impl<P: LayoutProvider> Graph<P> {
         self.blocks[block_idx].loop_id = loop_ids[self.blocks[block_idx].loop_depth as usize];
 
         // Recurse to successors (except for backedges)
-        if !self.blocks[block_idx].attributes.contains(&"backedge".to_string()) {
+        if !self.blocks[block_idx]
+            .attributes
+            .contains(&"backedge".to_string())
+        {
             let succs = self.blocks[block_idx].succs.clone();
             for succ_idx in succs {
                 self.find_loops(succ_idx, Some(loop_ids.clone()));
@@ -115,7 +126,10 @@ impl<P: LayoutProvider> Graph<P> {
     }
 
     fn layer(&mut self, block_idx: usize, layer: i32) {
-        if self.blocks[block_idx].attributes.contains(&"backedge".to_string()) {
+        if self.blocks[block_idx]
+            .attributes
+            .contains(&"backedge".to_string())
+        {
             let succ_layer = self.blocks[self.blocks[block_idx].succs[0]].layer;
             self.blocks[block_idx].layer = succ_layer;
             return;
@@ -126,7 +140,9 @@ impl<P: LayoutProvider> Graph<P> {
         }
 
         self.blocks[block_idx].layer = self.blocks[block_idx].layer.max(layer);
-        self.num_layers = self.num_layers.max((self.blocks[block_idx].layer + 1) as usize);
+        self.num_layers = self
+            .num_layers
+            .max((self.blocks[block_idx].layer + 1) as usize);
 
         // Update loop heights for all parent loops
         // TypeScript recalculates height for each parent loop level based on that loop's own layer
@@ -135,14 +151,17 @@ impl<P: LayoutProvider> Graph<P> {
 
         if let Some(&loop_header_idx) = self.blocks_by_id.get(&block_loop_id) {
             // Update this loop and all parent loops
-            let mut current_loop_opt = self.loops.iter()
+            let mut current_loop_opt = self
+                .loops
+                .iter()
                 .position(|lh| lh.block_idx == loop_header_idx);
 
             while let Some(current_loop_idx) = current_loop_opt {
                 // Calculate height relative to THIS loop header's layer
                 let loop_header_layer = self.blocks[self.loops[current_loop_idx].block_idx].layer;
                 let height = block_layer - loop_header_layer + 1;
-                self.loops[current_loop_idx].loop_height = self.loops[current_loop_idx].loop_height.max(height as f64);
+                self.loops[current_loop_idx].loop_height =
+                    self.loops[current_loop_idx].loop_height.max(height as f64);
                 current_loop_opt = self.loops[current_loop_idx].parent_loop;
             }
         }
@@ -158,7 +177,11 @@ impl<P: LayoutProvider> Graph<P> {
                 // This is an outgoing edge from the current loop
                 // Track it on the loop header to be layered later
                 if let Some(&loop_header_idx) = self.blocks_by_id.get(&block_loop_id) {
-                    if let Some(loop_idx) = self.loops.iter().position(|lh| lh.block_idx == loop_header_idx) {
+                    if let Some(loop_idx) = self
+                        .loops
+                        .iter()
+                        .position(|lh| lh.block_idx == loop_header_idx)
+                    {
                         if !self.loops[loop_idx].outgoing_edges.contains(&succ_idx) {
                             self.loops[loop_idx].outgoing_edges.push(succ_idx);
                         }
@@ -170,7 +193,10 @@ impl<P: LayoutProvider> Graph<P> {
         }
 
         // If this block is a true loop header, layer its outgoing edges
-        if self.blocks[block_idx].attributes.contains(&"loopheader".to_string()) {
+        if self.blocks[block_idx]
+            .attributes
+            .contains(&"loopheader".to_string())
+        {
             if let Some(loop_idx) = self.loops.iter().position(|lh| lh.block_idx == block_idx) {
                 let outgoing_edges = self.loops[loop_idx].outgoing_edges.clone();
                 let loop_height = self.loops[loop_idx].loop_height as i32;
@@ -256,7 +282,8 @@ impl<P: LayoutProvider> Graph<P> {
         let mut layout_nodes_by_layer: Vec<Vec<LayoutNode>> = vec![Vec::new(); self.num_layers];
         let mut node_id: LayoutNodeID = 0;
         let mut active_edges: Vec<IncompleteEdge> = Vec::new();
-        let mut latest_dummies_for_backedges: std::collections::HashMap<usize, (usize, usize)> = std::collections::HashMap::new(); // backedge_idx -> (layer, node_idx)
+        let mut latest_dummies_for_backedges: std::collections::HashMap<usize, (usize, usize)> =
+            std::collections::HashMap::new(); // backedge_idx -> (layer, node_idx)
 
         for (layer, block_indices) in blocks_by_layer.iter().enumerate() {
             // Find edges terminating at this layer
@@ -273,7 +300,8 @@ impl<P: LayoutProvider> Graph<P> {
             }
 
             // Create dummy nodes for active edges
-            let mut dummies_by_dest: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+            let mut dummies_by_dest: std::collections::HashMap<usize, usize> =
+                std::collections::HashMap::new();
             for edge in &active_edges {
                 let dummy_idx = if let Some(&existing_idx) = dummies_by_dest.get(&edge.dst_block) {
                     // Reuse existing dummy for this destination
@@ -283,7 +311,10 @@ impl<P: LayoutProvider> Graph<P> {
                     let new_idx = layout_nodes_by_layer[layer].len();
                     layout_nodes_by_layer[layer].push(LayoutNode::DummyNode(DummyNode {
                         id: node_id,
-                        pos: Vec2 { x: CONTENT_PADDING, y: CONTENT_PADDING },
+                        pos: Vec2 {
+                            x: CONTENT_PADDING,
+                            y: CONTENT_PADDING,
+                        },
                         size: Vec2 { x: 0.0, y: 0.0 },
                         src_nodes: Vec::new(),
                         dst_nodes: Vec::new(),
@@ -337,9 +368,15 @@ impl<P: LayoutProvider> Graph<P> {
                     // Find the loop header for current_loop_id
                     if let Some(&header_idx) = self.blocks_by_id.get(&current_loop_id) {
                         // Check if this is a true loop header (has "loopheader" attribute)
-                        if self.blocks[header_idx].attributes.contains(&"loopheader".to_string()) {
+                        if self.blocks[header_idx]
+                            .attributes
+                            .contains(&"loopheader".to_string())
+                        {
                             // Look for existing pending dummy for this loop
-                            if let Some(existing) = pending_loop_dummies.iter_mut().find(|d| d.loop_id == current_loop_id) {
+                            if let Some(existing) = pending_loop_dummies
+                                .iter_mut()
+                                .find(|d| d.loop_id == current_loop_id)
+                            {
                                 // Update to rightmost block in this loop
                                 existing.block_idx = block_idx;
                             } else {
@@ -351,10 +388,13 @@ impl<P: LayoutProvider> Graph<P> {
                             }
 
                             // Find the parent loop and continue walking up
-                            if let Some(loop_header) = self.loops.iter().find(|lh| lh.block_idx == header_idx) {
+                            if let Some(loop_header) =
+                                self.loops.iter().find(|lh| lh.block_idx == header_idx)
+                            {
                                 if let Some(parent_idx) = loop_header.parent_loop {
                                     // Get the parent loop's block ID and continue
-                                    current_loop_id = self.blocks[self.loops[parent_idx].block_idx].id;
+                                    current_loop_id =
+                                        self.blocks[self.loops[parent_idx].block_idx].id;
                                     continue;
                                 }
                             }
@@ -372,7 +412,10 @@ impl<P: LayoutProvider> Graph<P> {
                 let node_idx = layout_nodes_by_layer[layer].len();
                 layout_nodes_by_layer[layer].push(LayoutNode::BlockNode(BlockNode {
                     id: node_id,
-                    pos: Vec2 { x: CONTENT_PADDING, y: CONTENT_PADDING },
+                    pos: Vec2 {
+                        x: CONTENT_PADDING,
+                        y: CONTENT_PADDING,
+                    },
                     size: self.blocks[block_idx].size,
                     src_nodes: Vec::new(),
                     dst_nodes: Vec::new(),
@@ -404,7 +447,9 @@ impl<P: LayoutProvider> Graph<P> {
                         // Find the backedge block for this loop
                         if let Some(&loop_header_idx) = self.blocks_by_id.get(&pending.loop_id) {
                             // Find backedge from loop header
-                            let backedge_idx = self.loops.iter()
+                            let backedge_idx = self
+                                .loops
+                                .iter()
                                 .find(|lh| lh.block_idx == loop_header_idx)
                                 .map(|lh| lh.backedge)
                                 .unwrap_or(0);
@@ -415,18 +460,25 @@ impl<P: LayoutProvider> Graph<P> {
                                 let mut flags = 0;
 
                                 // Check if there's already a dummy for this backedge
-                                if let Some(&(prev_layer, prev_idx)) = latest_dummies_for_backedges.get(&backedge_idx) {
+                                if let Some(&(prev_layer, prev_idx)) =
+                                    latest_dummies_for_backedges.get(&backedge_idx)
+                                {
                                     // Connect to previous dummy
-                                    layout_nodes_by_layer[layer].push(LayoutNode::DummyNode(DummyNode {
-                                        id: node_id,
-                                        pos: Vec2 { x: CONTENT_PADDING, y: CONTENT_PADDING },
-                                        size: Vec2 { x: 0.0, y: 0.0 },
-                                        src_nodes: Vec::new(),
-                                        dst_nodes: Vec::new(),
-                                        dst_block: backedge_idx,
-                                        joint_offsets: Vec::new(),
-                                        flags,
-                                    }));
+                                    layout_nodes_by_layer[layer].push(LayoutNode::DummyNode(
+                                        DummyNode {
+                                            id: node_id,
+                                            pos: Vec2 {
+                                                x: CONTENT_PADDING,
+                                                y: CONTENT_PADDING,
+                                            },
+                                            size: Vec2 { x: 0.0, y: 0.0 },
+                                            src_nodes: Vec::new(),
+                                            dst_nodes: Vec::new(),
+                                            dst_block: backedge_idx,
+                                            joint_offsets: Vec::new(),
+                                            flags,
+                                        },
+                                    ));
 
                                     connect_nodes(
                                         &mut layout_nodes_by_layer,
@@ -440,19 +492,26 @@ impl<P: LayoutProvider> Graph<P> {
                                     // First dummy for this backedge - mark as imminent
                                     flags |= IMMINENT_BACKEDGE_DUMMY;
 
-                                    layout_nodes_by_layer[layer].push(LayoutNode::DummyNode(DummyNode {
-                                        id: node_id,
-                                        pos: Vec2 { x: CONTENT_PADDING, y: CONTENT_PADDING },
-                                        size: Vec2 { x: 0.0, y: 0.0 },
-                                        src_nodes: Vec::new(),
-                                        dst_nodes: Vec::new(),
-                                        dst_block: backedge_idx,
-                                        joint_offsets: Vec::new(),
-                                        flags,
-                                    }));
+                                    layout_nodes_by_layer[layer].push(LayoutNode::DummyNode(
+                                        DummyNode {
+                                            id: node_id,
+                                            pos: Vec2 {
+                                                x: CONTENT_PADDING,
+                                                y: CONTENT_PADDING,
+                                            },
+                                            size: Vec2 { x: 0.0, y: 0.0 },
+                                            src_nodes: Vec::new(),
+                                            dst_nodes: Vec::new(),
+                                            dst_block: backedge_idx,
+                                            joint_offsets: Vec::new(),
+                                            flags,
+                                        },
+                                    ));
 
                                     // Connect directly to backedge's layout node
-                                    if let Some(backedge_layout_node) = self.blocks[backedge_idx].layout_node {
+                                    if let Some(backedge_layout_node) =
+                                        self.blocks[backedge_idx].layout_node
+                                    {
                                         // Find the backedge's layer and index within that layer
                                         let mut backedge_global = backedge_layout_node;
                                         let mut backedge_layer = 0;
@@ -479,7 +538,8 @@ impl<P: LayoutProvider> Graph<P> {
                                     }
                                 }
 
-                                latest_dummies_for_backedges.insert(backedge_idx, (layer, backedge_dummy_idx));
+                                latest_dummies_for_backedges
+                                    .insert(backedge_idx, (layer, backedge_dummy_idx));
                                 node_id += 1;
                             }
                         }
@@ -487,7 +547,9 @@ impl<P: LayoutProvider> Graph<P> {
                 }
 
                 // Handle block edges
-                let is_backedge = self.blocks[block_idx].attributes.contains(&"backedge".to_string());
+                let is_backedge = self.blocks[block_idx]
+                    .attributes
+                    .contains(&"backedge".to_string());
                 let succs = self.blocks[block_idx].succs.clone();
 
                 if is_backedge {
@@ -523,7 +585,9 @@ impl<P: LayoutProvider> Graph<P> {
                 } else {
                     // Regular block - add edges
                     for (port, succ_idx) in succs.iter().enumerate() {
-                        let succ_is_backedge = self.blocks[*succ_idx].attributes.contains(&"backedge".to_string());
+                        let succ_is_backedge = self.blocks[*succ_idx]
+                            .attributes
+                            .contains(&"backedge".to_string());
 
                         if succ_is_backedge {
                             // Track to connect after all backedge dummies are created
@@ -547,7 +611,9 @@ impl<P: LayoutProvider> Graph<P> {
 
             // Connect backedge edges to their dummies
             for edge in backedge_edges {
-                if let Some(&(dummy_layer, dummy_idx)) = latest_dummies_for_backedges.get(&edge.dst_block) {
+                if let Some(&(dummy_layer, dummy_idx)) =
+                    latest_dummies_for_backedges.get(&edge.dst_block)
+                {
                     connect_nodes(
                         &mut layout_nodes_by_layer,
                         edge.src_layer,
@@ -584,7 +650,7 @@ impl<P: LayoutProvider> Graph<P> {
                 for &global_dst in &dst_nodes {
                     // Find the destination layer and index
                     let mut remaining = global_dst;
-                    for (dst_layer, nodes) in layout_nodes.iter_mut().enumerate() {
+                    for (_dst_layer, nodes) in layout_nodes.iter_mut().enumerate() {
                         if remaining < nodes.len() {
                             match &mut nodes[remaining] {
                                 LayoutNode::BlockNode(n) => {
@@ -607,11 +673,12 @@ impl<P: LayoutProvider> Graph<P> {
                 for (node_idx, node) in nodes.iter().enumerate() {
                     if let LayoutNode::DummyNode(dummy) = node {
                         // Check if this is a backedge dummy
-                        if self.blocks[dummy.dst_block].attributes.contains(&"backedge".to_string()) {
-                            if dummy.src_nodes.is_empty() {
+                        if self.blocks[dummy.dst_block]
+                            .attributes
+                            .contains(&"backedge".to_string())
+                            && dummy.src_nodes.is_empty() {
                                 orphan_roots.push((layer, node_idx));
                             }
-                        }
                     }
                 }
             }
@@ -633,7 +700,9 @@ impl<P: LayoutProvider> Graph<P> {
                     global_id += current_idx;
 
                     // Check if this is a dummy with no sources
-                    let (is_dummy, src_count, dst_nodes) = match &layout_nodes_by_layer[current_layer][current_idx] {
+                    let (is_dummy, src_count, dst_nodes) = match &layout_nodes_by_layer
+                        [current_layer][current_idx]
+                    {
                         LayoutNode::BlockNode(_) => break, // Stop at block nodes
                         LayoutNode::DummyNode(n) => (true, n.src_nodes.len(), n.dst_nodes.clone()),
                     };
@@ -709,7 +778,9 @@ impl<P: LayoutProvider> Graph<P> {
     }
 
     fn straighten_edges(&mut self, layout_nodes_by_layer: &mut [Vec<LayoutNode>]) {
-        use crate::graph::{BLOCK_GAP, PORT_START, PORT_SPACING, LAYOUT_ITERATIONS, NEARLY_STRAIGHT_ITERATIONS};
+        use crate::graph::{
+            BLOCK_GAP, LAYOUT_ITERATIONS, NEARLY_STRAIGHT_ITERATIONS, PORT_SPACING, PORT_START,
+        };
 
         // Helper: Push nodes to the right if they are too close together
         let push_neighbors = |nodes: &mut [LayoutNode]| {
@@ -742,13 +813,18 @@ impl<P: LayoutProvider> Graph<P> {
         };
 
         // Pre-compute loop header info to avoid borrowing issues
-        let mut block_to_loop_header: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut block_to_loop_header: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
         for (idx, block) in self.blocks.iter().enumerate() {
             let loop_id = block.loop_id;
             if let Some(&loop_header_idx) = self.blocks_by_id.get(&loop_id) {
                 // Only include actual loop headers (TypeScript uses asLH which checks this)
-                if self.blocks[loop_header_idx].attributes.contains(&"loopheader".to_string()) {
-                    if let Some(loop_header_layout_node) = self.blocks[loop_header_idx].layout_node {
+                if self.blocks[loop_header_idx]
+                    .attributes
+                    .contains(&"loopheader".to_string())
+                {
+                    if let Some(loop_header_layout_node) = self.blocks[loop_header_idx].layout_node
+                    {
                         block_to_loop_header.insert(idx, loop_header_layout_node);
                     }
                 }
@@ -756,38 +832,43 @@ impl<P: LayoutProvider> Graph<P> {
         }
 
         // Helper: Push nodes to the right so they fit inside their loop
-        let push_into_loops = |layout_nodes: &mut [Vec<LayoutNode>], block_to_loop: &std::collections::HashMap<usize, usize>| {
-            // First, build a map of layout node IDs to their positions
-            let mut layout_id_to_pos: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
-            for layer in layout_nodes.iter() {
-                for node in layer {
-                    match node {
-                        LayoutNode::BlockNode(n) => {
-                            layout_id_to_pos.insert(n.id, n.pos.x);
-                        }
-                        LayoutNode::DummyNode(n) => {
-                            layout_id_to_pos.insert(n.id, n.pos.x);
-                        }
-                    }
-                }
-            }
-
-            // Now apply the positions
-            for layer_nodes in layout_nodes.iter_mut() {
-                for node in layer_nodes.iter_mut() {
-                    if let LayoutNode::BlockNode(block_node) = node {
-                        let block_idx = block_node.block;
-
-                        if let Some(&loop_header_layout_id) = block_to_loop.get(&block_idx) {
-                            if let Some(&loop_header_x) = layout_id_to_pos.get(&loop_header_layout_id) {
-                                // Push this node to be at least as far right as the loop header
-                                block_node.pos.x = block_node.pos.x.max(loop_header_x);
+        let push_into_loops =
+            |layout_nodes: &mut [Vec<LayoutNode>],
+             block_to_loop: &std::collections::HashMap<usize, usize>| {
+                // First, build a map of layout node IDs to their positions
+                let mut layout_id_to_pos: std::collections::HashMap<usize, f64> =
+                    std::collections::HashMap::new();
+                for layer in layout_nodes.iter() {
+                    for node in layer {
+                        match node {
+                            LayoutNode::BlockNode(n) => {
+                                layout_id_to_pos.insert(n.id, n.pos.x);
+                            }
+                            LayoutNode::DummyNode(n) => {
+                                layout_id_to_pos.insert(n.id, n.pos.x);
                             }
                         }
                     }
                 }
-            }
-        };
+
+                // Now apply the positions
+                for layer_nodes in layout_nodes.iter_mut() {
+                    for node in layer_nodes.iter_mut() {
+                        if let LayoutNode::BlockNode(block_node) = node {
+                            let block_idx = block_node.block;
+
+                            if let Some(&loop_header_layout_id) = block_to_loop.get(&block_idx) {
+                                if let Some(&loop_header_x) =
+                                    layout_id_to_pos.get(&loop_header_layout_id)
+                                {
+                                    // Push this node to be at least as far right as the loop header
+                                    block_node.pos.x = block_node.pos.x.max(loop_header_x);
+                                }
+                            }
+                        }
+                    }
+                }
+            };
 
         // Helper: Straighten dummy runs
         let straighten_dummy_runs = |layout_nodes: &mut [Vec<LayoutNode>]| {
@@ -847,14 +928,15 @@ impl<P: LayoutProvider> Graph<P> {
                 next_x -= BLOCK_GAP + PORT_START;
                 for i in (0..first_block_idx).rev() {
                     // Get dummy info we need
-                    let (src_nodes, dst_block, dummy_id) = if let LayoutNode::DummyNode(dummy) = &layout_nodes[layer_idx][i] {
-                        if (dummy.flags & LEFTMOST_DUMMY) == 0 {
-                            break;
-                        }
-                        (dummy.src_nodes.clone(), dummy.dst_block, dummy.id)
-                    } else {
-                        continue;
-                    };
+                    let (src_nodes, _dst_block, dummy_id) =
+                        if let LayoutNode::DummyNode(dummy) = &layout_nodes[layer_idx][i] {
+                            if (dummy.flags & LEFTMOST_DUMMY) == 0 {
+                                break;
+                            }
+                            (dummy.src_nodes.clone(), dummy.dst_block, dummy.id)
+                        } else {
+                            continue;
+                        };
 
                     let mut max_safe_x = next_x;
 
@@ -877,7 +959,9 @@ impl<P: LayoutProvider> Graph<P> {
                                     // Calculate source port position (TypeScript line 795)
                                     // NOTE: TypeScript does NOT add PORT_START here, only PORT_SPACING!
                                     // TypeScript: srcX = src.pos.x + src.dstNodes.indexOf(dummy) * PORT_SPACING
-                                    if let Some(port_idx) = src_dst_nodes.iter().position(|&id| id == dummy_id) {
+                                    if let Some(port_idx) =
+                                        src_dst_nodes.iter().position(|&id| id == dummy_id)
+                                    {
                                         let src_port_x = src_x + (port_idx as f64) * PORT_SPACING;
                                         if src_port_x < max_safe_x {
                                             max_safe_x = src_port_x;
@@ -928,7 +1012,7 @@ impl<P: LayoutProvider> Graph<P> {
                 // This requires careful handling to avoid borrow checker issues
                 let mut updates: Vec<(usize, f64)> = Vec::new();
 
-                for (_node_idx, node) in layout_nodes[layer].iter().enumerate() {
+                for node in layout_nodes[layer].iter() {
                     let (node_id, node_pos_x, dst_nodes) = match node {
                         LayoutNode::BlockNode(n) => (n.id, n.pos.x, &n.dst_nodes),
                         LayoutNode::DummyNode(n) => (n.id, n.pos.x, &n.dst_nodes),
@@ -939,8 +1023,8 @@ impl<P: LayoutProvider> Graph<P> {
                         // We need to check the destination node's flags
                         let mut dst_is_backedge_dummy = false;
                         let mut global_count = 0;
-                        for (dst_layer_idx, dst_layer_nodes) in layout_nodes.iter().enumerate() {
-                            for (dst_node_idx, dst_node) in dst_layer_nodes.iter().enumerate() {
+                        for (_dst_layer_idx, dst_layer_nodes) in layout_nodes.iter().enumerate() {
+                            for (_dst_node_idx, dst_node) in dst_layer_nodes.iter().enumerate() {
                                 if global_count == dst_global_idx {
                                     if let LayoutNode::DummyNode(d) = dst_node {
                                         // Check if this is a backedge dummy (IMMINENT_BACKEDGE_DUMMY flag)
@@ -996,7 +1080,8 @@ impl<P: LayoutProvider> Graph<P> {
                                     LayoutNode::DummyNode(n) => n.pos.x,
                                 };
 
-                                let new_x = dst_pos_x.max(node_pos_x + src_port_offset - dst_port_offset);
+                                let new_x =
+                                    dst_pos_x.max(node_pos_x + src_port_offset - dst_port_offset);
                                 if new_x != dst_pos_x {
                                     updates.push((dst_idx_in_layer, new_x));
                                     last_shifted = dst_idx_in_layer as isize;
@@ -1148,14 +1233,16 @@ impl<P: LayoutProvider> Graph<P> {
         };
 
         // Pre-compute which blocks are backedges to avoid borrowing issues
-        let mut is_backedge_block: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut is_backedge_block: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
         for (idx, block) in self.blocks.iter().enumerate() {
             if block.attributes.contains(&"backedge".to_string()) {
                 is_backedge_block.insert(idx);
             }
         }
 
-        let mut is_backedge_dst: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut is_backedge_dst: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
         for (idx, block) in self.blocks.iter().enumerate() {
             if block.attributes.contains(&"backedge".to_string()) {
                 is_backedge_dst.insert(idx);
@@ -1163,146 +1250,179 @@ impl<P: LayoutProvider> Graph<P> {
         }
 
         // Helper: Conservative straightening without causing overlaps
-        let straighten_conservative = |layout_nodes: &mut [Vec<LayoutNode>],
-                                        backedge_blocks: &std::collections::HashSet<usize>,
-                                        backedge_dsts: &std::collections::HashSet<usize>| {
-            // Pre-compute all global node info to avoid borrowing issues
-            let mut global_node_info: Vec<(usize, f64, Vec<usize>, Vec<usize>, usize, Option<usize>)> = Vec::new(); // (global_idx, pos_x, src_nodes, dst_nodes, flags, dst_block)
-            let mut current_global = 0;
-            for layer in layout_nodes.iter() {
-                for node in layer {
-                    let (pos_x, src_nodes, dst_nodes, flags, dst_block) = match node {
-                        LayoutNode::BlockNode(n) => (n.pos.x, n.src_nodes.clone(), n.dst_nodes.clone(), 0, None),
-                        LayoutNode::DummyNode(n) => (n.pos.x, n.src_nodes.clone(), n.dst_nodes.clone(), n.flags as usize, Some(n.dst_block)),
-                    };
-                    global_node_info.push((current_global, pos_x, src_nodes, dst_nodes, flags, dst_block));
-                    current_global += 1;
-                }
-            }
-
-            // Pre-compute layer offsets
-            let mut layer_offsets: Vec<usize> = Vec::new();
-            let mut offset = 0;
-            for layer in layout_nodes.iter() {
-                layer_offsets.push(offset);
-                offset += layer.len();
-            }
-
-            // Process each layer
-            for (layer_idx, nodes) in layout_nodes.iter_mut().enumerate() {
-                let layer_global_offset = layer_offsets[layer_idx];
-
-                // Walk right to left
-                for i in (0..nodes.len()).rev() {
-                    let global_idx = layer_global_offset + i;
-
-                    // Only do this to block nodes, not backedges
-                    let (is_block, is_backedge) = match &nodes[i] {
-                        LayoutNode::BlockNode(n) => {
-                            let backedge = backedge_blocks.contains(&n.block);
-                            (true, backedge)
-                        }
-                        LayoutNode::DummyNode(_) => (false, false),
-                    };
-
-                    if !is_block || is_backedge {
-                        continue;
+        let straighten_conservative =
+            |layout_nodes: &mut [Vec<LayoutNode>],
+             backedge_blocks: &std::collections::HashSet<usize>,
+             backedge_dsts: &std::collections::HashSet<usize>| {
+                // Pre-compute all global node info to avoid borrowing issues
+                let mut global_node_info: Vec<(
+                    usize,
+                    f64,
+                    Vec<usize>,
+                    Vec<usize>,
+                    usize,
+                    Option<usize>,
+                )> = Vec::new(); // (global_idx, pos_x, src_nodes, dst_nodes, flags, dst_block)
+                let mut current_global = 0;
+                for layer in layout_nodes.iter() {
+                    for node in layer {
+                        let (pos_x, src_nodes, dst_nodes, flags, dst_block) = match node {
+                            LayoutNode::BlockNode(n) => {
+                                (n.pos.x, n.src_nodes.clone(), n.dst_nodes.clone(), 0, None)
+                            }
+                            LayoutNode::DummyNode(n) => (
+                                n.pos.x,
+                                n.src_nodes.clone(),
+                                n.dst_nodes.clone(),
+                                n.flags as usize,
+                                Some(n.dst_block),
+                            ),
+                        };
+                        global_node_info.push((
+                            current_global,
+                            pos_x,
+                            src_nodes,
+                            dst_nodes,
+                            flags,
+                            dst_block,
+                        ));
+                        current_global += 1;
                     }
+                }
 
-                    // Get this node's info from pre-computed data
-                    let (_, node_pos, src_nodes, dst_nodes, _, _) = &global_node_info[global_idx];
-                    let mut deltas_to_try: Vec<f64> = Vec::new();
+                // Pre-compute layer offsets
+                let mut layer_offsets: Vec<usize> = Vec::new();
+                let mut offset = 0;
+                for layer in layout_nodes.iter() {
+                    layer_offsets.push(offset);
+                    offset += layer.len();
+                }
 
-                    // Check parent nodes
-                    for &parent_global in src_nodes {
-                        if let Some((_, parent_pos, _, parent_dsts, _, _)) = global_node_info.get(parent_global) {
-                            if let Some(port_in_parent) = parent_dsts.iter().position(|&idx| idx == global_idx) {
-                                let src_port_offset = PORT_START + port_in_parent as f64 * PORT_SPACING;
+                // Process each layer
+                for (layer_idx, nodes) in layout_nodes.iter_mut().enumerate() {
+                    let layer_global_offset = layer_offsets[layer_idx];
+
+                    // Walk right to left
+                    for i in (0..nodes.len()).rev() {
+                        let global_idx = layer_global_offset + i;
+
+                        // Only do this to block nodes, not backedges
+                        let (is_block, is_backedge) = match &nodes[i] {
+                            LayoutNode::BlockNode(n) => {
+                                let backedge = backedge_blocks.contains(&n.block);
+                                (true, backedge)
+                            }
+                            LayoutNode::DummyNode(_) => (false, false),
+                        };
+
+                        if !is_block || is_backedge {
+                            continue;
+                        }
+
+                        // Get this node's info from pre-computed data
+                        let (_, node_pos, src_nodes, dst_nodes, _, _) =
+                            &global_node_info[global_idx];
+                        let mut deltas_to_try: Vec<f64> = Vec::new();
+
+                        // Check parent nodes
+                        for &parent_global in src_nodes {
+                            if let Some((_, parent_pos, _, parent_dsts, _, _)) =
+                                global_node_info.get(parent_global)
+                            {
+                                if let Some(port_in_parent) =
+                                    parent_dsts.iter().position(|&idx| idx == global_idx)
+                                {
+                                    let src_port_offset =
+                                        PORT_START + port_in_parent as f64 * PORT_SPACING;
+                                    let dst_port_offset = PORT_START;
+                                    let delta = (parent_pos + src_port_offset)
+                                        - (node_pos + dst_port_offset);
+                                    deltas_to_try.push(delta);
+                                }
+                            }
+                        }
+
+                        // Check child nodes
+                        for (src_port, &dst_global) in dst_nodes.iter().enumerate() {
+                            if let Some((_, dst_pos, _, _, _dst_flags, dst_block_opt)) =
+                                global_node_info.get(dst_global)
+                            {
+                                // Skip backedge dummies (TypeScript lines 882-884)
+                                // Check if this is a dummy (dst_block_opt.is_some()) AND it leads to a backedge block
+                                if let Some(dst_block) = dst_block_opt {
+                                    if backedge_dsts.contains(dst_block) {
+                                        continue;
+                                    }
+                                }
+
+                                let src_port_offset = PORT_START + src_port as f64 * PORT_SPACING;
                                 let dst_port_offset = PORT_START;
-                                let delta = (parent_pos + src_port_offset) - (node_pos + dst_port_offset);
+                                let delta =
+                                    (dst_pos + dst_port_offset) - (node_pos + src_port_offset);
                                 deltas_to_try.push(delta);
                             }
                         }
-                    }
 
-                    // Check child nodes
-                    for (src_port, &dst_global) in dst_nodes.iter().enumerate() {
-                        if let Some((_, dst_pos, _, _, dst_flags, dst_block_opt)) = global_node_info.get(dst_global) {
-                            // Skip backedge dummies (TypeScript lines 882-884)
-                            // Check if this is a dummy (dst_block_opt.is_some()) AND it leads to a backedge block
-                            if let Some(dst_block) = dst_block_opt {
-                                if backedge_dsts.contains(dst_block) {
+                        // Filter and sort deltas
+                        if deltas_to_try.contains(&0.0) {
+                            continue;
+                        }
+
+                        deltas_to_try.retain(|&d| d > 0.0);
+                        deltas_to_try.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+                        // Try each delta
+                        let (node_pos, node_size) = match &nodes[i] {
+                            LayoutNode::BlockNode(n) => (n.pos.x, n.size.x),
+                            LayoutNode::DummyNode(n) => (n.pos.x, n.size.x),
+                        };
+
+                        for delta in deltas_to_try {
+                            let mut overlaps_any = false;
+                            for j in (i + 1)..nodes.len() {
+                                // Ignore rightmost dummies
+                                let is_rightmost = match &nodes[j] {
+                                    LayoutNode::DummyNode(n) => (n.flags & RIGHTMOST_DUMMY) != 0,
+                                    _ => false,
+                                };
+
+                                if is_rightmost {
                                     continue;
+                                }
+
+                                let (other_pos, other_size) = match &nodes[j] {
+                                    LayoutNode::BlockNode(n) => (n.pos.x, n.size.x),
+                                    LayoutNode::DummyNode(n) => (n.pos.x, n.size.x),
+                                };
+
+                                let a1 = node_pos + delta;
+                                let a2 = node_pos + delta + node_size;
+                                let b1 = other_pos - BLOCK_GAP;
+                                let b2 = other_pos + other_size + BLOCK_GAP;
+
+                                if a2 >= b1 && a1 <= b2 {
+                                    overlaps_any = true;
+                                    break;
                                 }
                             }
 
-                            let src_port_offset = PORT_START + src_port as f64 * PORT_SPACING;
-                            let dst_port_offset = PORT_START;
-                            let delta = (dst_pos + dst_port_offset) - (node_pos + src_port_offset);
-                            deltas_to_try.push(delta);
-                        }
-                    }
-
-                    // Filter and sort deltas
-                    if deltas_to_try.contains(&0.0) {
-                        continue;
-                    }
-
-                    deltas_to_try.retain(|&d| d > 0.0);
-                    deltas_to_try.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-                    // Try each delta
-                    let (node_pos, node_size) = match &nodes[i] {
-                        LayoutNode::BlockNode(n) => (n.pos.x, n.size.x),
-                        LayoutNode::DummyNode(n) => (n.pos.x, n.size.x),
-                    };
-
-                    for delta in deltas_to_try {
-                        let mut overlaps_any = false;
-                        for j in (i + 1)..nodes.len() {
-                            // Ignore rightmost dummies
-                            let is_rightmost = match &nodes[j] {
-                                LayoutNode::DummyNode(n) => (n.flags & RIGHTMOST_DUMMY) != 0,
-                                _ => false,
-                            };
-
-                            if is_rightmost {
-                                continue;
-                            }
-
-                            let (other_pos, other_size) = match &nodes[j] {
-                                LayoutNode::BlockNode(n) => (n.pos.x, n.size.x),
-                                LayoutNode::DummyNode(n) => (n.pos.x, n.size.x),
-                            };
-
-                            let a1 = node_pos + delta;
-                            let a2 = node_pos + delta + node_size;
-                            let b1 = other_pos - BLOCK_GAP;
-                            let b2 = other_pos + other_size + BLOCK_GAP;
-
-                            if a2 >= b1 && a1 <= b2 {
-                                overlaps_any = true;
+                            if !overlaps_any {
+                                // Apply delta
+                                match &mut nodes[i] {
+                                    LayoutNode::BlockNode(n) => n.pos.x += delta,
+                                    LayoutNode::DummyNode(n) => n.pos.x += delta,
+                                }
                                 break;
                             }
                         }
-
-                        if !overlaps_any {
-                            // Apply delta
-                            match &mut nodes[i] {
-                                LayoutNode::BlockNode(n) => n.pos.x += delta,
-                                LayoutNode::DummyNode(n) => n.pos.x += delta,
-                            }
-                            break;
-                        }
                     }
-                }
 
-                push_neighbors(nodes);
-            }
-        };
+                    push_neighbors(nodes);
+                }
+            };
 
         // Run the passes in order (mimicking TypeScript)
-        for iter in 0..LAYOUT_ITERATIONS {
+        for _iter in 0..LAYOUT_ITERATIONS {
             straighten_children(layout_nodes_by_layer);
             push_into_loops(layout_nodes_by_layer, &block_to_loop_header);
             straighten_dummy_runs(layout_nodes_by_layer);
@@ -1310,7 +1430,7 @@ impl<P: LayoutProvider> Graph<P> {
 
         straighten_dummy_runs(layout_nodes_by_layer);
 
-        for iter in 0..NEARLY_STRAIGHT_ITERATIONS {
+        for _iter in 0..NEARLY_STRAIGHT_ITERATIONS {
             straighten_nearly_straight_edges_up(layout_nodes_by_layer);
             straighten_nearly_straight_edges_down(layout_nodes_by_layer);
         }
@@ -1321,10 +1441,11 @@ impl<P: LayoutProvider> Graph<P> {
     }
 
     fn finagle_joints(&mut self, layout_nodes_by_layer: &mut [Vec<LayoutNode>]) -> Vec<f64> {
-        use crate::graph::{ARROW_RADIUS, JOINT_SPACING, PORT_START, PORT_SPACING};
+        use crate::graph::{ARROW_RADIUS, JOINT_SPACING, PORT_SPACING, PORT_START};
 
         // Build a global map of node positions by global INDEX (not ID)
-        let mut global_node_positions: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+        let mut global_node_positions: std::collections::HashMap<usize, f64> =
+            std::collections::HashMap::new();
         let mut global_idx = 0;
         for layer in layout_nodes_by_layer.iter() {
             for node in layer {
@@ -1339,18 +1460,30 @@ impl<P: LayoutProvider> Graph<P> {
 
         let mut track_heights = Vec::new();
 
-        for (layer_idx, nodes) in layout_nodes_by_layer.iter_mut().enumerate() {
+        for (_layer_idx, nodes) in layout_nodes_by_layer.iter_mut().enumerate() {
             // First pass: collect node data
             let mut node_data: Vec<(usize, f64, Vec<usize>, bool)> = Vec::new(); // (id, pos.x, dst_nodes, is_backedge)
 
             for node in nodes.iter() {
                 match node {
                     LayoutNode::BlockNode(block_node) => {
-                        let is_backedge = self.blocks[block_node.block].attributes.contains(&"backedge".to_string());
-                        node_data.push((block_node.id, block_node.pos.x, block_node.dst_nodes.clone(), is_backedge));
+                        let is_backedge = self.blocks[block_node.block]
+                            .attributes
+                            .contains(&"backedge".to_string());
+                        node_data.push((
+                            block_node.id,
+                            block_node.pos.x,
+                            block_node.dst_nodes.clone(),
+                            is_backedge,
+                        ));
                     }
                     LayoutNode::DummyNode(dummy_node) => {
-                        node_data.push((dummy_node.id, dummy_node.pos.x, dummy_node.dst_nodes.clone(), false));
+                        node_data.push((
+                            dummy_node.id,
+                            dummy_node.pos.x,
+                            dummy_node.dst_nodes.clone(),
+                            false,
+                        ));
                     }
                 }
             }
@@ -1358,7 +1491,8 @@ impl<P: LayoutProvider> Graph<P> {
             // Collect all joints
             let mut joints: Vec<Joint> = Vec::new();
 
-            for (node_idx, (node_id, pos_x, dst_nodes, is_backedge)) in node_data.iter().enumerate() {
+            for (node_idx, (_node_id, pos_x, dst_nodes, is_backedge)) in node_data.iter().enumerate()
+            {
                 if *is_backedge {
                     continue;
                 }
@@ -1455,7 +1589,8 @@ impl<P: LayoutProvider> Graph<P> {
             // Apply joint offsets
             let num_rightward = rightward_tracks.len();
             let num_leftward = leftward_tracks.len();
-            let tracks_height = ((num_rightward + num_leftward).saturating_sub(1)) as f64 * JOINT_SPACING;
+            let tracks_height =
+                ((num_rightward + num_leftward).saturating_sub(1)) as f64 * JOINT_SPACING;
 
             let mut track_offset = -tracks_height / 2.0;
 
@@ -1487,7 +1622,11 @@ impl<P: LayoutProvider> Graph<P> {
         track_heights
     }
 
-    fn verticalize(&mut self, layout_nodes_by_layer: &mut [Vec<LayoutNode>], track_heights: &[f64]) -> Vec<f64> {
+    fn verticalize(
+        &mut self,
+        layout_nodes_by_layer: &mut [Vec<LayoutNode>],
+        track_heights: &[f64],
+    ) -> Vec<f64> {
         let mut layer_heights: Vec<f64> = vec![0.0; layout_nodes_by_layer.len()];
 
         let mut next_layer_y = CONTENT_PADDING;

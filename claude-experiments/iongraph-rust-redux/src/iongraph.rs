@@ -1,6 +1,5 @@
 // Port of iongraph.ts
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 pub const CURRENT_VERSION: u32 = 1;
 
@@ -106,7 +105,7 @@ pub struct LIRInstruction {
 
 pub fn migrate(mut ion_json: serde_json::Value) -> IonJSON {
     // Check if we need to migrate from version 0
-    if !ion_json.get("version").is_some() {
+    if ion_json.get("version").is_none() {
         // This is version 0, migrate to version 1
         ion_json["version"] = serde_json::Value::Number(1.into());
 

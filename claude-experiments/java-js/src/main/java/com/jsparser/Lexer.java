@@ -21,6 +21,7 @@ public class Lexer {
     // Whether an expression is allowed at the current position
     private boolean exprAllowed = true;
     private int generatorDepth = 0; // Track nesting level of generator functions
+    private Stack<Boolean> functionIsGeneratorStack = new Stack<>(); // Track if each function level is a generator
 
 
     public Lexer(String source) {
@@ -103,6 +104,13 @@ public class Lexer {
                     if (out == LexerContext.B_STAT && !contextStack.isEmpty() &&
                         contextStack.peek().getToken().equals("function")) {
                         out = contextStack.pop();
+                        // Pop the generator tracking stack and update depth
+                        if (!functionIsGeneratorStack.isEmpty()) {
+                            boolean wasGenerator = functionIsGeneratorStack.pop();
+                            if (wasGenerator && generatorDepth > 0) {
+                                generatorDepth--;
+                            }
+                        }
                     }
                     exprAllowed = !out.isExpr();
                 } else {
@@ -135,6 +143,21 @@ public class Lexer {
                                   !contextStack.isEmpty() && contextStack.peek() == LexerContext.B_STAT);
                 contextStack.push(isExpr ? LexerContext.F_EXPR : LexerContext.F_STAT);
                 exprAllowed = false;
+                // Mark this function as non-generator by default (will be updated if we see *)
+                functionIsGeneratorStack.push(false);
+            }
+            case STAR -> {
+                // After function*, we're entering a generator function
+                if (prevType == TokenType.FUNCTION) {
+                    // Update the most recent function to be a generator
+                    if (!functionIsGeneratorStack.isEmpty()) {
+                        functionIsGeneratorStack.pop();
+                        functionIsGeneratorStack.push(true);
+                    }
+                    generatorDepth++;
+                }
+                // After *, expressions are allowed (for generator functions or multiplication)
+                exprAllowed = TokenTypeProperties.beforeExpr(currentType);
             }
             case COLON -> {
                 // Pop function context if present
@@ -164,12 +187,12 @@ public class Lexer {
                 if (isKeyword(currentType) && prevType == TokenType.DOT) {
                     // Keywords after dot are property names, not keywords
                     exprAllowed = false;
+                } else if (currentType == TokenType.IDENTIFIER && "yield".equals(currentToken.lexeme())) {
+                    // Special handling for contextual keyword 'yield'
+                    // In generator functions, yield allows expressions after it (like return/throw)
+                    // Outside generator functions, yield is just an identifier (no expressions after)
+                    exprAllowed = generatorDepth > 0;
                 } else {
-                    // Note: 'yield' is tokenized as IDENTIFIER (not a keyword)
-                    // This means yield as a variable name works correctly (exprAllowed=false after it)
-                    // However, yield in generator functions should allow expressions after it
-                    // This requires generator context tracking at the parser level, which we don't have yet
-                    // Known limitation: generator functions with "yield /regex/" patterns won't parse
                     exprAllowed = TokenTypeProperties.beforeExpr(currentType);
                 }
             }

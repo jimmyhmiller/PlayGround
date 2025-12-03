@@ -53,14 +53,23 @@ pub trait LayoutProvider {
     fn get_client_height(&self, element: &Self::Element) -> f64;
 
     // Event handling (noop for SVG)
-    fn add_event_listener(&mut self, element: &mut Self::Element, event_type: &str, listener: Box<dyn Fn()>);
+    fn add_event_listener(
+        &mut self,
+        element: &mut Self::Element,
+        event_type: &str,
+        listener: Box<dyn Fn()>,
+    );
 
     // Query selectors (return owned to avoid lifetime issues)
     fn query_selector(&self, parent: &Self::Element, selector: &str) -> bool;
     fn query_selector_all(&self, parent: &Self::Element, selector: &str) -> usize;
 
     // Resize observation (noop for SVG)
-    fn observe_resize(&mut self, element: &Self::Element, callback: Box<dyn Fn(Vec2)>) -> Box<dyn Fn()>;
+    fn observe_resize(
+        &mut self,
+        element: &Self::Element,
+        callback: Box<dyn Fn(Vec2)>,
+    ) -> Box<dyn Fn()>;
 
     // Pointer capture (noop for SVG)
     fn set_pointer_capture(&mut self, element: &mut Self::Element, pointer_id: i32);
@@ -68,5 +77,11 @@ pub trait LayoutProvider {
     fn has_pointer_capture(&self, element: &Self::Element, pointer_id: i32) -> bool;
 
     // Calculate the size of a block based on its content
-    fn calculate_block_size(&self, block_id: &str, num_instructions: usize, has_lir: bool, has_samples: bool) -> Vec2;
+    fn calculate_block_size(
+        &self,
+        block_id: &str,
+        num_instructions: usize,
+        has_lir: bool,
+        has_samples: bool,
+    ) -> Vec2;
 }

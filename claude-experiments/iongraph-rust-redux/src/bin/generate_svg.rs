@@ -1,16 +1,19 @@
+use iongraph_rust_redux::graph::{Graph, GraphOptions};
+use iongraph_rust_redux::iongraph::IonJSON;
+use iongraph_rust_redux::layout_provider::LayoutProvider;
+use iongraph_rust_redux::pure_svg_text_layout_provider::PureSVGTextLayoutProvider;
 use std::env;
 use std::fs;
 use std::process;
-use iongraph_rust_redux::graph::{Graph, GraphOptions};
-use iongraph_rust_redux::pure_svg_text_layout_provider::PureSVGTextLayoutProvider;
-use iongraph_rust_redux::layout_provider::LayoutProvider;
-use iongraph_rust_redux::iongraph::IonJSON;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 3 {
-        eprintln!("Usage: {} <path-to-json> <function-index> [pass-index] [output.svg]", args[0]);
+        eprintln!(
+            "Usage: {} <path-to-json> <function-index> [pass-index] [output.svg]",
+            args[0]
+        );
         process::exit(1);
     }
 
@@ -35,14 +38,23 @@ fn main() {
 
     // Get the specified function and pass
     if func_idx >= data.functions.len() {
-        eprintln!("Error: function index {} out of range (max: {})", func_idx, data.functions.len() - 1);
+        eprintln!(
+            "Error: function index {} out of range (max: {})",
+            func_idx,
+            data.functions.len() - 1
+        );
         process::exit(1);
     }
 
     let func = &data.functions[func_idx];
 
     if pass_idx >= func.passes.len() {
-        eprintln!("Error: pass index {} out of range for function {} (max: {})", pass_idx, func_idx, func.passes.len() - 1);
+        eprintln!(
+            "Error: pass index {} out of range for function {} (max: {})",
+            pass_idx,
+            func_idx,
+            func.passes.len() - 1
+        );
         process::exit(1);
     }
 
@@ -50,7 +62,10 @@ fn main() {
 
     let func_name = &func.name;
     let pass_name = &pass.name;
-    eprintln!("Rendering function {} \"{}\", pass {}: \"{}\"", func_idx, func_name, pass_idx, pass_name);
+    eprintln!(
+        "Rendering function {} \"{}\", pass {}: \"{}\"",
+        func_idx, func_name, pass_idx, pass_name
+    );
 
     if let Some(ref mir) = pass.mir {
         eprintln!("  MIR blocks: {}", mir.blocks.len());
@@ -84,7 +99,11 @@ fn main() {
 
     layout_provider.set_attribute(&mut svg_root, "width", &width.to_string());
     layout_provider.set_attribute(&mut svg_root, "height", &height.to_string());
-    layout_provider.set_attribute(&mut svg_root, "viewBox", &format!("0 0 {} {}", width, height));
+    layout_provider.set_attribute(
+        &mut svg_root,
+        "viewBox",
+        &format!("0 0 {} {}", width, height),
+    );
     layout_provider.append_child(&mut svg_root, graph.graph_container);
 
     // Get the SVG output
