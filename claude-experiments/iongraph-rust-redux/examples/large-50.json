@@ -1,0 +1,2586 @@
+{
+  "functions": [
+    {
+      "name": "large_function_50_blocks",
+      "passes": [
+        {
+          "name": "Generated Pass",
+          "mir": {
+            "blocks": [
+              {
+                "id": 0,
+                "ptr": 1000,
+                "attributes": [],
+                "predecessors": [],
+                "successors": [
+                  1
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 0,
+                    "ptr": 2000,
+                    "opcode": "mod #0 #0",
+                    "type": "String",
+                    "attributes": []
+                  },
+                  {
+                    "id": 1,
+                    "ptr": 2001,
+                    "opcode": "shl",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 2,
+                    "ptr": 2002,
+                    "opcode": "load slot3",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 3,
+                    "ptr": 2003,
+                    "opcode": "mul #0 #0",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 4,
+                    "ptr": 2004,
+                    "opcode": "sub #1 #2",
+                    "type": "None",
+                    "attributes": [
+                      "movable"
+                    ]
+                  },
+                  {
+                    "id": 5,
+                    "ptr": 2005,
+                    "opcode": "bitor",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 6,
+                    "ptr": 2006,
+                    "opcode": "add #0 #5",
+                    "type": "Null",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 1,
+                "ptr": 1001,
+                "attributes": [],
+                "predecessors": [
+                  0
+                ],
+                "successors": [
+                  2,
+                  3
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 7,
+                    "ptr": 2007,
+                    "opcode": "compare #2 > 95",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 8,
+                    "ptr": 2008,
+                    "opcode": "bitxor",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 229,
+                    "ptr": 2230,
+                    "opcode": "branch #7",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 2,
+                "ptr": 1002,
+                "attributes": [],
+                "predecessors": [
+                  1
+                ],
+                "successors": [
+                  3
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 9,
+                    "ptr": 2009,
+                    "opcode": "add #1 #0",
+                    "type": "Null",
+                    "attributes": [
+                      "splitedge"
+                    ]
+                  },
+                  {
+                    "id": 10,
+                    "ptr": 2010,
+                    "opcode": "shl",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 11,
+                    "ptr": 2011,
+                    "opcode": "bitor",
+                    "type": "Float64",
+                    "attributes": []
+                  },
+                  {
+                    "id": 12,
+                    "ptr": 2012,
+                    "opcode": "bitand",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 13,
+                    "ptr": 2013,
+                    "opcode": "mod #8 #7",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 14,
+                    "ptr": 2014,
+                    "opcode": "add #13 #3",
+                    "type": "Float64",
+                    "attributes": []
+                  },
+                  {
+                    "id": 15,
+                    "ptr": 2015,
+                    "opcode": "call fn_9",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 16,
+                    "ptr": 2016,
+                    "opcode": "shr",
+                    "type": "Int32",
+                    "attributes": [
+                      "in-worklist"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": 3,
+                "ptr": 1003,
+                "attributes": [],
+                "predecessors": [
+                  1,
+                  2
+                ],
+                "successors": [
+                  4
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 17,
+                    "ptr": 2017,
+                    "opcode": "bitand",
+                    "type": "Object",
+                    "attributes": [
+                      "loopheader"
+                    ]
+                  },
+                  {
+                    "id": 18,
+                    "ptr": 2018,
+                    "opcode": "sub #17 #5",
+                    "type": "String",
+                    "attributes": [
+                      "loopheader"
+                    ]
+                  },
+                  {
+                    "id": 19,
+                    "ptr": 2019,
+                    "opcode": "call fn_0",
+                    "type": "Object",
+                    "attributes": [
+                      "movable"
+                    ]
+                  },
+                  {
+                    "id": 20,
+                    "ptr": 2020,
+                    "opcode": "mul #11 #4",
+                    "type": "None",
+                    "attributes": [
+                      "backedge"
+                    ]
+                  },
+                  {
+                    "id": 21,
+                    "ptr": 2021,
+                    "opcode": "shl",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 22,
+                    "ptr": 2022,
+                    "opcode": "div #4 #19",
+                    "type": "Bool",
+                    "attributes": [
+                      "backedge"
+                    ]
+                  },
+                  {
+                    "id": 23,
+                    "ptr": 2023,
+                    "opcode": "bitor",
+                    "type": "None",
+                    "attributes": [
+                      "splitedge"
+                    ]
+                  },
+                  {
+                    "id": 24,
+                    "ptr": 2024,
+                    "opcode": "load slot19",
+                    "type": "Int32",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 4,
+                "ptr": 1004,
+                "attributes": [],
+                "predecessors": [
+                  3
+                ],
+                "successors": [
+                  5
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 25,
+                    "ptr": 2025,
+                    "opcode": "load slot0",
+                    "type": "Undefined",
+                    "attributes": [
+                      "rob"
+                    ]
+                  },
+                  {
+                    "id": 26,
+                    "ptr": 2026,
+                    "opcode": "constant 56",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 27,
+                    "ptr": 2027,
+                    "opcode": "bitor",
+                    "type": "Null",
+                    "attributes": [
+                      "in-worklist"
+                    ]
+                  },
+                  {
+                    "id": 28,
+                    "ptr": 2028,
+                    "opcode": "load slot20",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 29,
+                    "ptr": 2029,
+                    "opcode": "store slot7",
+                    "type": "None",
+                    "attributes": []
+                  },
+                  {
+                    "id": 30,
+                    "ptr": 2030,
+                    "opcode": "sub #26 #20",
+                    "type": "None",
+                    "attributes": []
+                  },
+                  {
+                    "id": 31,
+                    "ptr": 2031,
+                    "opcode": "sub #28 #18",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 5,
+                "ptr": 1005,
+                "attributes": [],
+                "predecessors": [
+                  4
+                ],
+                "successors": [
+                  6,
+                  7
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 32,
+                    "ptr": 2032,
+                    "opcode": "sub #29 #7",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 33,
+                    "ptr": 2033,
+                    "opcode": "bitxor",
+                    "type": "Bool",
+                    "attributes": [
+                      "movable"
+                    ]
+                  },
+                  {
+                    "id": 230,
+                    "ptr": 2231,
+                    "opcode": "branch #32",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 6,
+                "ptr": 1006,
+                "attributes": [],
+                "predecessors": [
+                  5
+                ],
+                "successors": [
+                  7
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 34,
+                    "ptr": 2034,
+                    "opcode": "compare #2 > 36",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 35,
+                    "ptr": 2035,
+                    "opcode": "bitand",
+                    "type": "Object",
+                    "attributes": [
+                      "backedge"
+                    ]
+                  },
+                  {
+                    "id": 36,
+                    "ptr": 2036,
+                    "opcode": "call fn_8",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 37,
+                    "ptr": 2037,
+                    "opcode": "parameter x4",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 38,
+                    "ptr": 2038,
+                    "opcode": "phi #24 #9",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 39,
+                    "ptr": 2039,
+                    "opcode": "sub #6 #8",
+                    "type": "None",
+                    "attributes": [
+                      "loopheader"
+                    ]
+                  },
+                  {
+                    "id": 40,
+                    "ptr": 2040,
+                    "opcode": "bitand",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 41,
+                    "ptr": 2041,
+                    "opcode": "mul #33 #12",
+                    "type": "Int32",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 7,
+                "ptr": 1007,
+                "attributes": [],
+                "predecessors": [
+                  5,
+                  6
+                ],
+                "successors": [
+                  8
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 42,
+                    "ptr": 2042,
+                    "opcode": "mod #10 #1",
+                    "type": "Bool",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 8,
+                "ptr": 1008,
+                "attributes": [],
+                "predecessors": [
+                  7
+                ],
+                "successors": [
+                  9
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 43,
+                    "ptr": 2043,
+                    "opcode": "constant 97",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 44,
+                    "ptr": 2044,
+                    "opcode": "phi #26 #25",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 45,
+                    "ptr": 2045,
+                    "opcode": "bitor",
+                    "type": "Float64",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 9,
+                "ptr": 1009,
+                "attributes": [],
+                "predecessors": [
+                  8
+                ],
+                "successors": [
+                  10
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 46,
+                    "ptr": 2046,
+                    "opcode": "add #8 #11",
+                    "type": "Float64",
+                    "attributes": [
+                      "loopheader"
+                    ]
+                  },
+                  {
+                    "id": 47,
+                    "ptr": 2047,
+                    "opcode": "mod #0 #35",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 48,
+                    "ptr": 2048,
+                    "opcode": "shl",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 49,
+                    "ptr": 2049,
+                    "opcode": "compare #46 > 63",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 50,
+                    "ptr": 2050,
+                    "opcode": "shl",
+                    "type": "String",
+                    "attributes": []
+                  },
+                  {
+                    "id": 51,
+                    "ptr": 2051,
+                    "opcode": "bitxor",
+                    "type": "String",
+                    "attributes": []
+                  },
+                  {
+                    "id": 52,
+                    "ptr": 2052,
+                    "opcode": "call fn_6",
+                    "type": "Bool",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 10,
+                "ptr": 1010,
+                "attributes": [],
+                "predecessors": [
+                  9
+                ],
+                "successors": [
+                  11
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 53,
+                    "ptr": 2053,
+                    "opcode": "phi #44 #39",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 54,
+                    "ptr": 2054,
+                    "opcode": "call fn_5",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 55,
+                    "ptr": 2055,
+                    "opcode": "mod #3 #18",
+                    "type": "Bool",
+                    "attributes": [
+                      "movable"
+                    ]
+                  },
+                  {
+                    "id": 56,
+                    "ptr": 2056,
+                    "opcode": "sub #55 #42",
+                    "type": "Object",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 11,
+                "ptr": 1011,
+                "attributes": [],
+                "predecessors": [
+                  10
+                ],
+                "successors": [
+                  12,
+                  13
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 57,
+                    "ptr": 2057,
+                    "opcode": "shr",
+                    "type": "Float64",
+                    "attributes": [
+                      "in-worklist"
+                    ]
+                  },
+                  {
+                    "id": 58,
+                    "ptr": 2058,
+                    "opcode": "store slot12",
+                    "type": "Float64",
+                    "attributes": []
+                  },
+                  {
+                    "id": 231,
+                    "ptr": 2232,
+                    "opcode": "branch #57",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 12,
+                "ptr": 1012,
+                "attributes": [],
+                "predecessors": [
+                  11
+                ],
+                "successors": [
+                  13,
+                  14
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 59,
+                    "ptr": 2059,
+                    "opcode": "load slot1",
+                    "type": "Undefined",
+                    "attributes": [
+                      "rob"
+                    ]
+                  },
+                  {
+                    "id": 60,
+                    "ptr": 2060,
+                    "opcode": "parameter x5",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 232,
+                    "ptr": 2233,
+                    "opcode": "branch #59",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 13,
+                "ptr": 1013,
+                "attributes": [],
+                "predecessors": [
+                  11,
+                  12
+                ],
+                "successors": [
+                  14
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 61,
+                    "ptr": 2061,
+                    "opcode": "shl",
+                    "type": "Float64",
+                    "attributes": []
+                  },
+                  {
+                    "id": 62,
+                    "ptr": 2062,
+                    "opcode": "shr",
+                    "type": "Undefined",
+                    "attributes": [
+                      "splitedge"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": 14,
+                "ptr": 1014,
+                "attributes": [],
+                "predecessors": [
+                  12,
+                  13
+                ],
+                "successors": [
+                  15
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 63,
+                    "ptr": 2063,
+                    "opcode": "compare #26 > 56",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 64,
+                    "ptr": 2064,
+                    "opcode": "store slot0",
+                    "type": "Float64",
+                    "attributes": []
+                  },
+                  {
+                    "id": 65,
+                    "ptr": 2065,
+                    "opcode": "mul #17 #51",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 66,
+                    "ptr": 2066,
+                    "opcode": "load slot4",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 67,
+                    "ptr": 2067,
+                    "opcode": "constant 49",
+                    "type": "Bool",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 15,
+                "ptr": 1015,
+                "attributes": [],
+                "predecessors": [
+                  14
+                ],
+                "successors": [
+                  16,
+                  17
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 68,
+                    "ptr": 2068,
+                    "opcode": "shr",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 69,
+                    "ptr": 2069,
+                    "opcode": "parameter x2",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 70,
+                    "ptr": 2070,
+                    "opcode": "sub #28 #39",
+                    "type": "String",
+                    "attributes": [
+                      "backedge"
+                    ]
+                  },
+                  {
+                    "id": 71,
+                    "ptr": 2071,
+                    "opcode": "store slot14",
+                    "type": "Int32",
+                    "attributes": [
+                      "loopheader"
+                    ]
+                  },
+                  {
+                    "id": 233,
+                    "ptr": 2234,
+                    "opcode": "branch #68",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 16,
+                "ptr": 1016,
+                "attributes": [],
+                "predecessors": [
+                  15
+                ],
+                "successors": [
+                  17
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 72,
+                    "ptr": 2072,
+                    "opcode": "add #63 #17",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 73,
+                    "ptr": 2073,
+                    "opcode": "mod #38 #45",
+                    "type": "Undefined",
+                    "attributes": [
+                      "splitedge"
+                    ]
+                  },
+                  {
+                    "id": 74,
+                    "ptr": 2074,
+                    "opcode": "store slot0",
+                    "type": "Value",
+                    "attributes": [
+                      "backedge"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": 17,
+                "ptr": 1017,
+                "attributes": [],
+                "predecessors": [
+                  15,
+                  16
+                ],
+                "successors": [
+                  18
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 75,
+                    "ptr": 2075,
+                    "opcode": "compare #44 > 34",
+                    "type": "Value",
+                    "attributes": [
+                      "splitedge"
+                    ]
+                  },
+                  {
+                    "id": 76,
+                    "ptr": 2076,
+                    "opcode": "bitand",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 77,
+                    "ptr": 2077,
+                    "opcode": "load slot8",
+                    "type": "Undefined",
+                    "attributes": [
+                      "rob"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": 18,
+                "ptr": 1018,
+                "attributes": [],
+                "predecessors": [
+                  17
+                ],
+                "successors": [
+                  19
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 78,
+                    "ptr": 2078,
+                    "opcode": "mod #34 #1",
+                    "type": "Float64",
+                    "attributes": [
+                      "splitedge"
+                    ]
+                  },
+                  {
+                    "id": 79,
+                    "ptr": 2079,
+                    "opcode": "div #4 #54",
+                    "type": "Null",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 19,
+                "ptr": 1019,
+                "attributes": [
+                  "loopheader"
+                ],
+                "predecessors": [
+                  18,
+                  22
+                ],
+                "successors": [
+                  20
+                ],
+                "loopDepth": 1,
+                "instructions": [
+                  {
+                    "id": 80,
+                    "ptr": 2080,
+                    "opcode": "call fn_2",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 81,
+                    "ptr": 2081,
+                    "opcode": "sub #70 #25",
+                    "type": "Undefined",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 20,
+                "ptr": 1020,
+                "attributes": [],
+                "predecessors": [
+                  19
+                ],
+                "successors": [
+                  21
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 82,
+                    "ptr": 2082,
+                    "opcode": "div #58 #19",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 83,
+                    "ptr": 2083,
+                    "opcode": "shr",
+                    "type": "None",
+                    "attributes": [
+                      "backedge"
+                    ]
+                  },
+                  {
+                    "id": 84,
+                    "ptr": 2084,
+                    "opcode": "constant 22",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 85,
+                    "ptr": 2085,
+                    "opcode": "constant 65",
+                    "type": "None",
+                    "attributes": [
+                      "backedge"
+                    ]
+                  },
+                  {
+                    "id": 86,
+                    "ptr": 2086,
+                    "opcode": "sub #13 #25",
+                    "type": "Null",
+                    "attributes": [
+                      "movable"
+                    ]
+                  },
+                  {
+                    "id": 87,
+                    "ptr": 2087,
+                    "opcode": "store slot6",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 88,
+                    "ptr": 2088,
+                    "opcode": "bitand",
+                    "type": "String",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 21,
+                "ptr": 1021,
+                "attributes": [],
+                "predecessors": [
+                  20
+                ],
+                "successors": [
+                  22
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 89,
+                    "ptr": 2089,
+                    "opcode": "load slot14",
+                    "type": "Undefined",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 22,
+                "ptr": 1022,
+                "attributes": [
+                  "backedge"
+                ],
+                "predecessors": [
+                  21
+                ],
+                "successors": [
+                  19
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 90,
+                    "ptr": 2090,
+                    "opcode": "constant 50",
+                    "type": "Value",
+                    "attributes": [
+                      "movable"
+                    ]
+                  },
+                  {
+                    "id": 91,
+                    "ptr": 2091,
+                    "opcode": "sub #81 #43",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 92,
+                    "ptr": 2092,
+                    "opcode": "parameter x1",
+                    "type": "Float64",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 23,
+                "ptr": 1023,
+                "attributes": [],
+                "predecessors": [],
+                "successors": [
+                  24
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 93,
+                    "ptr": 2093,
+                    "opcode": "sub #24 #70",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 94,
+                    "ptr": 2094,
+                    "opcode": "bitor",
+                    "type": "None",
+                    "attributes": []
+                  },
+                  {
+                    "id": 95,
+                    "ptr": 2095,
+                    "opcode": "bitor",
+                    "type": "String",
+                    "attributes": []
+                  },
+                  {
+                    "id": 96,
+                    "ptr": 2096,
+                    "opcode": "bitor",
+                    "type": "Null",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 24,
+                "ptr": 1024,
+                "attributes": [],
+                "predecessors": [
+                  23
+                ],
+                "successors": [
+                  25
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 97,
+                    "ptr": 2097,
+                    "opcode": "shl",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 98,
+                    "ptr": 2098,
+                    "opcode": "shr",
+                    "type": "None",
+                    "attributes": []
+                  },
+                  {
+                    "id": 99,
+                    "ptr": 2099,
+                    "opcode": "bitor",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 100,
+                    "ptr": 2100,
+                    "opcode": "div #17 #21",
+                    "type": "Int32",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 25,
+                "ptr": 1025,
+                "attributes": [],
+                "predecessors": [
+                  24
+                ],
+                "successors": [
+                  26
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 101,
+                    "ptr": 2101,
+                    "opcode": "mod #28 #15",
+                    "type": "Bool",
+                    "attributes": [
+                      "splitedge"
+                    ]
+                  },
+                  {
+                    "id": 102,
+                    "ptr": 2102,
+                    "opcode": "mul #13 #32",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 103,
+                    "ptr": 2103,
+                    "opcode": "compare #31 > 17",
+                    "type": "String",
+                    "attributes": [
+                      "splitedge"
+                    ]
+                  },
+                  {
+                    "id": 104,
+                    "ptr": 2104,
+                    "opcode": "mod #21 #31",
+                    "type": "None",
+                    "attributes": []
+                  },
+                  {
+                    "id": 105,
+                    "ptr": 2105,
+                    "opcode": "shl",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 106,
+                    "ptr": 2106,
+                    "opcode": "bitand",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 107,
+                    "ptr": 2107,
+                    "opcode": "call fn_2",
+                    "type": "Undefined",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 26,
+                "ptr": 1026,
+                "attributes": [],
+                "predecessors": [
+                  25
+                ],
+                "successors": [
+                  27
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 108,
+                    "ptr": 2108,
+                    "opcode": "bitor",
+                    "type": "None",
+                    "attributes": []
+                  },
+                  {
+                    "id": 109,
+                    "ptr": 2109,
+                    "opcode": "phi #63 #14",
+                    "type": "Null",
+                    "attributes": [
+                      "in-worklist"
+                    ]
+                  },
+                  {
+                    "id": 110,
+                    "ptr": 2110,
+                    "opcode": "parameter x2",
+                    "type": "Value",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 27,
+                "ptr": 1027,
+                "attributes": [],
+                "predecessors": [
+                  26
+                ],
+                "successors": [
+                  28,
+                  29
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 111,
+                    "ptr": 2111,
+                    "opcode": "constant 15",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 112,
+                    "ptr": 2112,
+                    "opcode": "load slot20",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 113,
+                    "ptr": 2113,
+                    "opcode": "shr",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 234,
+                    "ptr": 2235,
+                    "opcode": "branch #111",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 28,
+                "ptr": 1028,
+                "attributes": [],
+                "predecessors": [
+                  27
+                ],
+                "successors": [
+                  29
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 114,
+                    "ptr": 2114,
+                    "opcode": "div #73 #4",
+                    "type": "String",
+                    "attributes": [
+                      "splitedge"
+                    ]
+                  },
+                  {
+                    "id": 115,
+                    "ptr": 2115,
+                    "opcode": "parameter x5",
+                    "type": "String",
+                    "attributes": []
+                  },
+                  {
+                    "id": 116,
+                    "ptr": 2116,
+                    "opcode": "load slot0",
+                    "type": "Value",
+                    "attributes": [
+                      "in-worklist"
+                    ]
+                  },
+                  {
+                    "id": 117,
+                    "ptr": 2117,
+                    "opcode": "shl",
+                    "type": "None",
+                    "attributes": [
+                      "in-worklist"
+                    ]
+                  },
+                  {
+                    "id": 118,
+                    "ptr": 2118,
+                    "opcode": "mul #68 #103",
+                    "type": "Float64",
+                    "attributes": []
+                  },
+                  {
+                    "id": 119,
+                    "ptr": 2119,
+                    "opcode": "constant 94",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 29,
+                "ptr": 1029,
+                "attributes": [],
+                "predecessors": [
+                  27,
+                  28
+                ],
+                "successors": [
+                  30,
+                  31
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 120,
+                    "ptr": 2120,
+                    "opcode": "constant 52",
+                    "type": "Value",
+                    "attributes": [
+                      "splitedge"
+                    ]
+                  },
+                  {
+                    "id": 121,
+                    "ptr": 2121,
+                    "opcode": "add #8 #30",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 122,
+                    "ptr": 2122,
+                    "opcode": "compare #75 > 47",
+                    "type": "Value",
+                    "attributes": [
+                      "backedge"
+                    ]
+                  },
+                  {
+                    "id": 123,
+                    "ptr": 2123,
+                    "opcode": "load slot11",
+                    "type": "Float64",
+                    "attributes": [
+                      "movable"
+                    ]
+                  },
+                  {
+                    "id": 124,
+                    "ptr": 2124,
+                    "opcode": "compare #44 > 61",
+                    "type": "String",
+                    "attributes": [
+                      "movable"
+                    ]
+                  },
+                  {
+                    "id": 235,
+                    "ptr": 2236,
+                    "opcode": "branch #120",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 30,
+                "ptr": 1030,
+                "attributes": [],
+                "predecessors": [
+                  29
+                ],
+                "successors": [
+                  31
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 125,
+                    "ptr": 2125,
+                    "opcode": "shr",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 126,
+                    "ptr": 2126,
+                    "opcode": "add #109 #49",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 127,
+                    "ptr": 2127,
+                    "opcode": "div #116 #27",
+                    "type": "String",
+                    "attributes": []
+                  },
+                  {
+                    "id": 128,
+                    "ptr": 2128,
+                    "opcode": "compare #66 > 21",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 129,
+                    "ptr": 2129,
+                    "opcode": "add #20 #53",
+                    "type": "Float64",
+                    "attributes": []
+                  },
+                  {
+                    "id": 130,
+                    "ptr": 2130,
+                    "opcode": "div #67 #50",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 131,
+                    "ptr": 2131,
+                    "opcode": "div #125 #106",
+                    "type": "Null",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 31,
+                "ptr": 1031,
+                "attributes": [],
+                "predecessors": [
+                  29,
+                  30
+                ],
+                "successors": [
+                  32,
+                  33
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 132,
+                    "ptr": 2132,
+                    "opcode": "phi #17 #13",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 133,
+                    "ptr": 2133,
+                    "opcode": "div #120 #132",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 134,
+                    "ptr": 2134,
+                    "opcode": "bitand",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 135,
+                    "ptr": 2135,
+                    "opcode": "mul #92 #71",
+                    "type": "Object",
+                    "attributes": [
+                      "movable"
+                    ]
+                  },
+                  {
+                    "id": 236,
+                    "ptr": 2237,
+                    "opcode": "branch #132",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 32,
+                "ptr": 1032,
+                "attributes": [],
+                "predecessors": [
+                  31
+                ],
+                "successors": [
+                  33
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 136,
+                    "ptr": 2136,
+                    "opcode": "phi #112 #58",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 137,
+                    "ptr": 2137,
+                    "opcode": "call fn_10",
+                    "type": "Bool",
+                    "attributes": [
+                      "backedge"
+                    ]
+                  },
+                  {
+                    "id": 138,
+                    "ptr": 2138,
+                    "opcode": "parameter x2",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 139,
+                    "ptr": 2139,
+                    "opcode": "constant 53",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 140,
+                    "ptr": 2140,
+                    "opcode": "mod #70 #71",
+                    "type": "None",
+                    "attributes": [
+                      "loopheader"
+                    ]
+                  },
+                  {
+                    "id": 141,
+                    "ptr": 2141,
+                    "opcode": "phi #130 #90",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 142,
+                    "ptr": 2142,
+                    "opcode": "add #8 #27",
+                    "type": "Bool",
+                    "attributes": [
+                      "movable"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": 33,
+                "ptr": 1033,
+                "attributes": [],
+                "predecessors": [
+                  31,
+                  32
+                ],
+                "successors": [
+                  34,
+                  35
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 143,
+                    "ptr": 2143,
+                    "opcode": "load slot6",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 144,
+                    "ptr": 2144,
+                    "opcode": "call fn_3",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 145,
+                    "ptr": 2145,
+                    "opcode": "phi #92 #144",
+                    "type": "String",
+                    "attributes": []
+                  },
+                  {
+                    "id": 146,
+                    "ptr": 2146,
+                    "opcode": "load slot19",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 147,
+                    "ptr": 2147,
+                    "opcode": "phi #39 #123",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 148,
+                    "ptr": 2148,
+                    "opcode": "sub #89 #78",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 149,
+                    "ptr": 2149,
+                    "opcode": "store slot7",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 237,
+                    "ptr": 2238,
+                    "opcode": "branch #143",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 34,
+                "ptr": 1034,
+                "attributes": [
+                  "loopheader"
+                ],
+                "predecessors": [
+                  33,
+                  42
+                ],
+                "successors": [
+                  35
+                ],
+                "loopDepth": 1,
+                "instructions": [
+                  {
+                    "id": 150,
+                    "ptr": 2150,
+                    "opcode": "mod #78 #146",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 151,
+                    "ptr": 2151,
+                    "opcode": "call fn_4",
+                    "type": "String",
+                    "attributes": []
+                  },
+                  {
+                    "id": 152,
+                    "ptr": 2152,
+                    "opcode": "sub #144 #12",
+                    "type": "Value",
+                    "attributes": [
+                      "splitedge"
+                    ]
+                  },
+                  {
+                    "id": 153,
+                    "ptr": 2153,
+                    "opcode": "load slot17",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 154,
+                    "ptr": 2154,
+                    "opcode": "constant 1",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 155,
+                    "ptr": 2155,
+                    "opcode": "load slot15",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 156,
+                    "ptr": 2156,
+                    "opcode": "bitand",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 157,
+                    "ptr": 2157,
+                    "opcode": "shr",
+                    "type": "String",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 35,
+                "ptr": 1035,
+                "attributes": [],
+                "predecessors": [
+                  33,
+                  34
+                ],
+                "successors": [
+                  36,
+                  37
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 158,
+                    "ptr": 2158,
+                    "opcode": "add #124 #115",
+                    "type": "None",
+                    "attributes": []
+                  },
+                  {
+                    "id": 159,
+                    "ptr": 2159,
+                    "opcode": "phi #159 #12",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 238,
+                    "ptr": 2239,
+                    "opcode": "branch #158",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 36,
+                "ptr": 1036,
+                "attributes": [],
+                "predecessors": [
+                  35
+                ],
+                "successors": [
+                  37,
+                  38
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 160,
+                    "ptr": 2160,
+                    "opcode": "store slot10",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 161,
+                    "ptr": 2161,
+                    "opcode": "mod #83 #110",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 162,
+                    "ptr": 2162,
+                    "opcode": "phi #25 #47",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 163,
+                    "ptr": 2163,
+                    "opcode": "store slot9",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 164,
+                    "ptr": 2164,
+                    "opcode": "call fn_2",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 165,
+                    "ptr": 2165,
+                    "opcode": "store slot11",
+                    "type": "String",
+                    "attributes": [
+                      "backedge"
+                    ]
+                  },
+                  {
+                    "id": 166,
+                    "ptr": 2166,
+                    "opcode": "call fn_3",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 167,
+                    "ptr": 2167,
+                    "opcode": "mul #96 #113",
+                    "type": "Null",
+                    "attributes": [
+                      "movable"
+                    ]
+                  },
+                  {
+                    "id": 239,
+                    "ptr": 2240,
+                    "opcode": "branch #160",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 37,
+                "ptr": 1037,
+                "attributes": [],
+                "predecessors": [
+                  35,
+                  36
+                ],
+                "successors": [
+                  38
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 168,
+                    "ptr": 2168,
+                    "opcode": "load slot15",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 169,
+                    "ptr": 2169,
+                    "opcode": "add #49 #95",
+                    "type": "Bool",
+                    "attributes": [
+                      "movable"
+                    ]
+                  },
+                  {
+                    "id": 170,
+                    "ptr": 2170,
+                    "opcode": "parameter x0",
+                    "type": "Object",
+                    "attributes": [
+                      "in-worklist"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": 38,
+                "ptr": 1038,
+                "attributes": [],
+                "predecessors": [
+                  36,
+                  37
+                ],
+                "successors": [
+                  39
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 171,
+                    "ptr": 2171,
+                    "opcode": "bitor",
+                    "type": "Bool",
+                    "attributes": [
+                      "movable"
+                    ]
+                  },
+                  {
+                    "id": 172,
+                    "ptr": 2172,
+                    "opcode": "mod #67 #138",
+                    "type": "Object",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 39,
+                "ptr": 1039,
+                "attributes": [],
+                "predecessors": [
+                  38
+                ],
+                "successors": [
+                  40
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 173,
+                    "ptr": 2173,
+                    "opcode": "bitand",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 174,
+                    "ptr": 2174,
+                    "opcode": "parameter x4",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 175,
+                    "ptr": 2175,
+                    "opcode": "compare #26 > 78",
+                    "type": "String",
+                    "attributes": [
+                      "backedge"
+                    ]
+                  },
+                  {
+                    "id": 176,
+                    "ptr": 2176,
+                    "opcode": "mod #92 #63",
+                    "type": "Bool",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 40,
+                "ptr": 1040,
+                "attributes": [],
+                "predecessors": [
+                  39
+                ],
+                "successors": [
+                  41,
+                  42
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 177,
+                    "ptr": 2177,
+                    "opcode": "bitor",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 178,
+                    "ptr": 2178,
+                    "opcode": "bitor",
+                    "type": "Int32",
+                    "attributes": [
+                      "in-worklist"
+                    ]
+                  },
+                  {
+                    "id": 179,
+                    "ptr": 2179,
+                    "opcode": "parameter x5",
+                    "type": "None",
+                    "attributes": [
+                      "in-worklist"
+                    ]
+                  },
+                  {
+                    "id": 180,
+                    "ptr": 2180,
+                    "opcode": "phi #150 #69",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 240,
+                    "ptr": 2241,
+                    "opcode": "branch #177",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 41,
+                "ptr": 1041,
+                "attributes": [],
+                "predecessors": [
+                  40
+                ],
+                "successors": [
+                  42,
+                  43
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 181,
+                    "ptr": 2181,
+                    "opcode": "bitxor",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 182,
+                    "ptr": 2182,
+                    "opcode": "div #119 #28",
+                    "type": "Float64",
+                    "attributes": []
+                  },
+                  {
+                    "id": 183,
+                    "ptr": 2183,
+                    "opcode": "add #108 #42",
+                    "type": "Int32",
+                    "attributes": []
+                  },
+                  {
+                    "id": 184,
+                    "ptr": 2184,
+                    "opcode": "store slot0",
+                    "type": "None",
+                    "attributes": []
+                  },
+                  {
+                    "id": 185,
+                    "ptr": 2185,
+                    "opcode": "mul #93 #138",
+                    "type": "Undefined",
+                    "attributes": [
+                      "backedge"
+                    ]
+                  },
+                  {
+                    "id": 186,
+                    "ptr": 2186,
+                    "opcode": "store slot13",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 187,
+                    "ptr": 2187,
+                    "opcode": "add #125 #107",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 188,
+                    "ptr": 2188,
+                    "opcode": "shl",
+                    "type": "Object",
+                    "attributes": [
+                      "loopheader"
+                    ]
+                  },
+                  {
+                    "id": 241,
+                    "ptr": 2242,
+                    "opcode": "branch #181",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 42,
+                "ptr": 1042,
+                "attributes": [
+                  "backedge"
+                ],
+                "predecessors": [
+                  40,
+                  41
+                ],
+                "successors": [
+                  34
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 189,
+                    "ptr": 2189,
+                    "opcode": "bitor",
+                    "type": "String",
+                    "attributes": []
+                  },
+                  {
+                    "id": 190,
+                    "ptr": 2190,
+                    "opcode": "constant 2",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 191,
+                    "ptr": 2191,
+                    "opcode": "bitxor",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 192,
+                    "ptr": 2192,
+                    "opcode": "div #122 #135",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 193,
+                    "ptr": 2193,
+                    "opcode": "bitand",
+                    "type": "Float64",
+                    "attributes": []
+                  },
+                  {
+                    "id": 194,
+                    "ptr": 2194,
+                    "opcode": "add #111 #82",
+                    "type": "Value",
+                    "attributes": [
+                      "in-worklist"
+                    ]
+                  },
+                  {
+                    "id": 195,
+                    "ptr": 2195,
+                    "opcode": "shr",
+                    "type": "Undefined",
+                    "attributes": [
+                      "rob"
+                    ]
+                  },
+                  {
+                    "id": 242,
+                    "ptr": 2243,
+                    "opcode": "branch #189",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 43,
+                "ptr": 1043,
+                "attributes": [],
+                "predecessors": [
+                  41
+                ],
+                "successors": [
+                  44,
+                  45
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 196,
+                    "ptr": 2196,
+                    "opcode": "phi #196 #10",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 197,
+                    "ptr": 2197,
+                    "opcode": "shl",
+                    "type": "Float64",
+                    "attributes": []
+                  },
+                  {
+                    "id": 198,
+                    "ptr": 2198,
+                    "opcode": "parameter x3",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 199,
+                    "ptr": 2199,
+                    "opcode": "div #2 #2",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 243,
+                    "ptr": 2244,
+                    "opcode": "branch #196",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 44,
+                "ptr": 1044,
+                "attributes": [],
+                "predecessors": [
+                  42,
+                  43
+                ],
+                "successors": [
+                  45
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 200,
+                    "ptr": 2200,
+                    "opcode": "mul #36 #83",
+                    "type": "String",
+                    "attributes": []
+                  },
+                  {
+                    "id": 201,
+                    "ptr": 2201,
+                    "opcode": "shr",
+                    "type": "String",
+                    "attributes": []
+                  },
+                  {
+                    "id": 202,
+                    "ptr": 2202,
+                    "opcode": "load slot15",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 203,
+                    "ptr": 2203,
+                    "opcode": "compare #31 > 40",
+                    "type": "Float64",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 45,
+                "ptr": 1045,
+                "attributes": [],
+                "predecessors": [
+                  43,
+                  44
+                ],
+                "successors": [
+                  46
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 204,
+                    "ptr": 2204,
+                    "opcode": "bitor",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 205,
+                    "ptr": 2205,
+                    "opcode": "add #67 #56",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 206,
+                    "ptr": 2206,
+                    "opcode": "mod #155 #168",
+                    "type": "None",
+                    "attributes": []
+                  },
+                  {
+                    "id": 207,
+                    "ptr": 2207,
+                    "opcode": "mod #113 #125",
+                    "type": "String",
+                    "attributes": []
+                  },
+                  {
+                    "id": 208,
+                    "ptr": 2208,
+                    "opcode": "load slot19",
+                    "type": "Undefined",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 46,
+                "ptr": 1046,
+                "attributes": [],
+                "predecessors": [
+                  45
+                ],
+                "successors": [
+                  47
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 209,
+                    "ptr": 2209,
+                    "opcode": "bitand",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 210,
+                    "ptr": 2210,
+                    "opcode": "bitand",
+                    "type": "String",
+                    "attributes": []
+                  },
+                  {
+                    "id": 211,
+                    "ptr": 2211,
+                    "opcode": "shl",
+                    "type": "Object",
+                    "attributes": []
+                  },
+                  {
+                    "id": 212,
+                    "ptr": 2212,
+                    "opcode": "constant 57",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 213,
+                    "ptr": 2213,
+                    "opcode": "call fn_5",
+                    "type": "String",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 47,
+                "ptr": 1047,
+                "attributes": [],
+                "predecessors": [
+                  46
+                ],
+                "successors": [
+                  48
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 214,
+                    "ptr": 2214,
+                    "opcode": "bitor",
+                    "type": "Float64",
+                    "attributes": []
+                  },
+                  {
+                    "id": 215,
+                    "ptr": 2215,
+                    "opcode": "call fn_8",
+                    "type": "Undefined",
+                    "attributes": [
+                      "splitedge"
+                    ]
+                  },
+                  {
+                    "id": 216,
+                    "ptr": 2216,
+                    "opcode": "load slot19",
+                    "type": "None",
+                    "attributes": []
+                  },
+                  {
+                    "id": 217,
+                    "ptr": 2217,
+                    "opcode": "div #189 #151",
+                    "type": "Undefined",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 48,
+                "ptr": 1048,
+                "attributes": [],
+                "predecessors": [
+                  47
+                ],
+                "successors": [
+                  49
+                ],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 218,
+                    "ptr": 2218,
+                    "opcode": "shr",
+                    "type": "Bool",
+                    "attributes": []
+                  },
+                  {
+                    "id": 219,
+                    "ptr": 2219,
+                    "opcode": "store slot4",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 220,
+                    "ptr": 2220,
+                    "opcode": "parameter x1",
+                    "type": "None",
+                    "attributes": []
+                  },
+                  {
+                    "id": 221,
+                    "ptr": 2221,
+                    "opcode": "phi #76 #210",
+                    "type": "Object",
+                    "attributes": [
+                      "rob"
+                    ]
+                  },
+                  {
+                    "id": 222,
+                    "ptr": 2222,
+                    "opcode": "sub #3 #122",
+                    "type": "Value",
+                    "attributes": []
+                  },
+                  {
+                    "id": 223,
+                    "ptr": 2223,
+                    "opcode": "call fn_3",
+                    "type": "Int32",
+                    "attributes": [
+                      "backedge"
+                    ]
+                  },
+                  {
+                    "id": 224,
+                    "ptr": 2224,
+                    "opcode": "shl",
+                    "type": "Bool",
+                    "attributes": []
+                  }
+                ]
+              },
+              {
+                "id": 49,
+                "ptr": 1049,
+                "attributes": [],
+                "predecessors": [
+                  48
+                ],
+                "successors": [],
+                "loopDepth": 0,
+                "instructions": [
+                  {
+                    "id": 225,
+                    "ptr": 2225,
+                    "opcode": "load slot10",
+                    "type": "Undefined",
+                    "attributes": []
+                  },
+                  {
+                    "id": 226,
+                    "ptr": 2226,
+                    "opcode": "mul #149 #10",
+                    "type": "Float64",
+                    "attributes": []
+                  },
+                  {
+                    "id": 227,
+                    "ptr": 2227,
+                    "opcode": "sub #100 #68",
+                    "type": "None",
+                    "attributes": []
+                  },
+                  {
+                    "id": 228,
+                    "ptr": 2228,
+                    "opcode": "sub #153 #2",
+                    "type": "Null",
+                    "attributes": []
+                  },
+                  {
+                    "id": 244,
+                    "ptr": 2245,
+                    "opcode": "return #243",
+                    "type": "None",
+                    "attributes": []
+                  }
+                ]
+              }
+            ]
+          },
+          "lir": {
+            "blocks": []
+          }
+        }
+      ]
+    }
+  ]
+}

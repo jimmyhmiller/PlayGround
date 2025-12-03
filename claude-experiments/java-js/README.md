@@ -2,6 +2,12 @@
 
 A modern, ESTree-compliant JavaScript parser built in Java 25 using modern language features (records, sealed interfaces, pattern matching).
 
+## 🚀 New: Automatic Test Generation from Real-World Code
+
+Automatically generate JUnit tests from discovered parser failures! See:
+- **[IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)** - Quick overview and getting started
+- **[ACORN_CACHE_TESTS.md](ACORN_CACHE_TESTS.md)** - Full documentation and examples
+
 ## 🎯 Current Status
 
 **7.32% exact matches** (2,467 / 33,698 cached test262 files)

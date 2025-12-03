@@ -26,8 +26,7 @@ for func_idx in {0..14}; do
         fi
 
         # Generate TS version
-        cd "$TS_SRC"
-        node generate-svg-function.mjs examples/mega-complex.json $func_idx $pass_idx output.svg > /dev/null 2>&1
+        (cd "$TS_SRC" && node generate-svg-function.mjs examples/mega-complex.json $func_idx $pass_idx output.svg) > /dev/null 2>&1
         ts_result=$?
 
         if [ $ts_result -ne 0 ]; then
@@ -35,11 +34,10 @@ for func_idx in {0..14}; do
             continue
         fi
 
-        cp output.svg /tmp/ts-func${func_idx}-pass${pass_idx}.svg
+        cp "$TS_SRC/output.svg" /tmp/ts-func${func_idx}-pass${pass_idx}.svg
 
         # Generate Rust version
-        cd - > /dev/null
-        node generate-svg-function.mjs "$INPUT_FILE" $func_idx $pass_idx /tmp/rust-func${func_idx}-pass${pass_idx}.svg > /dev/null 2>&1
+        (cd "$TS_SRC" && node generate-svg-function.mjs examples/mega-complex.json $func_idx $pass_idx /tmp/rust-func${func_idx}-pass${pass_idx}.svg) > /dev/null 2>&1
         rust_result=$?
 
         if [ $rust_result -ne 0 ]; then

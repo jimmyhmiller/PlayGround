@@ -16,8 +16,7 @@ for pass_idx in {0..5}; do
     echo "Testing function 5, pass $pass_idx..."
 
     # Generate TS version
-    cd "$TS_SRC"
-    node generate-svg-function.mjs examples/mega-complex.json 5 $pass_idx output.svg > /dev/null 2>&1
+    (cd "$TS_SRC" && node generate-svg-function.mjs examples/mega-complex.json 5 $pass_idx output.svg) > /dev/null 2>&1
     ts_result=$?
 
     if [ $ts_result -ne 0 ]; then
@@ -26,11 +25,10 @@ for pass_idx in {0..5}; do
     fi
 
     # Copy TS output
-    cp output.svg /tmp/ts-func5-pass${pass_idx}.svg
+    cp "$TS_SRC/output.svg" /tmp/ts-func5-pass${pass_idx}.svg
 
     # Generate Rust version
-    cd - > /dev/null
-    node generate-svg-function.mjs "$INPUT_FILE" 5 $pass_idx /tmp/rust-func5-pass${pass_idx}.svg > /dev/null 2>&1
+    (cd "$TS_SRC" && node generate-svg-function.mjs examples/mega-complex.json 5 $pass_idx /tmp/rust-func5-pass${pass_idx}.svg) > /dev/null 2>&1
     rust_result=$?
 
     if [ $rust_result -ne 0 ]; then
@@ -56,8 +54,7 @@ for func_idx in 0 6 14; do
     for pass_idx in 0 10 20; do
         echo "Testing function $func_idx, pass $pass_idx..."
 
-        cd "$TS_SRC"
-        node generate-svg-function.mjs examples/mega-complex.json $func_idx $pass_idx output.svg > /dev/null 2>&1
+        (cd "$TS_SRC" && node generate-svg-function.mjs examples/mega-complex.json $func_idx $pass_idx output.svg) > /dev/null 2>&1
         ts_result=$?
 
         if [ $ts_result -ne 0 ]; then
@@ -65,10 +62,9 @@ for func_idx in 0 6 14; do
             continue
         fi
 
-        cp output.svg /tmp/ts-func${func_idx}-pass${pass_idx}.svg
+        cp "$TS_SRC/output.svg" /tmp/ts-func${func_idx}-pass${pass_idx}.svg
 
-        cd - > /dev/null
-        node generate-svg-function.mjs "$INPUT_FILE" $func_idx $pass_idx /tmp/rust-func${func_idx}-pass${pass_idx}.svg > /dev/null 2>&1
+        (cd "$TS_SRC" && node generate-svg-function.mjs examples/mega-complex.json $func_idx $pass_idx /tmp/rust-func${func_idx}-pass${pass_idx}.svg) > /dev/null 2>&1
         rust_result=$?
 
         if [ $rust_result -ne 0 ]; then
