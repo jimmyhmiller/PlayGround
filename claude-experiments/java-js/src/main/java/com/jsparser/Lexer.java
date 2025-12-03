@@ -1553,27 +1553,30 @@ public class Lexer {
                 // Normalize line terminators: CR and CRLF both become LF
                 if (c == '\r') {
                     // Check if followed by LF (CRLF sequence)
-                    advance();
-                    column--;  // \r should not count as a column
+                    // Don't use advance() for \r since it shouldn't count as a column
+                    position++;  // Manually increment position without affecting column
                     if (!isAtEnd() && peek() == '\n') {
                         // CRLF: normalize to LF in both raw and cooked
                         raw.append('\n');
                         cooked.append('\n');
-                        advance(); // consume the LF
+                        advance(); // consume the LF (this also increments column)
+                        // After consuming CRLF, set to new line
+                        line++;
+                        column = 0;  // Reset to start of new line (advance already moved us past the \n)
                     } else {
                         // Just CR: normalize to LF
                         raw.append('\n');
                         cooked.append('\n');
+                        line++;
+                        column = 0;  // Reset to start of new line (we've moved past the \r)
                     }
-                    line++;
-                    column = -1;  // Will be incremented to 0 by advance()
                 } else if (c == '\n' || c == '\u2028' || c == '\u2029') {
                     // LF, LS, PS: keep as-is
                     raw.append(c);
                     cooked.append(c);
+                    advance(); // consume the line terminator (increments column)
                     line++;
-                    column = -1;  // Will be incremented to 0 by advance()
-                    advance();
+                    column = 0;  // Reset to start of new line
                 } else {
                     // Regular character
                     raw.append(c);

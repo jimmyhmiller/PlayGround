@@ -131,7 +131,10 @@ impl Compiler {
         if namespace.is_none() {
             if let Some(register) = self.lookup_local(name) {
                 // Local variable - just return the register directly
+                eprintln!("DEBUG compile_var: '{}' found as local, returning register {:?}", name, register);
                 return Ok(register);
+            } else {
+                eprintln!("DEBUG compile_var: '{}' not found as local, trying global", name);
             }
         }
 
@@ -464,6 +467,8 @@ impl Compiler {
             // This can reference prior bindings in this let!
             let value_reg = self.compile(value_expr)?;
 
+            eprintln!("DEBUG compile_let: binding '{}' to register {:?}", name, value_reg);
+
             // Bind the name to the register in current scope
             // No need to emit Assign - the value is already in the register
             self.bind_local(name.clone(), value_reg);
@@ -471,13 +476,16 @@ impl Compiler {
 
         // Compile body (returns last expression)
         let mut result = IrValue::Null;
-        for expr in body {
+        eprintln!("DEBUG compile_let: compiling {} body expressions", body.len());
+        for (i, expr) in body.iter().enumerate() {
             result = self.compile(expr)?;
+            eprintln!("DEBUG compile_let: body expr {} compiled to {:?}", i, result);
         }
 
         // Pop the local scope
         self.pop_scope();
 
+        eprintln!("DEBUG compile_let: returning {:?}", result);
         Ok(result)
     }
 
