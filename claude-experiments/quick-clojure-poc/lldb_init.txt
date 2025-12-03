@@ -1,0 +1,17 @@
+# LLDB initialization for debugging minimal spill test
+# Usage: lldb -s lldb_init.txt ./minimal_spill_test
+
+# Set breakpoint at trampoline entry
+# The trampoline code starts with "stp x29, x30, [sp, #-16]!"
+# We'll break on the execute call instead since we can't break on JIT code directly
+breakpoint set -n quick_clojure_poc::trampoline::Trampoline::execute
+
+# Run the program
+run
+
+# When we hit the breakpoint, print some info
+frame variable
+register read x0 x1 x29 x30 sp
+
+# Continue - we'll hit the actual JIT code
+continue

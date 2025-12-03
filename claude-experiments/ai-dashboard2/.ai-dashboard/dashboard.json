@@ -276,32 +276,6 @@
       "label": "Layout Settings"
     },
     {
-      "id": "code-editor-demo",
-      "type": "codeEditor",
-      "x": 0,
-      "y": 1064,
-      "width": 772,
-      "height": 600,
-      "label": "JavaScript Playground",
-      "language": "javascript",
-      "content": "// Try running some JavaScript code!\nconsole.log('Hello from the Code Editor!');\n\n// Test with some colors\nconsole.log('\\x1b[32mGreen text\\x1b[0m');\nconsole.log('\\x1b[34mBlue text\\x1b[0m');\nconsole.log('\\x1b[31mRed text\\x1b[0m');\n\n// Do some math\nfor (let i = 1; i <= 5; i++) {\n  console.log(`${i} squared = ${i * i}`);\n}\n\nconsole.log('\\x1b[33m✨ Execution complete!\\x1b[0m');",
-      "minimap": false,
-      "showLineNumbers": true
-    },
-    {
-      "id": "python-editor",
-      "type": "codeEditor",
-      "x": 784,
-      "y": 980,
-      "width": 548,
-      "height": 544,
-      "label": "Python Playground",
-      "language": "python",
-      "content": "# Python code example\nimport sys\n\nprint('Hello from Python!')\nprint('Python version:', sys.version.split()[0])\n\n# Test ANSI colors\nprint('\\033[92mGreen text\\033[0m')\nprint('\\033[94mBlue text\\033[0m')\nprint('\\033[91mRed text\\033[0m')\n\n# List comprehension\nsquares = [i**2 for i in range(1, 6)]\nfor i, sq in enumerate(squares, 1):\n    print(f'{i} squared = {sq}')\n\nprint('\\033[93m✨ All done!\\033[0m')",
-      "minimap": false,
-      "showLineNumbers": true
-    },
-    {
       "id": "clojure-editor",
       "type": "codeEditor",
       "x": 1344,
@@ -317,7 +291,7 @@
     {
       "id": "custom-command-example",
       "type": "codeEditor",
-      "x": 1344,
+      "x": 784,
       "y": 980,
       "width": 380,
       "height": 496,
@@ -332,7 +306,7 @@
       "id": "component-composition-ideas",
       "type": "markdown",
       "x": 784,
-      "y": 532,
+      "y": 560,
       "width": 548,
       "height": 408,
       "label": "Component Composition",
@@ -341,8 +315,8 @@
     {
       "id": "demo-nested-dashboard",
       "type": "nested-dashboard",
-      "x": 28,
-      "y": 1736,
+      "x": 0,
+      "y": 952,
       "width": 660,
       "height": 492,
       "label": "Nested Dashboard Demo",
@@ -394,7 +368,7 @@
               10,
               14
             ],
-            "x": 444,
+            "x": 456,
             "y": 0,
             "width": 300,
             "height": 200
@@ -425,6 +399,32 @@
                 "done": false
               }
             ]
+          },
+          {
+            "id": "code-editor-demo",
+            "type": "codeEditor",
+            "x": 480,
+            "y": 240,
+            "width": 424,
+            "height": 304,
+            "label": "JavaScript Playground",
+            "language": "javascript",
+            "content": "// Try running some JavaScript code!\nconsole.log('Hello from the Code Editor!');\n\n// Test with some colors\nconsole.log('\\x1b[32mGreen text\\x1b[0m');\nconsole.log('\\x1b[34mBlue text\\x1b[0m');\nconsole.log('\\x1b[31mRed text\\x1b[0m');\n\n// Do some math\nfor (let i = 1; i <= 5; i++) {\n  console.log(`${i} squared = ${i * i}`);\n}\n\nconsole.log('\\x1b[33m✨ Execution complete!\\x1b[0m');",
+            "minimap": false,
+            "showLineNumbers": true
+          },
+          {
+            "id": "python-editor",
+            "type": "codeEditor",
+            "x": 0,
+            "y": 384,
+            "width": 448,
+            "height": 400,
+            "label": "Python Playground",
+            "language": "python",
+            "content": "# Python code example\nimport sys\n\nprint('Hello from Python!')\nprint('Python version:', sys.version.split()[0])\n\n# Test ANSI colors\nprint('\\033[92mGreen text\\033[0m')\nprint('\\033[94mBlue text\\033[0m')\nprint('\\033[91mRed text\\033[0m')\n\n# List comprehension\nsquares = [i**2 for i in range(1, 6)]\nfor i, sq in enumerate(squares, 1):\n    print(f'{i} squared = {sq}')\n\nprint('\\033[93m✨ All done!\\033[0m')",
+            "minimap": false,
+            "showLineNumbers": true
           }
         ]
       }

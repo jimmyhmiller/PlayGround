@@ -152,6 +152,26 @@ export const LayoutSettingsConfigSchema = BaseWidgetConfigSchema.extend({
   type: z.union([z.literal('layout-settings'), z.literal('layoutSettings')]),
 });
 
+// NestedDashboard widget schema (with lazy evaluation to handle circular references)
+export const NestedDashboardConfigSchema: z.ZodType<any> = BaseWidgetConfigSchema.extend({
+  type: z.literal('nested-dashboard'),
+  dashboard: z.lazy(() => z.object({
+    id: z.string(),
+    title: z.string().optional(),
+    subtitle: z.string().optional(),
+    icon: z.string().optional(),
+    theme: z.any().optional(),
+    widgets: z.array(WidgetConfigSchema),
+    layout: z.object({
+      gridSize: z.number().optional(),
+      widgetGap: z.number().optional(),
+      mode: z.string().optional(),
+      gap: z.number().optional(),
+      buffer: z.number().optional(),
+    }).optional(),
+  })),
+});
+
 // Union of all widget schemas
 export const WidgetConfigSchema = z.union([
   StatConfigSchema,
@@ -170,6 +190,7 @@ export const WidgetConfigSchema = z.union([
   TestResultsConfigSchema,
   JsonViewerConfigSchema,
   LayoutSettingsConfigSchema,
+  NestedDashboardConfigSchema,
 ]);
 
 // Export type inference

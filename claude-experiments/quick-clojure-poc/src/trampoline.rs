@@ -122,6 +122,13 @@ impl Trampoline {
         };
 
         trampoline.generate_trampoline();
+
+        // Debug: print trampoline code
+        eprintln!("DEBUG: Trampoline instructions:");
+        for (i, inst) in trampoline.code.iter().enumerate() {
+            eprintln!("  {:04x}: {:08x}", i * 4, inst);
+        }
+
         trampoline.allocate_code();
 
         // Skip stack allocation for now - we're not using it
@@ -247,9 +254,14 @@ impl Trampoline {
     /// The jit_fn must be valid ARM64 code
     pub unsafe fn execute(&self, jit_fn: *const u8) -> i64 {
         unsafe {
+            eprintln!("DEBUG: trampoline.execute() - jit_fn address: {:p}", jit_fn);
+            eprintln!("DEBUG: trampoline.execute() - trampoline address: {:p}", self.code_ptr);
             let trampoline_fn: extern "C" fn(u64, u64) -> i64 =
                 std::mem::transmute(self.code_ptr);
-            trampoline_fn(0, jit_fn as u64)
+            eprintln!("DEBUG: About to call trampoline function...");
+            let result = trampoline_fn(0, jit_fn as u64);
+            eprintln!("DEBUG: Trampoline function returned: {}", result);
+            result
         }
     }
 

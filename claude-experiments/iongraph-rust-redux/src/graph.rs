@@ -496,7 +496,6 @@ impl<P: LayoutProvider> Graph<P> {
         let mut max_x: f64 = 0.0;
         let mut max_y: f64 = 0.0;
 
-        eprintln!("Rust calculating graph.size:");
         for (layer_idx, layer) in nodes_by_layer.iter().enumerate() {
             for node in layer {
                 let (pos, size, block_id, flags) = match node {
@@ -505,22 +504,14 @@ impl<P: LayoutProvider> Graph<P> {
                 };
                 let candidate_y = pos.y + size.y + CONTENT_PADDING;
                 if candidate_y > max_y {
-                    if let Some(bid) = block_id {
-                        eprintln!("Block {}: pos.y={}, size.y={}, candidate={}", bid.0, pos.y, size.y, candidate_y);
-                    }
                     max_y = candidate_y;
                 }
                 let candidate_x = pos.x + size.x + CONTENT_PADDING;
                 if candidate_x > max_x {
-                    eprintln!("Layer {}, {}: pos.x={}, size.x={}, candidate_x={}, flags={:#b}",
-                             layer_idx,
-                             if let Some(bid) = block_id { format!("Block {}", bid.0) } else { "Dummy".to_string() },
-                             pos.x, size.x, candidate_x, flags);
                     max_x = candidate_x;
                 }
             }
         }
-        eprintln!("Rust graph.size = ({}, {})", max_x, max_y);
 
         // Create container for arrows
         let mut arrows_container = self.layout_provider.create_svg_element("g");

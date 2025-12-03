@@ -57,14 +57,16 @@ echo -e "${BLUE}Running TypeScript Implementation${NC}"
 echo -e "${BLUE}----------------------------------------${NC}"
 echo ""
 
-if [ ! -f "$TYPESCRIPT_DIR/bench-iongraph.mjs" ]; then
-    echo -e "${YELLOW}Warning: TypeScript benchmark script not found${NC}"
-    echo -e "Creating benchmark script at $TYPESCRIPT_DIR/bench-iongraph.mjs"
+# Run TypeScript benchmarks
+# Convert relative path to absolute
+if [[ "$INPUT_FILE" = /* ]]; then
+    ABS_INPUT="$INPUT_FILE"
+else
+    ABS_INPUT="$(cd "$(dirname "$INPUT_FILE")" && pwd)/$(basename "$INPUT_FILE")"
 fi
 
-# Run TypeScript benchmarks
 cd "$TYPESCRIPT_DIR"
-TS_OUTPUT=$(node bench-iongraph.mjs "../claude-experiments/iongraph-rust-redux/$INPUT_FILE" "$ITERATIONS" 2>&1)
+TS_OUTPUT=$(node bench-svg-generation.mjs "$ABS_INPUT" "$ITERATIONS" 2>&1)
 cd - > /dev/null
 
 echo "$TS_OUTPUT"

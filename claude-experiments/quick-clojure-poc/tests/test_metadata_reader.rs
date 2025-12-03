@@ -15,12 +15,17 @@ fn test_metadata_shorthand() {
 
     if let Ok(edn) = result {
         match &edn {
+            Edn::Meta(meta, value) => {
+                println!("  Got Meta! meta={:?}, value={:?}", meta, value);
+                // Metadata is correctly parsed - this is the expected behavior
+                assert!(matches!(value.as_ref(), Edn::Symbol(_)), "Expected symbol after metadata");
+            }
             Edn::Tagged(tag, value) => {
                 println!("  Got Tagged! tag='{}', value={:?}", tag, value);
                 assert_eq!(*tag, "dynamic" , "Expected tag to be 'dynamic'");
             }
             _ => {
-                println!("  Not Tagged, got variant: {}", match edn {
+                println!("  Not Tagged or Meta, got variant: {}", match edn {
                     Edn::Vector(_) => "Vector",
                     Edn::Set(_) => "Set",
                     Edn::Map(_) => "Map",
@@ -30,12 +35,13 @@ fn test_metadata_shorthand() {
                     Edn::Str(_) => "Str",
                     Edn::Int(_) => "Int",
                     Edn::Tagged(_, _) => "Tagged",
+                    Edn::Meta(_, _) => "Meta",
                     Edn::Char(_) => "Char",
                     Edn::Bool(_) => "Bool",
                     Edn::Nil => "Nil",
                     _ => "Other",
                 });
-                panic!("Expected Tagged variant, got something else");
+                panic!("Expected Meta or Tagged variant, got something else");
             }
         }
     } else {

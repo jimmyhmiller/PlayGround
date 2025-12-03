@@ -4,7 +4,7 @@ export type WidgetType =
   | 'bar-chart' | 'chat' | 'code-editor' | 'command-runner'
   | 'diff-list' | 'error-test' | 'file-list' | 'flippable-test'
   | 'json-viewer' | 'key-value' | 'layout-settings' | 'markdown'
-  | 'progress' | 'stat' | 'test-results' | 'todo-list'
+  | 'nested-dashboard' | 'progress' | 'stat' | 'test-results' | 'todo-list'
   | 'claude-todo-list' | 'webview';
 
 export interface WidgetDimensions {
@@ -128,6 +128,11 @@ export interface LayoutSettingsConfig extends BaseWidgetConfig {
   type: 'layout-settings';
 }
 
+export interface NestedDashboardConfig extends BaseWidgetConfig {
+  type: 'nested-dashboard';
+  dashboard: Dashboard;
+}
+
 export type WidgetConfig =
   | BarChartConfig
   | ChatConfig
@@ -144,7 +149,8 @@ export type WidgetConfig =
   | DiffListConfig
   | TestResultsConfig
   | JsonViewerConfig
-  | LayoutSettingsConfig;
+  | LayoutSettingsConfig
+  | NestedDashboardConfig;
 
 export interface LayoutSettings {
   gap?: number;

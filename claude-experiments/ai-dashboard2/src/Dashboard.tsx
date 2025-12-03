@@ -12,6 +12,7 @@ interface DashboardProps {
   onSelect?: (dashboardId: string) => void;
   onWidgetResize?: (dashboardId: string, widgetId: string, dimensions: any) => void;
   onWidgetDelete?: (dashboardId: string, widgetId: string) => void;
+  onWidgetTransfer?: (widgetId: string, targetNestedWidgetId: string | null) => void;
   widgetConversations: Record<string, string | null>;
   setWidgetConversations: (update: (prev: Record<string, string | null>) => Record<string, string | null>) => void;
   dashboardVersion?: number;
@@ -26,6 +27,7 @@ export const Dashboard: FC<DashboardProps> = ({
   onSelect,
   onWidgetResize,
   onWidgetDelete,
+  onWidgetTransfer,
   widgetConversations,
   setWidgetConversations,
   dashboardVersion,
@@ -258,6 +260,7 @@ export const Dashboard: FC<DashboardProps> = ({
               reloadTrigger={reloadTrigger}
               onResize={onWidgetResize}
               onDelete={onWidgetDelete}
+              onTransfer={onWidgetTransfer}
               widgetComponents={WIDGET_REGISTRY}
             />
           ))}

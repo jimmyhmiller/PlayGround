@@ -755,14 +755,10 @@ impl Compiler {
         self.builder.emit(Instruction::Untag(left_untagged, left));
         self.builder.emit(Instruction::Untag(right_untagged, right));
 
-        let cmp_result = self.builder.new_register();
-        self.builder.emit(Instruction::Compare(cmp_result, left_untagged, right_untagged, Condition::LessThan));
-
-        // Tag the boolean result (0 or 1) as an integer
         let result = self.builder.new_register();
-        let tag = IrValue::TaggedConstant(0);
-        self.builder.emit(Instruction::Tag(result, cmp_result, tag));
+        self.builder.emit(Instruction::Compare(result, left_untagged, right_untagged, Condition::LessThan));
 
+        // Compare now returns properly tagged boolean (3 or 11)
         Ok(result)
     }
 
@@ -779,14 +775,10 @@ impl Compiler {
         self.builder.emit(Instruction::Untag(left_untagged, left));
         self.builder.emit(Instruction::Untag(right_untagged, right));
 
-        let cmp_result = self.builder.new_register();
-        self.builder.emit(Instruction::Compare(cmp_result, left_untagged, right_untagged, Condition::GreaterThan));
-
-        // Tag the boolean result (0 or 1) as an integer
         let result = self.builder.new_register();
-        let tag = IrValue::TaggedConstant(0);
-        self.builder.emit(Instruction::Tag(result, cmp_result, tag));
+        self.builder.emit(Instruction::Compare(result, left_untagged, right_untagged, Condition::GreaterThan));
 
+        // Compare now returns properly tagged boolean (3 or 11)
         Ok(result)
     }
 
@@ -798,19 +790,12 @@ impl Compiler {
         let left = self.compile(&args[0])?;
         let right = self.compile(&args[1])?;
 
-        let left_untagged = self.builder.new_register();
-        let right_untagged = self.builder.new_register();
-        self.builder.emit(Instruction::Untag(left_untagged, left));
-        self.builder.emit(Instruction::Untag(right_untagged, right));
-
-        let cmp_result = self.builder.new_register();
-        self.builder.emit(Instruction::Compare(cmp_result, left_untagged, right_untagged, Condition::Equal));
-
-        // Tag the boolean result (0 or 1) as an integer
+        // Compare tagged values directly - this preserves type information
+        // nil (7), false (3), true (11), and integers (n<<3) all have different representations
         let result = self.builder.new_register();
-        let tag = IrValue::TaggedConstant(0);
-        self.builder.emit(Instruction::Tag(result, cmp_result, tag));
+        self.builder.emit(Instruction::Compare(result, left, right, Condition::Equal));
 
+        // Compare returns properly tagged boolean (3 or 11)
         Ok(result)
     }
 
@@ -831,10 +816,11 @@ mod tests {
     use super::*;
     use crate::reader::read;
     use crate::clojure_ast::analyze;
+    use std::cell::UnsafeCell;
 
     #[test]
     fn test_compile_add_generates_ir() {
-        let runtime = Arc::new(Mutex::new(GCRuntime::new()));
+        let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
         let mut compiler = Compiler::new(runtime);
         let val = read("(+ 1 2)").unwrap();
         let ast = analyze(&val).unwrap();
@@ -859,7 +845,7 @@ mod tests {
 
     #[test]
     fn test_compile_nested() {
-        let runtime = Arc::new(Mutex::new(GCRuntime::new()));
+        let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
         let mut compiler = Compiler::new(runtime);
         let val = read("(+ (* 2 3) 4)").unwrap();
         let ast = analyze(&val).unwrap();

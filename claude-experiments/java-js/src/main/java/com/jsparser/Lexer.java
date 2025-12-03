@@ -22,6 +22,7 @@ public class Lexer {
     private boolean exprAllowed = true;
     private int generatorDepth = 0; // Track nesting level of generator functions
 
+
     public Lexer(String source) {
         this.source = source;
         this.buf = source.toCharArray();
@@ -151,6 +152,10 @@ public class Lexer {
                 }
                 exprAllowed = false;
             }
+            case TEMPLATE_HEAD, TEMPLATE_MIDDLE -> {
+                // After ${ in a template, expressions are allowed (including regexes)
+                exprAllowed = true;
+            }
             case INCREMENT, DECREMENT -> {
                 // ++ and -- don't change exprAllowed
             }
@@ -159,18 +164,12 @@ public class Lexer {
                 if (isKeyword(currentType) && prevType == TokenType.DOT) {
                     // Keywords after dot are property names, not keywords
                     exprAllowed = false;
-                } else if (currentType == TokenType.IDENTIFIER && "yield".equals(currentToken.lexeme()) &&
-                           // Only treat as yield keyword if in a context where it's likely a yield expression
-                           // NOT after: declarations, assignments at statement level
-                           prevType != TokenType.VAR && prevType != TokenType.LET && prevType != TokenType.CONST &&
-                           prevType != TokenType.COMMA && // comma in var declaration
-                           prevType != TokenType.SEMICOLON && // start of new statement where yield is a variable
-                           prevType != null) { // Also not at start of file
-                    // Special case: 'yield' is likely a yield expression (contextual keyword)
-                    // After yield, we allow expressions (including regex literals)
-                    // This is a heuristic - may have false positives, but parser will catch actual errors
-                    exprAllowed = true;
                 } else {
+                    // Note: 'yield' is tokenized as IDENTIFIER (not a keyword)
+                    // This means yield as a variable name works correctly (exprAllowed=false after it)
+                    // However, yield in generator functions should allow expressions after it
+                    // This requires generator context tracking at the parser level, which we don't have yet
+                    // Known limitation: generator functions with "yield /regex/" patterns won't parse
                     exprAllowed = TokenTypeProperties.beforeExpr(currentType);
                 }
             }

@@ -12,6 +12,9 @@ clojure-reader = { path = "../clojure-reader-fork" }
 im = "15.1.0"
 libc = "0.2.178"
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 debug = true
 opt-level = 3

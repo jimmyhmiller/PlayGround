@@ -342,6 +342,8 @@ electron_1.ipcMain.handle('update-widget-dimensions', async (_event, { dashboard
             widget.y = dimensions.y;
         entry.lastWriteTime = Date.now();
         fs.writeFileSync(targetPath, JSON.stringify(entry.dashboard, null, 2), 'utf-8');
+        // Broadcast all dashboards to keep state consistent
+        broadcastDashboards();
         return { success: true };
     }
     catch (error) {
@@ -383,12 +385,8 @@ electron_1.ipcMain.handle('update-widget', async (_event, { dashboardId, widgetI
         entry.dashboard.widgets[widgetIndex] = widgetConfig;
         entry.lastWriteTime = Date.now();
         fs.writeFileSync(targetPath, JSON.stringify(entry.dashboard, null, 2), 'utf-8');
-        electron_1.BrowserWindow.getAllWindows().forEach(win => {
-            win.webContents.send('dashboard-updated', {
-                dashboardId: entry.dashboard.id,
-                dashboard: entry.dashboard
-            });
-        });
+        // Broadcast all dashboards to keep state consistent
+        broadcastDashboards();
         return { success: true };
     }
     catch (error) {
@@ -687,6 +685,20 @@ ${widgetToolsList}
             }
             catch (streamError) {
                 console.error('[Claude] Streaming error:', streamError);
+                // If this was a session error, clear the corrupted session ID
+                if (streamError.message?.includes('session') || streamError.message?.includes('resume')) {
+                    console.warn(`[Claude] Clearing corrupted session ID for ${chatId}`);
+                    sessionIds.delete(chatId);
+                    // Also update the conversation metadata
+                    for (const [widgetKey, convos] of conversations.entries()) {
+                        const convo = convos.find(c => c.id === chatId);
+                        if (convo) {
+                            delete convo.sessionId;
+                            saveConversations();
+                            break;
+                        }
+                    }
+                }
                 mainWindow?.webContents.send('claude-chat-error', {
                     chatId,
                     responseId,
@@ -772,12 +784,22 @@ electron_1.ipcMain.handle('chat-get-messages', async (_event, { chatId }) => {
     try {
         const messages = chatMessages.get(chatId) || [];
         const isStreaming = activeChats.has(chatId);
-        console.log(`[Chat] Retrieved ${messages.length} messages for ${chatId}, streaming: ${isStreaming}`);
-        console.log(`[Chat] Messages:`, messages);
+        try {
+            console.log(`[Chat] Retrieved ${messages.length} messages for ${chatId}, streaming: ${isStreaming}`);
+            console.log(`[Chat] Messages:`, messages);
+        }
+        catch (logError) {
+            // Ignore EPIPE errors from console.log
+        }
         return { success: true, messages, isStreaming };
     }
     catch (error) {
-        console.error('[Chat] Error getting messages:', error);
+        try {
+            console.error('[Chat] Error getting messages:', error);
+        }
+        catch (logError) {
+            // Ignore EPIPE errors
+        }
         return { success: false, error: error.message };
     }
 });

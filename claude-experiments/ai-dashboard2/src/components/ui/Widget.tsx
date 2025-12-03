@@ -22,6 +22,7 @@ interface WidgetProps {
   clipPath?: string;
   onResize?: (dashboardId: string, widgetId: string, dimensions: Partial<WidgetDimensions>) => void;
   onDelete?: (dashboardId: string, widgetId: string) => void;
+  onTransfer?: (widgetId: string, targetNestedWidgetId: string | null) => void;
   dashboardId: string;
   dashboard?: Dashboard;
   layout?: LayoutSettings;
@@ -62,6 +63,7 @@ export const Widget: FC<WidgetProps> = ({
   clipPath,
   onResize,
   onDelete,
+  onTransfer,
   dashboardId,
   dashboard,
   layout,
@@ -74,6 +76,7 @@ export const Widget: FC<WidgetProps> = ({
   const [showContextMenu, setShowContextMenu] = useState(false);
   const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
   const [isRegenerating, setIsRegenerating] = useState(false);
+  const [hoveredNestedId, setHoveredNestedId] = useState<string | null>(null);
 
   const unknownWidgetContent = !Component ? (
     <div
@@ -123,6 +126,24 @@ export const Widget: FC<WidgetProps> = ({
     if (onResize && dashboardId && (width !== undefined || height !== undefined)) {
       onResize(dashboardId, config.id, { width, height });
     }
+  };
+
+  const handleDragOverNested = (targetWidgetId: string) => {
+    console.log(`🎯 Widget ${config.id} dragging over nested dashboard: ${targetWidgetId}`);
+    setHoveredNestedId(targetWidgetId);
+  };
+
+  const handleDragLeaveNested = () => {
+    console.log(`⬅️ Widget ${config.id} left nested dashboard`);
+    setHoveredNestedId(null);
+  };
+
+  const handleDropIntoNested = (targetWidgetId: string) => {
+    console.log(`📦 Widget ${config.id} dropped into nested dashboard: ${targetWidgetId}`);
+    if (onTransfer) {
+      onTransfer(config.id, targetWidgetId);
+    }
+    setHoveredNestedId(null);
   };
 
   const handleMouseDown = (e: MouseEvent<HTMLDivElement>) => {
@@ -204,6 +225,12 @@ export const Widget: FC<WidgetProps> = ({
             setCurrentConversationId={(id: string | null) => setWidgetConversations(prev => ({ ...prev, [widgetKey]: id }))}
             widgetConversations={widgetConversations}
             reloadTrigger={reloadTrigger}
+            {...(config.type === 'nested-dashboard' ? {
+              isDropTarget: config.id === hoveredNestedId,
+              onResize,
+              onDelete,
+              onTransfer
+            } : {})}
           />
         </ErrorBoundary>
       )}
@@ -257,9 +284,13 @@ export const Widget: FC<WidgetProps> = ({
       height={parseSize(dims.h || dims.height, defaults.h)}
       resizable={true}
       draggable={true}
+      dragMode="modifier"
       onDrag={handleDrag}
       onDragEnd={handleDrag}
       onResize={handleResizeEnd}
+      onDragOverNested={handleDragOverNested}
+      onDragLeaveNested={handleDragLeaveNested}
+      onDropIntoNested={handleDropIntoNested}
     >
       {widgetContent}
     </GridItem>

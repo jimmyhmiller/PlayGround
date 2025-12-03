@@ -39,7 +39,12 @@ impl Arm64CodeGen {
     }
 
     /// Compile IR instructions to ARM64 machine code
-    pub fn compile(&mut self, instructions: &[Instruction], result_reg: &IrValue) -> Result<Vec<u32>, String> {
+    ///
+    /// # Parameters
+    /// - `instructions`: IR instructions to compile
+    /// - `result_reg`: The register containing the final result
+    /// - `num_registers`: Number of registers available (0 = default/unlimited)
+    pub fn compile(&mut self, instructions: &[Instruction], result_reg: &IrValue, num_registers: usize) -> Result<Vec<u32>, String> {
         // Reset state
         self.code.clear();
         self.register_map.clear();
@@ -48,7 +53,7 @@ impl Arm64CodeGen {
         self.pending_fixups.clear();
 
         // Run linear scan register allocation
-        let mut allocator = LinearScan::new(instructions.to_vec(), 0);
+        let mut allocator = LinearScan::new(instructions.to_vec(), num_registers);
 
         // Mark result register as live until the end
         // This is critical - without this, the register allocator may reuse
@@ -58,6 +63,15 @@ impl Arm64CodeGen {
         }
 
         allocator.allocate();
+
+        // Debug output BEFORE consuming allocator
+        let num_stack_slots = allocator.next_stack_slot;
+        let num_spills = allocator.spill_locations.len();
+        eprintln!("DEBUG: {} spills, {} total stack slots", num_spills, num_stack_slots);
+        eprintln!("DEBUG: Spill locations from codegen allocator:");
+        for (vreg, slot) in &allocator.spill_locations {
+            eprintln!("  v{} -> slot {}", vreg.index, slot);
+        }
 
         // Find the physical register for the result (before consuming allocator)
         let result_physical = if let IrValue::Register(vreg) = result_reg {
@@ -69,8 +83,6 @@ impl Arm64CodeGen {
         };
 
         // Count spills to determine stack space needed
-        let num_stack_slots = allocator.next_stack_slot;
-        let num_spills = allocator.spill_locations.len();
         // Add 8 bytes padding so spills are above SP (ARM64 requirement)
         let stack_space = if num_stack_slots > 0 {
             num_stack_slots * 8 + 8
@@ -78,20 +90,15 @@ impl Arm64CodeGen {
             0
         };
 
-        eprintln!("DEBUG: {} spills, {} total stack slots, {} bytes", num_spills, num_stack_slots, stack_space);
+        eprintln!("DEBUG: Allocating {} bytes of stack space", stack_space);
 
         let allocated_instructions = allocator.finish();
 
         // Emit function prologue
+        // Note: Callee-saved registers (x19-x28) are saved by the trampoline, not here
         // Save FP and LR
         self.emit_stp(29, 30, 31, -2);  // stp x29, x30, [sp, #-16]!
         self.emit_mov(29, 31);           // mov x29, sp (set frame pointer)
-
-        // Save callee-saved registers we use (x19-x22)
-        // TESTING: Only using 4 registers to force spilling
-        // ARM64 requires 16-byte alignment, so save in pairs
-        self.emit_stp(19, 20, 31, -2);  // stp x19, x20, [sp, #-16]!
-        self.emit_stp(21, 22, 31, -2);  // stp x21, x22, [sp, #-16]!
 
         // Allocate stack space for spills if needed
         if stack_space > 0 {
@@ -107,12 +114,10 @@ impl Arm64CodeGen {
         // Apply jump fixups
         self.apply_fixups()?;
 
-        // Move result to x0 and untag it for return
+        // Move result to x0 (keep it tagged)
         if result_physical != 0 {
             self.emit_mov(0, result_physical);
         }
-        // Untag the result (shift right by 3)
-        self.emit_asr_imm(0, 0, 3);
 
         // Deallocate stack space for spills if needed
         if stack_space > 0 {
@@ -121,11 +126,7 @@ impl Arm64CodeGen {
         }
 
         // Emit function epilogue
-        // Restore callee-saved registers (in reverse order)
-        // TESTING: Only restoring x19-x22
-        self.emit_ldp(21, 22, 31, 2);   // ldp x21, x22, [sp], #16
-        self.emit_ldp(19, 20, 31, 2);   // ldp x19, x20, [sp], #16
-
+        // Note: Callee-saved registers (x19-x28) are restored by the trampoline, not here
         // Restore FP and LR
         self.emit_ldp(29, 30, 31, 2);    // ldp x29, x30, [sp], #16
 
@@ -145,13 +146,16 @@ impl Arm64CodeGen {
                         self.emit_mov_imm(dst_reg, *c as i64);
                     }
                     IrValue::True => {
-                        self.emit_mov_imm(dst_reg, 1);
+                        // true: (1 << 3) | 0b011 = 11
+                        self.emit_mov_imm(dst_reg, 11);
                     }
                     IrValue::False => {
-                        self.emit_mov_imm(dst_reg, 0);
+                        // false: (0 << 3) | 0b011 = 3
+                        self.emit_mov_imm(dst_reg, 3);
                     }
                     IrValue::Null => {
-                        self.emit_mov_imm(dst_reg, 0);
+                        // nil: 0b111 = 7
+                        self.emit_mov_imm(dst_reg, 7);
                     }
                     _ => return Err(format!("Invalid constant: {:?}", value)),
                 }
@@ -219,14 +223,16 @@ impl Arm64CodeGen {
             Instruction::LoadTrue(dst) => {
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                self.emit_mov_imm(dst_reg, 1);
+                // true: (1 << 3) | 0b011 = 11
+                self.emit_mov_imm(dst_reg, 11);
                 self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::LoadFalse(dst) => {
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                self.emit_mov_imm(dst_reg, 0);
+                // false: (0 << 3) | 0b011 = 3
+                self.emit_mov_imm(dst_reg, 3);
                 self.store_spill(dst_reg, dest_spill);
             }
 
@@ -428,7 +434,7 @@ impl Arm64CodeGen {
             }
 
             Instruction::Compare(dst, src1, src2, cond) => {
-                // Compare and set result to true/false
+                // Compare and set result to true/false (tagged bools: 11 or 3)
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
@@ -448,9 +454,17 @@ impl Arm64CodeGen {
                 };
 
                 // CSET is CSINC dst, XZR, XZR, invert(cond)
+                // This sets dst to 1 if true, 0 if false
                 let inverted_cond = cond_code ^ 1; // Invert the condition
                 let instruction = 0x9A9F07E0 | (inverted_cond << 12) | (dst_reg as u32);
                 self.code.push(instruction);
+
+                // Now convert 0/1 to tagged bools: 3 (false) or 11 (true)
+                // LSL dst, dst, #3  - Shift left by 3: 0→0, 1→8
+                self.emit_lsl_imm(dst_reg, dst_reg, 3);
+                // ADD dst, dst, #3  - Add 3: 0→3, 8→11
+                self.emit_add_imm(dst_reg, dst_reg, 3);
+
                 self.store_spill(dst_reg, dest_spill);
             }
 
@@ -483,10 +497,15 @@ impl Arm64CodeGen {
 
                 if !is_dest {
                     // Load spilled value from stack
-                    // Stack layout: [fp] = saved fp/lr, [fp-16] = saved x19/x20, [fp-32] = saved x21/x22
-                    // After sub sp, sp, #N, spills start at [fp-48] (slot 0), [fp-40] (slot 1), etc.
-                    // Note: slot numbering is reversed because stack grows downward
-                    let offset = -48 + (*stack_offset as i32 * 8);
+                    // Stack layout after prologue:
+                    //   [FP + 8]:  saved x30 (LR)
+                    //   [FP + 0]:  saved x29 (old FP) <- x29 points here
+                    //   [FP - 8]:  spill slot 0
+                    //   [FP - 16]: spill slot 1
+                    //   [FP - 24]: spill slot 2
+                    //   ...
+                    //   [FP - (N+1)*8]: spill slot N
+                    let offset = -((*stack_offset as i32 + 1) * 8);
                     self.emit_load_from_fp(temp_reg, offset);
                 }
                 // For destination, just return temp_reg without loading
@@ -513,9 +532,17 @@ impl Arm64CodeGen {
     /// Store a register to its spill location if needed
     fn store_spill(&mut self, src_reg: usize, dest_spill: Option<usize>) {
         if let Some(stack_offset) = dest_spill {
-            // Stack layout: [fp] = saved fp/lr, [fp-16] = saved x19/x20, [fp-32] = saved x21/x22
-            // After sub sp, sp, #N, spills start at [fp-48] (slot 0), [fp-40] (slot 1), etc.
-            let offset = -48 + (stack_offset as i32 * 8);
+            // Stack layout after prologue:
+            //   [FP + 8]:  saved x30 (LR)
+            //   [FP + 0]:  saved x29 (old FP) <- x29 points here
+            //   [FP - 8]:  spill slot 0
+            //   [FP - 16]: spill slot 1
+            //   [FP - 24]: spill slot 2
+            //   ...
+            //   [FP - (N+1)*8]: spill slot N
+            //   [FP - stack_space]: SP
+            let offset = -((stack_offset as i32 + 1) * 8);
+            eprintln!("DEBUG store_spill: slot {} -> offset {}", stack_offset, offset);
             self.emit_store_to_fp(src_reg, offset);
         }
     }
@@ -567,8 +594,33 @@ impl Arm64CodeGen {
     // ARM64 instruction encoding
 
     fn emit_mov(&mut self, dst: usize, src: usize) {
+        // Special handling when either source OR destination is register 31 (SP)
+        // Following Beagle's pattern: check both directions
+        // ORR treats register 31 as XZR, but we need it as SP
+        // Use ADD instruction which properly interprets register 31 as SP
+        if dst == 31 || src == 31 {
+            self.emit_mov_sp(dst, src);
+        } else {
+            self.emit_mov_reg(dst, src);
+        }
+    }
+
+    /// Generate MOV for regular registers (uses ORR)
+    /// Based on Beagle's mov_reg pattern
+    fn emit_mov_reg(&mut self, dst: usize, src: usize) {
         // MOV is ORR Xd, XZR, Xm
+        // This works for normal registers but treats register 31 as XZR
         let instruction = 0xAA0003E0 | ((src as u32) << 16) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    /// Generate MOV involving SP (uses ADD with immediate 0)
+    /// Based on Beagle's mov_sp pattern
+    fn emit_mov_sp(&mut self, dst: usize, src: usize) {
+        // ADD Xd, Xn, #0
+        // Works for both MOV from SP and MOV to SP
+        // ADD instruction properly interprets register 31 as SP, not XZR
+        let instruction = 0x910003E0 | ((src as u32) << 5) | (dst as u32);
         self.code.push(instruction);
     }
 
@@ -628,6 +680,12 @@ impl Arm64CodeGen {
         self.code.push(instruction);
     }
 
+    fn emit_add_imm(&mut self, dst: usize, src: usize, imm: i64) {
+        // ADD Xd, Xn, #imm
+        let instruction = 0x91000000 | ((imm as u32 & 0xFFF) << 10) | ((src as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
     fn emit_mul(&mut self, dst: usize, src1: usize, src2: usize) {
         // MUL Xd, Xn, Xm (MADD with XZR)
         let instruction = 0x9B007C00 | ((src2 as u32) << 16) | ((src1 as u32) << 5) | (dst as u32);
@@ -648,6 +706,18 @@ impl Arm64CodeGen {
         let immr = (64 - shift) & 0x3F;
         let imms = 63 - shift;
         let instruction = 0xD3400000 | ((immr as u32) << 16) | ((imms as u32) << 10) | ((src as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_orr_imm(&mut self, dst: usize, src: usize, imm: u32) {
+        // ORR Xd, Xn, #imm (logical OR with immediate)
+        // For small immediates like 3, we can use the logical immediate encoding
+        // The immediate must be encodable as a bitmask (3 = 0b11 is valid)
+        // For imm=3: N=0, immr=62, imms=1 encodes the pattern 0b11
+        let n = 0;
+        let immr = 62; // Rotation
+        let imms = 1;  // Size (pattern 0b11)
+        let instruction = 0xB2400000 | ((n as u32) << 22) | ((immr as u32) << 16) | ((imms as u32) << 10) | ((src as u32) << 5) | (dst as u32);
         self.code.push(instruction);
     }
 
@@ -695,6 +765,8 @@ impl Arm64CodeGen {
         // Using STUR for signed 9-bit offset
         let offset_bits = (offset as u32) & 0x1FF; // 9-bit signed
         let instruction = 0xF8000000 | (offset_bits << 12) | (29 << 5) | (src as u32);
+        eprintln!("DEBUG emit_store_to_fp: offset={}, offset_bits={:03x}, instruction={:08x}",
+                  offset, offset_bits, instruction);
         self.code.push(instruction);
     }
 
@@ -730,6 +802,11 @@ impl Arm64CodeGen {
     ///
     /// Uses a trampoline to safely execute JIT code with proper stack management
     pub fn execute(&self) -> Result<i64, String> {
+        eprintln!("DEBUG: execute() called with {} instructions", self.code.len());
+        eprintln!("DEBUG: JIT code:");
+        for (i, inst) in self.code.iter().enumerate() {
+            eprintln!("  {:04x}: {:08x}", i * 4, inst);
+        }
         let code_size = self.code.len() * 4;
 
         unsafe {
@@ -770,8 +847,11 @@ impl Arm64CodeGen {
             }
 
             // Execute through trampoline for safety
+            eprintln!("DEBUG: Creating trampoline...");
             let trampoline = Trampoline::new(64 * 1024); // 64KB stack
+            eprintln!("DEBUG: Calling trampoline.execute()...");
             let result = trampoline.execute(ptr as *const u8);
+            eprintln!("DEBUG: Trampoline returned: {}", result);
 
             // Explicitly drop trampoline before cleaning up JIT code
             drop(trampoline);
@@ -779,6 +859,7 @@ impl Arm64CodeGen {
             // Clean up
             libc::munmap(ptr, code_size);
 
+            // Return the tagged result (caller is responsible for untagging if needed)
             Ok(result)
         }
     }
@@ -791,7 +872,8 @@ mod tests {
     use crate::clojure_ast::analyze;
     use crate::compiler::Compiler;
     use crate::gc_runtime::GCRuntime;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+    use std::cell::UnsafeCell;
 
     #[test]
     fn test_arm64_codegen_add() {
@@ -799,13 +881,13 @@ mod tests {
         let val = read(code).unwrap();
         let ast = analyze(&val).unwrap();
 
-        let runtime = Arc::new(Mutex::new(GCRuntime::new()));
+        let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
         let mut compiler = Compiler::new(runtime);
         let result_reg = compiler.compile(&ast).unwrap();
         let instructions = compiler.finish();
 
         let mut codegen = Arm64CodeGen::new();
-        let machine_code = codegen.compile(&instructions, &result_reg).unwrap();
+        let machine_code = codegen.compile(&instructions, &result_reg, 0).unwrap();
 
         println!("\nGenerated {} ARM64 instructions for (+ 1 2)", machine_code.len());
         for (i, inst) in machine_code.iter().enumerate() {
@@ -813,7 +895,8 @@ mod tests {
         }
 
         let result = codegen.execute().unwrap();
-        assert_eq!(result, 3);
+        // Result is tagged: 3 << 3 = 24
+        assert_eq!(result, 24);
     }
 
     #[test]
@@ -822,17 +905,18 @@ mod tests {
         let val = read(code).unwrap();
         let ast = analyze(&val).unwrap();
 
-        let runtime = Arc::new(Mutex::new(GCRuntime::new()));
+        let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
         let mut compiler = Compiler::new(runtime);
         let result_reg = compiler.compile(&ast).unwrap();
         let instructions = compiler.finish();
 
         let mut codegen = Arm64CodeGen::new();
-        let machine_code = codegen.compile(&instructions, &result_reg).unwrap();
+        let machine_code = codegen.compile(&instructions, &result_reg, 0).unwrap();
 
         println!("\nGenerated {} ARM64 instructions for (+ (* 2 3) 4)", machine_code.len());
 
         let result = codegen.execute().unwrap();
-        assert_eq!(result, 10);
+        // Result is tagged: 10 << 3 = 80
+        assert_eq!(result, 80);
     }
 }

@@ -20,6 +20,21 @@ use crate::compiler::Compiler;
 use crate::arm_codegen::Arm64CodeGen;
 use crate::gc_runtime::GCRuntime;
 
+/// Print a tagged value, matching Clojure's behavior
+/// nil prints nothing, other values print their untagged representation
+fn print_tagged_value(tagged_value: i64) {
+    match tagged_value {
+        7 => {}, // nil - print nothing, matching Clojure
+        11 => println!("true"),
+        3 => println!("false"),
+        _ => {
+            // Integer - untag and print
+            let untagged = tagged_value >> 3;
+            println!("{}", untagged);
+        }
+    }
+}
+
 fn print_help() {
     println!("\nClojure REPL Commands:");
     println!("  (+ 1 2)           - Execute expression");
@@ -360,7 +375,7 @@ fn run_script(filename: &str) {
                                 let instructions = compiler.take_instructions();
                                 let mut codegen = Arm64CodeGen::new();
 
-                                match codegen.compile(&instructions, &result_reg) {
+                                match codegen.compile(&instructions, &result_reg, 0) {
                                     Ok(_) => {
                                         match codegen.execute() {
                                             Ok(result) => {
@@ -371,8 +386,7 @@ fn run_script(filename: &str) {
                                                     Expr::Ns { .. } |
                                                     Expr::Use { .. }
                                                 ) {
-                                                    // Result is already untagged by codegen
-                                                    println!("{}", result);
+                                                    print_tagged_value(result);
                                                 }
                                             }
                                             Err(e) => {
@@ -601,7 +615,7 @@ fn main() {
                                             Ok(result_reg) => {
                                                 let instructions = repl_compiler.take_instructions();
                                                 let mut codegen = Arm64CodeGen::new();
-                                                match codegen.compile(&instructions, &result_reg) {
+                                                match codegen.compile(&instructions, &result_reg, 0) {
                                                     Ok(code) => {
                                                         print_machine_code(&code);
                                                         println!();
@@ -618,7 +632,7 @@ fn main() {
                                             Ok(result_reg) => {
                                                 let instructions = repl_compiler.take_instructions();
                                                 let mut codegen = Arm64CodeGen::new();
-                                                match codegen.compile(&instructions, &result_reg) {
+                                                match codegen.compile(&instructions, &result_reg, 0) {
                                                     Ok(_) => {
                                                         match codegen.execute() {
                                                             Ok(result) => {
@@ -642,7 +656,7 @@ fn main() {
                                                                     }
                                                                 } else {
                                                                     // For other expressions, print the result value
-                                                                    println!("{}", result);
+                                                                    print_tagged_value(result);
                                                                 }
                                                             }
                                                             Err(e) => eprintln!("Execution error: {}", e),

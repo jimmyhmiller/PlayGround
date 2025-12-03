@@ -6,8 +6,8 @@ import { Widget } from '../components/ui/Widget';
 import { WIDGET_REGISTRY } from './index';
 import { DashboardProvider, useDashboardContext } from '../contexts/DashboardContext';
 
-export const NestedDashboard: FC<BaseWidgetComponentProps> = (props) => {
-  const { theme, config, dashboardId, widgetConversations, reloadTrigger } = props;
+export const NestedDashboard: FC<BaseWidgetComponentProps & { isDropTarget?: boolean; onResize?: any; onDelete?: any; onTransfer?: any }> = (props) => {
+  const { theme, config, dashboardId, widgetConversations, reloadTrigger, isDropTarget = false, onResize, onDelete, onTransfer } = props;
   const nestedConfig = config as NestedDashboardConfig;
   const parentContext = useDashboardContext();
 
@@ -95,6 +95,15 @@ export const NestedDashboard: FC<BaseWidgetComponentProps> = (props) => {
     console.log('✅ Event dispatched:', event);
   };
 
+  // Drop zone styles with pulse animation
+  const dropTargetStyles = isDropTarget ? {
+    border: `2px solid ${effectiveTheme.accent || '#00d9ff'}`,
+    boxShadow: `0 0 20px ${effectiveTheme.accent || '#00d9ff'}44`,
+    animation: 'pulse 1s ease-in-out infinite',
+  } : {
+    border: '1px solid rgba(255,255,255,0.1)',
+  };
+
   return (
     <DashboardProvider
       theme={effectiveTheme}
@@ -104,6 +113,7 @@ export const NestedDashboard: FC<BaseWidgetComponentProps> = (props) => {
     >
       <div
         data-nested-dashboard="true"
+        data-widget-id={config.id}
         onDoubleClick={handleDoubleClick}
         style={{
           width: '100%',
@@ -112,8 +122,33 @@ export const NestedDashboard: FC<BaseWidgetComponentProps> = (props) => {
           overflow: layoutMode === 'infinite-canvas' ? 'hidden' : 'auto',
           backgroundColor: effectiveTheme.bgApp || 'transparent',
           cursor: 'pointer',
+          ...dropTargetStyles,
+          transition: 'border 200ms ease-in-out, box-shadow 200ms ease-in-out',
         }}
       >
+        {isDropTarget && (
+          <div
+            style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              padding: '20px 40px',
+              backgroundColor: `${effectiveTheme.accent || '#00d9ff'}22`,
+              border: `2px dashed ${effectiveTheme.accent || '#00d9ff'}`,
+              borderRadius: '12px',
+              color: effectiveTheme.accent || '#00d9ff',
+              fontFamily: effectiveTheme.textBody,
+              fontSize: '18px',
+              fontWeight: 'bold',
+              zIndex: 1000,
+              pointerEvents: 'none',
+              backdropFilter: 'blur(4px)',
+            }}
+          >
+            Drop here to move widget
+          </div>
+        )}
         <Grid
           cellSize={cellSize}
           gapX={gapX}
@@ -137,6 +172,9 @@ export const NestedDashboard: FC<BaseWidgetComponentProps> = (props) => {
                 widgetConversations={widgetConversations || {}}
                 setWidgetConversations={props.setCurrentConversationId ? () => {} : () => {}}
                 reloadTrigger={reloadTrigger}
+                onResize={onResize}
+                onDelete={onDelete}
+                onTransfer={onTransfer}
                 widgetComponents={WIDGET_REGISTRY}
               />
             );

@@ -1,0 +1,25 @@
+# LLDB command script for debugging JIT code
+# Load with: (lldb) command source debug_commands.lldb
+
+# Custom command to show ARM64 state
+command alias show-state register read x0 x1 x2 x3 x4 x5 x6 x7 x8 x9 x10 x11 x29 x30 sp pc
+
+# Custom command to show stack
+command alias show-stack memory read -fx -c32 $sp
+
+# Custom command to show frame area
+command alias show-frame memory read -fx -c32 $x29
+
+# Custom command to step and show state
+command regex si-show
+s/(.+)/si\nregister read x0 x1 x2 x3 x4 x5 x6 x7 x8 x9 x10 x11 x29 x30 sp pc\n/
+
+# Useful commands:
+# show-state  - Show key registers
+# show-stack  - Show stack memory at SP
+# show-frame  - Show memory at frame pointer
+# si          - Step one instruction
+# si-show     - Step and show registers
+# c           - Continue execution
+# bt          - Backtrace
+# disassemble - Show disassembly

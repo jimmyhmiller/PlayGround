@@ -55,6 +55,9 @@ interface GridItemProps {
   onDrag?: (pos: { x: number; y: number }) => void;
   onDragEnd?: (pos: { x: number; y: number }) => void;
   onResize?: (size: { width: number; height: number }) => void;
+  onDragOverNested?: (targetWidgetId: string) => void;
+  onDragLeaveNested?: () => void;
+  onDropIntoNested?: (targetWidgetId: string) => void;
   className?: string;
   style?: CSSProperties;
 }
@@ -75,6 +78,9 @@ export const GridItem = ({
   onDrag,
   onDragEnd,
   onResize,
+  onDragOverNested,
+  onDragLeaveNested,
+  onDropIntoNested,
   className = '',
   style = {}
 }: GridItemProps) => {
@@ -97,6 +103,8 @@ export const GridItem = ({
   const resizeStartSize = useRef({ width: 0, height: 0 });
   const resizeStartPosition = useRef({ x: 0, y: 0 });
   const isManualResizeRef = useRef(false);
+  const [hoveredNestedId, setHoveredNestedId] = useState<string | null>(null);
+  const lastHoveredNestedIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     registerItem(id, { id, x: position.x, y: position.y, width: size.width, height: size.height });
@@ -245,6 +253,48 @@ export const GridItem = ({
 
         setPosition({ x: snappedX, y: snappedY });
 
+        // ONLY check for nested dashboard collision when BOTH Cmd/Ctrl AND Shift are held
+        // This completely avoids any interference with normal drag operations
+        const isNestingModeActive = e.shiftKey && (e.metaKey || e.ctrlKey);
+
+        if (isNestingModeActive && (onDragOverNested || onDragLeaveNested)) {
+          // Find nested dashboard widgets by checking for data-nested-dashboard attribute
+          let foundNestedId: string | null = null;
+
+          // Use the current mouse position directly for accurate detection
+          const elementsAtPoint = document.elementsFromPoint(e.clientX, e.clientY);
+
+          for (const element of elementsAtPoint) {
+            const nestedDashboard = element.closest('[data-nested-dashboard="true"]');
+            if (nestedDashboard && nestedDashboard !== itemRef.current?.closest('[data-nested-dashboard="true"]')) {
+              const nestedId = nestedDashboard.getAttribute('data-widget-id');
+              if (nestedId) {
+                foundNestedId = nestedId;
+                break;
+              }
+            }
+          }
+
+          // Handle enter/leave events
+          if (foundNestedId !== lastHoveredNestedIdRef.current) {
+            if (lastHoveredNestedIdRef.current && onDragLeaveNested) {
+              onDragLeaveNested();
+            }
+            if (foundNestedId && onDragOverNested) {
+              onDragOverNested(foundNestedId);
+            }
+            lastHoveredNestedIdRef.current = foundNestedId;
+            setHoveredNestedId(foundNestedId);
+          }
+        } else if (lastHoveredNestedIdRef.current) {
+          // Clear nested hover state if not in nesting mode
+          if (onDragLeaveNested) {
+            onDragLeaveNested();
+          }
+          lastHoveredNestedIdRef.current = null;
+          setHoveredNestedId(null);
+        }
+
         if (onDrag) {
           onDrag({ x: snappedX, y: snappedY });
         }
@@ -315,8 +365,21 @@ export const GridItem = ({
 
     const handleMouseUp = () => {
       if (isDragging) {
+        // Handle drop into nested dashboard
+        if (lastHoveredNestedIdRef.current && onDropIntoNested) {
+          onDropIntoNested(lastHoveredNestedIdRef.current);
+        }
+
         setIsDragging(false);
         setCurrentCursor(draggable ? 'grab' : 'default');
+
+        // Reset hover state
+        if (lastHoveredNestedIdRef.current && onDragLeaveNested) {
+          onDragLeaveNested();
+        }
+        lastHoveredNestedIdRef.current = null;
+        setHoveredNestedId(null);
+
         if (onDragEnd) {
           onDragEnd({ x: position.x, y: position.y });
         }
@@ -350,6 +413,9 @@ export const GridItem = ({
     cursor: currentCursor,
     userSelect: (isDragging || isResizing) ? 'none' : 'auto',
     boxSizing: 'border-box',
+    transform: hoveredNestedId ? 'scale(0.6)' : 'scale(1)',
+    transition: hoveredNestedId ? 'transform 200ms ease-in-out' : 'none',
+    opacity: hoveredNestedId ? 0.8 : 1,
     ...style
   };
 

@@ -322,9 +322,10 @@ fn analyze_let(items: &im::Vector<Value>) -> Result<Expr, String> {
     // (let [x 10 y 20] (+ x y))
     //      ^^^^^^^^^  ^^^^^^^^^^
     //      bindings   body
+    // Body is optional: (let [x 10]) returns nil
 
-    if items.len() < 3 {
-        return Err("let requires at least 2 arguments: bindings vector and body".to_string());
+    if items.len() < 2 {
+        return Err("let requires at least 1 argument: bindings vector".to_string());
     }
 
     // Parse bindings vector
@@ -351,13 +352,15 @@ fn analyze_let(items: &im::Vector<Value>) -> Result<Expr, String> {
     }
 
     // Parse body expressions (all evaluated, last one returned)
+    // If empty body, return nil
     let mut body = Vec::new();
     for i in 2..items.len() {
         body.push(analyze(&items[i])?);
     }
 
     if body.is_empty() {
-        return Err("let requires at least one body expression".to_string());
+        // Empty body returns nil
+        body.push(Expr::Literal(Value::Nil));
     }
 
     Ok(Expr::Let { bindings, body })
@@ -401,7 +404,7 @@ mod tests {
         let val = read("(def x 42)").unwrap();
         let expr = analyze(&val).unwrap();
         match expr {
-            Expr::Def { name, value } => {
+            Expr::Def { name, value, .. } => {
                 assert_eq!(name, "x");
                 assert!(matches!(*value, Expr::Literal(Value::Int(42))));
             }

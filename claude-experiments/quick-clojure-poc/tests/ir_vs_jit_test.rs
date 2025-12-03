@@ -20,22 +20,26 @@
 // ❌ Boolean literals as standalone values (true/false work in if conditions)
 
 use quick_clojure_poc::*;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::cell::UnsafeCell;
 
 /// Helper function to run a test case with a fresh compiler
 fn run_test(code: &str, expected: i64) {
     let val = reader::read(code).expect(&format!("Failed to read: {}", code));
     let ast = clojure_ast::analyze(&val).expect(&format!("Failed to analyze: {}", code));
 
-    let runtime = Arc::new(Mutex::new(gc_runtime::GCRuntime::new()));
+    let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     let mut compiler = compiler::Compiler::new(runtime);
     let result_reg = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.finish();
 
     let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg).expect(&format!("Codegen failed for: {}", code));
-    let result = codegen.execute()
+    codegen.compile(&instructions, &result_reg, 0).expect(&format!("Codegen failed for: {}", code));
+    let tagged_result = codegen.execute()
         .expect(&format!("Execute failed for: {}", code));
+
+    // Untag the result (integers are tagged by shifting left 3 bits)
+    let result = tagged_result >> 3;
 
     assert_eq!(result, expected, "Failed for: {}", code);
 }
@@ -72,14 +76,15 @@ fn test_ir_backend_literals() {
         let ast = clojure_ast::analyze(&val).unwrap();
 
         // IR-based backend
-        let runtime = Arc::new(Mutex::new(gc_runtime::GCRuntime::new()));
+        let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
         let mut compiler = compiler::Compiler::new(runtime);
         let result_reg = compiler.compile(&ast).unwrap();
         let instructions = compiler.finish();
 
         let mut codegen = arm_codegen::Arm64CodeGen::new();
-        codegen.compile(&instructions, &result_reg).unwrap();
-        let result = codegen.execute().unwrap();
+        codegen.compile(&instructions, &result_reg, 0).unwrap();
+        let tagged_result = codegen.execute().unwrap();
+        let result = tagged_result >> 3;
 
         assert_eq!(result, expected, "Literal test failed for: {}", code);
     }
@@ -107,14 +112,15 @@ fn test_ir_backend_arithmetic() {
         let val = reader::read(test.expr).unwrap();
         let ast = clojure_ast::analyze(&val).unwrap();
 
-        let runtime = Arc::new(Mutex::new(gc_runtime::GCRuntime::new()));
+        let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
         let mut compiler = compiler::Compiler::new(runtime);
         let result_reg = compiler.compile(&ast).unwrap();
         let instructions = compiler.finish();
 
         let mut codegen = arm_codegen::Arm64CodeGen::new();
-        codegen.compile(&instructions, &result_reg).unwrap();
-        let result = codegen.execute().unwrap();
+        codegen.compile(&instructions, &result_reg, 0).unwrap();
+        let tagged_result = codegen.execute().unwrap();
+        let result = tagged_result >> 3;
 
         assert_eq!(result, test.expected, "Failed for: {}", test.expr);
     }
@@ -286,7 +292,8 @@ fn test_ir_backend_mixed_operations() {
 #[test]
 fn test_ir_backend_def_with_persistent_compiler() {
     // This test simulates REPL behavior with a persistent compiler
-    let runtime = Arc::new(Mutex::new(gc_runtime::GCRuntime::new()));
+    let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
+    trampoline::set_runtime(runtime.clone());
     let mut compiler = compiler::Compiler::new(runtime);
 
     // Define a variable
@@ -296,14 +303,13 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let result_reg = compiler.compile(&ast).unwrap();
     let instructions = compiler.take_instructions();
     let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg).unwrap();
-    let result = codegen.execute().unwrap();
-    assert_eq!(result, 5);
+    codegen.compile(&instructions, &result_reg, 0).unwrap();
+    let tagged_result = codegen.execute().unwrap();
+    assert_eq!(tagged_result >> 3, 5);
 
     // Store the result in globals (simulating REPL behavior)
     if let clojure_ast::Expr::Def { name, .. } = &ast {
-        let tagged_value = (result as isize) << 3;
-        compiler.set_global(name.clone(), tagged_value);
+        compiler.set_global(name.clone(), tagged_result as isize);
     }
 
     // Use the variable
@@ -313,9 +319,9 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let result_reg = compiler.compile(&ast).unwrap();
     let instructions = compiler.take_instructions();
     let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg).unwrap();
-    let result = codegen.execute().unwrap();
-    assert_eq!(result, 5);
+    codegen.compile(&instructions, &result_reg, 0).unwrap();
+    let tagged_result = codegen.execute().unwrap();
+    assert_eq!(tagged_result >> 3, 5);
 
     // Define another variable using the first
     let code = "(def y (* x 2))";
@@ -324,13 +330,12 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let result_reg = compiler.compile(&ast).unwrap();
     let instructions = compiler.take_instructions();
     let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg).unwrap();
-    let result = codegen.execute().unwrap();
-    assert_eq!(result, 10);
+    codegen.compile(&instructions, &result_reg, 0).unwrap();
+    let tagged_result = codegen.execute().unwrap();
+    assert_eq!(tagged_result >> 3, 10);
 
     if let clojure_ast::Expr::Def { name, .. } = &ast {
-        let tagged_value = (result as isize) << 3;
-        compiler.set_global(name.clone(), tagged_value);
+        compiler.set_global(name.clone(), tagged_result as isize);
     }
 
     // Use both variables
@@ -340,7 +345,7 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let result_reg = compiler.compile(&ast).unwrap();
     let instructions = compiler.take_instructions();
     let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg).unwrap();
-    let result = codegen.execute().unwrap();
-    assert_eq!(result, 15);
+    codegen.compile(&instructions, &result_reg, 0).unwrap();
+    let tagged_result = codegen.execute().unwrap();
+    assert_eq!(tagged_result >> 3, 15);
 }
