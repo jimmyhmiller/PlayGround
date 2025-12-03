@@ -32,6 +32,15 @@ pub enum Value {
         params: Vec<String>,
         // body will be added later
     },
+
+    // Namespace object (for future heap allocation)
+    // For now, used as documentation of structure
+    // In Phase 2, this will be heap-allocated with GC
+    Namespace {
+        name: String,
+        mappings: std::collections::HashMap<String, isize>, // symbol → tagged value
+        used_namespaces: Vec<String>,                        // namespace names that are used
+    },
 }
 
 impl Value {
@@ -71,6 +80,7 @@ impl std::hash::Hash for Value {
                 "set".hash(state);
             }
             Value::Function { name, .. } => name.hash(state),
+            Value::Namespace { name, .. } => name.hash(state),
         }
     }
 }
@@ -130,6 +140,9 @@ impl fmt::Display for Value {
             }
             Value::Function { name, params, .. } => {
                 write!(f, "#<fn {}>", name.as_deref().unwrap_or("anonymous"))
+            }
+            Value::Namespace { name, mappings, .. } => {
+                write!(f, "#<Namespace {} with {} vars>", name, mappings.len())
             }
         }
     }

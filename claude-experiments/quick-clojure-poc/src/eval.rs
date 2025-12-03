@@ -24,17 +24,35 @@ impl Evaluator {
 
             Expr::Quote(value) => Ok(value.clone()),
 
-            Expr::Var(name) => {
+            Expr::Var { namespace, name } => {
+                // For now, ignore namespaces in the simple evaluator
+                // Just look up the bare name
+                let _ = namespace;  // Suppress warning
                 self.globals
                     .get(name)
                     .cloned()
                     .ok_or_else(|| format!("Undefined variable: {}", name))
             }
 
-            Expr::Def { name, value } => {
+            Expr::Ns { .. } => {
+                // Namespace declaration - just return nil in simple evaluator
+                Ok(Value::Nil)
+            }
+
+            Expr::Use { .. } => {
+                // Use declaration - just return nil in simple evaluator
+                Ok(Value::Nil)
+            }
+
+            Expr::Def { name, value, metadata: _ } => {
+                // Simple evaluator ignores metadata
                 let val = self.eval(value)?;
                 self.globals.insert(name.clone(), val.clone());
                 Ok(val)
+            }
+
+            Expr::Set { .. } => {
+                Err("set! not supported in simple evaluator (use JIT compiler)".to_string())
             }
 
             Expr::If { test, then, else_ } => {
@@ -56,15 +74,20 @@ impl Evaluator {
                 Ok(last)
             }
 
+            Expr::Binding { .. } => {
+                // Dynamic bindings not supported in simple evaluator
+                Err("binding form not supported in simple evaluator (use JIT compiler)".to_string())
+            }
+
             Expr::Call { func, args } => {
                 // Evaluate function position
-                if let Expr::Var(name) = &**func {
+                if let Expr::Var { name, .. } = &**func {
                     // Evaluate arguments
                     let arg_vals: Result<Vec<_>, _> =
                         args.iter().map(|arg| self.eval(arg)).collect();
                     let arg_vals = arg_vals?;
 
-                    // Call builtin
+                    // Call builtin (ignore namespaces for now in simple evaluator)
                     match name.as_str() {
                         "+" => self.builtin_add(&arg_vals),
                         "-" => self.builtin_sub(&arg_vals),

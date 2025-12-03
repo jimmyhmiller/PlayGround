@@ -37,6 +37,7 @@ public class DirectoryTester {
             System.err.println("  --max-failures=N        Stop after N Java parser failures (Acorn succeeded but Java failed) (default: unlimited)");
             System.err.println("  --max-mismatches=N      Stop after N AST mismatches (both succeeded but different ASTs) (default: unlimited)");
             System.err.println("  --max-too-permissive=N  Stop after N cases where Java is too permissive (Java succeeded but Acorn failed) (default: unlimited)");
+            System.err.println("  --cache                 Cache Acorn AST results for failures and mismatches (creates test-oracles/adhoc-cache)");
             System.err.println("");
             System.err.println("Categories:");
             System.err.println("  - Both succeeded + matched: Perfect agreement");
@@ -51,6 +52,7 @@ public class DirectoryTester {
         int maxFailures = Integer.MAX_VALUE;
         int maxMismatches = Integer.MAX_VALUE;
         int maxTooPermissive = Integer.MAX_VALUE;
+        boolean enableCaching = false;
 
         // Parse arguments
         for (int i = 1; i < args.length; i++) {
@@ -75,6 +77,8 @@ public class DirectoryTester {
                     System.err.println("Invalid value for --max-too-permissive: " + args[i]);
                     System.exit(1);
                 }
+            } else if (args[i].equals("--cache")) {
+                enableCaching = true;
             }
         }
 
@@ -87,6 +91,9 @@ public class DirectoryTester {
 
         System.out.println("Ad-hoc directory testing (real-time comparison)");
         System.out.println("Directory: " + targetDir.toAbsolutePath());
+        if (enableCaching) {
+            System.out.println("Caching enabled: Acorn results will be saved to test-oracles/adhoc-cache");
+        }
         System.out.println("");
 
         // Collect all files
@@ -97,6 +104,14 @@ public class DirectoryTester {
         if (jsFiles.isEmpty()) {
             System.out.println("No JavaScript files found");
             return;
+        }
+
+        // Setup cache builder if caching is enabled
+        AcornCacheBuilder cacheBuilder = null;
+        AtomicInteger cachedCount = new AtomicInteger(0);
+        if (enableCaching) {
+            Path cacheDir = Paths.get("test-oracles/adhoc-cache");
+            cacheBuilder = new AcornCacheBuilder(cacheDir);
         }
 
         // Process files
@@ -171,27 +186,107 @@ public class DirectoryTester {
                     acornFailed.incrementAndGet();
                 }
 
-                // Parse with Java
-                boolean isModule = acornSucceeded ? acornResult.sourceType.equals("module") :
-                    (file.toString().endsWith(".mjs") || source.contains("import ") || source.contains("export "));
-
+                // Parse with Java - try both script and module mode
+                // If Acorn succeeded, we know the correct mode; otherwise try both
                 Program javaAst = null;
                 boolean javaSucceeded = false;
                 String javaError = null;
+                boolean usedModuleMode = false;
 
-                try {
-                    javaAst = Parser.parse(source, isModule);
-                    javaSucceeded = true;
-                    javaSuccess.incrementAndGet();
-                } catch (ParseException e) {
-                    javaFailed.incrementAndGet();
-                    javaError = e.getMessage();
-                    if (javaError != null && javaError.length() > 100) {
-                        javaError = javaError.substring(0, 100);
+                if (acornSucceeded) {
+                    // We know the correct mode from Acorn
+                    boolean isModule = acornResult.sourceType.equals("module");
+                    try {
+                        javaAst = Parser.parse(source, isModule);
+                        javaSucceeded = true;
+                        usedModuleMode = isModule;
+                        javaSuccess.incrementAndGet();
+                    } catch (ParseException e) {
+                        javaFailed.incrementAndGet();
+                        javaError = e.getMessage();
+
+                        // Write first parse error details to file for debugging
+                        if (javaFailed.get() == 1) {
+                            try {
+                                StringBuilder debug = new StringBuilder();
+                                debug.append("File: ").append(relativePath).append("\n");
+                                debug.append("Error: ").append(javaError).append("\n");
+
+                                Token token = e.getToken();
+                                if (token != null) {
+                                    debug.append("Line: ").append(token.line()).append(" Column: ").append(token.column()).append("\n");
+                                    debug.append("Token: ").append(token).append("\n");
+                                }
+                                debug.append("IsModule: ").append(isModule).append("\n\n");
+
+                                // Try to get source context
+                                if (token != null && token.line() > 0) {
+                                    String[] lines = source.split("\n");
+                                    int lineIdx = token.line() - 1;
+                                    if (lineIdx >= 0 && lineIdx < lines.length) {
+                                        String line = lines[lineIdx];
+                                        int col = token.column();
+                                        int start = Math.max(0, col - 100);
+                                        int end = Math.min(line.length(), col + 100);
+                                        debug.append("Source context:\n");
+                                        debug.append(line.substring(start, end)).append("\n");
+                                        if (col - start >= 0) {
+                                            debug.append(" ".repeat(Math.min(col - start, 100))).append("^\n");
+                                        }
+                                    }
+                                }
+
+                                Files.writeString(Paths.get("/tmp/java-parser-error.txt"), debug.toString());
+                                System.out.println("\n=== First Java parser error written to /tmp/java-parser-error.txt ===");
+                            } catch (Exception debugErr) {
+                                System.out.println("Debug error: " + debugErr.getMessage());
+                            }
+                        }
+
+                        if (javaError != null && javaError.length() > 100) {
+                            javaError = javaError.substring(0, 100);
+                        }
+                    } catch (Exception e) {
+                        javaFailed.incrementAndGet();
+                        javaError = e.getMessage();
                     }
-                } catch (Exception e) {
-                    javaFailed.incrementAndGet();
-                    javaError = e.getMessage();
+                } else {
+                    // Acorn failed - try both modes and see if either works
+                    Program scriptAst = null;
+                    Program moduleAst = null;
+                    Exception scriptError = null;
+                    Exception moduleError = null;
+
+                    try {
+                        scriptAst = Parser.parse(source, false);
+                    } catch (Exception e) {
+                        scriptError = e;
+                    }
+
+                    try {
+                        moduleAst = Parser.parse(source, true);
+                    } catch (Exception e) {
+                        moduleError = e;
+                    }
+
+                    if (scriptAst != null) {
+                        javaAst = scriptAst;
+                        javaSucceeded = true;
+                        usedModuleMode = false;
+                        javaSuccess.incrementAndGet();
+                    } else if (moduleAst != null) {
+                        javaAst = moduleAst;
+                        javaSucceeded = true;
+                        usedModuleMode = true;
+                        javaSuccess.incrementAndGet();
+                    } else {
+                        javaFailed.incrementAndGet();
+                        javaError = scriptError != null ? scriptError.getMessage() :
+                                   (moduleError != null ? moduleError.getMessage() : "Unknown error");
+                        if (javaError != null && javaError.length() > 100) {
+                            javaError = javaError.substring(0, 100);
+                        }
+                    }
                 }
 
                 // Analyze outcomes
@@ -206,6 +301,18 @@ public class DirectoryTester {
                     }
                     if (javaFailedFiles.size() < 50) {
                         javaFailedFiles.add(relativePath + ": " + javaError);
+                    }
+
+                    // Cache Acorn result for test generation
+                    if (cacheBuilder != null && acornResult.astJson != null) {
+                        try {
+                            AcornCacheBuilder.CacheResult cacheResult = cacheBuilder.cacheFile(file, acornResult.sourceType);
+                            if (cacheResult.success) {
+                                cachedCount.incrementAndGet();
+                            }
+                        } catch (Exception cacheErr) {
+                            // Ignore caching errors
+                        }
                     }
                 } else if (!acornSucceeded && javaSucceeded) {
                     // Java succeeded but Acorn failed - Java is too permissive
@@ -234,6 +341,29 @@ public class DirectoryTester {
                             mismatchedFiles.add(relativePath);
                         }
 
+                        // Write first mismatch ASTs to files for debugging
+                        if (mismatched.get() == 1) {
+                            try {
+                                Files.writeString(Paths.get("/tmp/acorn-ast-mismatch.json"), acornJson);
+                                Files.writeString(Paths.get("/tmp/java-ast-mismatch.json"), javaJson);
+                                System.out.println("\n=== First mismatch found in: " + relativePath + " ===");
+                                System.out.println("ASTs written to /tmp/acorn-ast-mismatch.json and /tmp/java-ast-mismatch.json");
+                            } catch (IOException debugErr) {
+                                // Ignore
+                            }
+                        }
+
+                        // Cache Acorn result for test generation
+                        if (cacheBuilder != null) {
+                            try {
+                                AcornCacheBuilder.CacheResult cacheResult = cacheBuilder.cacheFile(file, acornResult.sourceType);
+                                if (cacheResult.success) {
+                                    cachedCount.incrementAndGet();
+                                }
+                            } catch (Exception cacheErr) {
+                                // Ignore caching errors
+                            }
+                        }
                     }
                 }
             } catch (Exception e) {
@@ -294,6 +424,13 @@ public class DirectoryTester {
                 .limit(20)
                 .forEach(e -> System.out.printf("  [%d] %s%n", e.getValue(), e.getKey()));
         }
+
+        if (enableCaching && cachedCount.get() > 0) {
+            System.out.println("\n=== Cache Summary ===");
+            System.out.printf("Cached %d Acorn AST results to test-oracles/adhoc-cache%n", cachedCount.get());
+            System.out.println("\nTo generate JUnit tests from cached results, run:");
+            System.out.println("  mvn exec:java -Dexec.mainClass=\"com.jsparser.TestGeneratorFromCache\"");
+        }
     }
 
     private static List<Path> collectJsFiles(Path dir) throws IOException {
@@ -311,17 +448,35 @@ public class DirectoryTester {
     }
 
     private static AcornResult parseWithAcorn(String source, Path filePath) {
-        try {
-            // Determine source type
-            String sourceType = "script";
-            if (filePath.toString().endsWith(".mjs") ||
-                source.contains("import ") ||
-                source.contains("export ") ||
-                source.contains("flags:\n  - module") ||
-                source.contains("flags: [module]")) {
-                sourceType = "module";
-            }
+        // Try both script and module mode, prefer the one that succeeds
+        // If both succeed, prefer module if file is .mjs or has import/export
+        AcornResult scriptResult = tryParseWithAcorn(source, filePath, "script");
+        AcornResult moduleResult = tryParseWithAcorn(source, filePath, "module");
 
+        // If both succeed, prefer module for .mjs files or files with import/export
+        if (scriptResult.success && moduleResult.success) {
+            boolean preferModule = filePath.toString().endsWith(".mjs") ||
+                                  source.contains("import ") ||
+                                  source.contains("export ") ||
+                                  source.contains("flags:\n  - module") ||
+                                  source.contains("flags: [module]");
+            return preferModule ? moduleResult : scriptResult;
+        }
+
+        // Return whichever succeeded
+        if (scriptResult.success) {
+            return scriptResult;
+        }
+        if (moduleResult.success) {
+            return moduleResult;
+        }
+
+        // Both failed, return script error
+        return scriptResult;
+    }
+
+    private static AcornResult tryParseWithAcorn(String source, Path filePath, String sourceType) {
+        try {
             // Write AST to temp file to avoid pipe buffer limits (64KB)
             Path tempFile = Files.createTempFile("acorn-ast-", ".json");
 

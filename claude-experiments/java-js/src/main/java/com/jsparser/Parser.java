@@ -626,8 +626,10 @@ public class Parser {
         boolean savedInGenerator = inGenerator;
         boolean savedInAsyncContext = inAsyncContext;
         boolean savedStrictMode = strictMode;
+        boolean savedInClassFieldInitializer = inClassFieldInitializer;
         inGenerator = isGenerator;
         inAsyncContext = isAsync;
+        inClassFieldInitializer = false; // Function bodies are never class field initializers
 
         // Parse parameters
         consume(TokenType.LPAREN, "Expected '(' after function name");
@@ -678,6 +680,7 @@ public class Parser {
         inGenerator = savedInGenerator;
         inAsyncContext = savedInAsyncContext;
         strictMode = savedStrictMode;
+        inClassFieldInitializer = savedInClassFieldInitializer;
 
         Token endToken = previous();
         SourceLocation loc = createLocation(startToken, endToken);
@@ -2021,7 +2024,9 @@ public class Parser {
     private Expression parseArrowFunctionBody(Token startToken, List<Pattern> params, boolean isAsync) {
         // Save and set async context for arrow function body
         boolean savedInAsyncContext = inAsyncContext;
+        boolean savedInClassFieldInitializer = inClassFieldInitializer;
         inAsyncContext = isAsync;
+        inClassFieldInitializer = false; // Function bodies are never class field initializers
 
         try {
             // Arrow function body can be an expression or block statement
@@ -2054,6 +2059,7 @@ public class Parser {
             }
         } finally {
             inAsyncContext = savedInAsyncContext;
+            inClassFieldInitializer = savedInClassFieldInitializer;
         }
     }
 
@@ -2435,17 +2441,14 @@ public class Parser {
                                    !checkAhead(1, TokenType.PLUS_ASSIGN) &&
                                    !checkAhead(1, TokenType.MINUS_ASSIGN);
             } else if (!inAsyncContext && !forceModuleMode) {
-                // Script mode (non-async): use full lookahead to distinguish identifier from expression
-                // Avoid parsing "await = x", "await: label", or standalone "await;" as AwaitExpression
-                shouldParseAsAwait = !checkAhead(1, TokenType.COLON) &&
-                                   !checkAhead(1, TokenType.SEMICOLON) &&
-                                   !checkAhead(1, TokenType.ASSIGN) &&
-                                   !checkAhead(1, TokenType.PLUS_ASSIGN) &&
-                                   !checkAhead(1, TokenType.MINUS_ASSIGN);
+                // Script mode (non-async, non-module): await is ALWAYS a regular identifier
+                // It is NEVER an AwaitExpression in script mode
+                shouldParseAsAwait = false;
             }
 
             // Class field initializer validation: reject AwaitExpression patterns
             // Even though we won't parse it as AwaitExpression, we need to detect and reject the pattern
+            // NOTE: Class field initializers cannot use await even in module mode
             if (inClassFieldInitializer && !shouldParseAsAwait) {
                 // Check if 'await' is followed by what looks like an AwaitExpression argument
                 // Reject patterns like: await foo, await x.y, await (expr), await func(), etc.
@@ -2819,8 +2822,10 @@ public class Parser {
                     boolean savedInGenerator = inGenerator;
                     boolean savedInAsyncContext = inAsyncContext;
                     boolean savedStrictMode = strictMode;
+                    boolean savedInClassFieldInitializer = inClassFieldInitializer;
                     inGenerator = isGenerator;
                     inAsyncContext = true; // async function expression
+                    inClassFieldInitializer = false; // Function bodies are never class field initializers
 
                     // Reset strict mode for function body (unless in module mode)
                     if (!forceModuleMode) {
@@ -2835,6 +2840,7 @@ public class Parser {
                     inGenerator = savedInGenerator;
                     inAsyncContext = savedInAsyncContext;
                     strictMode = savedStrictMode;
+                    inClassFieldInitializer = savedInClassFieldInitializer;
 
                     Token endToken = previous();
                     SourceLocation loc = createLocation(startToken, endToken);
@@ -3309,39 +3315,44 @@ public class Parser {
                 Expression callee = parsePrimary();
 
                 // Handle member/subscript access on constructor
-                while (match(TokenType.DOT)) {
-                    if (match(TokenType.HASH)) {
-                        // Private field: new obj.#method()
-                        Token hashToken = previous();
-                        Token propertyToken = peek();
-                        if (!check(TokenType.IDENTIFIER)) {
-                            throw new ExpectedTokenException("identifier", peek());
+                // Loop to handle chains like: new A.B[C].D[E].F
+                while (true) {
+                    if (match(TokenType.DOT)) {
+                        if (match(TokenType.HASH)) {
+                            // Private field: new obj.#method()
+                            Token hashToken = previous();
+                            Token propertyToken = peek();
+                            if (!check(TokenType.IDENTIFIER)) {
+                                throw new ExpectedTokenException("identifier", peek());
+                            }
+                            advance();
+                            Expression property = new PrivateIdentifier(getStart(hashToken), getEnd(propertyToken), createLocation(hashToken, propertyToken), propertyToken.lexeme());
+                            Token memberEnd = previous();
+                            SourceLocation memberLoc = createLocation(calleeStartToken, memberEnd);
+                            callee = new MemberExpression(getStart(calleeStartToken), getEnd(memberEnd), memberLoc, callee, property, false, false);
+                        } else {
+                            Token propertyToken = peek();
+                            if (!check(TokenType.IDENTIFIER) && !isKeyword(propertyToken) &&
+                                !check(TokenType.TRUE) && !check(TokenType.FALSE) && !check(TokenType.NULL)) {
+                                throw new ExpectedTokenException("property name", peek());
+                            }
+                            advance();
+                            Expression property = new Identifier(getStart(propertyToken), getEnd(propertyToken), createLocation(propertyToken, propertyToken), propertyToken.lexeme());
+                            Token memberEnd = previous();
+                            SourceLocation memberLoc = createLocation(calleeStartToken, memberEnd);
+                            callee = new MemberExpression(getStart(calleeStartToken), getEnd(memberEnd), memberLoc, callee, property, false, false);
                         }
-                        advance();
-                        Expression property = new PrivateIdentifier(getStart(hashToken), getEnd(propertyToken), createLocation(hashToken, propertyToken), propertyToken.lexeme());
+                    } else if (match(TokenType.LBRACKET)) {
+                        // Handle computed member expression
+                        Expression property = parseExpression();
+                        consume(TokenType.RBRACKET, "Expected ']' after computed property");
                         Token memberEnd = previous();
                         SourceLocation memberLoc = createLocation(calleeStartToken, memberEnd);
-                        callee = new MemberExpression(getStart(calleeStartToken), getEnd(memberEnd), memberLoc, callee, property, false, false);
+                        callee = new MemberExpression(getStart(calleeStartToken), getEnd(memberEnd), memberLoc, callee, property, true, false);
                     } else {
-                        Token propertyToken = peek();
-                        if (!check(TokenType.IDENTIFIER) && !isKeyword(propertyToken) &&
-                            !check(TokenType.TRUE) && !check(TokenType.FALSE) && !check(TokenType.NULL)) {
-                            throw new ExpectedTokenException("property name", peek());
-                        }
-                        advance();
-                        Expression property = new Identifier(getStart(propertyToken), getEnd(propertyToken), createLocation(propertyToken, propertyToken), propertyToken.lexeme());
-                        Token memberEnd = previous();
-                        SourceLocation memberLoc = createLocation(calleeStartToken, memberEnd);
-                        callee = new MemberExpression(getStart(calleeStartToken), getEnd(memberEnd), memberLoc, callee, property, false, false);
+                        // No more member access
+                        break;
                     }
-                }
-                // Handle computed member expression
-                if (match(TokenType.LBRACKET)) {
-                    Expression property = parseExpression();
-                    consume(TokenType.RBRACKET, "Expected ']' after computed property");
-                    Token memberEnd = previous();
-                    SourceLocation memberLoc = createLocation(calleeStartToken, memberEnd);
-                    callee = new MemberExpression(getStart(calleeStartToken), getEnd(memberEnd), memberLoc, callee, property, true, false);
                 }
 
                 // Handle tagged template: new tag`template`

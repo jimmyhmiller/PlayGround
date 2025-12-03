@@ -75,6 +75,12 @@ export const NestedDashboard: FC<BaseWidgetComponentProps> = (props) => {
   }
 
   const handleDoubleClick = () => {
+    console.log('🎯 Double-click detected on nested dashboard!', {
+      nestedDashboard,
+      parentDashboardId: dashboardId,
+      widgetId: config.id,
+    });
+
     // Emit custom event to tell App.tsx to navigate to this nested dashboard
     const event = new CustomEvent('navigate-to-nested-dashboard', {
       detail: {
@@ -86,6 +92,7 @@ export const NestedDashboard: FC<BaseWidgetComponentProps> = (props) => {
       bubbles: true,
     });
     window.dispatchEvent(event);
+    console.log('✅ Event dispatched:', event);
   };
 
   return (

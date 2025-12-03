@@ -1,6 +1,14 @@
 use crate::value::Value;
 use clojure_reader::edn::{Edn, read_string};
-use im::{vector, hashmap, hashset};
+use im::{vector, hashmap, hashset, HashMap};
+
+/// Metadata attached to a value
+/// Used for ^:dynamic and other metadata annotations
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithMetadata {
+    pub value: Value,
+    pub metadata: HashMap<String, Value>,
+}
 
 /// Convert clojure-reader's Edn to our Value representation
 pub fn edn_to_value(edn: &Edn) -> Result<Value, String> {

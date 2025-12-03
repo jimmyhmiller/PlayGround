@@ -17,6 +17,7 @@ interface DashboardProps {
   dashboardVersion?: number;
   onRefreshProjects?: () => void;
   onDashboardsChange?: () => void;
+  breadcrumbs?: Array<{ title: string; onClick: () => void }>;
 }
 
 export const Dashboard: FC<DashboardProps> = ({
@@ -29,7 +30,8 @@ export const Dashboard: FC<DashboardProps> = ({
   setWidgetConversations,
   dashboardVersion,
   onRefreshProjects,
-  onDashboardsChange
+  onDashboardsChange,
+  breadcrumbs
 }) => {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -134,8 +136,20 @@ export const Dashboard: FC<DashboardProps> = ({
     }
   };
 
+  const getWindowFrameHeight = () => {
+    switch (layoutMode) {
+      case 'vertical-scroll':
+      case 'horizontal-scroll':
+        return 'auto';
+      case 'infinite-canvas':
+      case 'single-pane':
+      default:
+        return '100vh';
+    }
+  };
+
   return (
-    <div className="window-frame" style={{ '--accent': theme.accent, overflow: getWindowFrameOverflow() } as any}>
+    <div className="window-frame" style={{ '--accent': theme.accent, overflow: getWindowFrameOverflow(), height: getWindowFrameHeight(), minHeight: layoutMode === 'vertical-scroll' || layoutMode === 'horizontal-scroll' ? '100vh' : undefined } as any}>
       <div className="titlebar" />
       <div className="bg-layer" style={theme.bgLayer as any} />
       <div className="sidebar">
@@ -170,7 +184,30 @@ export const Dashboard: FC<DashboardProps> = ({
       <div className="dashboard" style={{ backgroundColor: theme.bgApp }}>
         <div className="header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <h1 style={{ fontFamily: theme.textHead, color: theme.textColor }}>{dashboard.title}</h1>
+            {breadcrumbs && breadcrumbs.length > 0 ? (
+              <h1 style={{ fontFamily: theme.textHead, color: theme.textColor, display: 'flex', alignItems: 'center', gap: '12px' }}>
+                {breadcrumbs.map((crumb, index) => (
+                  <span key={index} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <span
+                      onClick={crumb.onClick}
+                      style={{
+                        cursor: 'pointer',
+                        opacity: 0.6,
+                        transition: 'opacity 0.2s ease',
+                      }}
+                      onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+                      onMouseLeave={(e) => e.currentTarget.style.opacity = '0.6'}
+                    >
+                      {crumb.title}
+                    </span>
+                    <span style={{ opacity: 0.4, fontWeight: 300 }}>›</span>
+                  </span>
+                ))}
+                <span>{dashboard.title}</span>
+              </h1>
+            ) : (
+              <h1 style={{ fontFamily: theme.textHead, color: theme.textColor }}>{dashboard.title}</h1>
+            )}
             <p style={{ fontFamily: theme.textBody, color: theme.accent }}>{dashboard.subtitle}</p>
           </div>
           {hasRegeneratableWidgets && (

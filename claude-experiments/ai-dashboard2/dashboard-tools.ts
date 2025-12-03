@@ -342,6 +342,210 @@ export function createDashboardTools(
     )
   );
 
+  // Generic tool to update any widget property
+  tools.push(
+    tool(
+      'update_widget',
+      'Update any property of a widget in the dashboard',
+      {
+        widgetId: z.string().describe('ID of the widget to update'),
+        property: z.string().describe('Property name to update (e.g., "label", "width", "height")'),
+        value: z.any().describe('New value for the property')
+      },
+      async ({ widgetId, property, value }: { widgetId: string; property: string; value: any }) => {
+        const result = updateDashboard((dashboard) => {
+          const targetWidget = dashboard.widgets.find(w => w.id === widgetId);
+          if (!targetWidget) {
+            return { error: `Widget ${widgetId} not found` };
+          }
+          (targetWidget as any)[property] = value;
+          return { message: `Updated widget ${widgetId}: ${property} = ${JSON.stringify(value)}` };
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: result.error || result.message || 'Updated successfully'
+            }
+          ],
+          isError: !!result.error
+        };
+      }
+    )
+  );
+
+  // Tool to add a new widget
+  tools.push(
+    tool(
+      'add_widget',
+      'Add a new widget to the dashboard',
+      {
+        type: z.string().describe('Type of widget to add (e.g., "bar-chart", "stat", "progress", "chat", "todo-list", "key-value", etc.)'),
+        id: z.string().describe('Unique ID for the widget'),
+        x: z.number().describe('X position'),
+        y: z.number().describe('Y position'),
+        width: z.number().describe('Widget width'),
+        height: z.number().describe('Widget height'),
+        config: z.object({}).passthrough().optional().describe('Additional widget configuration (label, data, etc.)')
+      },
+      async ({ type, id, x, y, width, height, config }: {
+        type: string;
+        id: string;
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        config?: Record<string, any>
+      }) => {
+        const result = updateDashboard((dashboard) => {
+          // Check if ID already exists
+          if (dashboard.widgets.find(w => w.id === id)) {
+            return { error: `Widget with ID ${id} already exists` };
+          }
+
+          const newWidget: any = {
+            id,
+            type,
+            x,
+            y,
+            width,
+            height,
+            ...config
+          };
+
+          dashboard.widgets.push(newWidget);
+          return { message: `Added ${type} widget with ID: ${id}` };
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: result.error || result.message || 'Widget added successfully'
+            }
+          ],
+          isError: !!result.error
+        };
+      }
+    )
+  );
+
+  // Tool to remove a widget
+  tools.push(
+    tool(
+      'remove_widget',
+      'Remove a widget from the dashboard',
+      {
+        widgetId: z.string().describe('ID of the widget to remove')
+      },
+      async ({ widgetId }: { widgetId: string }) => {
+        const result = updateDashboard((dashboard) => {
+          const index = dashboard.widgets.findIndex(w => w.id === widgetId);
+          if (index === -1) {
+            return { error: `Widget ${widgetId} not found` };
+          }
+          const removed = dashboard.widgets.splice(index, 1)[0];
+          return { message: `Removed ${removed.type} widget: ${widgetId}` };
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: result.error || result.message || 'Widget removed successfully'
+            }
+          ],
+          isError: !!result.error
+        };
+      }
+    )
+  );
+
+  // Ask user a question with multiple choice or custom input (available in all modes)
+  tools.push(
+    tool(
+      'AskUserQuestion',
+      'Ask the user one or more questions during planning. Can ask a single question or multiple questions at once. All questions are shown together and all answers collected before returning. Use this when you need clarification before proposing a plan.',
+      {
+        questions: z.union([
+          // Single question (backward compatible)
+          z.object({
+            question: z.string().describe('The question to ask'),
+            options: z.array(z.string()).optional().describe('Optional predefined choices'),
+            allowMultiple: z.boolean().optional().default(false).describe('Allow multiple selections'),
+            allowCustom: z.boolean().optional().default(true).describe('Show "type my own answer" option')
+          }),
+          // Multiple questions
+          z.array(z.object({
+            id: z.string().describe('Unique ID for this question (e.g., "widget-type", "position")'),
+            question: z.string().describe('The question to ask'),
+            options: z.array(z.string()).optional().describe('Optional predefined choices'),
+            allowMultiple: z.boolean().optional().default(false).describe('Allow multiple selections'),
+            allowCustom: z.boolean().optional().default(true).describe('Show "type my own answer" option')
+          }))
+        ]).describe('Either a single question object or an array of question objects to ask together')
+      },
+      async ({ questions }: { questions: any }) => {
+        try {
+          const { ipcMain, BrowserWindow } = await import('electron');
+          const mainWindow = BrowserWindow.getAllWindows()[0];
+
+          if (!mainWindow) {
+            return {
+              content: [{
+                type: 'text',
+                text: 'Error: No window available to display question'
+              }],
+              isError: true
+            };
+          }
+
+          // Normalize to array format
+          const questionArray = Array.isArray(questions)
+            ? questions
+            : [{ id: 'single', ...questions }];
+
+          // Send the questions to the renderer and wait for response
+          return new Promise((resolve) => {
+            // Set up one-time listener for the answer
+            const answerId = `question-${Date.now()}`;
+
+            ipcMain.once(`question-answer-${answerId}`, (_event: any, answers: any) => {
+              // If it was a single question, return just the answer value
+              const result = Array.isArray(questions)
+                ? answers
+                : answers.single;
+
+              resolve({
+                content: [{
+                  type: 'text',
+                  text: `User answered: ${JSON.stringify(result)}`
+                }],
+                isError: false
+              });
+            });
+
+            // Send questions to renderer
+            mainWindow.webContents.send('ask-user-question', {
+              id: answerId,
+              questions: questionArray,
+              isMultiple: Array.isArray(questions)
+            });
+          });
+        } catch (error: any) {
+          return {
+            content: [{
+              type: 'text',
+              text: `Error asking question: ${error.message}`
+            }],
+            isError: true
+          };
+        }
+      }
+    )
+  );
+
   // Create the MCP server with these tools
   return createSdkMcpServer({
     name: `dashboard-${config.id}`,

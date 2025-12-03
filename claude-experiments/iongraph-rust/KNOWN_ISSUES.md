@@ -1,58 +1,75 @@
 # Known Issues
 
-## Test Results: 13/15 Passing (87% Success Rate)
+## Test Results: 1671/2742 Passing (61% Success Rate)
 
-### Passing Tests (13)
-- ✅ **func0-5**: Byte-for-byte identical (including func5 which is the main mega-complex test)
-- ✅ **func6**: Fixed by last_shifted implementation
-- ✅ **func7-9**: Byte-for-byte identical  
-- ✅ **func10**: Fixed by last_shifted implementation
-- ✅ **func11**: Byte-for-byte identical
-- ✅ **func14**: Byte-for-byte identical
+### Recent Fixes (This Session)
 
-### Failing Tests (2)
+Two critical bugs were fixed that improved test pass rate:
 
-#### func12: 16px Y-coordinate offset
-- **Issue**: Block 32 positioned at y=6612 instead of y=6596 (16 pixel difference)
-- **Root Cause**: Layer 26 has `track_height=16` in Rust vs `track_height=0` in TypeScript
-- **Details**: Two leftward joints overlap in Rust (requiring 2 tracks) but don't overlap in TypeScript (1 track)
-  - Joint 0: x1=276, x2=36 (Rust) vs x1=276, x2=156 (TypeScript) 
-  - Joint 1: x1=1082, x2=216 to dst_id=44 (Rust) vs x1=1082, x2=621 to dst_id=45 (TypeScript)
-- **Impact**: Visual output is correct, just 16px vertically offset starting from Block 32
-- **Status**: Minor cosmetic difference, does not affect functionality
+#### Bug 1: Block Order Not Preserved
+- **Issue**: Using `BTreeMap` sorted blocks by number, destroying original order from `pass.mir.blocks`
+- **Impact**: Blocks within the same layer were positioned incorrectly
+- **Fix**: Use `Vec` with `HashMap` for index lookup to preserve original array order
 
-#### func13: 48px height difference  
-- **Issue**: SVG height 16156 instead of 16108 (48 pixel difference)
-- **Root Cause**: Similar joint overlap issue affecting multiple layers
-- **Impact**: Graph is slightly taller but layout is correct
-- **Status**: Minor cosmetic difference, does not affect functionality
+#### Bug 2: `find_loops` Skipping Root Blocks  
+- **Issue**: Root blocks had `loop_id` pre-initialized to their own ID before `find_loops` was called
+- **Impact**: `find_loops` saw the matching `loop_id` and returned early, skipping entire subgraphs
+- **Result**: Blocks like Block 7 (loop exit) never got correct layer assignment
+- **Fix**: Don't pre-set `loop_id` for roots - let `find_loops` handle it during traversal
+
+**Result**: +91 tests passing (1580 → 1671)
+
+### Remaining Failures (1071 tests)
+
+The remaining failures likely stem from similar issues in the layout pipeline:
+
+1. **Layer assignment edge cases**: Some complex loop structures may still have incorrect layer assignments
+2. **Edge straightening differences**: The `straighten_edges` algorithm may not match TypeScript exactly
+3. **Joint track calculation**: Subtle differences in how overlapping edges are assigned to tracks
+4. **Dummy node positioning**: X-coordinate assignment for dummy nodes during edge straightening
 
 ### Technical Analysis
 
-The remaining failures stem from subtle differences in how joint tracks are calculated:
+The Rust implementation now correctly handles:
+- ✅ Original block order preservation (critical for layout)
+- ✅ Loop hierarchy detection (`find_loops`)
+- ✅ Outgoing edge tracking for loop headers
+- ✅ Layer assignment with loop height offsets
+- ✅ Backedge handling
 
-1. **Node Positioning**: After applying the `last_shifted` fix, some dummy nodes have slightly different X positions than TypeScript
-2. **Joint Overlap**: Different node positions cause joint paths to overlap differently
-3. **Track Height**: Overlapping joints require separate tracks, adding 16px per extra track
-4. **Cumulative Effect**: Track height differences accumulate vertically through the graph
+Areas that may still need investigation:
+- Edge straightening iterations and convergence
+- Nearly-straight edge detection threshold
+- Block width calculations for dummy nodes
+- Joint offset calculations for overlapping edges
 
-### Attempted Fixes
+### Suggested Next Steps
 
-Several approaches were attempted to resolve the joint overlap issue:
+1. **Pick another failing test** and diff the SVG output line-by-line
+2. **Compare block positions** - if positions differ, trace back to layout algorithm
+3. **Check edge paths** - if paths differ, investigate `straighten_edges` or `finangle_joints`
+4. **Add debug logging** selectively to trace specific differences
 
-1. ✅ **Immediate position application**: Improved from 11/15 to 13/15 by matching TypeScript's update semantics
-2. ✅ **Layer height calculation fix**: Prevented double-counting of track heights  
-3. ❌ **Backedge filtering**: Filtering joints for backedges broke 5 previously passing tests
-4. ❌ **Next-layer-only filtering**: Too restrictive, broke tests that need multi-layer joints
+### How to Debug
 
-### Conclusion
+```bash
+# Run a specific failing test with output
+cargo test test_while_loop_func0_pass17 -- --nocapture 2>&1 | head -50
 
-The Rust implementation achieves **87% byte-for-byte compatibility** with the TypeScript reference, with **11 perfect matches** out of 15 complex real-world test cases. The 2 remaining differences are minor vertical spacing variations (16-48 pixels) that don't affect layout correctness or visual quality.
+# Generate Rust SVG for manual comparison
+cargo run -- ion-examples/while-loop.json 0 17 /tmp/rust.svg
 
-The implementation successfully replicates:
-- ✅ All layout algorithms (layering, edge straightening, loop alignment)
-- ✅ All rendering logic (SVG generation, styling, arrows)
-- ✅ Complex features (dummy nodes, edge coalescence, joint tracks, backedges)
-- ✅ Edge cases (nested loops, multiple successors, loop headers)
+# Generate TypeScript SVG
+cd /Users/jimmyhmiller/Documents/Code/open-source/iongraph2
+node generate-svg-function.mjs "/path/to/ion-examples/while-loop.json" 0 17 /tmp/ts.svg
 
-This demonstrates excellent fidelity to the original TypeScript implementation.
+# Compare
+diff /tmp/ts.svg /tmp/rust.svg | head -50
+```
+
+### Test Infrastructure
+
+- **2742 total tests** covering all ion-examples JSON files
+- Tests compare byte-for-byte against TypeScript-generated fixtures
+- Fixtures in `tests/fixtures/ion-examples/`
+- Test generator: `node generate-test-suite.mjs`

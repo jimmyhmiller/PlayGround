@@ -279,7 +279,7 @@
       "id": "code-editor-demo",
       "type": "codeEditor",
       "x": 0,
-      "y": 952,
+      "y": 1064,
       "width": 772,
       "height": 600,
       "label": "JavaScript Playground",
@@ -337,6 +337,97 @@
       "height": 408,
       "label": "Component Composition",
       "filePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/.ai-dashboard/component-composition.md"
+    },
+    {
+      "id": "demo-nested-dashboard",
+      "type": "nested-dashboard",
+      "x": 28,
+      "y": 1736,
+      "width": 660,
+      "height": 492,
+      "label": "Nested Dashboard Demo",
+      "dashboard": {
+        "id": "demo-nested",
+        "title": "Project Metrics",
+        "subtitle": "Real-time development stats",
+        "theme": {},
+        "layout": {
+          "gridSize": 16,
+          "widgetGap": 8,
+          "mode": "single-pane"
+        },
+        "widgets": [
+          {
+            "id": "build-status",
+            "type": "stat",
+            "label": "Build Status",
+            "value": "✅ Passing",
+            "x": 0,
+            "y": 0,
+            "width": 180,
+            "height": 120
+          },
+          {
+            "id": "test-coverage",
+            "type": "progress",
+            "label": "Test Coverage",
+            "value": 87,
+            "text": "87% covered",
+            "x": 192,
+            "y": 0,
+            "width": 240,
+            "height": 120
+          },
+          {
+            "id": "metrics-chart",
+            "type": "bar-chart",
+            "label": [
+              "Commit Activity",
+              "Last 7 days"
+            ],
+            "data": [
+              12,
+              18,
+              9,
+              15,
+              22,
+              10,
+              14
+            ],
+            "x": 444,
+            "y": 0,
+            "width": 300,
+            "height": 200
+          },
+          {
+            "id": "recent-changes",
+            "type": "todo-list",
+            "label": "Recent Changes",
+            "x": 0,
+            "y": 132,
+            "width": 420,
+            "height": 240,
+            "items": [
+              {
+                "text": "Implement nested dashboard feature",
+                "done": true
+              },
+              {
+                "text": "Add recursive tool generation",
+                "done": true
+              },
+              {
+                "text": "Update validation schemas",
+                "done": true
+              },
+              {
+                "text": "Write documentation",
+                "done": false
+              }
+            ]
+          }
+        ]
+      }
     }
   ],
   "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/.ai-dashboard/dashboard.json"

@@ -75,39 +75,36 @@ export const Widget: FC<WidgetProps> = ({
   const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
   const [isRegenerating, setIsRegenerating] = useState(false);
 
-  if (!Component) {
-    // Show unknown widget type instead of returning null
-    return (
-      <div
-        className="widget"
-        style={{
-          background: theme.widgetBg,
-          border: '2px solid ' + theme.negative,
-          borderRadius: theme.widgetRadius,
-          clipPath: clipPath,
-          width: '100%',
-          height: '100%',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          padding: '20px',
-          textAlign: 'center',
-        }}
-      >
-        <div style={{ fontSize: '48px', marginBottom: '16px' }}>⚠️</div>
-        <div style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '8px', color: theme.negative }}>
-          Unknown Widget Type
-        </div>
-        <div style={{ fontSize: '14px', opacity: 0.7, marginBottom: '8px' }}>
-          Type: "{config.type}"
-        </div>
-        <div style={{ fontSize: '12px', opacity: 0.5 }}>
-          Widget ID: {config.id}
-        </div>
+  const unknownWidgetContent = !Component ? (
+    <div
+      className="widget"
+      style={{
+        background: theme.widgetBg,
+        border: '2px solid ' + theme.negative,
+        borderRadius: theme.widgetRadius,
+        clipPath: clipPath,
+        width: '100%',
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '20px',
+        textAlign: 'center',
+      }}
+    >
+      <div style={{ fontSize: '48px', marginBottom: '16px' }}>⚠️</div>
+      <div style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '8px', color: theme.negative }}>
+        Unknown Widget Type
       </div>
-    );
-  }
+      <div style={{ fontSize: '14px', opacity: 0.7, marginBottom: '8px' }}>
+        Type: "{config.type}"
+      </div>
+      <div style={{ fontSize: '12px', opacity: 0.5 }}>
+        Widget ID: {config.id}
+      </div>
+    </div>
+  ) : null;
 
   const isChat = config.type === 'chat';
   const widgetKey = `${dashboardId}-${config.id}`;
@@ -194,20 +191,22 @@ export const Widget: FC<WidgetProps> = ({
         transition: 'opacity 0.2s',
       }}
     >
-      <ErrorBoundary theme={theme}>
-        <Component
-          theme={theme}
-          config={config}
-          dashboardId={dashboardId}
-          dashboard={dashboard}
-          layout={layout}
-          widgetKey={widgetKey}
-          currentConversationId={widgetConversations[widgetKey] || null}
-          setCurrentConversationId={(id: string | null) => setWidgetConversations(prev => ({ ...prev, [widgetKey]: id }))}
-          widgetConversations={widgetConversations}
-          reloadTrigger={reloadTrigger}
-        />
-      </ErrorBoundary>
+      {unknownWidgetContent || (
+        <ErrorBoundary theme={theme}>
+          <Component
+            theme={theme}
+            config={config}
+            dashboardId={dashboardId}
+            dashboard={dashboard}
+            layout={layout}
+            widgetKey={widgetKey}
+            currentConversationId={widgetConversations[widgetKey] || null}
+            setCurrentConversationId={(id: string | null) => setWidgetConversations(prev => ({ ...prev, [widgetKey]: id }))}
+            widgetConversations={widgetConversations}
+            reloadTrigger={reloadTrigger}
+          />
+        </ErrorBoundary>
+      )}
       {/* Context Menu */}
       {showContextMenu && (
         <div

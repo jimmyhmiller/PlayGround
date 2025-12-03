@@ -10,11 +10,31 @@ pub enum Expr {
     Literal(Value),
 
     // Variable reference
-    Var(String),
+    Var {
+        namespace: Option<String>,  // None = unqualified, Some("user") = qualified
+        name: String,
+    },
+
+    // Namespace special forms
+    Ns {
+        name: String,
+    },
+
+    Use {
+        namespace: String,
+    },
 
     // Special forms
     Def {
         name: String,
+        value: Box<Expr>,
+        metadata: Option<im::HashMap<String, Value>>,
+    },
+
+    /// (set! var value)
+    /// Modifies a thread-local binding (only works within binding context)
+    Set {
+        var: Box<Expr>,
         value: Box<Expr>,
     },
 
@@ -26,6 +46,13 @@ pub enum Expr {
 
     Do {
         exprs: Vec<Expr>,
+    },
+
+    /// (binding [var1 val1 var2 val2 ...] body)
+    /// Establishes thread-local bindings for dynamic vars
+    Binding {
+        bindings: Vec<(String, Box<Expr>)>,  // [(var-name, value-expr), ...]
+        body: Vec<Expr>,  // Multiple expressions in body (like do)
     },
 
     // Function call (for now, all calls are the same)
@@ -58,8 +85,28 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
         }
 
         // Symbols become variable references
-        Value::Symbol(name) => {
-            Ok(Expr::Var(name.clone()))
+        // Parse qualified symbols: "user/foo" → Var { namespace: Some("user"), name: "foo" }
+        // Special case: "/" is the division operator, not a qualified symbol
+        Value::Symbol(s) => {
+            if s == "/" {
+                // Division operator - treat as unqualified symbol
+                Ok(Expr::Var {
+                    namespace: None,
+                    name: s.clone(),
+                })
+            } else if let Some(idx) = s.find('/') {
+                let namespace = s[..idx].to_string();
+                let name = s[idx+1..].to_string();
+                Ok(Expr::Var {
+                    namespace: Some(namespace),
+                    name,
+                })
+            } else {
+                Ok(Expr::Var {
+                    namespace: None,
+                    name: s.clone(),
+                })
+            }
         }
 
         // Lists are either special forms or function calls
@@ -68,9 +115,13 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
             if let Some(Value::Symbol(name)) = items.get(0) {
                 match name.as_str() {
                     "def" => analyze_def(items),
+                    "set!" => analyze_set(items),
                     "if" => analyze_if(items),
                     "do" => analyze_do(items),
                     "quote" => analyze_quote(items),
+                    "ns" => analyze_ns(items),
+                    "use" => analyze_use(items),
+                    "binding" => analyze_binding(items),
                     _ => analyze_call(items),
                 }
             } else {
@@ -84,6 +135,10 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
 
         Value::Function { .. } => {
             Err("Functions not yet implemented".to_string())
+        }
+
+        Value::Namespace { .. } => {
+            Err("Namespace values not yet implemented".to_string())
         }
     }
 }
@@ -100,8 +155,33 @@ fn analyze_def(items: &im::Vector<Value>) -> Result<Expr, String> {
 
     let value = analyze(&items[2])?;
 
+    // For now, use earmuff convention: *var* means dynamic
+    // In the future, we'll parse ^:dynamic metadata
+    let metadata = if name.starts_with('*') && name.ends_with('*') && name.len() > 2 {
+        let mut meta = im::HashMap::new();
+        meta.insert("dynamic".to_string(), Value::Bool(true));
+        Some(meta)
+    } else {
+        None
+    };
+
     Ok(Expr::Def {
         name,
+        value: Box::new(value),
+        metadata,
+    })
+}
+
+fn analyze_set(items: &im::Vector<Value>) -> Result<Expr, String> {
+    if items.len() != 3 {
+        return Err(format!("set! requires 2 arguments, got {}", items.len() - 1));
+    }
+
+    let var = analyze(&items[1])?;
+    let value = analyze(&items[2])?;
+
+    Ok(Expr::Set {
+        var: Box::new(var),
         value: Box::new(value),
     })
 }
@@ -147,6 +227,86 @@ fn analyze_quote(items: &im::Vector<Value>) -> Result<Expr, String> {
     Ok(Expr::Quote(items[1].clone()))
 }
 
+fn analyze_ns(items: &im::Vector<Value>) -> Result<Expr, String> {
+    if items.len() != 2 {
+        return Err(format!("ns requires 1 argument, got {}", items.len() - 1));
+    }
+
+    let ns_name = match &items[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Err("ns requires a symbol as namespace name".to_string()),
+    };
+
+    Ok(Expr::Ns { name: ns_name })
+}
+
+fn analyze_use(items: &im::Vector<Value>) -> Result<Expr, String> {
+    if items.len() != 2 {
+        return Err(format!("use requires 1 argument, got {}", items.len() - 1));
+    }
+
+    let ns_name = match &items[1] {
+        // Accept both symbols and quoted symbols: (use clojure.core) or (use 'clojure.core)
+        Value::Symbol(s) => s.clone(),
+        Value::List(quoted) if quoted.len() == 2 => {
+            if let (Some(Value::Symbol(q)), Some(Value::Symbol(ns))) = (quoted.get(0), quoted.get(1)) {
+                if q == "quote" {
+                    ns.clone()
+                } else {
+                    return Err("use requires a symbol or quoted symbol".to_string());
+                }
+            } else {
+                return Err("use requires a symbol or quoted symbol".to_string());
+            }
+        }
+        _ => return Err("use requires a symbol or quoted symbol".to_string()),
+    };
+
+    Ok(Expr::Use { namespace: ns_name })
+}
+
+fn analyze_binding(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // (binding [var1 val1 var2 val2 ...] body...)
+    if items.len() < 3 {
+        return Err("binding requires at least 2 arguments: bindings vector and body".to_string());
+    }
+
+    // Parse bindings vector
+    let bindings_vec = match &items[1] {
+        Value::Vector(v) => v,
+        _ => return Err("binding requires a vector of bindings as first argument".to_string()),
+    };
+
+    // Bindings must be even (pairs of var/value)
+    if bindings_vec.len() % 2 != 0 {
+        return Err("binding vector must contain an even number of forms (var/value pairs)".to_string());
+    }
+
+    // Parse each binding pair
+    let mut bindings = Vec::new();
+    for i in (0..bindings_vec.len()).step_by(2) {
+        let var_name = match &bindings_vec[i] {
+            Value::Symbol(s) => {
+                // Handle both qualified and unqualified symbols
+                // For now, we'll store the full symbol name
+                s.clone()
+            }
+            _ => return Err(format!("binding requires symbols as variable names, got {:?}", bindings_vec[i])),
+        };
+
+        let value_expr = analyze(&bindings_vec[i + 1])?;
+        bindings.push((var_name, Box::new(value_expr)));
+    }
+
+    // Parse body expressions (like do - all expressions evaluated, last one returned)
+    let mut body = Vec::new();
+    for i in 2..items.len() {
+        body.push(analyze(&items[i])?);
+    }
+
+    Ok(Expr::Binding { bindings, body })
+}
+
 fn analyze_call(items: &im::Vector<Value>) -> Result<Expr, String> {
     let func = analyze(&items[0])?;
     let mut args = Vec::new();
@@ -177,7 +337,7 @@ mod tests {
     fn test_analyze_var() {
         let val = read("x").unwrap();
         let expr = analyze(&val).unwrap();
-        assert!(matches!(expr, Expr::Var(ref s) if s == "x"));
+        assert!(matches!(expr, Expr::Var { namespace: None, ref name } if name == "x"));
     }
 
     #[test]
@@ -213,7 +373,7 @@ mod tests {
         let expr = analyze(&val).unwrap();
         match expr {
             Expr::Call { func, args } => {
-                assert!(matches!(*func, Expr::Var(ref s) if s == "+"));
+                assert!(matches!(*func, Expr::Var { namespace: None, ref name } if name == "+"));
                 assert_eq!(args.len(), 2);
             }
             _ => panic!("Expected Call"),

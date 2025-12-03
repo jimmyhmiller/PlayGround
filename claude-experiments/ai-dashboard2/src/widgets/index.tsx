@@ -21,6 +21,7 @@ import { JsonViewer } from './JsonViewer';
 import { LayoutSettings } from './LayoutSettings';
 import { TestResults } from './TestResults';
 import { WebView } from './WebView';
+import { NestedDashboard } from './NestedDashboard';
 
 // Re-export them all
 export {
@@ -41,7 +42,8 @@ export {
   JsonViewer,
   LayoutSettings,
   TestResults,
-  WebView
+  WebView,
+  NestedDashboard
 };
 
 export type WidgetProps = BaseWidgetComponentProps;
@@ -70,6 +72,7 @@ export const WIDGET_REGISTRY: Record<string, FC<WidgetProps>> = {
   'todo-list': TodoList,
   'claude-todo-list': ClaudeTodoList,
   'webview': WebView,
+  'nested-dashboard': NestedDashboard,
 
   // CamelCase (current standard)
   'barChart': BarChart,
@@ -86,4 +89,5 @@ export const WIDGET_REGISTRY: Record<string, FC<WidgetProps>> = {
   'todoList': TodoList,
   'claudeTodos': ClaudeTodoList,
   'webView': WebView,
+  'nestedDashboard': NestedDashboard,
 };

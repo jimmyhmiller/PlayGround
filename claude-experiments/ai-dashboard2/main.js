@@ -41,6 +41,7 @@ const child_process_1 = require("child_process");
 const claude_agent_sdk_1 = require("@anthropic-ai/claude-agent-sdk");
 const dashboard_tools_1 = require("./dashboard-tools");
 const projectUtils = __importStar(require("./project-utils"));
+const validation_1 = require("./src/validation");
 const isDev = process.env.NODE_ENV === 'development';
 // Set app name to ensure consistent userData path in dev and prod
 electron_1.app.setName('ai-dashboard2');
@@ -366,7 +367,20 @@ electron_1.ipcMain.handle('update-widget', async (_event, { dashboardId, widgetI
         if (widgetIndex === -1) {
             return { success: false, error: 'Widget not found' };
         }
-        entry.dashboard.widgets[widgetIndex] = { ...config, id: widgetId };
+        // Validate the widget configuration before updating
+        const widgetConfig = { ...config, id: widgetId };
+        const validationResult = (0, validation_1.validateWidget)(widgetConfig);
+        if (!validationResult.valid) {
+            const errorMsg = validationResult.errors?.map(e => `${e.field}: ${e.message}`).join(', ') || 'Invalid widget configuration';
+            console.error('[Widget Validation] Failed:', errorMsg);
+            return {
+                success: false,
+                error: `Widget validation failed: ${errorMsg}`,
+                validationErrors: validationResult.errors,
+                suggestion: validationResult.suggestion
+            };
+        }
+        entry.dashboard.widgets[widgetIndex] = widgetConfig;
         entry.lastWriteTime = Date.now();
         fs.writeFileSync(targetPath, JSON.stringify(entry.dashboard, null, 2), 'utf-8');
         electron_1.BrowserWindow.getAllWindows().forEach(win => {

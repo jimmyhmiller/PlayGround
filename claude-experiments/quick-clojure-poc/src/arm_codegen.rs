@@ -1,4 +1,6 @@
 use crate::ir::{Instruction, IrValue, VirtualRegister, Condition, Label};
+use crate::register_allocation::linear_scan::LinearScan;
+use crate::trampoline::Trampoline;
 use std::collections::HashMap;
 
 /// ARM64 code generator - compiles IR to ARM64 machine code
@@ -33,7 +35,7 @@ impl Arm64CodeGen {
     }
 
     /// Compile IR instructions to ARM64 machine code
-    pub fn compile(&mut self, instructions: &[Instruction]) -> Result<Vec<u32>, String> {
+    pub fn compile(&mut self, instructions: &[Instruction], result_reg: &IrValue) -> Result<Vec<u32>, String> {
         // Reset state
         self.code.clear();
         self.register_map.clear();
@@ -41,25 +43,42 @@ impl Arm64CodeGen {
         self.label_positions.clear();
         self.pending_fixups.clear();
 
-        // Track the last result register
-        let mut last_result_reg: Option<usize> = None;
+        // Run linear scan register allocation
+        let mut allocator = LinearScan::new(instructions.to_vec(), 0);
+        allocator.allocate();
 
-        // Compile each instruction
-        for inst in instructions {
-            if let Some(result_reg) = self.compile_instruction(inst)? {
-                last_result_reg = Some(result_reg);
-            }
+        // Find the physical register for the result (before consuming allocator)
+        let result_physical = if let IrValue::Register(vreg) = result_reg {
+            allocator.allocated_registers.get(vreg)
+                .ok_or_else(|| format!("Result register {:?} not allocated", vreg))?
+                .index
+        } else {
+            return Err(format!("Expected register for result, got {:?}", result_reg));
+        };
+
+        let allocated_instructions = allocator.finish();
+
+        // Emit function prologue (save FP and LR)
+        self.emit_stp(29, 30, 31, -2);  // stp x29, x30, [sp, #-16]!
+        self.emit_mov(29, 31);           // mov x29, sp (set frame pointer)
+
+        // Compile each instruction (now with physical registers)
+        for inst in &allocated_instructions {
+            self.compile_instruction(inst)?;
         }
 
         // Apply jump fixups
         self.apply_fixups()?;
 
-        // Move final result to x0 if not already there
-        if let Some(result_reg) = last_result_reg {
-            if result_reg != 0 {
-                self.emit_mov(0, result_reg);
-            }
+        // Move result to x0 and untag it for return
+        if result_physical != 0 {
+            self.emit_mov(0, result_physical);
         }
+        // Untag the result (shift right by 3)
+        self.emit_asr_imm(0, 0, 3);
+
+        // Emit function epilogue (restore FP and LR)
+        self.emit_ldp(29, 30, 31, 2);    // ldp x29, x30, [sp], #16
 
         // Emit return instruction
         self.emit_ret();
@@ -85,6 +104,62 @@ impl Arm64CodeGen {
                         self.emit_mov_imm(dst_reg, 0);
                     }
                     _ => return Err(format!("Invalid constant: {:?}", value)),
+                }
+            }
+
+            Instruction::LoadVar(dst, var_ptr) => {
+                // LoadVar: call trampoline to check dynamic bindings
+                // ARM64 calling convention:
+                // - x0 = argument (var_ptr, tagged)
+                // - x0 = return value (tagged)
+                // - x30 = link register (return address)
+                // - x19-x28 are callee-saved (our allocator uses these, so they're safe)
+                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
+
+                match var_ptr {
+                    IrValue::TaggedConstant(tagged_ptr) => {
+                        // Load tagged var_ptr into x0 (first argument)
+                        self.emit_mov_imm(0, *tagged_ptr as i64);
+
+                        // Load trampoline function address into x15
+                        let func_addr = crate::trampoline::trampoline_var_get_value_dynamic as usize;
+                        self.emit_mov_imm(15, func_addr as i64);
+
+                        // Call the trampoline
+                        // BLR x15 - stores return address in x30, jumps to x15
+                        self.emit_blr(15);
+
+                        // Result is in x0, move to destination if needed
+                        if dst_reg != 0 {
+                            self.emit_mov(dst_reg, 0);
+                        }
+                    }
+                    _ => return Err(format!("LoadVar requires constant var pointer: {:?}", var_ptr)),
+                }
+            }
+
+            Instruction::StoreVar(var_ptr, value) => {
+                // StoreVar: store value into var at runtime
+                // Var layout: [header(8)] [ns_ptr(8)] [symbol_ptr(8)] [value(8)]
+                // We want to write to field 2 (value) which is at offset 24 bytes (3 * 8)
+                let value_reg = self.get_physical_reg_for_irvalue(value)?;
+
+                match var_ptr {
+                    IrValue::TaggedConstant(tagged_ptr) => {
+                        // Untag the var pointer (shift right by 3)
+                        let untagged_ptr = (*tagged_ptr as usize) >> 3;
+
+                        // Load var pointer into a temp register
+                        // Use x15 as temp register - it's the highest general purpose register
+                        // and unlikely to be allocated by our simple allocator
+                        let temp_reg = 15;
+                        self.emit_mov_imm(temp_reg, untagged_ptr as i64);
+
+                        // Store value into var (offset 24 = header + ns_ptr + symbol_ptr)
+                        // str value_reg, [temp_reg, #24]
+                        self.emit_str_offset(value_reg, temp_reg, 24);
+                    }
+                    _ => return Err(format!("StoreVar requires constant var pointer: {:?}", var_ptr)),
                 }
             }
 
@@ -148,23 +223,162 @@ impl Arm64CodeGen {
                 }
             }
 
+            Instruction::PushBinding(var_ptr, value) => {
+                // PushBinding: call trampoline to push a dynamic binding
+                // ARM64 calling convention:
+                // - x0 = var_ptr (tagged)
+                // - x1 = value (tagged)
+                // - x0 = return value (0 = success, 1 = error)
+
+                match var_ptr {
+                    IrValue::TaggedConstant(tagged_ptr) => {
+                        // Get the value register
+                        let value_reg = self.get_physical_reg_for_irvalue(value)?;
+
+                        // Load tagged var_ptr into x0 (first argument)
+                        self.emit_mov_imm(0, *tagged_ptr as i64);
+
+                        // Move value to x1 (second argument) if not already there
+                        if value_reg != 1 {
+                            self.emit_mov(1, value_reg);
+                        }
+
+                        // Load trampoline function address into x15
+                        let func_addr = crate::trampoline::trampoline_push_binding as usize;
+                        self.emit_mov_imm(15, func_addr as i64);
+
+                        // Call the trampoline
+                        self.emit_blr(15);
+
+                        // Return value in x0 (0 = success, 1 = error)
+                        // For now, we ignore errors (could add error handling later)
+                    }
+                    _ => return Err(format!("PushBinding requires constant var pointer: {:?}", var_ptr)),
+                }
+            }
+
+            Instruction::PopBinding(var_ptr) => {
+                // PopBinding: call trampoline to pop a dynamic binding
+                // ARM64 calling convention:
+                // - x0 = var_ptr (tagged)
+                // - x0 = return value (0 = success, 1 = error)
+
+                match var_ptr {
+                    IrValue::TaggedConstant(tagged_ptr) => {
+                        // Load tagged var_ptr into x0 (first argument)
+                        self.emit_mov_imm(0, *tagged_ptr as i64);
+
+                        // Load trampoline function address into x15
+                        let func_addr = crate::trampoline::trampoline_pop_binding as usize;
+                        self.emit_mov_imm(15, func_addr as i64);
+
+                        // Call the trampoline
+                        self.emit_blr(15);
+
+                        // Return value in x0 (0 = success, 1 = error)
+                        // For now, we ignore errors (could add error handling later)
+                    }
+                    _ => return Err(format!("PopBinding requires constant var pointer: {:?}", var_ptr)),
+                }
+            }
+
+            Instruction::SetVar(var_ptr, value) => {
+                // SetVar: call trampoline to modify a thread-local binding (for set!)
+                // ARM64 calling convention:
+                // - x0 = var_ptr (tagged)
+                // - x1 = value (tagged)
+                // - x0 = return value (0 = success, 1 = error)
+
+                match var_ptr {
+                    IrValue::TaggedConstant(tagged_ptr) => {
+                        // Get the value register
+                        let value_reg = self.get_physical_reg_for_irvalue(value)?;
+
+                        // Load tagged var_ptr into x0 (first argument)
+                        self.emit_mov_imm(0, *tagged_ptr as i64);
+
+                        // Move value to x1 (second argument) if not already there
+                        if value_reg != 1 {
+                            self.emit_mov(1, value_reg);
+                        }
+
+                        // Load trampoline function address into x15
+                        let func_addr = crate::trampoline::trampoline_set_binding as usize;
+                        self.emit_mov_imm(15, func_addr as i64);
+
+                        // Call the trampoline
+                        self.emit_blr(15);
+
+                        // Return value in x0 (0 = success, 1 = error)
+                        // For now, we ignore errors (could add error handling later)
+                    }
+                    _ => return Err(format!("SetVar requires constant var pointer: {:?}", var_ptr)),
+                }
+            }
+
             Instruction::Label(label) => {
                 // Record position of this label
                 self.label_positions.insert(label.clone(), self.code.len());
             }
 
-            Instruction::Jump(_label) => {
-                // For now, just emit a placeholder
-                // We'll fix this up later
-                return Err("Jump not yet implemented".to_string());
+            Instruction::Jump(label) => {
+                // Emit unconditional branch
+                // We'll fix up the offset later
+                let fixup_index = self.code.len();
+                self.pending_fixups.push((fixup_index, label.clone()));
+                // Placeholder - will be patched in apply_fixups
+                self.code.push(0x14000000); // B #0
             }
 
-            Instruction::JumpIf(_label, _cond, _src1, _src2) => {
-                return Err("JumpIf not yet implemented".to_string());
+            Instruction::JumpIf(label, cond, src1, src2) => {
+                // Compare src1 and src2
+                let src1_reg = self.get_physical_reg_for_irvalue(src1)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2)?;
+
+                // Emit CMP instruction
+                self.emit_cmp(src1_reg, src2_reg);
+
+                // Emit conditional branch
+                let fixup_index = self.code.len();
+                self.pending_fixups.push((fixup_index, label.clone()));
+
+                // Placeholder conditional branch - will be patched in apply_fixups
+                let branch_cond = match cond {
+                    Condition::Equal => 0,       // EQ
+                    Condition::NotEqual => 1,    // NE
+                    Condition::LessThan => 11,   // LT
+                    Condition::LessThanOrEqual => 13, // LE
+                    Condition::GreaterThan => 12, // GT
+                    Condition::GreaterThanOrEqual => 10, // GE
+                };
+
+                // B.cond #0 (placeholder)
+                self.code.push(0x54000000 | branch_cond);
             }
 
-            Instruction::Compare(_dst, _src1, _src2, _cond) => {
-                return Err("Compare not yet implemented".to_string());
+            Instruction::Compare(dst, src1, src2, cond) => {
+                // Compare and set result to true/false
+                let dst_reg = self.get_physical_reg_for_irvalue(dst)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2)?;
+
+                // CMP src1, src2
+                self.emit_cmp(src1_reg, src2_reg);
+
+                // CSET dst, condition (sets dst to 1 if condition is true, 0 otherwise)
+                let cond_code = match cond {
+                    Condition::Equal => 0,       // EQ
+                    Condition::NotEqual => 1,    // NE
+                    Condition::LessThan => 11,   // LT
+                    Condition::LessThanOrEqual => 13, // LE
+                    Condition::GreaterThan => 12, // GT
+                    Condition::GreaterThanOrEqual => 10, // GE
+                };
+
+                // CSET is CSINC dst, XZR, XZR, invert(cond)
+                let inverted_cond = cond_code ^ 1; // Invert the condition
+                let instruction = 0x9A9F07E0 | (inverted_cond << 12) | (dst_reg as u32);
+                self.code.push(instruction);
             }
 
             Instruction::Ret(value) => {
@@ -189,24 +403,39 @@ impl Arm64CodeGen {
     }
 
     fn get_physical_reg(&mut self, vreg: &VirtualRegister) -> usize {
-        if let Some(&physical) = self.register_map.get(vreg) {
-            physical
-        } else {
-            // Allocate a new physical register
-            let physical = self.next_physical_reg;
-            self.next_physical_reg += 1;
-            if physical >= 16 {
-                panic!("Out of registers! Need to implement spilling");
-            }
-            self.register_map.insert(*vreg, physical);
-            physical
-        }
+        // After linear scan allocation, all registers are already physical
+        // Just return the register index directly
+        vreg.index
     }
 
     fn apply_fixups(&mut self) -> Result<(), String> {
-        // For now, we don't have any jumps to fix up
-        if !self.pending_fixups.is_empty() {
-            return Err("Cannot apply fixups - jumps not yet implemented".to_string());
+        for (code_index, label) in &self.pending_fixups {
+            let target_pos = self.label_positions.get(label)
+                .ok_or_else(|| format!("Undefined label: {}", label))?;
+
+            // Calculate offset in instructions (not bytes)
+            let offset = (*target_pos as isize) - (*code_index as isize);
+
+            // Check if offset fits in the instruction encoding
+            if offset < -1048576 || offset > 1048575 {
+                return Err(format!("Jump offset too large: {}", offset));
+            }
+
+            // Patch the instruction
+            let instruction = self.code[*code_index];
+
+            // Check if it's a conditional branch (B.cond) or unconditional branch (B)
+            if (instruction & 0xFF000000) == 0x54000000 {
+                // B.cond - 19-bit signed offset in bits [23:5]
+                let offset_bits = (offset as u32) & 0x7FFFF; // 19 bits
+                self.code[*code_index] = (instruction & 0xFF00001F) | (offset_bits << 5);
+            } else if (instruction & 0xFC000000) == 0x14000000 {
+                // B - 26-bit signed offset in bits [25:0]
+                let offset_bits = (offset as u32) & 0x03FFFFFF; // 26 bits
+                self.code[*code_index] = (instruction & 0xFC000000) | offset_bits;
+            } else {
+                return Err(format!("Unknown branch instruction at {}: {:08x}", code_index, instruction));
+            }
         }
         Ok(())
     }
@@ -220,24 +449,34 @@ impl Arm64CodeGen {
     }
 
     fn emit_mov_imm(&mut self, dst: usize, imm: i64) {
-        // MOVZ Xd, #imm for 16-bit immediates
-        if imm >= 0 && imm < 65536 {
-            let instruction = 0xD2800000 | ((imm as u32) << 5) | (dst as u32);
-            self.code.push(instruction);
-        } else {
-            // For larger values, use MOVZ/MOVK sequence
-            let low = (imm & 0xFFFF) as u32;
-            let high = ((imm >> 16) & 0xFFFF) as u32;
+        let imm = imm as u64;  // Treat as unsigned for bitwise ops
 
-            // MOVZ Xd, #low
-            let movz = 0xD2800000 | (low << 5) | (dst as u32);
-            self.code.push(movz);
+        // Extract 16-bit chunks
+        let chunk0 = (imm & 0xFFFF) as u32;
+        let chunk1 = ((imm >> 16) & 0xFFFF) as u32;
+        let chunk2 = ((imm >> 32) & 0xFFFF) as u32;
+        let chunk3 = ((imm >> 48) & 0xFFFF) as u32;
 
-            if high != 0 {
-                // MOVK Xd, #high, LSL #16
-                let movk = 0xF2A00000 | (high << 5) | (dst as u32);
-                self.code.push(movk);
-            }
+        // MOVZ Xd, #chunk0 (always emit this)
+        let movz = 0xD2800000 | (chunk0 << 5) | (dst as u32);
+        self.code.push(movz);
+
+        // MOVK Xd, #chunk1, LSL #16 (if non-zero)
+        if chunk1 != 0 {
+            let movk = 0xF2A00000 | (chunk1 << 5) | (dst as u32);
+            self.code.push(movk);
+        }
+
+        // MOVK Xd, #chunk2, LSL #32 (if non-zero)
+        if chunk2 != 0 {
+            let movk = 0xF2C00000 | (chunk2 << 5) | (dst as u32);
+            self.code.push(movk);
+        }
+
+        // MOVK Xd, #chunk3, LSL #48 (if non-zero)
+        if chunk3 != 0 {
+            let movk = 0xF2E00000 | (chunk3 << 5) | (dst as u32);
+            self.code.push(movk);
         }
     }
 
@@ -285,15 +524,60 @@ impl Arm64CodeGen {
         self.code.push(instruction);
     }
 
+    fn emit_cmp(&mut self, src1: usize, src2: usize) {
+        // CMP Xn, Xm (compare - this is SUBS XZR, Xn, Xm)
+        let instruction = 0xEB00001F | ((src2 as u32) << 16) | ((src1 as u32) << 5);
+        self.code.push(instruction);
+    }
+
+    fn emit_ldr_offset(&mut self, dst: usize, base: usize, offset: i32) {
+        // LDR Xd, [Xn, #offset]
+        // Offset is in bytes, needs to be divided by 8 for encoding (unsigned 12-bit)
+        let offset_scaled = (offset / 8) as u32;
+        let instruction = 0xF9400000 | (offset_scaled << 10) | ((base as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_str_offset(&mut self, src: usize, base: usize, offset: i32) {
+        // STR Xt, [Xn, #offset]
+        // Offset is in bytes, needs to be divided by 8 for encoding (unsigned 12-bit)
+        let offset_scaled = (offset / 8) as u32;
+        let instruction = 0xF9000000 | (offset_scaled << 10) | ((base as u32) << 5) | (src as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_stp(&mut self, rt: usize, rt2: usize, rn: usize, offset: i32) {
+        // STP Xt, Xt2, [Xn, #offset]! (pre-index)
+        // offset is in 8-byte units for STP, range -512 to 504
+        let offset_scaled = ((offset & 0x7F) as u32) << 15;  // 7-bit signed offset
+        let instruction = 0xA9800000 | offset_scaled | ((rt2 as u32) << 10) | ((rn as u32) << 5) | (rt as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_ldp(&mut self, rt: usize, rt2: usize, rn: usize, offset: i32) {
+        // LDP Xt, Xt2, [Xn], #offset (post-index)
+        // offset is in 8-byte units for LDP, range -512 to 504
+        let offset_scaled = ((offset & 0x7F) as u32) << 15;  // 7-bit signed offset
+        let instruction = 0xA8C00000 | offset_scaled | ((rt2 as u32) << 10) | ((rn as u32) << 5) | (rt as u32);
+        self.code.push(instruction);
+    }
+
     fn emit_ret(&mut self) {
         // RET (returns to address in X30/LR)
         self.code.push(0xD65F03C0);
     }
 
-    /// Execute the compiled code (for testing)
-    pub fn execute(&self) -> Result<i64, String> {
-        use std::mem;
+    fn emit_blr(&mut self, rn: usize) {
+        // BLR Xn - Branch with Link to Register
+        // Calls function at address in Xn, stores return address in X30
+        let instruction = 0xD63F0000 | ((rn as u32) << 5);
+        self.code.push(instruction);
+    }
 
+    /// Execute the compiled code (for testing)
+    ///
+    /// Uses a trampoline to safely execute JIT code with proper stack management
+    pub fn execute(&self) -> Result<i64, String> {
         let code_size = self.code.len() * 4;
 
         unsafe {
@@ -333,9 +617,12 @@ impl Arm64CodeGen {
                 sys_icache_invalidate(ptr, code_size);
             }
 
-            // Execute!
-            let func: extern "C" fn() -> i64 = mem::transmute(ptr);
-            let result = func();
+            // Execute through trampoline for safety
+            let trampoline = Trampoline::new(64 * 1024); // 64KB stack
+            let result = trampoline.execute(ptr as *const u8);
+
+            // Explicitly drop trampoline before cleaning up JIT code
+            drop(trampoline);
 
             // Clean up
             libc::munmap(ptr, code_size);
@@ -351,6 +638,8 @@ mod tests {
     use crate::reader::read;
     use crate::clojure_ast::analyze;
     use crate::compiler::Compiler;
+    use crate::gc_runtime::GCRuntime;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_arm64_codegen_add() {
@@ -358,12 +647,13 @@ mod tests {
         let val = read(code).unwrap();
         let ast = analyze(&val).unwrap();
 
-        let mut compiler = Compiler::new();
-        compiler.compile(&ast).unwrap();
+        let runtime = Arc::new(Mutex::new(GCRuntime::new()));
+        let mut compiler = Compiler::new(runtime);
+        let result_reg = compiler.compile(&ast).unwrap();
         let instructions = compiler.finish();
 
         let mut codegen = Arm64CodeGen::new();
-        let machine_code = codegen.compile(&instructions).unwrap();
+        let machine_code = codegen.compile(&instructions, &result_reg).unwrap();
 
         println!("\nGenerated {} ARM64 instructions for (+ 1 2)", machine_code.len());
         for (i, inst) in machine_code.iter().enumerate() {
@@ -380,12 +670,13 @@ mod tests {
         let val = read(code).unwrap();
         let ast = analyze(&val).unwrap();
 
-        let mut compiler = Compiler::new();
-        compiler.compile(&ast).unwrap();
+        let runtime = Arc::new(Mutex::new(GCRuntime::new()));
+        let mut compiler = Compiler::new(runtime);
+        let result_reg = compiler.compile(&ast).unwrap();
         let instructions = compiler.finish();
 
         let mut codegen = Arm64CodeGen::new();
-        let machine_code = codegen.compile(&instructions).unwrap();
+        let machine_code = codegen.compile(&instructions, &result_reg).unwrap();
 
         println!("\nGenerated {} ARM64 instructions for (+ (* 2 3) 4)", machine_code.len());
 

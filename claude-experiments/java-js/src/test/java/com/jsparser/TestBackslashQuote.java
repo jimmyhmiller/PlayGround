@@ -28,7 +28,9 @@ public class TestBackslashQuote {
 
         assertNotNull(stringToken, "Should find a STRING token");
         System.out.println("String token literal: " + stringToken.literal());
-        assertEquals("\\\\", stringToken.literal(), "String value should be two backslashes");
+        // Source "\\\" has TWO backslashes, which JavaScript interprets as ONE backslash
+        // The token literal should contain the interpreted value (ONE backslash)
+        assertEquals("\\", stringToken.literal(), "String value should be one backslash (interpreted from \\\\)");
     }
 
     @Test

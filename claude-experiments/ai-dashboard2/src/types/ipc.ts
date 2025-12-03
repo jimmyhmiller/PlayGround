@@ -48,22 +48,18 @@ export interface CommandAPI {
 }
 
 // Claude API
-export interface QuestionOption {
-  label: string;
-  description: string;
-}
-
 export interface Question {
+  id?: string; // Optional ID for multi-question scenarios
   question: string;
-  header: string;
-  options: QuestionOption[];
-  multiSelect: boolean;
+  options?: string[]; // Optional predefined choices
+  allowMultiple?: boolean; // Allow multiple selections
+  allowCustom?: boolean; // Show "type my own answer" option
 }
 
 export interface UserQuestion {
   id: string;
-  chatId: string;
   questions: Question[];
+  isMultiple?: boolean; // True if multiple questions asked together
 }
 
 export interface ClaudeAPI {

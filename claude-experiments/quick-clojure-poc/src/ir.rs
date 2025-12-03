@@ -75,8 +75,15 @@ pub enum Instruction {
 
     // Constants
     LoadConstant(IrValue, IrValue),
+    LoadVar(IrValue, IrValue),  // LoadVar(dest_reg, var_ptr) - dereferences var at runtime, checks dynamic bindings
+    StoreVar(IrValue, IrValue), // StoreVar(var_ptr, value_reg) - stores value into var at runtime
     LoadTrue(IrValue),
     LoadFalse(IrValue),
+
+    // Dynamic var bindings
+    PushBinding(IrValue, IrValue),  // PushBinding(var_ptr, value) - push thread-local binding
+    PopBinding(IrValue),            // PopBinding(var_ptr) - pop thread-local binding
+    SetVar(IrValue, IrValue),       // SetVar(var_ptr, value) - modify thread-local binding (for set!)
 
     // Control flow
     Label(Label),
@@ -124,6 +131,11 @@ impl IrBuilder {
 
     pub fn finish(self) -> Vec<Instruction> {
         self.instructions
+    }
+
+    /// Take the instructions without consuming the builder, clearing the buffer
+    pub fn take_instructions(&mut self) -> Vec<Instruction> {
+        std::mem::take(&mut self.instructions)
     }
 }
 
