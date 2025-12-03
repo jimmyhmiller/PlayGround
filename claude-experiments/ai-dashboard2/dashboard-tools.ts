@@ -350,9 +350,9 @@ export function createDashboardTools(
       {
         widgetId: z.string().describe('ID of the widget to update'),
         property: z.string().describe('Property name to update (e.g., "label", "width", "height")'),
-        value: z.any().describe('New value for the property')
+        value: z.any().optional().describe('New value for the property')
       },
-      async ({ widgetId, property, value }: { widgetId: string; property: string; value: any }) => {
+      async ({ widgetId, property, value }: { widgetId: string; property: string; value?: any }) => {
         const result = updateDashboard((dashboard) => {
           const targetWidget = dashboard.widgets.find(w => w.id === widgetId);
           if (!targetWidget) {

@@ -55,6 +55,14 @@ pub enum Expr {
         body: Vec<Expr>,  // Multiple expressions in body (like do)
     },
 
+    /// (let [x 10 y 20] (+ x y))
+    /// Establishes lexical (stack-allocated) local bindings
+    /// Bindings are sequential - each can see prior bindings
+    Let {
+        bindings: Vec<(String, Box<Expr>)>,  // [(name, value-expr), ...]
+        body: Vec<Expr>,  // Body expressions (returns last)
+    },
+
     // Function call (for now, all calls are the same)
     // Later we'll distinguish between special forms at parse time
     Call {
@@ -123,6 +131,7 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
                     "set!" => analyze_set(items),
                     "if" => analyze_if(items),
                     "do" => analyze_do(items),
+                    "let" => analyze_let(items),
                     "quote" => analyze_quote(items),
                     "ns" => analyze_ns(items),
                     "use" => analyze_use(items),
@@ -307,6 +316,51 @@ fn analyze_binding(items: &im::Vector<Value>) -> Result<Expr, String> {
     }
 
     Ok(Expr::Binding { bindings, body })
+}
+
+fn analyze_let(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // (let [x 10 y 20] (+ x y))
+    //      ^^^^^^^^^  ^^^^^^^^^^
+    //      bindings   body
+
+    if items.len() < 3 {
+        return Err("let requires at least 2 arguments: bindings vector and body".to_string());
+    }
+
+    // Parse bindings vector
+    let bindings_vec = match &items[1] {
+        Value::Vector(v) => v,
+        _ => return Err("let requires a vector of bindings as first argument".to_string()),
+    };
+
+    // Bindings must be even (pairs of name/value)
+    if bindings_vec.len() % 2 != 0 {
+        return Err("let bindings vector must contain an even number of forms (name/value pairs)".to_string());
+    }
+
+    // Parse each binding pair
+    let mut bindings = Vec::new();
+    for i in (0..bindings_vec.len()).step_by(2) {
+        let name = match &bindings_vec[i] {
+            Value::Symbol(s) => s.clone(),
+            _ => return Err(format!("let binding names must be symbols, got {:?}", bindings_vec[i])),
+        };
+
+        let value_expr = analyze(&bindings_vec[i + 1])?;
+        bindings.push((name, Box::new(value_expr)));
+    }
+
+    // Parse body expressions (all evaluated, last one returned)
+    let mut body = Vec::new();
+    for i in 2..items.len() {
+        body.push(analyze(&items[i])?);
+    }
+
+    if body.is_empty() {
+        return Err("let requires at least one body expression".to_string());
+    }
+
+    Ok(Expr::Let { bindings, body })
 }
 
 fn analyze_call(items: &im::Vector<Value>) -> Result<Expr, String> {

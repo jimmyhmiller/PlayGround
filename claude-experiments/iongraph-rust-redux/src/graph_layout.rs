@@ -477,8 +477,29 @@ impl<P: LayoutProvider> Graph<P> {
 
                                     // Connect directly to backedge's layout node
                                     if let Some(backedge_layout_node) = self.blocks[backedge_idx].layout_node {
-                                        // We'll connect this later when we know the backedge's layer
-                                        // For now, just store the connection info
+                                        // Find the backedge's layer and index within that layer
+                                        let mut backedge_global = backedge_layout_node;
+                                        let mut backedge_layer = 0;
+                                        let mut backedge_idx_in_layer = 0;
+
+                                        for (l, nodes) in layout_nodes_by_layer.iter().enumerate() {
+                                            if backedge_global < nodes.len() {
+                                                backedge_layer = l;
+                                                backedge_idx_in_layer = backedge_global;
+                                                break;
+                                            }
+                                            backedge_global -= nodes.len();
+                                        }
+
+                                        // Connect the backedge dummy to the backedge block
+                                        connect_nodes(
+                                            &mut layout_nodes_by_layer,
+                                            layer,
+                                            backedge_dummy_idx,
+                                            0,
+                                            backedge_layer,
+                                            backedge_idx_in_layer,
+                                        );
                                     }
                                 }
 
@@ -494,11 +515,33 @@ impl<P: LayoutProvider> Graph<P> {
                 let succs = self.blocks[block_idx].succs.clone();
 
                 if is_backedge {
-                    // Connect backedge to loop header immediately
+                    // Connect backedge to loop header immediately (TypeScript line 641-642)
                     if !succs.is_empty() {
                         let header_idx = succs[0];
                         if let Some(header_layout_node) = self.blocks[header_idx].layout_node {
-                            // Will be connected in rendering
+                            // Find the header's layer and index
+                            let mut header_global = header_layout_node;
+                            let mut header_layer = 0;
+                            let mut header_idx_in_layer = 0;
+
+                            for (l, nodes) in layout_nodes_by_layer.iter().enumerate() {
+                                if header_global < nodes.len() {
+                                    header_layer = l;
+                                    header_idx_in_layer = header_global;
+                                    break;
+                                }
+                                header_global -= nodes.len();
+                            }
+
+                            // Connect backedge block to loop header
+                            connect_nodes(
+                                &mut layout_nodes_by_layer,
+                                layer,
+                                node_idx,
+                                0,
+                                header_layer,
+                                header_idx_in_layer,
+                            );
                         }
                     }
                 } else {
@@ -692,8 +735,31 @@ impl<P: LayoutProvider> Graph<P> {
     fn straighten_edges(&mut self, layout_nodes_by_layer: &mut [Vec<LayoutNode>]) {
         use crate::graph::{BLOCK_GAP, PORT_START, PORT_SPACING, LAYOUT_ITERATIONS, NEARLY_STRAIGHT_ITERATIONS};
 
+        // Debug: Check initial positions on layer 8
+        if let Some(layer8) = layout_nodes_by_layer.get(8) {
+            if layer8.len() == 4 {
+                eprintln!("straighten_edges START - Layer 8:");
+                for (i, node) in layer8.iter().enumerate() {
+                    match node {
+                        LayoutNode::BlockNode(n) => eprintln!("  [{}] Block {}: x={}", i, n.block, n.pos.x),
+                        LayoutNode::DummyNode(n) => eprintln!("  [{}] Dummy {}: x={}", i, n.id, n.pos.x),
+                    }
+                }
+            }
+        }
+
         // Helper: Push nodes to the right if they are too close together
         let push_neighbors = |nodes: &mut [LayoutNode]| {
+            let is_layer_8 = nodes.len() == 4 && matches!(nodes.get(1), Some(LayoutNode::BlockNode(n)) if n.block == 10);
+            if is_layer_8 {
+                eprintln!("push_neighbors layer 8 BEFORE:");
+                for (i, node) in nodes.iter().enumerate() {
+                    match node {
+                        LayoutNode::BlockNode(n) => eprintln!("  [{}] Block {}: x={}, size.x={}", i, n.block, n.pos.x, n.size.x),
+                        LayoutNode::DummyNode(n) => eprintln!("  [{}] Dummy {}: x={}, size.x={}", i, n.id, n.pos.x, n.size.x),
+                    }
+                }
+            }
             for i in 0..nodes.len().saturating_sub(1) {
                 let (node_is_dummy, node_size_x, node_pos_x) = match &nodes[i] {
                     LayoutNode::BlockNode(n) => (false, n.size.x, n.pos.x),
@@ -717,6 +783,15 @@ impl<P: LayoutProvider> Graph<P> {
                     }
                     LayoutNode::DummyNode(neighbor) => {
                         neighbor.pos.x = neighbor.pos.x.max(node_right_plus_padding);
+                    }
+                }
+            }
+            if is_layer_8 {
+                eprintln!("push_neighbors layer 8 AFTER:");
+                for (i, node) in nodes.iter().enumerate() {
+                    match node {
+                        LayoutNode::BlockNode(n) => eprintln!("  [{}] Block {}: x={}, size.x={}", i, n.block, n.pos.x, n.size.x),
+                        LayoutNode::DummyNode(n) => eprintln!("  [{}] Dummy {}: x={}, size.x={}", i, n.id, n.pos.x, n.size.x),
                     }
                 }
             }
@@ -1116,16 +1191,29 @@ impl<P: LayoutProvider> Graph<P> {
         let straighten_conservative = |layout_nodes: &mut [Vec<LayoutNode>],
                                         backedge_blocks: &std::collections::HashSet<usize>,
                                         backedge_dsts: &std::collections::HashSet<usize>| {
+            // Check block 11 at start
+            if let Some(layer8) = layout_nodes.get(8) {
+                if layer8.len() == 4 {
+                    for node in layer8.iter() {
+                        if let LayoutNode::BlockNode(n) = node {
+                            if n.block == 11 {
+                                eprintln!("straighten_conservative START: Block 11: x={}", n.pos.x);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Pre-compute all global node info to avoid borrowing issues
-            let mut global_node_info: Vec<(usize, f64, Vec<usize>, Vec<usize>, usize)> = Vec::new(); // (global_idx, pos_x, src_nodes, dst_nodes, flags)
+            let mut global_node_info: Vec<(usize, f64, Vec<usize>, Vec<usize>, usize, Option<usize>)> = Vec::new(); // (global_idx, pos_x, src_nodes, dst_nodes, flags, dst_block)
             let mut current_global = 0;
             for layer in layout_nodes.iter() {
                 for node in layer {
-                    let (pos_x, src_nodes, dst_nodes, flags) = match node {
-                        LayoutNode::BlockNode(n) => (n.pos.x, n.src_nodes.clone(), n.dst_nodes.clone(), 0),
-                        LayoutNode::DummyNode(n) => (n.pos.x, n.src_nodes.clone(), n.dst_nodes.clone(), n.flags as usize),
+                    let (pos_x, src_nodes, dst_nodes, flags, dst_block) = match node {
+                        LayoutNode::BlockNode(n) => (n.pos.x, n.src_nodes.clone(), n.dst_nodes.clone(), 0, None),
+                        LayoutNode::DummyNode(n) => (n.pos.x, n.src_nodes.clone(), n.dst_nodes.clone(), n.flags as usize, Some(n.dst_block)),
                     };
-                    global_node_info.push((current_global, pos_x, src_nodes, dst_nodes, flags));
+                    global_node_info.push((current_global, pos_x, src_nodes, dst_nodes, flags, dst_block));
                     current_global += 1;
                 }
             }
@@ -1160,16 +1248,30 @@ impl<P: LayoutProvider> Graph<P> {
                     }
 
                     // Get this node's info from pre-computed data
-                    let (_, node_pos, src_nodes, dst_nodes, _) = &global_node_info[global_idx];
+                    let (_, node_pos, src_nodes, dst_nodes, _, _) = &global_node_info[global_idx];
                     let mut deltas_to_try: Vec<f64> = Vec::new();
+
+                    // Debug: Check if this is block 11
+                    let is_block_11 = match &nodes[i] {
+                        LayoutNode::BlockNode(n) => n.block == 11,
+                        _ => false,
+                    };
+                    if is_block_11 {
+                        eprintln!("straighten_conservative: Processing block 11 at x={}, global_idx={}", node_pos, global_idx);
+                        eprintln!("  src_nodes (parents): {:?}", src_nodes);
+                        eprintln!("  dst_nodes (children): {:?}", dst_nodes);
+                    }
 
                     // Check parent nodes
                     for &parent_global in src_nodes {
-                        if let Some((_, parent_pos, _, parent_dsts, _)) = global_node_info.get(parent_global) {
+                        if let Some((_, parent_pos, _, parent_dsts, _, _)) = global_node_info.get(parent_global) {
                             if let Some(port_in_parent) = parent_dsts.iter().position(|&idx| idx == global_idx) {
                                 let src_port_offset = PORT_START + port_in_parent as f64 * PORT_SPACING;
                                 let dst_port_offset = PORT_START;
                                 let delta = (parent_pos + src_port_offset) - (node_pos + dst_port_offset);
+                                if is_block_11 {
+                                    eprintln!("  Parent {} at x={}, port={}, delta={}", parent_global, parent_pos, port_in_parent, delta);
+                                }
                                 deltas_to_try.push(delta);
                             }
                         }
@@ -1177,14 +1279,30 @@ impl<P: LayoutProvider> Graph<P> {
 
                     // Check child nodes
                     for (src_port, &dst_global) in dst_nodes.iter().enumerate() {
-                        if let Some((_, dst_pos, _, _, dst_flags)) = global_node_info.get(dst_global) {
-                            // Check if it's a backedge dummy by checking if dst_block is in backedge_dsts
-                            // We can't easily check this without more info, so skip for now
+                        if let Some((_, dst_pos, _, _, dst_flags, dst_block_opt)) = global_node_info.get(dst_global) {
+                            // Skip backedge dummies (TypeScript lines 882-884)
+                            // Check if this is a dummy (dst_block_opt.is_some()) AND it leads to a backedge block
+                            if let Some(dst_block) = dst_block_opt {
+                                if backedge_dsts.contains(dst_block) {
+                                    if is_block_11 {
+                                        eprintln!("  Child {} is backedge dummy, SKIPPING", dst_global);
+                                    }
+                                    continue;
+                                }
+                            }
+
                             let src_port_offset = PORT_START + src_port as f64 * PORT_SPACING;
                             let dst_port_offset = PORT_START;
                             let delta = (dst_pos + dst_port_offset) - (node_pos + src_port_offset);
+                            if is_block_11 {
+                                eprintln!("  Child {} at x={}, src_port={}, delta={}", dst_global, dst_pos, src_port, delta);
+                            }
                             deltas_to_try.push(delta);
                         }
+                    }
+
+                    if is_block_11 {
+                        eprintln!("  Deltas to try: {:?}", deltas_to_try);
                     }
 
                     // Filter and sort deltas
@@ -1202,6 +1320,9 @@ impl<P: LayoutProvider> Graph<P> {
                     };
 
                     for delta in deltas_to_try {
+                        if is_block_11 {
+                            eprintln!("  Trying delta={}", delta);
+                        }
                         let mut overlaps_any = false;
                         for j in (i + 1)..nodes.len() {
                             // Ignore rightmost dummies
@@ -1232,11 +1353,16 @@ impl<P: LayoutProvider> Graph<P> {
 
                         if !overlaps_any {
                             // Apply delta
+                            if is_block_11 {
+                                eprintln!("  APPLYING delta={}, new x={}", delta, node_pos + delta);
+                            }
                             match &mut nodes[i] {
                                 LayoutNode::BlockNode(n) => n.pos.x += delta,
                                 LayoutNode::DummyNode(n) => n.pos.x += delta,
                             }
                             break;
+                        } else if is_block_11 {
+                            eprintln!("  Delta overlaps, skipping");
                         }
                     }
                 }
@@ -1254,14 +1380,77 @@ impl<P: LayoutProvider> Graph<P> {
 
         straighten_dummy_runs(layout_nodes_by_layer);
 
-        for _ in 0..NEARLY_STRAIGHT_ITERATIONS {
+        for iter in 0..NEARLY_STRAIGHT_ITERATIONS {
             straighten_nearly_straight_edges_up(layout_nodes_by_layer);
+            // Check after nearly_straight_up
+            if let Some(layer8) = layout_nodes_by_layer.get(8) {
+                if layer8.len() == 4 {
+                    for node in layer8.iter() {
+                        if let LayoutNode::BlockNode(n) = node {
+                            if n.block == 11 {
+                                eprintln!("After nearly_straight_up iter {}: Block 11: x={}", iter, n.pos.x);
+                            }
+                        }
+                    }
+                }
+            }
+
             straighten_nearly_straight_edges_down(layout_nodes_by_layer);
+            // Check after nearly_straight_down
+            if let Some(layer8) = layout_nodes_by_layer.get(8) {
+                if layer8.len() == 4 {
+                    for node in layer8.iter() {
+                        if let LayoutNode::BlockNode(n) = node {
+                            if n.block == 11 {
+                                eprintln!("After nearly_straight_down iter {}: Block 11: x={}", iter, n.pos.x);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         straighten_conservative(layout_nodes_by_layer, &is_backedge_block, &is_backedge_dst);
+        // Check layer 8 after straighten_conservative
+        if let Some(layer8) = layout_nodes_by_layer.get(8) {
+            if layer8.len() == 4 {
+                eprintln!("After straighten_conservative:");
+                for (i, node) in layer8.iter().enumerate() {
+                    match node {
+                        LayoutNode::BlockNode(n) if n.block == 11 => eprintln!("  [{}] Block 11: x={}", i, n.pos.x),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         straighten_dummy_runs(layout_nodes_by_layer);
+        // Check layer 8 after straighten_dummy_runs
+        if let Some(layer8) = layout_nodes_by_layer.get(8) {
+            if layer8.len() == 4 {
+                eprintln!("After straighten_dummy_runs:");
+                for (i, node) in layer8.iter().enumerate() {
+                    match node {
+                        LayoutNode::BlockNode(n) if n.block == 11 => eprintln!("  [{}] Block 11: x={}", i, n.pos.x),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         suck_in_leftmost_dummies(layout_nodes_by_layer);
+        // Check layer 8 after suck_in_leftmost_dummies
+        if let Some(layer8) = layout_nodes_by_layer.get(8) {
+            if layer8.len() == 4 {
+                eprintln!("After suck_in_leftmost_dummies:");
+                for (i, node) in layer8.iter().enumerate() {
+                    match node {
+                        LayoutNode::BlockNode(n) if n.block == 11 => eprintln!("  [{}] Block 11: x={}", i, n.pos.x),
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 
     fn finagle_joints(&mut self, layout_nodes_by_layer: &mut [Vec<LayoutNode>]) -> Vec<f64> {
@@ -1288,23 +1477,13 @@ impl<P: LayoutProvider> Graph<P> {
             // First pass: collect node data
             let mut node_data: Vec<(usize, f64, Vec<usize>, bool)> = Vec::new(); // (id, pos.x, dst_nodes, is_backedge)
 
-            if layer_idx == 9 {
-                eprintln!("Layer 9 has {} nodes", nodes.len());
-            }
-
             for node in nodes.iter() {
                 match node {
                     LayoutNode::BlockNode(block_node) => {
                         let is_backedge = self.blocks[block_node.block].attributes.contains(&"backedge".to_string());
-                        if layer_idx == 9 {
-                            eprintln!("  BlockNode id={}, block={}, is_backedge={}", block_node.id, block_node.block, is_backedge);
-                        }
                         node_data.push((block_node.id, block_node.pos.x, block_node.dst_nodes.clone(), is_backedge));
                     }
                     LayoutNode::DummyNode(dummy_node) => {
-                        if layer_idx == 9 {
-                            eprintln!("  DummyNode id={}, flags={:?}", dummy_node.id, dummy_node.flags);
-                        }
                         node_data.push((dummy_node.id, dummy_node.pos.x, dummy_node.dst_nodes.clone(), false));
                     }
                 }
@@ -1325,30 +1504,13 @@ impl<P: LayoutProvider> Graph<P> {
                     let dst_pos_x = match global_node_positions.get(&dst_global_idx) {
                         Some(&x) => x,
                         None => {
-                            if layer_idx == 9 {
-                                eprintln!("  Skipping joint: dst_global_idx={} not found", dst_global_idx);
-                            }
                             continue; // Skip if dst not found
                         }
                     };
                     let x2 = dst_pos_x + PORT_START;
 
-                    if layer_idx == 9 {
-                        eprintln!("  Node {} (pos.x={}), src_port={}, dst_global={} (pos.x={})",
-                                  node_id, pos_x, src_port, dst_global_idx, dst_pos_x);
-                        eprintln!("    x1 = {} + {} + {}*{} = {}", pos_x, PORT_START, PORT_SPACING, src_port, x1);
-                        eprintln!("    x2 = {} + {} = {}", dst_pos_x, PORT_START, x2);
-                    }
-
                     if (x2 - x1).abs() < 2.0 * ARROW_RADIUS {
-                        if layer_idx == 9 {
-                            eprintln!("  Skipping joint: x1={}, x2={}, too narrow (diff={})", x1, x2, (x2-x1).abs());
-                        }
                         continue;
-                    }
-
-                    if layer_idx == 9 {
-                        eprintln!("  Adding joint: x1={}, x2={}, dst_global={}", x1, x2, dst_global_idx);
                     }
                     joints.push(Joint {
                         x1,

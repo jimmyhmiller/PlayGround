@@ -1,0 +1,98 @@
+;; Comprehensive Let Tests
+;; Testing lexical (stack-allocated) local bindings
+
+;; Test 1: Basic let
+(let [x 10] x)
+;; Expected: 10
+
+;; Test 2: Multiple bindings
+(let [x 10 y 20] (+ x y))
+;; Expected: 30
+
+;; Test 3: Sequential bindings (y can see x)
+(let [x 10
+      y (+ x 5)
+      z (+ y x)]
+  z)
+;; Expected: 25
+
+;; Test 4: Shadowing global var
+(def global-x 100)
+(let [global-x 10] global-x)
+;; Expected: 10
+
+;; Test 5: Global var restored after let
+global-x
+;; Expected: 100
+
+;; Test 6: Nested let
+(let [x 10]
+  (let [y 20]
+    (+ x y)))
+;; Expected: 30
+
+;; Test 7: Shadowing in nested let
+(let [x 10]
+  (let [x 20]
+    x))
+;; Expected: 20
+
+;; Test 8: Outer binding still accessible after nested let
+(let [x 10]
+  (let [y 20]
+    x)
+  x)
+;; Expected: 10 (from the second x reference)
+
+;; Test 9: Multiple expressions in body
+(let [x 10]
+  (+ x 5)
+  (* x 2))
+;; Expected: 20 (returns last expression)
+
+;; Test 10: Let with arithmetic
+(let [a 5
+      b 3]
+  (- (* a b) a))
+;; Expected: 10
+
+;; Test 11: Let with comparison
+(let [x 10
+      y 20]
+  (< x y))
+;; Expected: true
+
+;; Test 12: Triple nested let
+(let [a 1]
+  (let [b 2]
+    (let [c 3]
+      (+ a (+ b c)))))
+;; Expected: 6
+
+;; Test 13: Let with if
+(let [x 10]
+  (if (< x 20)
+    (* x 2)
+    x))
+;; Expected: 20
+
+;; Test 14: Let with do
+(let [x 5]
+  (do
+    (+ x 1)
+    (+ x 2)
+    (+ x 3)))
+;; Expected: 8
+
+;; Test 15: Empty bindings vector (edge case)
+;; (let [] 42)
+;; This should work and return 42
+
+;; Test 16: Complex sequential dependencies
+(let [x 2
+      y (* x x)
+      z (+ y x)]
+  (- z y))
+;; Expected: 2
+
+:quit

@@ -20,6 +20,7 @@ public class Lexer {
     private Stack<LexerContext> contextStack = new Stack<>();
     // Whether an expression is allowed at the current position
     private boolean exprAllowed = true;
+    private int generatorDepth = 0; // Track nesting level of generator functions
 
     public Lexer(String source) {
         this.source = source;
@@ -75,7 +76,7 @@ public class Lexer {
             Token token = nextToken();
             if (token != null) {
                 tokens.add(token);
-                updateContext(lastTokenType, token.type());
+                updateContext(lastTokenType, token);
                 lastTokenType = token.type();
                 atLineStart = false;
             }
@@ -89,7 +90,8 @@ public class Lexer {
      * Updates the context stack and exprAllowed flag after reading a token.
      * Based on Acorn's updateContext approach.
      */
-    private void updateContext(TokenType prevType, TokenType currentType) {
+    private void updateContext(TokenType prevType, Token currentToken) {
+        TokenType currentType = currentToken.type();
         // Handle specific token types that need custom context updates
         switch (currentType) {
             case RPAREN, RBRACE -> {
@@ -157,6 +159,17 @@ public class Lexer {
                 if (isKeyword(currentType) && prevType == TokenType.DOT) {
                     // Keywords after dot are property names, not keywords
                     exprAllowed = false;
+                } else if (currentType == TokenType.IDENTIFIER && "yield".equals(currentToken.lexeme()) &&
+                           // Only treat as yield keyword if in a context where it's likely a yield expression
+                           // NOT after: declarations, assignments at statement level
+                           prevType != TokenType.VAR && prevType != TokenType.LET && prevType != TokenType.CONST &&
+                           prevType != TokenType.COMMA && // comma in var declaration
+                           prevType != TokenType.SEMICOLON && // start of new statement where yield is a variable
+                           prevType != null) { // Also not at start of file
+                    // Special case: 'yield' is likely a yield expression (contextual keyword)
+                    // After yield, we allow expressions (including regex literals)
+                    // This is a heuristic - may have false positives, but parser will catch actual errors
+                    exprAllowed = true;
                 } else {
                     exprAllowed = TokenTypeProperties.beforeExpr(currentType);
                 }
@@ -1541,6 +1554,7 @@ public class Lexer {
                 if (c == '\r') {
                     // Check if followed by LF (CRLF sequence)
                     advance();
+                    column--;  // \r should not count as a column
                     if (!isAtEnd() && peek() == '\n') {
                         // CRLF: normalize to LF in both raw and cooked
                         raw.append('\n');

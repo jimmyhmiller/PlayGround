@@ -152,8 +152,8 @@ export const LayoutSettingsConfigSchema = BaseWidgetConfigSchema.extend({
   type: z.union([z.literal('layout-settings'), z.literal('layoutSettings')]),
 });
 
-// Discriminated union of all widget schemas
-export const WidgetConfigSchema = z.discriminatedUnion('type', [
+// Union of all widget schemas
+export const WidgetConfigSchema = z.union([
   StatConfigSchema,
   BarChartConfigSchema,
   ProgressConfigSchema,

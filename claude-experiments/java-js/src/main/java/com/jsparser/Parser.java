@@ -2109,7 +2109,9 @@ public class Parser {
             String raw = startToken.raw();
             String cooked = (String) startToken.literal();
             int elemStart = templateStart + 1; // +1 for opening `
-            int elemEnd = elemStart + raw.length();
+            // Token endPosition includes the ${ delimiter, so we need to subtract 2
+            // This works correctly for both LF and CRLF files since we use actual token positions
+            int elemEnd = getEnd(startToken) - 2;
             SourceLocation.Position elemStartPos = getPositionFromOffset(elemStart);
             SourceLocation.Position elemEndPos = getPositionFromOffset(elemEnd);
             SourceLocation elemLoc = new SourceLocation(elemStartPos, elemEndPos);
@@ -2137,7 +2139,9 @@ public class Parser {
                     String quasiRaw = quasiToken.raw();
                     String quasiCooked = (String) quasiToken.literal();
                     int quasiStart = getStart(quasiToken) + 1; // +1 to skip }
-                    int quasiEnd = quasiStart + quasiRaw.length();
+                    // Token endPosition includes the ${ delimiter, so we need to subtract 2
+                    // This works correctly for both LF and CRLF files since we use actual token positions
+                    int quasiEnd = getEnd(quasiToken) - 2;
                     SourceLocation.Position quasiStartPos = getPositionFromOffset(quasiStart);
                     SourceLocation.Position quasiEndPos = getPositionFromOffset(quasiEnd);
                     SourceLocation quasiLoc = new SourceLocation(quasiStartPos, quasiEndPos);
@@ -2155,7 +2159,9 @@ public class Parser {
                     String quasiRaw = quasiToken.raw();
                     String quasiCooked = (String) quasiToken.literal();
                     int quasiStart = getStart(quasiToken) + 1; // +1 to skip }
-                    int quasiEnd = quasiStart + quasiRaw.length();
+                    // Use token's actual end position - 1 to exclude closing `
+                    // This is important for files with CRLF line endings where raw is normalized
+                    int quasiEnd = getEnd(quasiToken) - 1;
                     SourceLocation.Position quasiStartPos = getPositionFromOffset(quasiStart);
                     SourceLocation.Position quasiEndPos = getPositionFromOffset(quasiEnd);
                     SourceLocation quasiLoc = new SourceLocation(quasiStartPos, quasiEndPos);

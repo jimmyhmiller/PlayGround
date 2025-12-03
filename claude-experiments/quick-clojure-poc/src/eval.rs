@@ -74,6 +74,11 @@ impl Evaluator {
                 Ok(last)
             }
 
+            Expr::Let { .. } => {
+                // Let form not supported in simple evaluator
+                Err("let form not supported in simple evaluator (use JIT compiler)".to_string())
+            }
+
             Expr::Binding { .. } => {
                 // Dynamic bindings not supported in simple evaluator
                 Err("binding form not supported in simple evaluator (use JIT compiler)".to_string())

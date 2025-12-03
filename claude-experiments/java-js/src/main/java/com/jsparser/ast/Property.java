@@ -20,7 +20,7 @@ public record Property(
         this(0, 0, loc, false, false, computed, key, value, kind);
     }
 
-    @JsonProperty(value = "type", index = 0)
+    @Override
     public String type() {
         return "Property";
     }

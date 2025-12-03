@@ -25,6 +25,11 @@ pub struct Compiler {
 
     /// IR builder
     builder: IrBuilder,
+
+    /// Local variable scopes (for let bindings)
+    /// Each scope maps variable name → register
+    /// Stack of scopes allows for nested lets
+    local_scopes: Vec<HashMap<String, IrValue>>,
 }
 
 impl Compiler {
@@ -69,6 +74,7 @@ impl Compiler {
             namespace_registry,
             used_namespaces,
             builder: IrBuilder::new(),
+            local_scopes: Vec::new(),
         }
     }
 
@@ -83,6 +89,7 @@ impl Compiler {
             Expr::Use { namespace } => self.compile_use(namespace),
             Expr::If { test, then, else_ } => self.compile_if(test, then, else_),
             Expr::Do { exprs } => self.compile_do(exprs),
+            Expr::Let { bindings, body } => self.compile_let(bindings, body),
             Expr::Binding { bindings, body } => self.compile_binding(bindings, body),
             Expr::Call { func, args } => self.compile_call(func, args),
             Expr::Quote(value) => self.compile_literal(value),
@@ -119,6 +126,16 @@ impl Compiler {
     }
 
     fn compile_var(&mut self, namespace: &Option<String>, name: &str) -> Result<IrValue, String> {
+        // First, check if this is a local variable (from let)
+        // Only unqualified names can be locals
+        if namespace.is_none() {
+            if let Some(register) = self.lookup_local(name) {
+                // Local variable - just return the register directly
+                return Ok(register);
+            }
+        }
+
+        // Not a local - look up as a global var
         // SAFETY: Single-threaded REPL - no concurrent access during compilation
         let rt = unsafe { &*self.runtime.get() };
 
@@ -424,6 +441,46 @@ impl Compiler {
         Ok(last_result)
     }
 
+    fn compile_let(&mut self, bindings: &[(String, Box<Expr>)], body: &[Expr]) -> Result<IrValue, String> {
+        // (let [x 10 y 20] (+ x y))
+        // This creates LEXICAL (stack-allocated) bindings, not dynamic bindings
+        //
+        // Implementation:
+        // 1. Push new scope
+        // 2. For each binding:
+        //    - Compile value expression (can reference prior bindings!)
+        //    - Store result in a register
+        //    - Add to current scope
+        // 3. Compile body (can reference all bindings)
+        // 4. Pop scope
+        // 5. Return last body expression's value
+
+        // Push new local scope
+        self.push_scope();
+
+        // Compile each binding sequentially
+        for (name, value_expr) in bindings {
+            // Compile the value expression
+            // This can reference prior bindings in this let!
+            let value_reg = self.compile(value_expr)?;
+
+            // Bind the name to the register in current scope
+            // No need to emit Assign - the value is already in the register
+            self.bind_local(name.clone(), value_reg);
+        }
+
+        // Compile body (returns last expression)
+        let mut result = IrValue::Null;
+        for expr in body {
+            result = self.compile(expr)?;
+        }
+
+        // Pop the local scope
+        self.pop_scope();
+
+        Ok(result)
+    }
+
     fn compile_binding(&mut self, bindings: &[(String, Box<Expr>)], body: &[Expr]) -> Result<IrValue, String> {
         // (binding [var1 val1 var2 val2 ...] body)
         // 1. Compile and push all bindings
@@ -504,6 +561,34 @@ impl Compiler {
         } else {
             Ok((None, var_name.to_string()))
         }
+    }
+
+    /// Push a new local scope (for let)
+    fn push_scope(&mut self) {
+        self.local_scopes.push(HashMap::new());
+    }
+
+    /// Pop a local scope (end of let)
+    fn pop_scope(&mut self) {
+        self.local_scopes.pop();
+    }
+
+    /// Bind a local variable to a register in the current scope
+    fn bind_local(&mut self, name: String, register: IrValue) {
+        if let Some(scope) = self.local_scopes.last_mut() {
+            scope.insert(name, register);
+        }
+    }
+
+    /// Look up a local variable, searching from innermost to outermost scope
+    fn lookup_local(&self, name: &str) -> Option<IrValue> {
+        // Search from innermost scope outward
+        for scope in self.local_scopes.iter().rev() {
+            if let Some(register) = scope.get(name) {
+                return Some(*register);
+            }
+        }
+        None
     }
 
     /// Look up a var pointer by namespace and name

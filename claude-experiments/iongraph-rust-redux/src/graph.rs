@@ -524,50 +524,6 @@ impl<P: LayoutProvider> Graph<P> {
                     LayoutNode::DummyNode(n) => (n.pos, n.size, n.flags, None, n.dst_nodes.clone(), n.joint_offsets.clone()),
                 };
 
-                // Check if this is a backedge block - draw loop header arrow regardless of dst_nodes
-                let is_backedge = if let Some(block_idx) = node_block_idx {
-                    self.blocks[block_idx].attributes.contains(&"backedge".to_string())
-                } else {
-                    false
-                };
-
-                if is_backedge {
-                    // Draw loop header arrow (TypeScript lines 1261-1269)
-                    if let Some(block_idx) = node_block_idx {
-                        if !self.blocks[block_idx].successors.is_empty() {
-                            let header_idx = self.blocks[block_idx].successors[0];
-                            if let Some(header_layout_node) = self.blocks[header_idx].layout_node {
-                                let header_node = self.find_layout_node_by_global_idx(&nodes_by_layer, header_layout_node);
-                                if let Some(LayoutNode::BlockNode(header)) = header_node {
-                                    let x1_arrow = node_pos.x;
-                                    let y1_arrow = node_pos.y + HEADER_ARROW_PUSHDOWN;
-                                    let x2_arrow = header.pos.x + header.size.x;
-                                    let y2_arrow = header.pos.y + HEADER_ARROW_PUSHDOWN;
-                                    let arrow = loop_header_arrow(&mut self.layout_provider, x1_arrow, y1_arrow, x2_arrow, y2_arrow, 1);
-                                    self.layout_provider.append_child(&mut arrows_container, arrow);
-                                }
-                            }
-                        }
-                    }
-                } else if (node_flags & IMMINENT_BACKEDGE_DUMMY) != 0 {
-                    // Draw from IMMINENT_BACKEDGE_DUMMY to backedge (TypeScript lines 1270-1278)
-                    // Need to find the destination backedge block
-                    if let LayoutNode::DummyNode(dummy) = node {
-                        let backedge_idx = dummy.dst_block;
-                        if let Some(backedge_layout_node) = self.blocks[backedge_idx].layout_node {
-                            let backedge_node = self.find_layout_node_by_global_idx(&nodes_by_layer, backedge_layout_node);
-                            if let Some(LayoutNode::BlockNode(backedge)) = backedge_node {
-                                let x1_arrow = node_pos.x + PORT_START;
-                                let y1_arrow = node_pos.y + HEADER_ARROW_PUSHDOWN + ARROW_RADIUS;
-                                let x2_arrow = backedge.pos.x + backedge.size.x;
-                                let y2_arrow = backedge.pos.y + HEADER_ARROW_PUSHDOWN;
-                                let arrow = arrow_to_backedge(&mut self.layout_provider, x1_arrow, y1_arrow, x2_arrow, y2_arrow, 1);
-                                self.layout_provider.append_child(&mut arrows_container, arrow);
-                            }
-                        }
-                    }
-                }
-
                 // Iterate through destination nodes and draw arrows
                 for (i, &dst_global_idx) in dst_nodes.iter().enumerate() {
                     let x1 = node_pos.x + PORT_START + PORT_SPACING * i as f64;
@@ -582,9 +538,48 @@ impl<P: LayoutProvider> Graph<P> {
                             LayoutNode::DummyNode(n) => (n.pos, n.size, n.flags, Some(n.dst_block)),
                         };
 
-                        // Note: backedge and IMMINENT_BACKEDGE_DUMMY arrows are handled outside the dst_nodes loop above
+                        // Check if this is a backedge block - draw loop header arrow
+                        let is_backedge = if let Some(block_idx) = node_block_idx {
+                            self.blocks[block_idx].attributes.contains(&"backedge".to_string())
+                        } else {
+                            false
+                        };
 
-                        if matches!(dst, LayoutNode::DummyNode(_)) {
+                        if is_backedge {
+                            // Draw loop header arrow (TypeScript lines 1282-1290)
+                            if let Some(block_idx) = node_block_idx {
+                                if !self.blocks[block_idx].successors.is_empty() {
+                                    let header_idx = self.blocks[block_idx].successors[0];
+                                    if let Some(header_layout_node) = self.blocks[header_idx].layout_node {
+                                        let header_node = self.find_layout_node_by_global_idx(&nodes_by_layer, header_layout_node);
+                                        if let Some(LayoutNode::BlockNode(header)) = header_node {
+                                            let x1_arrow = node_pos.x;
+                                            let y1_arrow = node_pos.y + HEADER_ARROW_PUSHDOWN;
+                                            let x2_arrow = header.pos.x + header.size.x;
+                                            let y2_arrow = header.pos.y + HEADER_ARROW_PUSHDOWN;
+                                            let arrow = loop_header_arrow(&mut self.layout_provider, x1_arrow, y1_arrow, x2_arrow, y2_arrow, 1);
+                                            self.layout_provider.append_child(&mut arrows_container, arrow);
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (node_flags & IMMINENT_BACKEDGE_DUMMY) != 0 {
+                            // Draw from IMMINENT_BACKEDGE_DUMMY to backedge (TypeScript lines 1291-1299)
+                            if let LayoutNode::DummyNode(dummy) = node {
+                                let backedge_idx = dummy.dst_block;
+                                if let Some(backedge_layout_node) = self.blocks[backedge_idx].layout_node {
+                                    let backedge_node = self.find_layout_node_by_global_idx(&nodes_by_layer, backedge_layout_node);
+                                    if let Some(LayoutNode::BlockNode(backedge)) = backedge_node {
+                                        let x1_arrow = node_pos.x + PORT_START;
+                                        let y1_arrow = node_pos.y + HEADER_ARROW_PUSHDOWN + ARROW_RADIUS;
+                                        let x2_arrow = backedge.pos.x + backedge.size.x;
+                                        let y2_arrow = backedge.pos.y + HEADER_ARROW_PUSHDOWN;
+                                        let arrow = arrow_to_backedge(&mut self.layout_provider, x1_arrow, y1_arrow, x2_arrow, y2_arrow, 1);
+                                        self.layout_provider.append_child(&mut arrows_container, arrow);
+                                    }
+                                }
+                            }
+                        } else if matches!(dst, LayoutNode::DummyNode(_)) {
                             // Check if this dummy eventually leads to a backedge (TypeScript line 1279)
                             let dst_dummy_block = if let LayoutNode::DummyNode(dn) = dst { dn.dst_block } else { unreachable!() };
                             let dst_dummy_leads_to_backedge = self.blocks[dst_dummy_block].attributes.contains(&"backedge".to_string());
