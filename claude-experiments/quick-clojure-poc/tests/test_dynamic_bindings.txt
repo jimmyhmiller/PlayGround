@@ -1,0 +1,45 @@
+;; Test 1: Basic binding
+(def *x* 10)
+*x*
+(binding [*x* 20] *x*)
+*x*
+
+;; Test 2: Nested bindings
+(binding [*x* 30] (binding [*x* 40] *x*))
+*x*
+
+;; Test 3: Multiple vars in one binding
+(def *y* 100)
+*y*
+(binding [*x* 50 *y* 200] (+ *x* *y*))
+*x*
+*y*
+
+;; Test 4: Binding in arithmetic
+(binding [*x* 5] (* *x* *x*))
+*x*
+
+;; Test 5: Shadowing with same value
+(binding [*x* 10] *x*)
+*x*
+
+;; Test 6: Multiple bindings with nested access
+(binding [*x* 7 *y* 3] (+ (* *x* *x*) *y*))
+*x*
+*y*
+
+;; Test 7: Deeply nested bindings
+(binding [*x* 1]
+  (binding [*x* 2]
+    (binding [*x* 3]
+      (binding [*x* 4] *x*))))
+*x*
+
+;; Test 8: Binding with do blocks
+(binding [*x* 99]
+  (do
+    (def temp *x*)
+    temp))
+*x*
+
+:quit

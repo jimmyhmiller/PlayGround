@@ -1,0 +1,71 @@
+; GC and Heap Inspection Demo
+; This demonstrates the garbage-collected heap and namespace objects
+
+; ========================================
+; 1. Initial heap state (just bootstrapped namespaces)
+; ========================================
+:heap
+:namespaces
+
+; ========================================
+; 2. Create some variables - watch heap grow
+; ========================================
+(def x 42)
+(def y 100)
+(def z 314)
+:heap
+:inspect user
+
+; ========================================
+; 3. Create a new namespace - more objects!
+; ========================================
+(ns math)
+(def pi 314)
+(def e 271)
+:heap
+:namespaces
+:inspect math
+
+; ========================================
+; 4. Another namespace
+; ========================================
+(ns physics)
+(def c 299792458)
+(def h 662607015)
+:heap
+:namespaces
+
+; ========================================
+; 5. Look at all the heap objects
+; ========================================
+:heap
+
+; Notice:
+; - Each namespace is a Namespace object on the heap
+; - Each variable name is a String object
+; - The heap shows exact addresses and sizes
+; - You can see namespace objects growing when you add bindings
+;   (user namespace went from 16b → 32b → 48b as we added x, y, z)
+
+; ========================================
+; 6. Inspect specific namespaces
+; ========================================
+:inspect user
+:inspect math
+:inspect physics
+
+; Notice the tagged values:
+; - 0x00000150 = 336 in decimal = 42 << 3 (shifted for tag)
+; - Untagged column shows the actual value (42)
+
+; ========================================
+; 7. Run garbage collection
+; ========================================
+:gc
+:heap
+
+; Currently all objects are reachable (namespaces are GC roots)
+; So GC doesn't collect anything yet
+; In a real system, unreferenced namespaces would be collected
+
+:quit

@@ -1,0 +1,90 @@
+;; Comprehensive set! Tests
+
+(def *x* 10)
+(def *y* 20)
+
+;; Test 1: Basic set! within binding
+(binding [*x* 100]
+  (set! *x* 200)
+  *x*)
+
+;; Test 2: Root value unchanged
+*x*
+
+;; Test 3: Multiple set! calls
+(binding [*x* 1]
+  (set! *x* 2)
+  (set! *x* 3)
+  (set! *x* 4)
+  *x*)
+
+;; Test 4: set! with arithmetic
+(binding [*x* 5]
+  (set! *x* (+ *x* 10))
+  *x*)
+
+;; Test 5: set! with multiplication
+(binding [*x* 7]
+  (set! *x* (* *x* *x*))
+  *x*)
+
+;; Test 6: set! multiple vars
+(binding [*x* 10 *y* 20]
+  (set! *x* 30)
+  (set! *y* 40)
+  (+ *x* *y*))
+
+;; Test 7: Both vars back to root
+*x*
+*y*
+
+;; Test 8: set! in nested bindings - inner
+(binding [*x* 100]
+  (binding [*x* 200]
+    (set! *x* 300)
+    *x*))
+
+;; Test 9: set! in nested bindings - outer remains
+(binding [*x* 100]
+  (do
+    *x*
+    (binding [*x* 200]
+      (set! *x* 300))
+    *x*))
+
+;; Test 10: set! using previous value
+(binding [*x* 10]
+  (set! *x* (+ *x* *x*))
+  (set! *x* (+ *x* *x*))
+  *x*)
+
+;; Test 11: set! with comparisons
+(binding [*x* 5]
+  (set! *x* (+ *x* 1))
+  (< *x* 10))
+
+;; Test 12: set! then use in arithmetic
+(binding [*x* 3 *y* 4]
+  (set! *x* (* *x* 2))
+  (set! *y* (* *y* 2))
+  (+ *x* *y*))
+
+;; Test 13: Chain of set! and arithmetic
+(binding [*x* 1]
+  (set! *x* (+ *x* 1))
+  (set! *x* (+ *x* 1))
+  (set! *x* (+ *x* 1))
+  (set! *x* (* *x* 10))
+  *x*)
+
+;; Test 14: set! to zero
+(binding [*x* 100]
+  (set! *x* 0)
+  *x*)
+
+;; Test 15: set! to negative
+(binding [*x* 10]
+  (set! *x* -99)
+  *x*)
+
+:quit

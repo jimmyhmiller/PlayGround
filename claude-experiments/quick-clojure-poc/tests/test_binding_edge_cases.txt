@@ -1,0 +1,72 @@
+;; Edge Cases for Dynamic Bindings
+
+(def *x* 1)
+(def *y* 2)
+(def *z* 3)
+
+;; Test 1: Empty binding body
+(binding [*x* 100] nil)
+
+;; Test 2: Binding returns last expression
+(binding [*x* 10]
+  (+ 1 2)
+  (+ 3 4)
+  (+ 5 6))
+
+;; Test 3: Binding with only var reference
+(binding [*x* 99] *x*)
+
+;; Test 4: Three vars at once
+(binding [*x* 10 *y* 20 *z* 30]
+  (+ *x* (+ *y* *z*)))
+
+;; Test 5: All back to root
+*x*
+*y*
+*z*
+
+;; Test 6: Rebind same var to same value
+(binding [*x* 1] *x*)
+
+;; Test 7: Interleaved nesting
+(binding [*x* 1]
+  (binding [*y* 2]
+    (binding [*z* 3]
+      (+ *x* (+ *y* *z*)))))
+
+;; Test 8: Binding shadowing in different order
+(binding [*x* 10]
+  (binding [*y* 20]
+    (binding [*x* 30]
+      (+ *x* *y*))))
+
+;; Test 9: Multiple references to same var
+(binding [*x* 5]
+  (+ *x* (+ *x* *x*)))
+
+;; Test 10: Binding with comparison
+(binding [*x* 100]
+  (< *x* 200))
+
+;; Test 11: Binding with equality
+(binding [*x* 42]
+  (= *x* 42))
+
+;; Test 12: Two bindings sequentially
+(binding [*x* 10] *x*)
+(binding [*x* 20] *x*)
+
+;; Test 13: Root between bindings
+*x*
+
+;; Test 14: Binding inside arithmetic
+(+ (binding [*x* 5] *x*)
+   (binding [*x* 10] *x*))
+
+;; Test 15: Complex expression using bound var multiple times
+(binding [*x* 3]
+  (+ (* *x* *x*)
+     (* 2 *x*)
+     1))
+
+:quit

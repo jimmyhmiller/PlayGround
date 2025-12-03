@@ -1,0 +1,34 @@
+;; set! Error Tests
+
+(def *x* 10)
+
+;; Test 1: set! outside binding should error
+(set! *x* 20)
+
+;; Test 2: After error, var should still have root value
+*x*
+
+;; Test 3: set! in binding should work
+(binding [*x* 30]
+  (set! *x* 40)
+  *x*)
+
+;; Test 4: Root still unchanged
+*x*
+
+;; Test 5: set! after binding exits should error
+(binding [*x* 100] *x*)
+(set! *x* 200)
+
+;; Test 6: Var still has root value
+*x*
+
+;; Test 7: set! with non-dynamic var (outside binding)
+(def static 50)
+(set! static 60)
+
+;; Test 8: set! with non-dynamic var (inside binding on different var)
+(binding [*x* 100]
+  (set! static 70))
+
+:quit

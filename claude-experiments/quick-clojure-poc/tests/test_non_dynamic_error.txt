@@ -1,0 +1,8 @@
+;; Test: Binding non-dynamic var should error
+;; Non-dynamic var (no earmuffs)
+(def static-var 42)
+
+;; This should print an error: "Can't dynamically bind non-dynamic var: user/static-var"
+(binding [static-var 100] static-var)
+
+:quit

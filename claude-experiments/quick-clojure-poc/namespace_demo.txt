@@ -1,0 +1,70 @@
+; Namespace Demo - Copy and paste these commands into the REPL
+; This demonstrates heap-allocated namespaces with GC
+
+; ========================================
+; 1. Working in the default 'user' namespace
+; ========================================
+(def x 42)
+(def y 100)
+(+ x y)
+
+; ========================================
+; 2. Create a new namespace 'math'
+; ========================================
+(ns math)
+; Notice the prompt changed to 'math=>'
+(def pi 314)
+(def e 271)
+(+ pi e)
+
+; ========================================
+; 3. Access variables from other namespaces
+; ========================================
+user/x
+user/y
+(+ user/x pi)
+
+; ========================================
+; 4. Create another namespace
+; ========================================
+(ns physics)
+(def c 299792458)
+(def planck 662607015)
+
+; Access from multiple namespaces
+user/x
+math/pi
+(+ user/x math/pi)
+
+; ========================================
+; 5. Switch back to user namespace
+; ========================================
+(ns user)
+; Notice the prompt is back to 'user=>'
+x
+y
+(+ x y)
+
+; ========================================
+; 6. Test division (the bug we fixed!)
+; ========================================
+(/ 100 10)
+(def z 50)
+(/ z 5)
+
+; ========================================
+; 7. All arithmetic operations work
+; ========================================
+(+ 1 2)
+(- 10 3)
+(* 4 5)
+(/ 20 4)
+
+; ========================================
+; 8. Qualified access still works
+; ========================================
+math/pi
+physics/c
+user/z
+
+:quit

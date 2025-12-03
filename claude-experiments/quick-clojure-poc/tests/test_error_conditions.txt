@@ -1,0 +1,25 @@
+;; Error Condition Tests
+;; This file tests that proper errors are thrown
+
+;; Setup
+(def *dynamic* 10)
+(def static 20)
+
+;; Test 1: Binding non-dynamic var should error
+(binding [static 100] static)
+
+;; Test 2: Dynamic var should work
+(binding [*dynamic* 100] *dynamic*)
+
+;; Test 3: Mixed - should error on static
+(binding [*dynamic* 1 static 2] (+ *dynamic* static))
+
+;; Test 4: Multiple non-dynamic vars
+(def another-static 30)
+(binding [static 1 another-static 2] static)
+
+;; Test 5: Nested binding with non-dynamic
+(binding [*dynamic* 100]
+  (binding [static 200] static))
+
+:quit

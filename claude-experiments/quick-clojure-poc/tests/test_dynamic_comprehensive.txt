@@ -1,0 +1,73 @@
+;; Comprehensive Dynamic Binding Tests
+
+;; Test 1: Basic dynamic var behavior
+(def *x* 100)
+*x*
+
+;; Test 2: Simple binding
+(binding [*x* 200] *x*)
+
+;; Test 3: Root value restored
+*x*
+
+;; Test 4: Multiple vars in one binding
+(def *y* 500)
+(binding [*x* 1 *y* 2] (+ *x* *y*))
+
+;; Test 5: Both vars back to root
+*x*
+*y*
+
+;; Test 6: Deeply nested bindings
+(binding [*x* 1]
+  (binding [*x* 2]
+    (binding [*x* 3]
+      (binding [*x* 4]
+        (binding [*x* 5] *x*)))))
+
+;; Test 7: Root still unchanged
+*x*
+
+;; Test 8: Alternating bindings
+(binding [*x* 10]
+  (binding [*y* 20]
+    (binding [*x* 30]
+      (binding [*y* 40]
+        (+ *x* *y*)))))
+
+;; Test 9: Bindings in arithmetic expressions
+(binding [*x* 7] (* *x* *x*))
+
+;; Test 10: Binding with function calls
+(binding [*x* 3 *y* 4] (+ (* *x* *x*) (* *y* *y*)))
+
+;; Test 11: Same var bound twice in nested scopes
+(binding [*x* 111]
+  (do
+    *x*
+    (binding [*x* 222] *x*)
+    *x*))
+
+;; Test 12: Multiple bindings with shadowing
+(binding [*x* 10 *y* 20]
+  (binding [*x* 30]
+    (+ *x* *y*)))
+
+;; Test 13: Zero and negative values
+(binding [*x* 0] *x*)
+(binding [*x* -42] *x*)
+
+;; Test 14: Binding within do blocks
+(binding [*x* 99]
+  (do
+    (def temp *x*)
+    (* temp 2)))
+
+;; Test 15: Complex nested structure
+(binding [*x* 1]
+  (+ *x*
+     (binding [*x* 2]
+       (+ *x*
+          (binding [*x* 3] *x*)))))
+
+:quit

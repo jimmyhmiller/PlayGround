@@ -1,0 +1,28 @@
+;; Test set! works within binding
+
+(def *x* 10)
+*x*
+
+;; set! within binding should work
+(binding [*x* 20]
+  (set! *x* 30)
+  *x*)
+
+*x*
+
+;; Nested binding with set!
+(binding [*x* 100]
+  (binding [*x* 200]
+    (set! *x* 300)
+    *x*))
+
+*x*
+
+;; set! with arithmetic
+(binding [*x* 5]
+  (set! *x* (* *x* 2))
+  *x*)
+
+*x*
+
+:quit

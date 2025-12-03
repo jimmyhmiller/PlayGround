@@ -1,0 +1,21 @@
+(def x 42)
+x
+(ns app.core)
+(def x 100)
+(def y 200)
+x
+y
+user/x
+(ns math)
+(def pi 314)
+(def double-pi (* pi 2))
+pi
+double-pi
+(ns user)
+x
+math/pi
+math/double-pi
+app.core/x
+app.core/y
+(+ user/x math/pi)
+:quit
