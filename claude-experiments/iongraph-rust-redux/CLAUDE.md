@@ -157,10 +157,42 @@ All edge straightening algorithms are now fully implemented:
     - Created test suite: test-all-functions.sh, test-multiple-passes.sh, test-comprehensive.sh
     - See TEST_REPORT.md for detailed results
 
+### Session 6: Benchmarking Suite (2025-12-03)
+11. ✅ Implemented comprehensive benchmarking infrastructure:
+    - Criterion.rs benchmark suite with statistical analysis
+    - TypeScript comparison benchmarks
+    - Profiling-friendly binary for samply/perf
+    - Automated comparison script (compare-performance.sh)
+    - Quick benchmark script (quick-bench.sh)
+    - Detailed documentation (BENCHMARKS.md, BENCHMARK_QUICK_START.md)
+
 ### Next Priorities
 
 1. **Sample Counts Integration** - Add profiling data support (low priority)
 2. **Navigation & Interactivity** - User interaction features (low priority)
+
+## Benchmarking
+
+The project includes comprehensive benchmarking tools. See [BENCHMARK_QUICK_START.md](BENCHMARK_QUICK_START.md) for quick start guide.
+
+### Quick Commands
+
+```bash
+# Run statistical benchmarks
+cargo bench
+
+# Compare Rust vs TypeScript
+./compare-performance.sh ion-examples/mega-complex.json 100
+
+# Profile with samply
+cargo build --release --bin profile-render
+samply record target/release/profile-render ion-examples/mega-complex.json 1000
+
+# Quick performance check
+./quick-bench.sh 50
+```
+
+See [BENCHMARKS.md](BENCHMARKS.md) for complete documentation.
 
 ## Architecture Notes
 

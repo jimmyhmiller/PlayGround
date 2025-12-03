@@ -71,15 +71,27 @@ impl Arm64CodeGen {
         // Count spills to determine stack space needed
         let num_stack_slots = allocator.next_stack_slot;
         let num_spills = allocator.spill_locations.len();
-        let stack_space = num_stack_slots * 8;  // 8 bytes per slot
+        // Add 8 bytes padding so spills are above SP (ARM64 requirement)
+        let stack_space = if num_stack_slots > 0 {
+            num_stack_slots * 8 + 8
+        } else {
+            0
+        };
 
         eprintln!("DEBUG: {} spills, {} total stack slots, {} bytes", num_spills, num_stack_slots, stack_space);
 
         let allocated_instructions = allocator.finish();
 
-        // Emit function prologue (save FP and LR)
+        // Emit function prologue
+        // Save FP and LR
         self.emit_stp(29, 30, 31, -2);  // stp x29, x30, [sp, #-16]!
         self.emit_mov(29, 31);           // mov x29, sp (set frame pointer)
+
+        // Save callee-saved registers we use (x19-x22)
+        // TESTING: Only using 4 registers to force spilling
+        // ARM64 requires 16-byte alignment, so save in pairs
+        self.emit_stp(19, 20, 31, -2);  // stp x19, x20, [sp, #-16]!
+        self.emit_stp(21, 22, 31, -2);  // stp x21, x22, [sp, #-16]!
 
         // Allocate stack space for spills if needed
         if stack_space > 0 {
@@ -108,7 +120,13 @@ impl Arm64CodeGen {
             self.emit_add_sp_imm(stack_space as i64);
         }
 
-        // Emit function epilogue (restore FP and LR)
+        // Emit function epilogue
+        // Restore callee-saved registers (in reverse order)
+        // TESTING: Only restoring x19-x22
+        self.emit_ldp(21, 22, 31, 2);   // ldp x21, x22, [sp], #16
+        self.emit_ldp(19, 20, 31, 2);   // ldp x19, x20, [sp], #16
+
+        // Restore FP and LR
         self.emit_ldp(29, 30, 31, 2);    // ldp x29, x30, [sp], #16
 
         // Emit return instruction
@@ -465,8 +483,10 @@ impl Arm64CodeGen {
 
                 if !is_dest {
                     // Load spilled value from stack
-                    // Slots are at [fp, #-(slot+1)*8]: slot 0 at -8, slot 1 at -16, etc.
-                    let offset = -((*stack_offset as i32) + 1) * 8;
+                    // Stack layout: [fp] = saved fp/lr, [fp-16] = saved x19/x20, [fp-32] = saved x21/x22
+                    // After sub sp, sp, #N, spills start at [fp-48] (slot 0), [fp-40] (slot 1), etc.
+                    // Note: slot numbering is reversed because stack grows downward
+                    let offset = -48 + (*stack_offset as i32 * 8);
                     self.emit_load_from_fp(temp_reg, offset);
                 }
                 // For destination, just return temp_reg without loading
@@ -493,8 +513,9 @@ impl Arm64CodeGen {
     /// Store a register to its spill location if needed
     fn store_spill(&mut self, src_reg: usize, dest_spill: Option<usize>) {
         if let Some(stack_offset) = dest_spill {
-            // Slots are at [fp, #-(slot+1)*8]: slot 0 at -8, slot 1 at -16, etc.
-            let offset = -((stack_offset as i32) + 1) * 8;
+            // Stack layout: [fp] = saved fp/lr, [fp-16] = saved x19/x20, [fp-32] = saved x21/x22
+            // After sub sp, sp, #N, spills start at [fp-48] (slot 0), [fp-40] (slot 1), etc.
+            let offset = -48 + (stack_offset as i32 * 8);
             self.emit_store_to_fp(src_reg, offset);
         }
     }

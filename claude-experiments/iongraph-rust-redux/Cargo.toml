@@ -10,3 +10,18 @@ path = "src/lib.rs"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "layout_algorithms"
+harness = false
+
+[[bench]]
+name = "rendering"
+harness = false
+
+[[bin]]
+name = "profile-render"
+path = "src/bin/profile_render.rs"

@@ -47,11 +47,9 @@ impl LinearScan {
     pub fn new(instructions: Vec<Instruction>, num_locals: usize) -> Self {
         let lifetimes = Self::compute_lifetimes(&instructions);
 
-        // Use ARM64 callee-saved registers (x19-x28)
-        // These are safe to use across function calls (trampolines for LoadVar, etc.)
-        // We have 10 registers which should be enough for most cases
-        // TODO: Implement proper register spilling for cases with >10 live values
-        let physical_registers: Vec<VirtualRegister> = (19..=28).map(physical).collect();
+        // Use ARM64 callee-saved registers (x19-x22)
+        // TESTING: Using only 4 registers to force spilling and verify implementation
+        let physical_registers: Vec<VirtualRegister> = (19..=22).map(physical).collect();
         let max_registers = physical_registers.len();
 
         LinearScan {
@@ -192,6 +190,14 @@ impl LinearScan {
         eprintln!("DEBUG LinearScan: {} virtual registers, {} physical registers available",
                   self.lifetimes.len(), self.max_registers);
 
+        // Print all lifetimes for debugging
+        let mut lifetime_vec: Vec<_> = self.lifetimes.iter().collect();
+        lifetime_vec.sort_by_key(|(_, (start, _))| *start);
+        eprintln!("Lifetimes:");
+        for (vreg, (start, end)) in &lifetime_vec {
+            eprintln!("  v{}: [{}, {}]", vreg.index, start, end);
+        }
+
         // Create sorted list of intervals (start, end, register)
         let mut intervals: Vec<(usize, usize, VirtualRegister)> = self
             .lifetimes
@@ -230,6 +236,10 @@ impl LinearScan {
         // Replace spilled registers with Spill values, then replace allocated registers
         self.replace_spilled_registers();
         self.replace_allocated_registers();
+
+        eprintln!("\nFinal allocation:");
+        eprintln!("Spilled: {:?}", self.spill_locations);
+        eprintln!("Allocated: {:?}", self.allocated_registers);
     }
 
     /// Replace spilled registers with Spill IR values
@@ -377,11 +387,14 @@ impl LinearScan {
         if spill_end > end {
             // Spill the interval that ends last, allocate its register to current interval
             let physical_reg = *self.allocated_registers.get(&spill_vreg).unwrap();
-            self.allocated_registers.insert(vreg, physical_reg);
 
-            // Mark spilled register
+            // Remove the spilled register from allocated_registers and mark it as spilled
+            self.allocated_registers.remove(&spill_vreg);
             let stack_slot = self.allocate_stack_slot();
             self.spill_locations.insert(spill_vreg, stack_slot);
+
+            // Allocate the freed physical register to current interval
+            self.allocated_registers.insert(vreg, physical_reg);
 
             // Remove from active and add current interval
             active.retain(|x| *x != spill);

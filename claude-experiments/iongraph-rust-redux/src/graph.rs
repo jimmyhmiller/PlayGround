@@ -46,6 +46,7 @@ pub struct LIRBlockData {
     pub instructions: Vec<LIRInstruction>,
 }
 
+#[derive(Clone)]
 pub struct SampleCounts {
     // Placeholder for sample count data
 }
@@ -117,6 +118,7 @@ pub struct RestoreStateOpts {
     pub preserve_selected_block_position: bool,
 }
 
+#[derive(Clone)]
 pub struct GraphOptions {
     pub sample_counts: Option<SampleCounts>,
     pub instruction_palette: Option<Vec<String>>,
