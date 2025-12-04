@@ -87,6 +87,11 @@ pub enum Instruction {
     // Assignment
     Assign(IrValue, IrValue),  // dst, src
 
+    // Function operations
+    MakeFunction(IrValue, Label),           // MakeFunction(dst, code_label) - create function object
+    LoadClosure(IrValue, IrValue, usize),   // LoadClosure(dst, fn_obj, index) - load closure variable
+    Call(IrValue, IrValue, Vec<IrValue>),   // Call(dst, fn, args) - invoke function
+
     // Return
     Ret(IrValue),
 }

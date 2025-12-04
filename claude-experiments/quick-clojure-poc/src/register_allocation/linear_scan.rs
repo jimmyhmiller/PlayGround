@@ -175,6 +175,23 @@ impl LinearScan {
                 if let IrValue::Register(r) = var_ptr { regs.push(*r); }
                 if let IrValue::Register(r) = value { regs.push(*r); }
             }
+
+            Instruction::MakeFunction(dst, _label) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+            }
+
+            Instruction::LoadClosure(dst, fn_obj, _index) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = fn_obj { regs.push(*r); }
+            }
+
+            Instruction::Call(dst, fn_val, args) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = fn_val { regs.push(*r); }
+                for arg in args {
+                    if let IrValue::Register(r) = arg { regs.push(*r); }
+                }
+            }
         }
 
         regs
@@ -195,10 +212,26 @@ impl LinearScan {
         // eprintln!("DEBUG LinearScan: {} virtual registers, {} physical registers available",
         //           self.lifetimes.len(), self.max_registers);
 
+        // PRE-ALLOCATE ARGUMENT REGISTERS
+        // ARM64 calling convention: arguments are passed in x0-x7
+        // Virtual registers with is_argument=true should map to x0-x7 based on their index
+        for (vreg, _interval) in &self.lifetimes {
+            if vreg.is_argument && vreg.index < 8 {
+                // Map argument virtual register to corresponding physical register (x0-x7)
+                let physical_reg = VirtualRegister {
+                    index: vreg.index,
+                    is_argument: false,
+                };
+                self.allocated_registers.insert(*vreg, physical_reg);
+                eprintln!("DEBUG: Pre-allocated argument register v{} -> x{}", vreg.index, vreg.index);
+            }
+        }
+
         // Create sorted list of intervals (start, end, register)
         let mut intervals: Vec<(usize, usize, VirtualRegister)> = self
             .lifetimes
             .iter()
+            .filter(|(vreg, _)| !vreg.is_argument)  // Skip argument registers - already allocated
             .map(|(register, (start, end))| (*start, *end, *register))
             .collect();
 
@@ -333,6 +366,23 @@ impl LinearScan {
             Instruction::SetVar(var_ptr, value) => {
                 replace(var_ptr);
                 replace(value);
+            }
+
+            Instruction::MakeFunction(dst, _label) => {
+                replace(dst);
+            }
+
+            Instruction::LoadClosure(dst, fn_obj, _index) => {
+                replace(dst);
+                replace(fn_obj);
+            }
+
+            Instruction::Call(dst, fn_val, args) => {
+                replace(dst);
+                replace(fn_val);
+                for arg in args {
+                    replace(arg);
+                }
             }
         }
     }
@@ -497,6 +547,23 @@ impl LinearScan {
             Instruction::SetVar(var_ptr, value) => {
                 replace(var_ptr);
                 replace(value);
+            }
+
+            Instruction::MakeFunction(dst, _label) => {
+                replace(dst);
+            }
+
+            Instruction::LoadClosure(dst, fn_obj, _index) => {
+                replace(dst);
+                replace(fn_obj);
+            }
+
+            Instruction::Call(dst, fn_val, args) => {
+                replace(dst);
+                replace(fn_val);
+                for arg in args {
+                    replace(arg);
+                }
             }
         }
     }

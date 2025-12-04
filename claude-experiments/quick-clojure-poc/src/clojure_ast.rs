@@ -63,6 +63,15 @@ pub enum Expr {
         body: Vec<Expr>,  // Body expressions (returns last)
     },
 
+    /// (fn name? [params*] exprs*)
+    /// (fn name? ([params*] exprs*)+)
+    /// Function definition - first-class values
+    /// Supports multi-arity dispatch and closures
+    Fn {
+        name: Option<String>,                      // Optional self-recursion name
+        arities: Vec<crate::value::FnArity>,       // One or more arity overloads
+    },
+
     // Function call (for now, all calls are the same)
     // Later we'll distinguish between special forms at parse time
     Call {
@@ -132,6 +141,7 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
                     "if" => analyze_if(items),
                     "do" => analyze_do(items),
                     "let" => analyze_let(items),
+                    "fn" => analyze_fn(items),
                     "quote" => analyze_quote(items),
                     "ns" => analyze_ns(items),
                     "use" => analyze_use(items),
@@ -364,6 +374,226 @@ fn analyze_let(items: &im::Vector<Value>) -> Result<Expr, String> {
     }
 
     Ok(Expr::Let { bindings, body })
+}
+
+fn analyze_fn(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // (fn name? [params] body*)
+    // (fn name? ([params] body*)+)
+    if items.len() < 2 {
+        return Err("fn requires at least a parameter vector".to_string());
+    }
+
+    let mut idx = 1;
+
+    // Check for optional name
+    let name = if let Some(Value::Symbol(s)) = items.get(idx) {
+        // Could be name or could be param vector
+        // Name is a symbol, params is a vector
+        // Peek ahead to disambiguate
+        if idx + 1 < items.len() {
+            match items.get(idx + 1) {
+                Some(Value::Vector(_)) => {
+                    // This is a name, next is params
+                    idx += 1;
+                    Some(s.clone())
+                }
+                Some(Value::List(_)) => {
+                    // Multi-arity form starting with (params) list, no name
+                    None
+                }
+                _ => {
+                    // Ambiguous - assume no name if current is a vector
+                    if matches!(items.get(idx), Some(Value::Vector(_))) {
+                        None
+                    } else {
+                        return Err("fn requires parameter vector or arity forms".to_string());
+                    }
+                }
+            }
+        } else {
+            // Only one element after fn - must be params vector
+            None
+        }
+    } else {
+        None
+    };
+
+    // Parse arities
+    let mut arities = Vec::new();
+
+    // Check if single-arity or multi-arity form
+    let is_multi_arity = matches!(items.get(idx), Some(Value::List(_)));
+
+    if is_multi_arity {
+        // Multi-arity: (fn name? ([params] body)+ )
+        for i in idx..items.len() {
+            let arity_form = match &items[i] {
+                Value::List(arity_items) => arity_items,
+                _ => return Err("Multi-arity fn requires lists for each arity".to_string()),
+            };
+
+            let arity = parse_fn_arity(arity_form)?;
+            arities.push(arity);
+        }
+    } else {
+        // Single-arity: (fn name? [params] body*)
+        let params_vec = match &items[idx] {
+            Value::Vector(v) => v,
+            _ => return Err("fn requires parameter vector".to_string()),
+        };
+
+        // Collect body expressions (everything after params)
+        let body_start = idx + 1;
+        let mut body_values = Vec::new();
+        for i in body_start..items.len() {
+            body_values.push(items[i].clone());
+        }
+
+        let arity = parse_fn_params_and_body(params_vec, &body_values)?;
+        arities.push(arity);
+    }
+
+    // Validate arities
+    validate_fn_arities(&arities)?;
+
+    Ok(Expr::Fn { name, arities })
+}
+
+fn parse_fn_arity(arity_items: &im::Vector<Value>) -> Result<crate::value::FnArity, String> {
+    // ([params] condition-map? body*)
+    if arity_items.is_empty() {
+        return Err("fn arity form cannot be empty".to_string());
+    }
+
+    let params_vec = match &arity_items[0] {
+        Value::Vector(v) => v,
+        _ => return Err("fn arity form must start with parameter vector".to_string()),
+    };
+
+    let mut body_values = Vec::new();
+    for i in 1..arity_items.len() {
+        body_values.push(arity_items[i].clone());
+    }
+    parse_fn_params_and_body(params_vec, &body_values)
+}
+
+fn parse_fn_params_and_body(
+    params_vec: &im::Vector<Value>,
+    body_items: &[Value],
+) -> Result<crate::value::FnArity, String> {
+    // Parse parameters: [x y] or [x y & rest]
+    let mut params = Vec::new();
+    let mut rest_param = None;
+    let mut found_ampersand = false;
+
+    for (i, param) in params_vec.iter().enumerate() {
+        match param {
+            Value::Symbol(s) if s == "&" => {
+                if found_ampersand {
+                    return Err("Only one & allowed in parameter list".to_string());
+                }
+                if i == params_vec.len() - 1 {
+                    return Err("& must be followed by rest parameter".to_string());
+                }
+                found_ampersand = true;
+            }
+            Value::Symbol(s) => {
+                if found_ampersand {
+                    if rest_param.is_some() {
+                        return Err("Only one rest parameter allowed after &".to_string());
+                    }
+                    rest_param = Some(s.clone());
+                } else {
+                    params.push(s.clone());
+                }
+            }
+            _ => return Err(format!("fn parameters must be symbols, got {:?}", param)),
+        }
+    }
+
+    // Parse condition map and body
+    let (pre_conditions, post_conditions, body_start_idx) =
+        if !body_items.is_empty() {
+            if let Some(Value::Map(cond_map)) = body_items.first() {
+                // Check if this is truly a condition map or just the body
+                // Condition map has :pre and/or :post keys
+                let has_pre = cond_map.contains_key(&Value::Keyword("pre".to_string()));
+                let has_post = cond_map.contains_key(&Value::Keyword("post".to_string()));
+
+                if has_pre || has_post {
+                    // Parse condition map
+                    let pre = if let Some(Value::Vector(pre_vec)) = cond_map.get(&Value::Keyword("pre".to_string())) {
+                        pre_vec.iter()
+                            .map(|v| analyze(v))
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        Vec::new()
+                    };
+
+                    let post = if let Some(Value::Vector(post_vec)) = cond_map.get(&Value::Keyword("post".to_string())) {
+                        post_vec.iter()
+                            .map(|v| analyze(v))
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        Vec::new()
+                    };
+
+                    (pre, post, 1)
+                } else {
+                    // Just a map in the body, not a condition map
+                    (Vec::new(), Vec::new(), 0)
+                }
+            } else {
+                (Vec::new(), Vec::new(), 0)
+            }
+        } else {
+            (Vec::new(), Vec::new(), 0)
+        };
+
+    // Parse body expressions
+    let mut body = Vec::new();
+    for i in body_start_idx..body_items.len() {
+        body.push(analyze(&body_items[i])?);
+    }
+
+    if body.is_empty() {
+        // Empty body returns nil
+        body.push(Expr::Literal(Value::Nil));
+    }
+
+    Ok(crate::value::FnArity {
+        params,
+        rest_param,
+        body,
+        pre_conditions,
+        post_conditions,
+    })
+}
+
+fn validate_fn_arities(arities: &[crate::value::FnArity]) -> Result<(), String> {
+    if arities.is_empty() {
+        return Err("fn requires at least one arity".to_string());
+    }
+
+    let mut seen_arities = std::collections::HashSet::new();
+    let mut variadic_count = 0;
+
+    for arity in arities {
+        let arity_num = arity.params.len();
+
+        if arity.rest_param.is_some() {
+            variadic_count += 1;
+            if variadic_count > 1 {
+                return Err("fn can have at most one variadic arity".to_string());
+            }
+        }
+
+        if !seen_arities.insert(arity_num) {
+            return Err(format!("Duplicate arity {} in fn", arity_num));
+        }
+    }
+
+    Ok(())
 }
 
 fn analyze_call(items: &im::Vector<Value>) -> Result<Expr, String> {

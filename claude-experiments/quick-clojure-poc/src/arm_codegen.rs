@@ -22,6 +22,10 @@ pub struct Arm64CodeGen {
     /// Pending jump fixups: (code_index, label)
     pending_fixups: Vec<(usize, Label)>,
 
+    /// Pending ADR fixups: (code_index, label)
+    /// ADR instructions need to be patched with PC-relative offsets
+    pending_adr_fixups: Vec<(usize, Label)>,
+
     /// Pool of temporary registers for spill loads (x9, x10, x11)
     temp_register_pool: Vec<usize>,
 }
@@ -40,6 +44,7 @@ impl Arm64CodeGen {
             next_physical_reg: 0,
             label_positions: HashMap::new(),
             pending_fixups: Vec::new(),
+            pending_adr_fixups: Vec::new(),
             temp_register_pool: vec![11, 10, 9],  // Start with x11, x10, x9 available
         }
     }
@@ -57,6 +62,7 @@ impl Arm64CodeGen {
         self.next_physical_reg = 0;
         self.label_positions.clear();
         self.pending_fixups.clear();
+        self.pending_adr_fixups.clear();
 
         // Run linear scan register allocation
         let mut allocator = LinearScan::new(instructions.to_vec(), num_registers);
@@ -474,12 +480,147 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
             }
 
+            Instruction::MakeFunction(dst, label) => {
+                // MakeFunction: Create a function object
+                // Call trampoline to allocate function object on heap
+                //
+                // For now: Simple implementation without closures
+                // trampoline_allocate_function(name_ptr, code_ptr, closure_count, c0-c4)
+                //
+                // Args:
+                //   x0 = name_ptr (0 for anonymous)
+                //   x1 = code_ptr (address of function code)
+                //   x2 = closure_count (0 for now)
+                //   x3-x7 = closure values (unused for now)
+
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+
+                // x0 = 0 (anonymous function - no name for now)
+                self.emit_mov_imm(0, 0);
+
+                // x1 = code_ptr (address of the label)
+                // Use ADR instruction to load label address into x1
+                // This will be patched with the actual PC-relative offset later
+                self.emit_adr(1, label.clone());
+
+                // x2 = 0 (no closures for now)
+                self.emit_mov_imm(2, 0);
+
+                // Call trampoline
+                let func_addr = crate::trampoline::trampoline_allocate_function as usize;
+                self.emit_mov_imm(15, func_addr as i64);
+                self.emit_blr(15);
+
+                // Result is in x0 (tagged function pointer)
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
+                }
+
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::LoadClosure(dst, fn_obj, index) => {
+                // LoadClosure: Load a captured variable from function object
+                // Call trampoline: trampoline_function_get_closure(fn_ptr, index)
+
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let fn_obj_reg = self.get_physical_reg_for_irvalue(fn_obj, false)?;
+
+                // x0 = function pointer (tagged)
+                if fn_obj_reg != 0 {
+                    self.emit_mov(0, fn_obj_reg);
+                }
+
+                // x1 = index
+                self.emit_mov_imm(1, *index as i64);
+
+                // Call trampoline
+                let func_addr = crate::trampoline::trampoline_function_get_closure as usize;
+                self.emit_mov_imm(15, func_addr as i64);
+                self.emit_blr(15);
+
+                // Result is in x0 (tagged closure value)
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
+                }
+
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::Call(dst, fn_val, args) => {
+                // Call: Invoke a function with arguments
+                // This is the most complex instruction!
+                //
+                // Steps:
+                // 1. Get function code pointer from function object
+                // 2. Move arguments to x0, x1, x2, ... (ARM64 calling convention)
+                // 3. Call the function
+                // 4. Get result from x0
+
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+
+                // Step 1: Get code pointer
+                let fn_reg = self.get_physical_reg_for_irvalue(fn_val, false)?;
+
+                // Save fn_reg in a callee-saved register if needed
+                // For now, assume we can use x19 as temporary
+                let saved_fn_reg = 19;
+                if fn_reg != saved_fn_reg {
+                    self.emit_mov(saved_fn_reg, fn_reg);
+                }
+
+                // Call trampoline to get code pointer
+                // x0 = function pointer (tagged)
+                if saved_fn_reg != 0 {
+                    self.emit_mov(0, saved_fn_reg);
+                }
+
+                let func_addr = crate::trampoline::trampoline_function_code_ptr as usize;
+                self.emit_mov_imm(15, func_addr as i64);
+                self.emit_blr(15);
+
+                // Code pointer now in x0, save it
+                let code_ptr_reg = 20; // Use x20 to store code pointer
+                self.emit_mov(code_ptr_reg, 0);
+
+                // Step 2: Move arguments to x0, x1, x2, ...
+                // ARM64 calling convention: first 8 args in x0-x7
+                for (i, arg) in args.iter().enumerate() {
+                    if i >= 8 {
+                        return Err("Call with more than 8 arguments not yet supported".to_string());
+                    }
+
+                    let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
+
+                    // Move argument to correct position (x0, x1, x2, ...)
+                    if arg_reg != i {
+                        self.emit_mov(i, arg_reg);
+                    }
+                }
+
+                // Step 3: Call the function
+                // BLR to the code pointer
+                self.emit_blr(code_ptr_reg);
+
+                // Step 4: Result is in x0
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
+                }
+
+                self.store_spill(dst_reg, dest_spill);
+            }
+
             Instruction::Ret(value) => {
                 // Move result to x0 (return register)
                 let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
                 if src_reg != 0 {
                     self.emit_mov(0, src_reg);
                 }
+                // Emit RET instruction to return from function
+                self.emit_ret();
             }
         }
 
@@ -566,6 +707,7 @@ impl Arm64CodeGen {
     }
 
     fn apply_fixups(&mut self) -> Result<(), String> {
+        // Apply branch fixups
         for (code_index, label) in &self.pending_fixups {
             let target_pos = self.label_positions.get(label)
                 .ok_or_else(|| format!("Undefined label: {}", label))?;
@@ -594,6 +736,38 @@ impl Arm64CodeGen {
                 return Err(format!("Unknown branch instruction at {}: {:08x}", code_index, instruction));
             }
         }
+
+        // Apply ADR fixups
+        for (code_index, label) in &self.pending_adr_fixups {
+            let target_pos = self.label_positions.get(label)
+                .ok_or_else(|| format!("Undefined label: {}", label))?;
+
+            // Calculate offset in instructions
+            let offset_instructions = (*target_pos as isize) - (*code_index as isize);
+
+            // ADR uses byte offsets, so multiply by 4
+            let byte_offset = offset_instructions * 4;
+
+            eprintln!("DEBUG ADR fixup: code_index={}, label={}, target_pos={}, offset_instructions={}, byte_offset={}",
+                      code_index, label, target_pos, offset_instructions, byte_offset);
+
+            // Check if offset fits in 21-bit signed immediate
+            if !(-1048576..=1048575).contains(&byte_offset) {
+                return Err(format!("ADR offset too large: {}", byte_offset));
+            }
+
+            // ADR encoding: immlo (2 bits) | immhi (19 bits)
+            let immlo = (byte_offset & 0x3) as u32;  // Lower 2 bits
+            let immhi = ((byte_offset >> 2) & 0x7FFFF) as u32;  // Upper 19 bits
+
+            // Patch the instruction
+            let instruction = self.code[*code_index];
+            self.code[*code_index] = (instruction & 0x9F00001F) | (immlo << 29) | (immhi << 5);
+
+            eprintln!("DEBUG ADR: patched instruction at {} from {:08x} to {:08x}",
+                      code_index, instruction, self.code[*code_index]);
+        }
+
         Ok(())
     }
 
@@ -781,6 +955,23 @@ impl Arm64CodeGen {
         // BLR Xn - Branch with Link to Register
         // Calls function at address in Xn, stores return address in X30
         let instruction = 0xD63F0000 | ((rn as u32) << 5);
+        self.code.push(instruction);
+    }
+
+    fn emit_adr(&mut self, dst: usize, label: Label) {
+        // ADR Xd, <label>
+        // Loads PC-relative address of label into Xd
+        // Encoding: 0x10000000 | (immlo << 29) | (immhi << 5) | rd
+        // immlo: 2 bits (bits 30-29)
+        // immhi: 19 bits (bits 23-5)
+        // rd: 5 bits (bits 4-0)
+        //
+        // For now, emit placeholder (offset 0) and record for fixup
+        let fixup_index = self.code.len();
+        self.pending_adr_fixups.push((fixup_index, label));
+
+        // ADR with offset 0 (placeholder)
+        let instruction = 0x10000000 | (dst as u32);
         self.code.push(instruction);
     }
 

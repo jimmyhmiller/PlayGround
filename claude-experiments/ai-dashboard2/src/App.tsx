@@ -152,6 +152,13 @@ function App() {
 
       console.log(`   ✅ Direct update`);
       await window.dashboardAPI.updateWidgetDimensions(dashboardId, widgetId, dimensions);
+
+      // Reload dashboards to reflect the saved changes
+      // This only happens on drag/resize END, not during drag
+      const updatedDashboards = await window.dashboardAPI.loadDashboards();
+      if (Array.isArray(updatedDashboards) && updatedDashboards.length > 0) {
+        setDashboards(updatedDashboards);
+      }
     } catch (error) {
       console.error('❌ Failed to update widget dimensions:', error);
       // Don't throw - let the UI continue working

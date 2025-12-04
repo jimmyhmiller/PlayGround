@@ -1,5 +1,17 @@
 use im::{Vector, HashMap};
 use std::fmt;
+use std::collections::HashMap as StdHashMap;
+
+/// Function arity definition
+/// Represents one overload of a multi-arity function
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnArity {
+    pub params: Vec<String>,           // Positional parameters
+    pub rest_param: Option<String>,    // Variadic rest parameter (after &)
+    pub body: Vec<crate::clojure_ast::Expr>,  // Body expressions (implicit do)
+    pub pre_conditions: Vec<crate::clojure_ast::Expr>,   // :pre assertions
+    pub post_conditions: Vec<crate::clojure_ast::Expr>,  // :post assertions (can use %)
+}
 
 /// Clojure value representation
 ///
@@ -29,11 +41,12 @@ pub enum Value {
     // Metadata wrapper
     WithMeta(HashMap<String, Value>, Box<Value>),
 
-    // Functions (to be implemented in Stage 1)
+    // Functions - first-class values implementing IFn interface
+    // Supports multi-arity dispatch (0-20 arities + optional variadic)
     Function {
-        name: Option<String>,
-        params: Vec<String>,
-        // body will be added later
+        name: Option<String>,                      // Optional name for self-recursion
+        arity_map: StdHashMap<usize, FnArity>,     // Fixed arities: arity_num → implementation
+        variadic_arity: Option<Box<FnArity>>,      // Optional variadic overload (& rest-param)
     },
 
     // Namespace object (for future heap allocation)
@@ -75,7 +88,10 @@ impl std::hash::Hash for Value {
                 // Hash the inner value, metadata doesn't affect hash
                 inner.hash(state);
             }
-            Value::Function { name, .. } => name.hash(state),
+            Value::Function { name, arity_map, .. } => {
+                name.hash(state);
+                arity_map.len().hash(state);
+            }
             Value::Namespace { name, .. } => name.hash(state),
         }
     }

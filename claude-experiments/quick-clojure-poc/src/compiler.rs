@@ -90,6 +90,7 @@ impl Compiler {
             Expr::If { test, then, else_ } => self.compile_if(test, then, else_),
             Expr::Do { exprs } => self.compile_do(exprs),
             Expr::Let { bindings, body } => self.compile_let(bindings, body),
+            Expr::Fn { name, arities } => self.compile_fn(name, arities),
             Expr::Binding { bindings, body } => self.compile_binding(bindings, body),
             Expr::Call { func, args } => self.compile_call(func, args),
             Expr::Quote(value) => self.compile_literal(value),
@@ -565,10 +566,270 @@ impl Compiler {
             .ok_or_else(|| format!("Var not found: {}", name))
     }
 
-    fn compile_call(&mut self, func: &Expr, args: &[Expr]) -> Result<IrValue, String> {
-        // For now, only handle builtin functions
-        // Later we'll handle user-defined functions
+    fn compile_fn(&mut self, name: &Option<String>, arities: &[crate::value::FnArity]) -> Result<IrValue, String> {
+        // For Phase 1: Simple single-arity functions without closures
+        // Multi-arity dispatch will be added in Phase 5
 
+        if arities.len() != 1 {
+            return Err("Multi-arity functions not yet implemented".to_string());
+        }
+
+        let arity = &arities[0];
+
+        // Step 1: Analyze closures - find free variables
+        let free_vars = self.find_free_variables_in_arity(arity, name)?;
+
+        // Step 2: Capture free variables (evaluate them in current scope)
+        let mut closure_values = Vec::new();
+        for var_name in &free_vars {
+            // Look up the variable in the current scope
+            if let Some(value_reg) = self.lookup_local(var_name) {
+                closure_values.push(value_reg);
+            } else {
+                return Err(format!("Free variable not found in scope: {}", var_name));
+            }
+        }
+
+        // Step 3: Generate code for the function body
+        // We'll compile the function code inline for now
+        // In a real implementation, this would be a separate code block
+
+        let fn_start_label = self.builder.new_label();
+        let fn_end_label = self.builder.new_label();
+
+        // Jump over the function body (we're compiling it inline)
+        self.builder.emit(Instruction::Jump(fn_end_label.clone()));
+
+        // Function entry point
+        self.builder.emit(Instruction::Label(fn_start_label.clone()));
+
+        // Push new scope for function parameters
+        self.push_scope();
+
+        // If named, bind function name to itself (for recursion)
+        // For now, we'll skip this as it requires having the function object
+        // which we haven't created yet (chicken-and-egg problem)
+
+        // Bind parameters to argument registers
+        // In ARM64 calling convention, arguments are in x0, x1, x2, etc.
+        for (i, param) in arity.params.iter().enumerate() {
+            let arg_reg = IrValue::Register(crate::ir::VirtualRegister {
+                index: i,
+                is_argument: true,
+            });
+            self.bind_local(param.clone(), arg_reg);
+        }
+
+        // Bind rest parameter if variadic
+        if let Some(rest) = &arity.rest_param {
+            // For now, bind to nil (list construction not implemented)
+            let rest_reg = self.builder.new_register();
+            self.builder.emit(Instruction::LoadConstant(rest_reg, IrValue::Null));
+            self.bind_local(rest.clone(), rest_reg);
+        }
+
+        // Bind closure variables
+        // These will be loaded from the function object at runtime
+        // For now, we'll create placeholder registers
+        for (_i, var_name) in free_vars.iter().enumerate() {
+            let closure_reg = self.builder.new_register();
+            // TODO: Emit LoadClosure instruction when we implement it
+            // For now, just bind to nil
+            self.builder.emit(Instruction::LoadConstant(closure_reg, IrValue::Null));
+            self.bind_local(var_name.clone(), closure_reg);
+        }
+
+        // Compile body (implicit do)
+        let result = self.compile_body(&arity.body)?;
+
+        // Return result
+        self.builder.emit(Instruction::Ret(result));
+
+        // Pop function scope
+        self.pop_scope();
+
+        // Function exit (after inline code)
+        self.builder.emit(Instruction::Label(fn_end_label));
+
+        // Step 4: Create function object
+        let fn_obj_reg = self.builder.new_register();
+        self.builder.emit(Instruction::MakeFunction(fn_obj_reg, fn_start_label));
+
+        Ok(fn_obj_reg)
+    }
+
+    /// Compile a sequence of expressions (like do)
+    fn compile_body(&mut self, exprs: &[Expr]) -> Result<IrValue, String> {
+        if exprs.is_empty() {
+            let result = self.builder.new_register();
+            self.builder.emit(Instruction::LoadConstant(result, IrValue::Null));
+            return Ok(result);
+        }
+
+        let mut result = self.builder.new_register();
+        for expr in exprs {
+            result = self.compile(expr)?;
+        }
+
+        Ok(result)
+    }
+
+    /// Find free variables in a function arity
+    /// A variable is free if:
+    /// 1. It's referenced in the body
+    /// 2. It's not a parameter
+    /// 3. It's not bound by an inner let
+    /// 4. It's a local (not a global var or builtin)
+    fn find_free_variables_in_arity(
+        &self,
+        arity: &crate::value::FnArity,
+        fn_name: &Option<String>,
+    ) -> Result<Vec<String>, String> {
+        let mut bound_vars = std::collections::HashSet::new();
+
+        // Add parameters to bound vars
+        for param in &arity.params {
+            bound_vars.insert(param.clone());
+        }
+
+        // Add rest param if present
+        if let Some(rest) = &arity.rest_param {
+            bound_vars.insert(rest.clone());
+        }
+
+        // Add function name if present (for self-recursion)
+        if let Some(name) = fn_name {
+            bound_vars.insert(name.clone());
+        }
+
+        let mut free_vars = std::collections::HashSet::new();
+
+        // Analyze body expressions
+        for expr in &arity.body {
+            self.collect_free_vars_from_expr(expr, &bound_vars, &mut free_vars);
+        }
+
+        // Return as sorted vector for consistent ordering
+        let mut result: Vec<String> = free_vars.into_iter().collect();
+        result.sort();
+        Ok(result)
+    }
+
+    /// Recursively collect free variables from an expression
+    fn collect_free_vars_from_expr(
+        &self,
+        expr: &Expr,
+        bound: &std::collections::HashSet<String>,
+        free: &mut std::collections::HashSet<String>,
+    ) {
+        match expr {
+            Expr::Var { namespace: None, name } => {
+                // Only consider unqualified names
+                if !bound.contains(name) && !self.is_builtin(name) {
+                    // Check if it's a local variable in current scope
+                    if self.lookup_local(name).is_some() {
+                        // It's a free variable (captured from outer scope)
+                        free.insert(name.clone());
+                    }
+                    // If not in local scope, it's a global var, not free
+                }
+            }
+
+            Expr::Let { bindings, body } => {
+                // Let creates new bindings
+                let mut new_bound = bound.clone();
+
+                for (name, value_expr) in bindings {
+                    // Analyze value expression with current bindings
+                    self.collect_free_vars_from_expr(value_expr, &new_bound, free);
+                    // Add this binding for subsequent expressions
+                    new_bound.insert(name.clone());
+                }
+
+                // Analyze body with all bindings
+                for expr in body {
+                    self.collect_free_vars_from_expr(expr, &new_bound, free);
+                }
+            }
+
+            Expr::Fn { name: fn_name, arities } => {
+                // Nested function - need to recurse with proper scoping
+                let mut fn_bound = bound.clone();
+
+                // Name (if present) is bound within the function
+                if let Some(n) = fn_name {
+                    fn_bound.insert(n.clone());
+                }
+
+                for arity in arities {
+                    let mut arity_bound = fn_bound.clone();
+
+                    // Add parameters
+                    for param in &arity.params {
+                        arity_bound.insert(param.clone());
+                    }
+
+                    // Add rest param
+                    if let Some(rest) = &arity.rest_param {
+                        arity_bound.insert(rest.clone());
+                    }
+
+                    // Analyze body
+                    for expr in &arity.body {
+                        self.collect_free_vars_from_expr(expr, &arity_bound, free);
+                    }
+                }
+            }
+
+            Expr::If { test, then, else_ } => {
+                self.collect_free_vars_from_expr(test, bound, free);
+                self.collect_free_vars_from_expr(then, bound, free);
+                if let Some(e) = else_ {
+                    self.collect_free_vars_from_expr(e, bound, free);
+                }
+            }
+
+            Expr::Do { exprs } => {
+                for expr in exprs {
+                    self.collect_free_vars_from_expr(expr, bound, free);
+                }
+            }
+
+            Expr::Call { func, args } => {
+                self.collect_free_vars_from_expr(func, bound, free);
+                for arg in args {
+                    self.collect_free_vars_from_expr(arg, bound, free);
+                }
+            }
+
+            Expr::Def { value, .. } => {
+                self.collect_free_vars_from_expr(value, bound, free);
+            }
+
+            Expr::Set { var, value } => {
+                self.collect_free_vars_from_expr(var, bound, free);
+                self.collect_free_vars_from_expr(value, bound, free);
+            }
+
+            Expr::Binding { bindings, body } => {
+                for (_, value_expr) in bindings {
+                    self.collect_free_vars_from_expr(value_expr, bound, free);
+                }
+                for expr in body {
+                    self.collect_free_vars_from_expr(expr, bound, free);
+                }
+            }
+
+            // These don't contain free variables
+            Expr::Literal(_) | Expr::Quote(_) | Expr::Ns { .. } | Expr::Use { .. } => {}
+
+            // Qualified vars are not free (they're global)
+            Expr::Var { namespace: Some(_), .. } => {}
+        }
+    }
+
+    fn compile_call(&mut self, func: &Expr, args: &[Expr]) -> Result<IrValue, String> {
+        // Check if it's a built-in first
         if let Expr::Var { namespace, name } = func {
             // Check if it's a built-in (either explicitly qualified or unqualified)
             let is_builtin = match namespace {
@@ -579,7 +840,7 @@ impl Compiler {
 
             if is_builtin {
                 // Dispatch to appropriate built-in handler
-                match name.as_str() {
+                return match name.as_str() {
                     "+" => self.compile_builtin_add(args),
                     "-" => self.compile_builtin_sub(args),
                     "*" => self.compile_builtin_mul(args),
@@ -588,19 +849,25 @@ impl Compiler {
                     ">" => self.compile_builtin_gt(args),
                     "=" => self.compile_builtin_eq(args),
                     _ => unreachable!(),
-                }
-            } else {
-                // Not a built-in, try to resolve as user function
-                let full_name = if let Some(ns) = namespace {
-                    format!("{}/{}", ns, name)
-                } else {
-                    name.to_string()
                 };
-                Err(format!("Unknown function: {}", full_name))
             }
-        } else {
-            Err("Function calls must use a symbol".to_string())
         }
+
+        // General function call (user-defined or first-class function)
+        // 1. Evaluate function expression to get function object
+        let fn_val = self.compile(func)?;
+
+        // 2. Evaluate arguments
+        let mut arg_vals = Vec::new();
+        for arg in args {
+            arg_vals.push(self.compile(arg)?);
+        }
+
+        // 3. Emit Call instruction
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::Call(result, fn_val, arg_vals));
+
+        Ok(result)
     }
 
     fn compile_builtin_add(&mut self, args: &[Expr]) -> Result<IrValue, String> {

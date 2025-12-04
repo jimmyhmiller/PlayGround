@@ -98,6 +98,85 @@ pub extern "C" fn trampoline_set_binding(var_ptr: usize, value: usize) -> usize 
     }
 }
 
+/// Trampoline: Allocate function object
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = name_ptr (0 for anonymous), x1 = code_ptr, x2 = closure_count, x3+ = closure values
+/// - Returns: x0 = function pointer (tagged)
+///
+/// Note: For simplicity, we limit closures to 5 values (uses x3-x7)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_allocate_function(
+    name_ptr: usize,
+    code_ptr: usize,
+    closure_count: usize,
+    c0: usize, c1: usize, c2: usize, c3: usize, c4: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // Get function name if provided
+        let name = if name_ptr != 0 {
+            Some(rt.read_string(name_ptr >> 3)) // Untag string pointer
+        } else {
+            None
+        };
+
+        // Collect closure values
+        let closure_values = match closure_count {
+            0 => vec![],
+            1 => vec![c0],
+            2 => vec![c0, c1],
+            3 => vec![c0, c1, c2],
+            4 => vec![c0, c1, c2, c3],
+            5 => vec![c0, c1, c2, c3, c4],
+            _ => {
+                eprintln!("Error: Too many closure variables (max 5 supported)");
+                return 7; // Return nil on error
+            }
+        };
+
+        match rt.allocate_function(name, code_ptr, closure_values) {
+            Ok(fn_ptr) => fn_ptr,
+            Err(msg) => {
+                eprintln!("Error allocating function: {}", msg);
+                7 // Return nil on error
+            }
+        }
+    }
+}
+
+/// Trampoline: Get function code pointer
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = function pointer (tagged)
+/// - Returns: x0 = code pointer (untagged)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_function_code_ptr(fn_ptr: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+        let code_ptr = rt.function_code_ptr(fn_ptr);
+        eprintln!("DEBUG: trampoline_function_code_ptr({:x}) -> {:x}", fn_ptr, code_ptr);
+        code_ptr
+    }
+}
+
+/// Trampoline: Get closure value from function
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = function pointer (tagged), x1 = index
+/// - Returns: x0 = closure value (tagged)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_function_get_closure(fn_ptr: usize, index: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+        rt.function_get_closure(fn_ptr, index)
+    }
+}
+
 /// Trampoline that sets up a safe environment for JIT code execution
 ///
 /// The trampoline:

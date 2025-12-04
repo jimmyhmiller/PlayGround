@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 const TYPE_ID_STRING: u8 = 2;
 const TYPE_ID_NAMESPACE: u8 = 10;
 const TYPE_ID_VAR: u8 = 11;
+const TYPE_ID_FUNCTION: u8 = 12;
 
 /// Header for heap-allocated objects
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -362,7 +363,7 @@ impl GCRuntime {
     }
 
     /// Read a string from a tagged pointer
-    fn read_string(&self, tagged_ptr: usize) -> String {
+    pub fn read_string(&self, tagged_ptr: usize) -> String {
         let ptr = BuiltInTypes::String.untag(tagged_ptr);
         let heap_obj = HeapObject::from_untagged(ptr);
         let header = heap_obj.read_header();
@@ -637,6 +638,73 @@ impl GCRuntime {
         let symbol_name = self.read_string(symbol_ptr);
 
         (ns_name, symbol_name)
+    }
+
+    /// Allocate a function object on the heap
+    /// Layout: Header | name_ptr | code_ptr | closure_count | [closure_value...]
+    ///
+    /// For Phase 1: Simple implementation without multi-arity dispatch
+    /// code_ptr points to the compiled ARM64 code entry point
+    /// closure values are captured variables from the enclosing scope
+    pub fn allocate_function(
+        &mut self,
+        name: Option<String>,
+        code_ptr: usize,
+        closure_values: Vec<usize>,
+    ) -> Result<usize, String> {
+        // Allocate name string if present
+        let name_ptr = if let Some(n) = name {
+            self.allocate_string(&n)?
+        } else {
+            0 // null pointer for anonymous functions
+        };
+
+        // Calculate size: name + code_ptr + closure_count + closure_values
+        let size_words = 3 + closure_values.len();
+
+        let fn_ptr = self.allocate_raw(size_words, TYPE_ID_FUNCTION)?;
+        let mut heap_obj = HeapObject::from_untagged(fn_ptr);
+
+        heap_obj.write_field(0, name_ptr);
+        heap_obj.write_field(1, code_ptr);
+        heap_obj.write_field(2, closure_values.len());
+
+        // Write closure values
+        for (i, value) in closure_values.iter().enumerate() {
+            heap_obj.write_field(3 + i, *value);
+        }
+
+        Ok(BuiltInTypes::HeapObject.tagged(fn_ptr))
+    }
+
+    /// Get function code pointer
+    pub fn function_code_ptr(&self, fn_ptr: usize) -> usize {
+        let untagged = BuiltInTypes::HeapObject.untag(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged);
+        heap_obj.get_field(1)
+    }
+
+    /// Get closure value by index
+    pub fn function_get_closure(&self, fn_ptr: usize, index: usize) -> usize {
+        let untagged = BuiltInTypes::HeapObject.untag(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged);
+        let closure_count = heap_obj.get_field(2);
+        if index >= closure_count {
+            panic!("Closure index out of bounds: {} >= {}", index, closure_count);
+        }
+        heap_obj.get_field(3 + index)
+    }
+
+    /// Get function name (for debugging/printing)
+    pub fn function_name(&self, fn_ptr: usize) -> String {
+        let untagged = BuiltInTypes::HeapObject.untag(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged);
+        let name_ptr = heap_obj.get_field(0);
+        if name_ptr == 0 {
+            "anonymous".to_string()
+        } else {
+            self.read_string(name_ptr)
+        }
     }
 }
 

@@ -123,6 +123,21 @@ fn print_ast(ast: &Expr, indent: usize) {
                 print_ast(expr, indent + 3);
             }
         }
+        Expr::Fn { name, arities } => {
+            println!("{}Fn", prefix);
+            if let Some(n) = name {
+                println!("{}  name: {}", prefix, n);
+            }
+            println!("{}  arities: {}", prefix, arities.len());
+            for (i, arity) in arities.iter().enumerate() {
+                println!("{}    arity {}:", prefix, i);
+                println!("{}      params: {:?}", prefix, arity.params);
+                if let Some(rest) = &arity.rest_param {
+                    println!("{}      rest: {}", prefix, rest);
+                }
+                println!("{}      body ({} exprs)", prefix, arity.body.len());
+            }
+        }
         Expr::Call { func, args } => {
             println!("{}Call", prefix);
             println!("{}  func:", prefix);
