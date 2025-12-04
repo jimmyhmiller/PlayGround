@@ -32,9 +32,19 @@ pub fn set_runtime(runtime: Arc<UnsafeCell<GCRuntime>>) {
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_var_get_value_dynamic(var_ptr: usize) -> usize {
     unsafe {
+        eprintln!("DEBUG: trampoline_var_get_value_dynamic called with var_ptr={:x}", var_ptr);
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
-        rt.var_get_value_dynamic(var_ptr)
+
+        // Debug: check what's actually in the var
+        let untagged = (var_ptr >> 3) as *const usize;
+        let value_ptr = untagged.add(3); // field 3 is the value
+        let stored_value = *value_ptr;
+        eprintln!("DEBUG: trampoline_var_get_value_dynamic - stored value at var: {:x}", stored_value);
+
+        let result = rt.var_get_value_dynamic(var_ptr);
+        eprintln!("DEBUG: trampoline_var_get_value_dynamic returning {:x}", result);
+        result
     }
 }
 
@@ -113,6 +123,9 @@ pub extern "C" fn trampoline_allocate_function(
     c0: usize, c1: usize, c2: usize, c3: usize, c4: usize,
 ) -> usize {
     unsafe {
+        eprintln!("DEBUG: trampoline_allocate_function called: name_ptr={:x}, code_ptr={:x}, closure_count={}", name_ptr, code_ptr, closure_count);
+        eprintln!("DEBUG:   closure values: c0={:x}, c1={:x}, c2={:x}, c3={:x}, c4={:x}", c0, c1, c2, c3, c4);
+
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
@@ -138,7 +151,11 @@ pub extern "C" fn trampoline_allocate_function(
         };
 
         match rt.allocate_function(name, code_ptr, closure_values) {
-            Ok(fn_ptr) => fn_ptr,
+            Ok(fn_ptr) => {
+                eprintln!("DEBUG: Function allocated successfully: fn_ptr={:x}", fn_ptr);
+                eprintln!("DEBUG: trampoline_allocate_function RETURNING fn_ptr={:x}", fn_ptr);
+                fn_ptr
+            },
             Err(msg) => {
                 eprintln!("Error allocating function: {}", msg);
                 7 // Return nil on error
@@ -174,6 +191,20 @@ pub extern "C" fn trampoline_function_get_closure(fn_ptr: usize, index: usize) -
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
         rt.function_get_closure(fn_ptr, index)
+    }
+}
+
+/// Trampoline: Get closure count from function
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = function pointer (tagged)
+/// - Returns: x0 = closure_count (untagged integer)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_function_closure_count(fn_ptr: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+        rt.function_closure_count(fn_ptr)
     }
 }
 
@@ -327,7 +358,7 @@ impl Trampoline {
                 std::mem::transmute(self.code_ptr);
             eprintln!("DEBUG: About to call trampoline function...");
             let result = trampoline_fn(0, jit_fn as u64);
-            eprintln!("DEBUG: Trampoline function returned: {}", result);
+            eprintln!("DEBUG: Trampoline function returned: {} (0x{:x})", result, result);
             result
         }
     }

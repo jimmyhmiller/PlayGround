@@ -1,0 +1,76 @@
+{
+  "format": "codegraph-v1",
+  "compiler": "ion",
+  "metadata": {
+    "name": "simpleLoop",
+    "optimization_level": 2
+  },
+  "blocks": [
+    {
+      "id": "0",
+      "attributes": ["entry"],
+      "loopDepth": 0,
+      "predecessors": [],
+      "successors": ["1"],
+      "instructions": [
+        {
+          "opcode": "MParameter",
+          "attributes": [],
+          "type": "int32"
+        },
+        {
+          "opcode": "MConstant",
+          "attributes": ["Movable"],
+          "type": "int32"
+        }
+      ]
+    },
+    {
+      "id": "1",
+      "attributes": ["loopheader"],
+      "loopDepth": 1,
+      "predecessors": ["0", "2"],
+      "successors": ["2", "3"],
+      "instructions": [
+        {
+          "opcode": "MPhi",
+          "attributes": [],
+          "type": "int32"
+        },
+        {
+          "opcode": "MCompare",
+          "attributes": ["Movable"],
+          "type": "boolean"
+        }
+      ]
+    },
+    {
+      "id": "2",
+      "attributes": ["backedge"],
+      "loopDepth": 1,
+      "predecessors": ["1"],
+      "successors": ["1"],
+      "instructions": [
+        {
+          "opcode": "MAdd",
+          "attributes": ["Movable"],
+          "type": "int32"
+        }
+      ]
+    },
+    {
+      "id": "3",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": ["1"],
+      "successors": [],
+      "instructions": [
+        {
+          "opcode": "MReturn",
+          "attributes": [],
+          "type": "int32"
+        }
+      ]
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 use crate::ir::{Instruction, IrValue, VirtualRegister, Condition, Label};
 use crate::register_allocation::linear_scan::LinearScan;
 use crate::trampoline::Trampoline;
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 
 /// ARM64 code generator - compiles IR to ARM64 machine code
 ///
@@ -10,8 +10,8 @@ pub struct Arm64CodeGen {
     /// Generated ARM64 machine code (32-bit instructions)
     code: Vec<u32>,
 
-    /// Map from virtual registers to physical ARM64 registers (x0-x15)
-    register_map: HashMap<VirtualRegister, usize>,
+    /// Map from virtual registers to physical ARM64 registers (from linear scan)
+    register_map: BTreeMap<VirtualRegister, VirtualRegister>,
 
     /// Next physical register to allocate
     next_physical_reg: usize,
@@ -28,6 +28,9 @@ pub struct Arm64CodeGen {
 
     /// Pool of temporary registers for spill loads (x9, x10, x11)
     temp_register_pool: Vec<usize>,
+
+    /// Counter for generating unique labels
+    label_counter: usize,
 }
 
 impl Default for Arm64CodeGen {
@@ -40,13 +43,20 @@ impl Arm64CodeGen {
     pub fn new() -> Self {
         Arm64CodeGen {
             code: Vec::new(),
-            register_map: HashMap::new(),
+            register_map: BTreeMap::new(),
             next_physical_reg: 0,
             label_positions: HashMap::new(),
             pending_fixups: Vec::new(),
             pending_adr_fixups: Vec::new(),
             temp_register_pool: vec![11, 10, 9],  // Start with x11, x10, x9 available
+            label_counter: 0,
         }
+    }
+
+    fn new_label(&mut self) -> Label {
+        let label = format!("L{}", self.label_counter);
+        self.label_counter += 1;
+        label
     }
 
     /// Compile IR instructions to ARM64 machine code
@@ -83,6 +93,17 @@ impl Arm64CodeGen {
         eprintln!("DEBUG: Spill locations from codegen allocator:");
         for (vreg, slot) in &allocator.spill_locations {
             eprintln!("  v{} -> slot {}", vreg.index, slot);
+        }
+
+        // Store the register allocation map for use in codegen
+        self.register_map = allocator.allocated_registers.clone();
+
+        // Debug: print allocation for v27 if it exists
+        let v27 = crate::ir::VirtualRegister { index: 27, is_argument: false };
+        if let Some(physical) = self.register_map.get(&v27) {
+            eprintln!("DEBUG: v27 allocated to x{}", physical.index);
+        } else {
+            eprintln!("DEBUG: v27 not in allocation map (might be physical already or not used)");
         }
 
         // Find the physical register for the result (before consuming allocator)
@@ -123,10 +144,18 @@ impl Arm64CodeGen {
             self.compile_instruction(inst)?;
         }
 
-        // Apply jump fixups
-        self.apply_fixups()?;
+        // Apply jump fixups AFTER all code is generated
+        // (We'll apply fixups after emitting epilogue)
+
+        // Emit epilogue label (where Ret instructions jump to)
+        self.emit_label("__epilogue".to_string());
 
         // Move result to x0 (keep it tagged)
+        // For Ret instructions, they've already moved their result to x0 before jumping here
+        // But for top-level code that falls through (no explicit Ret), we need to move result to x0
+        // Since both paths go through here, and Ret already ensures result is in x0,
+        // this is a harmless mov x0, x0 for functions with Ret, but necessary for top-level code
+        eprintln!("DEBUG: Epilogue - result_physical=x{}", result_physical);
         if result_physical != 0 {
             self.emit_mov(0, result_physical);
         }
@@ -144,6 +173,9 @@ impl Arm64CodeGen {
 
         // Emit return instruction
         self.emit_ret();
+
+        // NOW apply jump fixups after all labels are defined
+        self.apply_fixups()?;
 
         Ok(self.code.clone())
     }
@@ -186,6 +218,8 @@ impl Arm64CodeGen {
 
                 match var_ptr {
                     IrValue::TaggedConstant(tagged_ptr) => {
+                        eprintln!("DEBUG LoadVar codegen: var_ptr={:x}", tagged_ptr);
+
                         // Load tagged var_ptr into x0 (first argument)
                         self.emit_mov_imm(0, *tagged_ptr as i64);
 
@@ -208,25 +242,39 @@ impl Arm64CodeGen {
             }
 
             Instruction::StoreVar(var_ptr, value) => {
+                eprintln!("DEBUG: StoreVar - var_ptr={:?}, value={:?}", var_ptr, value);
+                eprintln!("DEBUG: StoreVar - code position before: {}", self.code.len());
                 // StoreVar: store value into var at runtime
                 // Var layout: [header(8)] [ns_ptr(8)] [symbol_ptr(8)] [value(8)]
                 // We want to write to field 2 (value) which is at offset 24 bytes (3 * 8)
                 let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
+                eprintln!("DEBUG: StoreVar - value_reg=x{}, code position: {}", value_reg, self.code.len());
 
                 match var_ptr {
                     IrValue::TaggedConstant(tagged_ptr) => {
                         // Untag the var pointer (shift right by 3)
                         let untagged_ptr = (*tagged_ptr as usize) >> 3;
+                        eprintln!("DEBUG: StoreVar - untagged_ptr={:x}", untagged_ptr);
 
+                        let code_pos_before_movimm = self.code.len();
                         // Load var pointer into a temp register
                         // Use x15 as temp register - it's the highest general purpose register
                         // and unlikely to be allocated by our simple allocator
                         let temp_reg = 15;
                         self.emit_mov_imm(temp_reg, untagged_ptr as i64);
+                        let code_pos_after_movimm = self.code.len();
+                        eprintln!("DEBUG: StoreVar - emit_mov_imm emitted {} instructions from {} to {}",
+                                 code_pos_after_movimm - code_pos_before_movimm,
+                                 code_pos_before_movimm, code_pos_after_movimm - 1);
 
                         // Store value into var (offset 24 = header + ns_ptr + symbol_ptr)
                         // str value_reg, [temp_reg, #24]
+                        let code_pos_before_str = self.code.len();
                         self.emit_str_offset(value_reg, temp_reg, 24);
+                        eprintln!("DEBUG: StoreVar - emit_str at position {}, storing x{} to [x{}+24]",
+                                 code_pos_before_str, value_reg, temp_reg);
+                        eprintln!("DEBUG: StoreVar - actual str instruction: 0x{:08x}",
+                                 self.code[code_pos_before_str]);
                     }
                     _ => return Err(format!("StoreVar requires constant var pointer: {:?}", var_ptr)),
                 }
@@ -407,13 +455,16 @@ impl Arm64CodeGen {
 
             Instruction::Label(label) => {
                 // Record position of this label
-                self.label_positions.insert(label.clone(), self.code.len());
+                let pos = self.code.len();
+                eprintln!("DEBUG: Label {} at code position {}", label, pos);
+                self.label_positions.insert(label.clone(), pos);
             }
 
             Instruction::Jump(label) => {
                 // Emit unconditional branch
                 // We'll fix up the offset later
                 let fixup_index = self.code.len();
+                eprintln!("DEBUG: Jump to {} from code position {}", label, fixup_index);
                 self.pending_fixups.push((fixup_index, label.clone()));
                 // Placeholder - will be patched in apply_fixups
                 self.code.push(0x14000000); // B #0
@@ -480,22 +531,39 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            Instruction::MakeFunction(dst, label) => {
-                // MakeFunction: Create a function object
+            Instruction::MakeFunction(dst, label, closure_values) => {
+                eprintln!("DEBUG: MakeFunction - dst={:?}, label={}, closure_values={:?}", dst, label, closure_values);
+                // MakeFunction: Create a function object with closure values
                 // Call trampoline to allocate function object on heap
                 //
-                // For now: Simple implementation without closures
                 // trampoline_allocate_function(name_ptr, code_ptr, closure_count, c0-c4)
                 //
                 // Args:
                 //   x0 = name_ptr (0 for anonymous)
                 //   x1 = code_ptr (address of function code)
-                //   x2 = closure_count (0 for now)
-                //   x3-x7 = closure values (unused for now)
+                //   x2 = closure_count
+                //   x3-x7 = closure values (max 5 supported)
+
+                if closure_values.len() > 5 {
+                    return Err(format!("Too many closure variables: {} (max 5 supported)", closure_values.len()));
+                }
 
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
+                // IMPORTANT: Move closure values to argument registers FIRST
+                // because they might be in x0-x2 which we're about to overwrite!
+                // x3-x7 = closure values
+                for (i, value) in closure_values.iter().enumerate() {
+                    let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
+                    let dest_arg_reg = 3 + i;  // x3, x4, x5, x6, x7
+                    eprintln!("DEBUG: MakeFunction - moving closure value from x{} to x{}", src_reg, dest_arg_reg);
+                    if src_reg != dest_arg_reg {
+                        self.emit_mov(dest_arg_reg, src_reg);
+                    }
+                }
+
+                // NOW set up the other arguments (after closure values are safe)
                 // x0 = 0 (anonymous function - no name for now)
                 self.emit_mov_imm(0, 0);
 
@@ -504,20 +572,24 @@ impl Arm64CodeGen {
                 // This will be patched with the actual PC-relative offset later
                 self.emit_adr(1, label.clone());
 
-                // x2 = 0 (no closures for now)
-                self.emit_mov_imm(2, 0);
+                // x2 = closure_count
+                self.emit_mov_imm(2, closure_values.len() as i64);
 
                 // Call trampoline
                 let func_addr = crate::trampoline::trampoline_allocate_function as usize;
+                eprintln!("DEBUG: MakeFunction - calling trampoline_allocate_function at {:x}", func_addr);
                 self.emit_mov_imm(15, func_addr as i64);
                 self.emit_blr(15);
+                eprintln!("DEBUG: MakeFunction - trampoline returned, dst_reg={}", dst_reg);
 
                 // Result is in x0 (tagged function pointer)
                 if dst_reg != 0 {
                     self.emit_mov(dst_reg, 0);
+                    eprintln!("DEBUG: MakeFunction - moved result from x0 to x{}", dst_reg);
                 }
 
                 self.store_spill(dst_reg, dest_spill);
+                eprintln!("DEBUG: MakeFunction - done, spill={:?}", dest_spill);
             }
 
             Instruction::LoadClosure(dst, fn_obj, index) => {
@@ -550,33 +622,48 @@ impl Arm64CodeGen {
             }
 
             Instruction::Call(dst, fn_val, args) => {
+                eprintln!("DEBUG: Call - dst={:?}, fn_val={:?}", dst, fn_val);
                 // Call: Invoke a function with arguments
                 // This is the most complex instruction!
                 //
                 // Steps:
+                // 0. Save function and arguments to callee-saved registers (before trampolines clobber them)
                 // 1. Get function code pointer from function object
-                // 2. Move arguments to x0, x1, x2, ... (ARM64 calling convention)
-                // 3. Call the function
-                // 4. Get result from x0
+                // 2. Check if function is a closure (closure_count > 0)
+                // 3a. If closure: pass function object in x8, args in x0-x7
+                // 3b. If regular function: args in x0-x7
+                // 4. Call the function
+                // 5. Get result from x0
 
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
-                // Step 1: Get code pointer
+                // Step 0: Save function and arguments to callee-saved registers BEFORE trampolines
                 let fn_reg = self.get_physical_reg_for_irvalue(fn_val, false)?;
-
-                // Save fn_reg in a callee-saved register if needed
-                // For now, assume we can use x19 as temporary
-                let saved_fn_reg = 19;
+                let saved_fn_reg = 19;  // Use x19 for function object
                 if fn_reg != saved_fn_reg {
                     self.emit_mov(saved_fn_reg, fn_reg);
                 }
 
+                // Save arguments to x21-x28 (callee-saved)
+                let mut saved_arg_regs = Vec::new();
+                for (i, arg) in args.iter().enumerate() {
+                    if i >= 8 {
+                        return Err("Call with more than 8 arguments not yet supported".to_string());
+                    }
+
+                    let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
+                    let saved_reg = 21 + i;  // x21, x22, x23, ...
+                    saved_arg_regs.push(saved_reg);
+                    if arg_reg != saved_reg {
+                        self.emit_mov(saved_reg, arg_reg);
+                    }
+                }
+
+                // Step 1: Get code pointer
                 // Call trampoline to get code pointer
                 // x0 = function pointer (tagged)
-                if saved_fn_reg != 0 {
-                    self.emit_mov(0, saved_fn_reg);
-                }
+                self.emit_mov(0, saved_fn_reg);
 
                 let func_addr = crate::trampoline::trampoline_function_code_ptr as usize;
                 self.emit_mov_imm(15, func_addr as i64);
@@ -586,40 +673,79 @@ impl Arm64CodeGen {
                 let code_ptr_reg = 20; // Use x20 to store code pointer
                 self.emit_mov(code_ptr_reg, 0);
 
-                // Step 2: Move arguments to x0, x1, x2, ...
-                // ARM64 calling convention: first 8 args in x0-x7
-                for (i, arg) in args.iter().enumerate() {
-                    if i >= 8 {
-                        return Err("Call with more than 8 arguments not yet supported".to_string());
+                // Step 2: Get closure count to determine calling convention
+                // Call trampoline: trampoline_function_closure_count(fn_ptr) -> x0
+                self.emit_mov(0, saved_fn_reg);
+
+                let func_addr = crate::trampoline::trampoline_function_closure_count as usize;
+                self.emit_mov_imm(15, func_addr as i64);
+                self.emit_blr(15);
+
+                // closure_count now in x0, save it
+                let closure_count_reg = 10;  // Use x10 temporarily
+                self.emit_mov(closure_count_reg, 0);
+
+                // Step 3: Set up arguments based on whether this is a closure
+                // if (closure_count > 0) { /* closure calling convention */ } else { /* normal */ }
+
+                // Compare closure_count with 0
+                self.emit_cmp_imm(closure_count_reg, 0);
+
+                // Branch if equal (not a closure) - skip closure setup
+                let normal_call_label = self.new_label();
+                self.emit_branch_cond(normal_call_label.clone(), 0); // 0 = EQ
+
+                // Closure path: pass function object in x8
+                self.emit_mov(8, saved_fn_reg);
+                // Args go in x0-x7
+                for (i, saved_reg) in saved_arg_regs.iter().enumerate() {
+                    if *saved_reg != i {
+                        self.emit_mov(i, *saved_reg);
                     }
+                }
+                let after_call_label = self.new_label();
+                self.emit_jump(after_call_label.clone());
 
-                    let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
-
-                    // Move argument to correct position (x0, x1, x2, ...)
-                    if arg_reg != i {
-                        self.emit_mov(i, arg_reg);
+                // Normal function path: args in x0-x7
+                self.emit_label(normal_call_label);
+                for (i, saved_reg) in saved_arg_regs.iter().enumerate() {
+                    if *saved_reg != i {
+                        self.emit_mov(i, *saved_reg);
                     }
                 }
 
-                // Step 3: Call the function
-                // BLR to the code pointer
+                // Step 4: Call the function
+                self.emit_label(after_call_label);
                 self.emit_blr(code_ptr_reg);
 
-                // Step 4: Result is in x0
+                // Step 5: Result is in x0
+                eprintln!("DEBUG: Call - result will be moved from x0 to x{}", dst_reg);
+                let code_pos_before = self.code.len();
                 if dst_reg != 0 {
                     self.emit_mov(dst_reg, 0);
                 }
+                let code_pos_after = self.code.len();
+                if code_pos_after > code_pos_before {
+                    eprintln!("DEBUG: Call - emitted mov instruction: 0x{:08x} at position {}",
+                             self.code[code_pos_before], code_pos_before);
+                }
 
                 self.store_spill(dst_reg, dest_spill);
+                eprintln!("DEBUG: Call - done, dst_reg=x{}, spill={:?}", dst_reg, dest_spill);
             }
 
             Instruction::Ret(value) => {
+                eprintln!("DEBUG: Compiling Ret instruction with value: {:?}", value);
                 // Move result to x0 (return register)
                 let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
+                eprintln!("DEBUG: Ret - src_reg={}, moving to x0", src_reg);
                 if src_reg != 0 {
                     self.emit_mov(0, src_reg);
                 }
-                // Emit RET instruction to return from function
+                // Return directly - don't jump to epilogue!
+                // Functions have their own stack frames and should return immediately.
+                // Only the top-level code needs the epilogue to restore frame before returning to trampoline.
+                eprintln!("DEBUG: Emitting ret instruction");
                 self.emit_ret();
             }
         }
@@ -663,9 +789,16 @@ impl Arm64CodeGen {
     }
 
     fn get_physical_reg(&mut self, vreg: &VirtualRegister) -> usize {
-        // After linear scan allocation, all registers are already physical
-        // Just return the register index directly
-        vreg.index
+        // After register allocation, the IR has been rewritten with physical registers
+        // Physical registers are represented as VirtualRegister { index: X, is_argument: false }
+        // where X is the physical register number.
+        //
+        // If the register is in the allocation map, it's an original virtual register
+        // and we need to look up its physical register.
+        // If not in the map, it's already a physical register, so just use its index.
+        self.register_map.get(vreg)
+            .map(|physical| physical.index)
+            .unwrap_or(vreg.index)  // Already physical, use index directly
     }
 
     /// Check if a destination is a spill and return its stack offset
@@ -774,6 +907,7 @@ impl Arm64CodeGen {
     // ARM64 instruction encoding
 
     fn emit_mov(&mut self, dst: usize, src: usize) {
+        // eprintln!("DEBUG: emit_mov(x{}, x{})", dst, src);
         // Special handling when either source OR destination is register 31 (SP)
         // Following Beagle's pattern: check both directions
         // ORR treats register 31 as XZR, but we need it as SP
@@ -901,6 +1035,40 @@ impl Arm64CodeGen {
     fn emit_cmp(&mut self, src1: usize, src2: usize) {
         // CMP Xn, Xm (compare - this is SUBS XZR, Xn, Xm)
         let instruction = 0xEB00001F | ((src2 as u32) << 16) | ((src1 as u32) << 5);
+        self.code.push(instruction);
+    }
+
+    fn emit_cmp_imm(&mut self, src: usize, imm: i64) {
+        // CMP Xn, #imm (compare - this is SUBS XZR, Xn, #imm)
+        let imm12 = (imm & 0xFFF) as u32;  // 12-bit immediate
+        let instruction = 0xF100001F | (imm12 << 10) | ((src as u32) << 5);
+        self.code.push(instruction);
+    }
+
+    fn emit_branch_cond(&mut self, label: Label, cond: u32) {
+        // B.cond label
+        // Record this as a pending fixup
+        let fixup_index = self.code.len();
+        self.pending_fixups.push((fixup_index, label));
+
+        // Emit placeholder with condition
+        let instruction = 0x54000000 | (cond & 0xF);
+        self.code.push(instruction);
+    }
+
+    fn emit_label(&mut self, label: Label) {
+        // Record the current position for this label
+        let pos = self.code.len();
+        self.label_positions.insert(label, pos);
+    }
+
+    fn emit_jump(&mut self, label: Label) {
+        // B label (unconditional branch)
+        let fixup_index = self.code.len();
+        self.pending_fixups.push((fixup_index, label));
+
+        // Emit placeholder
+        let instruction = 0x14000000;
         self.code.push(instruction);
     }
 
@@ -1033,8 +1201,13 @@ impl Arm64CodeGen {
             // Explicitly drop trampoline before cleaning up JIT code
             drop(trampoline);
 
-            // Clean up
-            libc::munmap(ptr, code_size);
+            // NOTE: We intentionally DO NOT call munmap here!
+            // The JIT code needs to stay alive because function objects may hold
+            // pointers to code in this block. In a production system, we would need
+            // a proper JIT code cache with reference counting or garbage collection.
+            // For now, we leak the memory (acceptable for a REPL/demo).
+            //
+            // libc::munmap(ptr, code_size);  // DISABLED - would free function code!
 
             // Return the tagged result (caller is responsible for untagging if needed)
             Ok(result)

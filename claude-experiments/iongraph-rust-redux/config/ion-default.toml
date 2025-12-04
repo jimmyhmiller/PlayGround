@@ -1,0 +1,32 @@
+# Ion Default Theme
+# This is the default theme matching the original IonGraph colors
+
+[metadata]
+name = "Ion Default"
+description = "Original IonGraph color scheme for SpiderMonkey JIT"
+compiler = "ion"
+
+[blocks]
+header = "#0c0c0d"
+loop_header = "#1fa411"
+backedge = "#ff6600"
+border = "#000000"
+text = "#ffffff"
+
+[instruction_attributes]
+# Ion-specific instruction attributes
+Movable = "#1048af"
+Guard = "#000000"
+RecoveredOnBailout = "#444444"
+InWorklist = "#ff0000"
+
+[heatmap]
+enabled = true
+hot = "#ff849e"
+cool = "#ffe546"
+threshold = 0.2
+
+[arrows]
+normal = "#000000"
+backedge = "#ff0000"
+loop_header = "#1fa411"

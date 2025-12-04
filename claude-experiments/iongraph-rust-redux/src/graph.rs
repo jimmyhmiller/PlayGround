@@ -49,6 +49,26 @@ pub struct Block<E> {
     pub layout_node: Option<usize>, // Index into layout nodes (global)
 }
 
+impl<E> Block<E> {
+    /// Check if this block has a semantic attribute using Ion attribute mapping
+    pub fn has_semantic_attribute(&self, semantic: crate::core::SemanticAttribute) -> bool {
+        use crate::core::semantic_attrs::AttributeSemantics;
+        use crate::compilers::IonIR;
+
+        IonIR::has_semantic_attribute(&self.attributes, semantic)
+    }
+
+    /// Check if this block is a loop header (Ion-specific helper)
+    pub fn is_loop_header(&self) -> bool {
+        self.has_semantic_attribute(crate::core::SemanticAttribute::LoopHeader)
+    }
+
+    /// Check if this block is a backedge (Ion-specific helper)
+    pub fn is_backedge(&self) -> bool {
+        self.has_semantic_attribute(crate::core::SemanticAttribute::Backedge)
+    }
+}
+
 #[derive(Clone)]
 pub struct LIRBlockData {
     pub instructions: Vec<LIRInstruction>,

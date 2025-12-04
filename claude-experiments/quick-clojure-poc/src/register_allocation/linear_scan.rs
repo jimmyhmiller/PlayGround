@@ -176,8 +176,11 @@ impl LinearScan {
                 if let IrValue::Register(r) = value { regs.push(*r); }
             }
 
-            Instruction::MakeFunction(dst, _label) => {
+            Instruction::MakeFunction(dst, _label, closure_values) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
+                for val in closure_values {
+                    if let IrValue::Register(r) = val { regs.push(*r); }
+                }
             }
 
             Instruction::LoadClosure(dst, fn_obj, _index) => {
@@ -214,10 +217,11 @@ impl LinearScan {
 
         // PRE-ALLOCATE ARGUMENT REGISTERS
         // ARM64 calling convention: arguments are passed in x0-x7
-        // Virtual registers with is_argument=true should map to x0-x7 based on their index
+        // Also pre-allocate x8 for closure self parameter
+        // Virtual registers with is_argument=true should map directly to their index
         for (vreg, _interval) in &self.lifetimes {
-            if vreg.is_argument && vreg.index < 8 {
-                // Map argument virtual register to corresponding physical register (x0-x7)
+            if vreg.is_argument && vreg.index <= 8 {
+                // Map argument virtual register to corresponding physical register (x0-x8)
                 let physical_reg = VirtualRegister {
                     index: vreg.index,
                     is_argument: false,
@@ -368,8 +372,11 @@ impl LinearScan {
                 replace(value);
             }
 
-            Instruction::MakeFunction(dst, _label) => {
+            Instruction::MakeFunction(dst, _label, closure_values) => {
                 replace(dst);
+                for val in closure_values {
+                    replace(val);
+                }
             }
 
             Instruction::LoadClosure(dst, fn_obj, _index) => {
@@ -549,8 +556,11 @@ impl LinearScan {
                 replace(value);
             }
 
-            Instruction::MakeFunction(dst, _label) => {
+            Instruction::MakeFunction(dst, _label, closure_values) => {
                 replace(dst);
+                for val in closure_values {
+                    replace(val);
+                }
             }
 
             Instruction::LoadClosure(dst, fn_obj, _index) => {

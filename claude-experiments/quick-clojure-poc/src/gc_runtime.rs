@@ -680,8 +680,18 @@ impl GCRuntime {
     /// Get function code pointer
     pub fn function_code_ptr(&self, fn_ptr: usize) -> usize {
         let untagged = BuiltInTypes::HeapObject.untag(fn_ptr);
+        eprintln!("DEBUG function_code_ptr: fn_ptr={:x}, untagged={:x}", fn_ptr, untagged);
         let heap_obj = HeapObject::from_untagged(untagged);
-        heap_obj.get_field(1)
+        let code_ptr = heap_obj.get_field(1);
+        eprintln!("DEBUG function_code_ptr: returning code_ptr={:x}", code_ptr);
+        code_ptr
+    }
+
+    /// Get closure count
+    pub fn function_closure_count(&self, fn_ptr: usize) -> usize {
+        let untagged = BuiltInTypes::HeapObject.untag(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged);
+        heap_obj.get_field(2)  // closure_count is field 2
     }
 
     /// Get closure value by index

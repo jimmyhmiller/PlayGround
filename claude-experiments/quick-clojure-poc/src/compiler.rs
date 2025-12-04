@@ -148,6 +148,7 @@ impl Compiler {
         } else {
             // Try current namespace first
             if let Some(var_ptr) = rt.namespace_lookup(self.current_namespace_ptr, name) {
+                eprintln!("DEBUG compile_var (current ns): found var '{}' at {:x}", name, var_ptr);
                 // Emit LoadVar - will dereference at runtime!
                 let result = self.builder.new_register();
                 self.builder.emit(Instruction::LoadVar(
@@ -163,6 +164,7 @@ impl Compiler {
                 for used_ns in used {
                     if let Some(&used_ns_ptr) = self.namespace_registry.get(used_ns)
                         && let Some(var_ptr) = rt.namespace_lookup(used_ns_ptr, name) {
+                            eprintln!("DEBUG compile_var (used ns {}): found var '{}' at {:x}", used_ns, name, var_ptr);
                             // Emit LoadVar - will dereference at runtime!
                             let result = self.builder.new_register();
                             self.builder.emit(Instruction::LoadVar(
@@ -179,6 +181,7 @@ impl Compiler {
 
         // Look up in specified namespace
         if let Some(var_ptr) = rt.namespace_lookup(ns_ptr, name) {
+            eprintln!("DEBUG compile_var: found var '{}' at {:x}", name, var_ptr);
             // Emit LoadVar - will dereference at runtime!
             let result = self.builder.new_register();
             self.builder.emit(Instruction::LoadVar(
@@ -611,7 +614,7 @@ impl Compiler {
         // which we haven't created yet (chicken-and-egg problem)
 
         // Bind parameters to argument registers
-        // In ARM64 calling convention, arguments are in x0, x1, x2, etc.
+        // ARM64 calling convention: arguments are in x0, x1, x2, etc.
         for (i, param) in arity.params.iter().enumerate() {
             let arg_reg = IrValue::Register(crate::ir::VirtualRegister {
                 index: i,
@@ -619,6 +622,19 @@ impl Compiler {
             });
             self.bind_local(param.clone(), arg_reg);
         }
+
+        // Create a virtual register for the function object (self) if this function has closures
+        // This will be passed in a special way for closures
+        let self_reg = if !free_vars.is_empty() {
+            // For closures, we'll use a special calling convention where the function object
+            // is passed in x8 (a callee-saved register that won't conflict with args)
+            Some(IrValue::Register(crate::ir::VirtualRegister {
+                index: 8,  // x8 - outside normal argument range
+                is_argument: true,
+            }))
+        } else {
+            None
+        };
 
         // Bind rest parameter if variadic
         if let Some(rest) = &arity.rest_param {
@@ -629,14 +645,14 @@ impl Compiler {
         }
 
         // Bind closure variables
-        // These will be loaded from the function object at runtime
-        // For now, we'll create placeholder registers
-        for (_i, var_name) in free_vars.iter().enumerate() {
-            let closure_reg = self.builder.new_register();
-            // TODO: Emit LoadClosure instruction when we implement it
-            // For now, just bind to nil
-            self.builder.emit(Instruction::LoadConstant(closure_reg, IrValue::Null));
-            self.bind_local(var_name.clone(), closure_reg);
+        // Load them from the function object (self_reg = x8) using LoadClosure
+        if let Some(self_reg) = &self_reg {
+            for (i, var_name) in free_vars.iter().enumerate() {
+                let closure_reg = self.builder.new_register();
+                // Emit LoadClosure to load from function object in x8
+                self.builder.emit(Instruction::LoadClosure(closure_reg, self_reg.clone(), i));
+                self.bind_local(var_name.clone(), closure_reg);
+            }
         }
 
         // Compile body (implicit do)
@@ -651,9 +667,20 @@ impl Compiler {
         // Function exit (after inline code)
         self.builder.emit(Instruction::Label(fn_end_label));
 
-        // Step 4: Create function object
+        // Step 4: Gather closure values from current scope
+        // Look up each free variable in the current scope and collect its value
+        let mut closure_values = Vec::new();
+        for var_name in &free_vars {
+            if let Some(value) = self.lookup_local(var_name) {
+                closure_values.push(value.clone());
+            } else {
+                return Err(format!("Free variable '{}' not found in scope", var_name));
+            }
+        }
+
+        // Step 5: Create function object with closure values
         let fn_obj_reg = self.builder.new_register();
-        self.builder.emit(Instruction::MakeFunction(fn_obj_reg, fn_start_label));
+        self.builder.emit(Instruction::MakeFunction(fn_obj_reg, fn_start_label, closure_values));
 
         Ok(fn_obj_reg)
     }

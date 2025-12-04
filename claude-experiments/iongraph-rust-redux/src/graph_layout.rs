@@ -57,9 +57,7 @@ impl<P: LayoutProvider> Graph<P> {
             return;
         }
 
-        let is_loop_header = self.blocks[block_idx]
-            .attributes
-            .contains(&"loopheader".to_string());
+        let is_loop_header = self.blocks[block_idx].is_loop_header();
 
         if is_loop_header {
             // This is a true loop header
@@ -75,11 +73,7 @@ impl<P: LayoutProvider> Graph<P> {
                 let backedge_idx = self.blocks[block_idx]
                     .predecessors
                     .iter()
-                    .find(|&&pred_idx| {
-                        self.blocks[pred_idx]
-                            .attributes
-                            .contains(&"backedge".to_string())
-                    })
+                    .find(|&&pred_idx| self.blocks[pred_idx].is_backedge())
                     .copied()
                     .unwrap_or(0);
 
@@ -114,10 +108,7 @@ impl<P: LayoutProvider> Graph<P> {
         self.blocks[block_idx].loop_id = loop_ids[self.blocks[block_idx].loop_depth as usize];
 
         // Recurse to successors (except for backedges)
-        if !self.blocks[block_idx]
-            .attributes
-            .contains(&"backedge".to_string())
-        {
+        if !self.blocks[block_idx].is_backedge() {
             let succs = self.blocks[block_idx].succs.clone();
             for succ_idx in succs {
                 self.find_loops(succ_idx, Some(loop_ids.clone()));
@@ -126,10 +117,7 @@ impl<P: LayoutProvider> Graph<P> {
     }
 
     fn layer(&mut self, block_idx: usize, layer: i32) {
-        if self.blocks[block_idx]
-            .attributes
-            .contains(&"backedge".to_string())
-        {
+        if self.blocks[block_idx].is_backedge() {
             let succ_layer = self.blocks[self.blocks[block_idx].succs[0]].layer;
             self.blocks[block_idx].layer = succ_layer;
             return;
@@ -193,10 +181,7 @@ impl<P: LayoutProvider> Graph<P> {
         }
 
         // If this block is a true loop header, layer its outgoing edges
-        if self.blocks[block_idx]
-            .attributes
-            .contains(&"loopheader".to_string())
-        {
+        if self.blocks[block_idx].is_loop_header() {
             if let Some(loop_idx) = self.loops.iter().position(|lh| lh.block_idx == block_idx) {
                 let outgoing_edges = self.loops[loop_idx].outgoing_edges.clone();
                 let loop_height = self.loops[loop_idx].loop_height as i32;
@@ -360,10 +345,7 @@ impl<P: LayoutProvider> Graph<P> {
                     // Find the loop header for current_loop_id
                     if let Some(&header_idx) = self.blocks_by_id.get(&current_loop_id) {
                         // Check if this is a true loop header (has "loopheader" attribute)
-                        if self.blocks[header_idx]
-                            .attributes
-                            .contains(&"loopheader".to_string())
-                        {
+                        if self.blocks[header_idx].is_loop_header() {
                             // Look for existing pending dummy for this loop
                             if let Some(existing) = pending_loop_dummies
                                 .iter_mut()
@@ -539,9 +521,7 @@ impl<P: LayoutProvider> Graph<P> {
                 }
 
                 // Handle block edges
-                let is_backedge = self.blocks[block_idx]
-                    .attributes
-                    .contains(&"backedge".to_string());
+                let is_backedge = self.blocks[block_idx].is_backedge();
                 let succs = self.blocks[block_idx].succs.clone();
 
                 if is_backedge {
@@ -577,9 +557,7 @@ impl<P: LayoutProvider> Graph<P> {
                 } else {
                     // Regular block - add edges
                     for (port, succ_idx) in succs.iter().enumerate() {
-                        let succ_is_backedge = self.blocks[*succ_idx]
-                            .attributes
-                            .contains(&"backedge".to_string());
+                        let succ_is_backedge = self.blocks[*succ_idx].is_backedge();
 
                         if succ_is_backedge {
                             // Track to connect after all backedge dummies are created
@@ -661,9 +639,7 @@ impl<P: LayoutProvider> Graph<P> {
                 for (node_idx, node) in nodes.iter().enumerate() {
                     if let LayoutNode::DummyNode(dummy) = node {
                         // Check if this is a backedge dummy
-                        if self.blocks[dummy.dst_block]
-                            .attributes
-                            .contains(&"backedge".to_string())
+                        if self.blocks[dummy.dst_block].is_backedge()
                             && dummy.src_nodes.is_empty() {
                                 orphan_roots.push((layer, node_idx));
                             }
@@ -803,10 +779,7 @@ impl<P: LayoutProvider> Graph<P> {
             let loop_id = block.loop_id;
             if let Some(&loop_header_idx) = self.blocks_by_id.get(&loop_id) {
                 // Only include actual loop headers (TypeScript uses asLH which checks this)
-                if self.blocks[loop_header_idx]
-                    .attributes
-                    .contains(&"loopheader".to_string())
-                {
+                if self.blocks[loop_header_idx].is_loop_header() {
                     if let Some(loop_header_layout_node) = self.blocks[loop_header_idx].layout_node
                     {
                         block_to_loop_header.insert(idx, loop_header_layout_node);
@@ -1220,7 +1193,7 @@ impl<P: LayoutProvider> Graph<P> {
         let mut is_backedge_block: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
         for (idx, block) in self.blocks.iter().enumerate() {
-            if block.attributes.contains(&"backedge".to_string()) {
+            if block.is_backedge() {
                 is_backedge_block.insert(idx);
             }
         }
@@ -1228,7 +1201,7 @@ impl<P: LayoutProvider> Graph<P> {
         let mut is_backedge_dst: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
         for (idx, block) in self.blocks.iter().enumerate() {
-            if block.attributes.contains(&"backedge".to_string()) {
+            if block.is_backedge() {
                 is_backedge_dst.insert(idx);
             }
         }
@@ -1452,9 +1425,7 @@ impl<P: LayoutProvider> Graph<P> {
             for node in nodes.iter() {
                 match node {
                     LayoutNode::BlockNode(block_node) => {
-                        let is_backedge = self.blocks[block_node.block]
-                            .attributes
-                            .contains(&"backedge".to_string());
+                        let is_backedge = self.blocks[block_node.block].is_backedge();
                         node_data.push((
                             block_node.id,
                             block_node.pos.x,
