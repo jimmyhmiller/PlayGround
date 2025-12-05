@@ -1,0 +1,2334 @@
+{
+  "format": "codegraph-v1",
+  "compiler": "ion",
+  "metadata": {
+    "name": "-e:21",
+    "pass": "BuildSSA"
+  },
+  "blocks": [
+    {
+      "id": "0",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [],
+      "successors": [
+        "1"
+      ],
+      "instructions": [
+        {
+          "opcode": "Parameter THIS_SLOT",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 0
+          }
+        },
+        {
+          "opcode": "Parameter 0",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 1
+          }
+        },
+        {
+          "opcode": "Constant undefined",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Undefined",
+          "profiling": null,
+          "metadata": {
+            "id": 2
+          }
+        },
+        {
+          "opcode": "Start",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 3
+          }
+        },
+        {
+          "opcode": "CheckOverRecursed",
+          "attributes": [
+            "Guard"
+          ],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 4
+          }
+        },
+        {
+          "opcode": "Callee",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 5
+          }
+        },
+        {
+          "opcode": "FunctionEnvironment <- Callee#5",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 6
+          }
+        },
+        {
+          "opcode": "Constant object 104289c3f078 (Call)",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 7
+          }
+        },
+        {
+          "opcode": "NewCallObject <- Constant#7",
+          "attributes": [],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 8
+          }
+        },
+        {
+          "opcode": "AssertCanElidePostWriteBarrier <- NewCallObject#8, FunctionEnvironment#6",
+          "attributes": [
+            "Guard"
+          ],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 9
+          }
+        },
+        {
+          "opcode": "AssertCanElidePostWriteBarrier <- NewCallObject#8, Callee#5",
+          "attributes": [
+            "Guard"
+          ],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 10
+          }
+        },
+        {
+          "opcode": "StoreFixedSlot <- NewCallObject#8, FunctionEnvironment#6 (slot 0)",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 11
+          }
+        },
+        {
+          "opcode": "StoreFixedSlot <- NewCallObject#8, Callee#5 (slot 1)",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 12
+          }
+        },
+        {
+          "opcode": "PostWriteBarrier <- NewCallObject#8, Parameter#1",
+          "attributes": [
+            "Guard"
+          ],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 13
+          }
+        },
+        {
+          "opcode": "StoreFixedSlot <- NewCallObject#8, Parameter#1 (slot 2)",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 14
+          }
+        },
+        {
+          "opcode": "Constant object 104289c3f040 (LexicalEnvironment)",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 15
+          }
+        },
+        {
+          "opcode": "Constant object 104289c3e030 (global)",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 16
+          }
+        },
+        {
+          "opcode": "Constant function Object at 104289c422e0",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 17
+          }
+        },
+        {
+          "opcode": "Constant function Object at 104289c422e0",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 18
+          }
+        },
+        {
+          "opcode": "GuardObjectIdentity <- Constant#17, Constant#18",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 19
+          }
+        },
+        {
+          "opcode": "Constant function keys at 104289c42468",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 20
+          }
+        },
+        {
+          "opcode": "LoadFixedSlot <- NewCallObject#8 (slot 2)",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 21
+          }
+        },
+        {
+          "opcode": "Constant 0x1",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 22
+          }
+        },
+        {
+          "opcode": "Constant function keys at 104289c42468",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 23
+          }
+        },
+        {
+          "opcode": "GuardSpecificFunction <- Constant#20, Constant#23",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 24
+          }
+        },
+        {
+          "opcode": "Unbox LoadFixedSlot#21 to Object (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 25
+          }
+        },
+        {
+          "opcode": "GuardIsNotProxy <- Unbox#25",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 26
+          }
+        },
+        {
+          "opcode": "ObjectKeys <- GuardIsNotProxy#26",
+          "attributes": [
+            "ImplicitlyUsed"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 27
+          }
+        },
+        {
+          "opcode": "GuardShape <- ObjectKeys#27",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 28
+          }
+        },
+        {
+          "opcode": "Constant object 104289c3e088 (Array)",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 29
+          }
+        },
+        {
+          "opcode": "Constant function map (self-hosted:163) at 104289c47920",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 30
+          }
+        },
+        {
+          "opcode": "Constant function complex5/< (-e:22) at 104289c63e08",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 31
+          }
+        },
+        {
+          "opcode": "Lambda <- NewCallObject#8, Constant#31",
+          "attributes": [
+            "ImplicitlyUsed"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 32
+          }
+        },
+        {
+          "opcode": "Constant 0x1",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 33
+          }
+        },
+        {
+          "opcode": "Constant function map (self-hosted:163) at 104289c47920",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 34
+          }
+        },
+        {
+          "opcode": "GuardSpecificFunction <- Constant#30, Constant#34",
+          "attributes": [
+            "Movable",
+            "Guard",
+            "ImplicitlyUsed"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 35
+          }
+        },
+        {
+          "opcode": "Goto -> block 1",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 36
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "1",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [
+        "0"
+      ],
+      "successors": [
+        "2",
+        "3"
+      ],
+      "instructions": [
+        {
+          "opcode": "Constant undefined",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Undefined",
+          "profiling": null,
+          "metadata": {
+            "id": 37
+          }
+        },
+        {
+          "opcode": "Constant function ToObject at 104289c6c740",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 38
+          }
+        },
+        {
+          "opcode": "DebugCheckSelfHosted <- Constant#38",
+          "attributes": [
+            "Guard",
+            "ImplicitlyUsed"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 39
+          }
+        },
+        {
+          "opcode": "Constant undefined",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Undefined",
+          "profiling": null,
+          "metadata": {
+            "id": 40
+          }
+        },
+        {
+          "opcode": "Constant 0x1",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 41
+          }
+        },
+        {
+          "opcode": "Constant function ToLength at 104289c6c778",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 42
+          }
+        },
+        {
+          "opcode": "DebugCheckSelfHosted <- Constant#42",
+          "attributes": [
+            "Guard",
+            "ImplicitlyUsed"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 43
+          }
+        },
+        {
+          "opcode": "Constant undefined",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Undefined",
+          "profiling": null,
+          "metadata": {
+            "id": 44
+          }
+        },
+        {
+          "opcode": "GuardShape <- ObjectKeys#27",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 45
+          }
+        },
+        {
+          "opcode": "Elements <- GuardShape#45",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Elements",
+          "profiling": null,
+          "metadata": {
+            "id": 46
+          }
+        },
+        {
+          "opcode": "ArrayLength <- Elements#46",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 47
+          }
+        },
+        {
+          "opcode": "Constant 0x1",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 48
+          }
+        },
+        {
+          "opcode": "Constant 0x0",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 49
+          }
+        },
+        {
+          "opcode": "MinMax <- ArrayLength#47, Constant#49 (max)",
+          "attributes": [
+            "Commutative",
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 50
+          }
+        },
+        {
+          "opcode": "Constant 0x1",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 51
+          }
+        },
+        {
+          "opcode": "Constant 0x0",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 52
+          }
+        },
+        {
+          "opcode": "Compare <- Constant#51, Constant#52 StrictEq",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Bool",
+          "profiling": null,
+          "metadata": {
+            "id": 53
+          }
+        },
+        {
+          "opcode": "Test <- Compare#53 -> block 2, block 3",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 54
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "2",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [
+        "1"
+      ],
+      "successors": [
+        "3"
+      ],
+      "instructions": [
+        {
+          "opcode": "CallGetIntrinsicValue",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 55
+          }
+        },
+        {
+          "opcode": "DebugCheckSelfHosted <- CallGetIntrinsicValue#55",
+          "attributes": [
+            "Guard",
+            "ImplicitlyUsed"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 56
+          }
+        },
+        {
+          "opcode": "Constant undefined",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Undefined",
+          "profiling": null,
+          "metadata": {
+            "id": 57
+          }
+        },
+        {
+          "opcode": "Constant 0x37",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 58
+          }
+        },
+        {
+          "opcode": "Constant 0x0",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 59
+          }
+        },
+        {
+          "opcode": "Constant string 104289c2e080",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "String",
+          "profiling": null,
+          "metadata": {
+            "id": 60
+          }
+        },
+        {
+          "opcode": "Bail",
+          "attributes": [
+            "Guard"
+          ],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 61
+          }
+        },
+        {
+          "opcode": "UnreachableResult",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 62
+          }
+        },
+        {
+          "opcode": "Goto -> block 3",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 63
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "3",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [
+        "2",
+        "1"
+      ],
+      "successors": [
+        "5",
+        "4"
+      ],
+      "instructions": [
+        {
+          "opcode": "Constant function IsCallable at 104289c6c7b0",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 64
+          }
+        },
+        {
+          "opcode": "DebugCheckSelfHosted <- Constant#64",
+          "attributes": [
+            "Guard",
+            "ImplicitlyUsed"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 65
+          }
+        },
+        {
+          "opcode": "Constant undefined",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Undefined",
+          "profiling": null,
+          "metadata": {
+            "id": 66
+          }
+        },
+        {
+          "opcode": "Constant 0x1",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 67
+          }
+        },
+        {
+          "opcode": "IsCallable <- Lambda#32",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Bool",
+          "profiling": null,
+          "metadata": {
+            "id": 68
+          }
+        },
+        {
+          "opcode": "Test <- IsCallable#68 -> block 5, block 4",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 69
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "4",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [
+        "3"
+      ],
+      "successors": [
+        "5"
+      ],
+      "instructions": [
+        {
+          "opcode": "CallGetIntrinsicValue",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 70
+          }
+        },
+        {
+          "opcode": "DebugCheckSelfHosted <- CallGetIntrinsicValue#70",
+          "attributes": [
+            "Guard",
+            "ImplicitlyUsed"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 71
+          }
+        },
+        {
+          "opcode": "Constant undefined",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Undefined",
+          "profiling": null,
+          "metadata": {
+            "id": 72
+          }
+        },
+        {
+          "opcode": "Constant 0xc",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 73
+          }
+        },
+        {
+          "opcode": "CallGetIntrinsicValue",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 74
+          }
+        },
+        {
+          "opcode": "DebugCheckSelfHosted <- CallGetIntrinsicValue#74",
+          "attributes": [
+            "Guard",
+            "ImplicitlyUsed"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 75
+          }
+        },
+        {
+          "opcode": "Constant undefined",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Undefined",
+          "profiling": null,
+          "metadata": {
+            "id": 76
+          }
+        },
+        {
+          "opcode": "Constant 0x0",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 77
+          }
+        },
+        {
+          "opcode": "Bail",
+          "attributes": [
+            "Guard"
+          ],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 78
+          }
+        },
+        {
+          "opcode": "UnreachableResult",
+          "attributes": [
+            "ImplicitlyUsed"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 79
+          }
+        },
+        {
+          "opcode": "Bail",
+          "attributes": [
+            "Guard"
+          ],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 80
+          }
+        },
+        {
+          "opcode": "UnreachableResult",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 81
+          }
+        },
+        {
+          "opcode": "Goto -> block 5",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 82
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "5",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [
+        "4",
+        "3"
+      ],
+      "successors": [
+        "6",
+        "7"
+      ],
+      "instructions": [
+        {
+          "opcode": "Constant 0x1",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 83
+          }
+        },
+        {
+          "opcode": "Constant 0x1",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 84
+          }
+        },
+        {
+          "opcode": "Compare <- Constant#83, Constant#84 Gt",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Bool",
+          "profiling": null,
+          "metadata": {
+            "id": 85
+          }
+        },
+        {
+          "opcode": "Test <- Compare#85 -> block 6, block 7",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 86
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "6",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [
+        "5"
+      ],
+      "successors": [
+        "8"
+      ],
+      "instructions": [
+        {
+          "opcode": "Constant 0x1",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 87
+          }
+        },
+        {
+          "opcode": "GetInlinedArgument <- Constant#87, Lambda#32",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 88
+          }
+        },
+        {
+          "opcode": "Goto -> block 8",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 89
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "7",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [
+        "5"
+      ],
+      "successors": [
+        "8"
+      ],
+      "instructions": [
+        {
+          "opcode": "Constant undefined",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Undefined",
+          "profiling": null,
+          "metadata": {
+            "id": 90
+          }
+        },
+        {
+          "opcode": "Goto -> block 8",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 91
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "8",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [
+        "7",
+        "6"
+      ],
+      "successors": [
+        "9",
+        "10"
+      ],
+      "instructions": [
+        {
+          "opcode": "Phi <- Constant#90, GetInlinedArgument#88",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 92
+          }
+        },
+        {
+          "opcode": "Constant function CanOptimizeArraySpecies at 104289c6c7e8",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 93
+          }
+        },
+        {
+          "opcode": "DebugCheckSelfHosted <- Constant#93",
+          "attributes": [
+            "Guard",
+            "ImplicitlyUsed"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 94
+          }
+        },
+        {
+          "opcode": "Constant undefined",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Undefined",
+          "profiling": null,
+          "metadata": {
+            "id": 95
+          }
+        },
+        {
+          "opcode": "Constant 0x1",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 96
+          }
+        },
+        {
+          "opcode": "HasShape <- ObjectKeys#27",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Bool",
+          "profiling": null,
+          "metadata": {
+            "id": 97
+          }
+        },
+        {
+          "opcode": "Test <- HasShape#97 -> block 9, block 10",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 98
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "9",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [
+        "8"
+      ],
+      "successors": [
+        "11"
+      ],
+      "instructions": [
+        {
+          "opcode": "Constant function std_Array at 104289c6c820",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 99
+          }
+        },
+        {
+          "opcode": "DebugCheckSelfHosted <- Constant#99",
+          "attributes": [
+            "Guard"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 100
+          }
+        },
+        {
+          "opcode": "Constant undefined",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Undefined",
+          "profiling": null,
+          "metadata": {
+            "id": 101
+          }
+        },
+        {
+          "opcode": "Constant 0x1",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 102
+          }
+        },
+        {
+          "opcode": "Unbox DebugCheckSelfHosted#100 to Object (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 103
+          }
+        },
+        {
+          "opcode": "Constant function std_Array at 104289c6c820",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 104
+          }
+        },
+        {
+          "opcode": "GuardSpecificFunction <- Unbox#103, Constant#104",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 105
+          }
+        },
+        {
+          "opcode": "NewArrayDynamicLength <- MinMax#50",
+          "attributes": [
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 106
+          }
+        },
+        {
+          "opcode": "Goto -> block 11",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 107
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "10",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [
+        "8"
+      ],
+      "successors": [
+        "11"
+      ],
+      "instructions": [
+        {
+          "opcode": "CallGetIntrinsicValue",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 108
+          }
+        },
+        {
+          "opcode": "DebugCheckSelfHosted <- CallGetIntrinsicValue#108",
+          "attributes": [
+            "Guard",
+            "ImplicitlyUsed"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 109
+          }
+        },
+        {
+          "opcode": "Constant undefined",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Undefined",
+          "profiling": null,
+          "metadata": {
+            "id": 110
+          }
+        },
+        {
+          "opcode": "Bail",
+          "attributes": [
+            "Guard"
+          ],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 111
+          }
+        },
+        {
+          "opcode": "UnreachableResult",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 112
+          }
+        },
+        {
+          "opcode": "Goto -> block 11",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 113
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "11",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [
+        "10",
+        "9"
+      ],
+      "successors": [
+        "12"
+      ],
+      "instructions": [
+        {
+          "opcode": "Phi <- UnreachableResult#112, NewArrayDynamicLength#106",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 114
+          }
+        },
+        {
+          "opcode": "Constant 0x0",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 115
+          }
+        },
+        {
+          "opcode": "Goto -> block 12",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 127
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "12",
+      "attributes": [
+        "loopheader"
+      ],
+      "loopDepth": 1,
+      "predecessors": [
+        "11",
+        "17"
+      ],
+      "successors": [
+        "13",
+        "18"
+      ],
+      "instructions": [
+        {
+          "opcode": "Phi <- Constant#37, Constant#37",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 116
+          }
+        },
+        {
+          "opcode": "Phi <- Constant#37, Constant#37",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 117
+          }
+        },
+        {
+          "opcode": "Phi <- ObjectKeys#27, ObjectKeys#27",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 118
+          }
+        },
+        {
+          "opcode": "Phi <- Lambda#32, Lambda#32",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 119
+          }
+        },
+        {
+          "opcode": "Phi <- ObjectKeys#27, ObjectKeys#27",
+          "attributes": [
+            "ImplicitlyUsed"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 120
+          }
+        },
+        {
+          "opcode": "Phi <- MinMax#50, MinMax#50",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 121
+          }
+        },
+        {
+          "opcode": "Phi <- Phi#92, Phi#92",
+          "attributes": [
+            "ImplicitlyUsed"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 122
+          }
+        },
+        {
+          "opcode": "Phi <- Phi#114, Phi#114",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 123
+          }
+        },
+        {
+          "opcode": "Phi <- Constant#115, Add#173",
+          "attributes": [
+            "ImplicitlyUsed"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 124
+          }
+        },
+        {
+          "opcode": "Phi <- Constant#37, Phi#170",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 125
+          }
+        },
+        {
+          "opcode": "Phi <- ObjectKeys#27, ObjectKeys#27",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 126
+          }
+        },
+        {
+          "opcode": "InterruptCheck",
+          "attributes": [
+            "Guard"
+          ],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 128
+          }
+        },
+        {
+          "opcode": "Unbox Phi#124 to Int32 (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 129
+          }
+        },
+        {
+          "opcode": "Unbox Phi#121 to Int32 (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 130
+          }
+        },
+        {
+          "opcode": "Compare <- Unbox#129, Unbox#130 Lt",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Bool",
+          "profiling": null,
+          "metadata": {
+            "id": 131
+          }
+        },
+        {
+          "opcode": "Test <- Compare#131 -> block 13, block 18",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 132
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "13",
+      "attributes": [],
+      "loopDepth": 1,
+      "predecessors": [
+        "12"
+      ],
+      "successors": [
+        "14",
+        "17"
+      ],
+      "instructions": [
+        {
+          "opcode": "Unbox Phi#120 to Object (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 133
+          }
+        },
+        {
+          "opcode": "Unbox Phi#124 to Int32 (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 134
+          }
+        },
+        {
+          "opcode": "GuardShape <- Unbox#133",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 135
+          }
+        },
+        {
+          "opcode": "Elements <- GuardShape#135",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Elements",
+          "profiling": null,
+          "metadata": {
+            "id": 136
+          }
+        },
+        {
+          "opcode": "InitializedLength <- Elements#136",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 137
+          }
+        },
+        {
+          "opcode": "BoundsCheck <- Unbox#134, InitializedLength#137",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 138
+          }
+        },
+        {
+          "opcode": "SpectreMaskIndex <- BoundsCheck#138, InitializedLength#137",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 139
+          }
+        },
+        {
+          "opcode": "GuardElementNotHole <- Elements#136, SpectreMaskIndex#139",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 140
+          }
+        },
+        {
+          "opcode": "Constant true",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Bool",
+          "profiling": null,
+          "metadata": {
+            "id": 141
+          }
+        },
+        {
+          "opcode": "Test <- Constant#141 -> block 14, block 17",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 142
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "14",
+      "attributes": [],
+      "loopDepth": 1,
+      "predecessors": [
+        "13"
+      ],
+      "successors": [
+        "15"
+      ],
+      "instructions": [
+        {
+          "opcode": "Unbox Phi#120 to Object (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 143
+          }
+        },
+        {
+          "opcode": "Unbox Phi#124 to Int32 (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 144
+          }
+        },
+        {
+          "opcode": "GuardShape <- Unbox#143",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 145
+          }
+        },
+        {
+          "opcode": "Elements <- GuardShape#145",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Elements",
+          "profiling": null,
+          "metadata": {
+            "id": 146
+          }
+        },
+        {
+          "opcode": "InitializedLength <- Elements#146",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 147
+          }
+        },
+        {
+          "opcode": "BoundsCheck <- Unbox#144, InitializedLength#147",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 148
+          }
+        },
+        {
+          "opcode": "SpectreMaskIndex <- BoundsCheck#148, InitializedLength#147",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 149
+          }
+        },
+        {
+          "opcode": "GuardElementsArePacked <- Elements#146",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 150
+          }
+        },
+        {
+          "opcode": "LoadElement <- Elements#146, SpectreMaskIndex#149",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 151
+          }
+        },
+        {
+          "opcode": "Constant 0x3",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 152
+          }
+        },
+        {
+          "opcode": "Unbox Phi#119 to Object (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 153
+          }
+        },
+        {
+          "opcode": "GuardToFunction <- Unbox#153",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 154
+          }
+        },
+        {
+          "opcode": "GuardFunctionScript <- GuardToFunction#154",
+          "attributes": [
+            "Movable",
+            "Guard",
+            "ImplicitlyUsed"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 155
+          }
+        },
+        {
+          "opcode": "Goto -> block 15",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 156
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "15",
+      "attributes": [],
+      "loopDepth": 1,
+      "predecessors": [
+        "14"
+      ],
+      "successors": [
+        "16"
+      ],
+      "instructions": [
+        {
+          "opcode": "Constant undefined",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Undefined",
+          "profiling": null,
+          "metadata": {
+            "id": 157
+          }
+        },
+        {
+          "opcode": "FunctionEnvironment <- GuardFunctionScript#155",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 158
+          }
+        },
+        {
+          "opcode": "LoadFixedSlot <- FunctionEnvironment#158 (slot 2)",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 159
+          }
+        },
+        {
+          "opcode": "Unbox LoadFixedSlot#159 to Object (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 160
+          }
+        },
+        {
+          "opcode": "MegamorphicLoadSlotByValue <- Unbox#160, LoadElement#151",
+          "attributes": [
+            "Guard"
+          ],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 161
+          }
+        },
+        {
+          "opcode": "Goto -> block 16",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 163
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "16",
+      "attributes": [],
+      "loopDepth": 1,
+      "predecessors": [
+        "15"
+      ],
+      "successors": [
+        "17"
+      ],
+      "instructions": [
+        {
+          "opcode": "Unbox Phi#123 to Object (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 164
+          }
+        },
+        {
+          "opcode": "Unbox Phi#124 to Int32 (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 165
+          }
+        },
+        {
+          "opcode": "GuardShape <- Unbox#164",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 166
+          }
+        },
+        {
+          "opcode": "Elements <- GuardShape#166",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Elements",
+          "profiling": null,
+          "metadata": {
+            "id": 167
+          }
+        },
+        {
+          "opcode": "StoreElementHole <- GuardShape#166, Elements#167, Unbox#165, MegamorphicLoadSlotByValue#161",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 168
+          }
+        },
+        {
+          "opcode": "Goto -> block 17",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 169
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "17",
+      "attributes": [
+        "backedge"
+      ],
+      "loopDepth": 1,
+      "predecessors": [
+        "16",
+        "13"
+      ],
+      "successors": [
+        "12"
+      ],
+      "instructions": [
+        {
+          "opcode": "Phi <- MegamorphicLoadSlotByValue#161, Phi#125",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 170
+          }
+        },
+        {
+          "opcode": "Unbox Phi#124 to Int32 (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 171
+          }
+        },
+        {
+          "opcode": "Constant 0x1",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 172
+          }
+        },
+        {
+          "opcode": "Add <- Unbox#171, Constant#172 [int32]",
+          "attributes": [
+            "Commutative",
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 173
+          }
+        },
+        {
+          "opcode": "Goto -> block 12",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 174
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "18",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [
+        "12"
+      ],
+      "successors": [
+        "19"
+      ],
+      "instructions": [
+        {
+          "opcode": "Goto -> block 19",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 176
+          }
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "19",
+      "attributes": [],
+      "loopDepth": 0,
+      "predecessors": [
+        "18"
+      ],
+      "successors": [],
+      "instructions": [
+        {
+          "opcode": "Unbox Phi#123 to Object (fallible)",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 177
+          }
+        },
+        {
+          "opcode": "GuardShape <- Unbox#177",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 178
+          }
+        },
+        {
+          "opcode": "Constant object 104289c3e088 (Array)",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 179
+          }
+        },
+        {
+          "opcode": "Constant function reduce (self-hosted:205) at 104289c479c0",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 180
+          }
+        },
+        {
+          "opcode": "Constant function complex5/< (-e:22) at 104289c63e40",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 181
+          }
+        },
+        {
+          "opcode": "Lambda <- NewCallObject#8, Constant#181",
+          "attributes": [],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 182
+          }
+        },
+        {
+          "opcode": "Constant 0x0",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 183
+          }
+        },
+        {
+          "opcode": "Constant 0x2",
+          "attributes": [
+            "Movable",
+            "ImplicitlyUsed"
+          ],
+          "type": "Int32",
+          "profiling": null,
+          "metadata": {
+            "id": 184
+          }
+        },
+        {
+          "opcode": "Constant function reduce (self-hosted:205) at 104289c479c0",
+          "attributes": [
+            "Movable"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 185
+          }
+        },
+        {
+          "opcode": "GuardSpecificFunction <- Constant#180, Constant#185",
+          "attributes": [
+            "Movable",
+            "Guard"
+          ],
+          "type": "Object",
+          "profiling": null,
+          "metadata": {
+            "id": 186
+          }
+        },
+        {
+          "opcode": "Call <- GuardSpecificFunction#186, Phi#123, Lambda#182, Constant#183",
+          "attributes": [],
+          "type": "Value",
+          "profiling": null,
+          "metadata": {
+            "id": 187
+          }
+        },
+        {
+          "opcode": "Return <- Call#187",
+          "attributes": [],
+          "type": "None",
+          "profiling": null,
+          "metadata": {
+            "id": 188
+          }
+        }
+      ],
+      "metadata": {}
+    }
+  ]
+}

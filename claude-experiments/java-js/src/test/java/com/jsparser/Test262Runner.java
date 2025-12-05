@@ -41,12 +41,14 @@ public class Test262Runner {
         AtomicInteger mismatched = new AtomicInteger(0);
         AtomicInteger failed = new AtomicInteger(0);
         AtomicInteger noCache = new AtomicInteger(0);
+        AtomicInteger negativeTestsPassed = new AtomicInteger(0);
         Map<String, Integer> errorTypes = new HashMap<>();
         Map<String, Integer> errorMessages = new HashMap<>();
         List<String> mismatchedFiles = new ArrayList<>();
         Map<String, List<String>> errorToFiles = new HashMap<>();
         List<String> allFailures = new ArrayList<>();
         List<Map<String, Object>> allFailuresJson = new ArrayList<>();
+        List<String> negativeTestsPassedFiles = new ArrayList<>();
 
         System.out.println("Starting test262 oracle comparison test...");
         System.out.println("Test262 dir: " + test262Dir.toAbsolutePath());
@@ -88,6 +90,9 @@ public class Test262Runner {
                              continue;
                          }
 
+                         // Check if this is a negative parse test (expected to fail at parse time)
+                         boolean isNegativeParseTest = Parser.isNegativeParseTest(source);
+
                          // Get corresponding cache file
                          Path relativePath = test262Dir.relativize(path);
                          Path cacheFile = cacheDir.resolve(relativePath.toString() + ".json");
@@ -108,6 +113,24 @@ public class Test262Runner {
 
                          // Parse with our parser using correct sourceType
                          Program actualProgram = Parser.parse(source, isModule);
+
+                         // If this is a negative parse test and we successfully parsed, that's an error
+                         if (isNegativeParseTest) {
+                             negativeTestsPassed.incrementAndGet();
+                             if (negativeTestsPassedFiles.size() < 50) {
+                                 negativeTestsPassedFiles.add(path.toString());
+                             }
+
+                             Map<String, Object> errorJson = new HashMap<>();
+                             errorJson.put("file", path.toString());
+                             errorJson.put("errorType", "NegativeTestPassed");
+                             errorJson.put("message", "Test marked as negative (expected parse failure) but parsing succeeded");
+                             allFailuresJson.add(errorJson);
+
+                             allFailures.add(path.toString() + ": Negative test incorrectly passed (expected parse failure)");
+                             continue;
+                         }
+
                          String actualJson = mapper.writeValueAsString(actualProgram);
 
                          // Parse both JSONs for structural comparison
@@ -233,7 +256,7 @@ public class Test262Runner {
                      }
         }
 
-        int totalWithCache = matched.get() + mismatched.get() + failed.get();
+        int totalWithCache = matched.get() + mismatched.get() + failed.get() + negativeTestsPassed.get();
 
         System.out.println("\n=== Test262 Oracle Comparison Results ===");
         System.out.printf("Total files scanned: %d%n", total.get());
@@ -245,6 +268,8 @@ public class Test262Runner {
             mismatched.get(), totalWithCache > 0 ? (mismatched.get() * 100.0 / totalWithCache) : 0);
         System.out.printf("  ⚠ Parse failures: %d (%.2f%%)%n",
             failed.get(), totalWithCache > 0 ? (failed.get() * 100.0 / totalWithCache) : 0);
+        System.out.printf("  ❌ Negative tests incorrectly passed: %d (%.2f%%)%n",
+            negativeTestsPassed.get(), totalWithCache > 0 ? (negativeTestsPassed.get() * 100.0 / totalWithCache) : 0);
 
         if (!errorTypes.isEmpty()) {
             System.out.println("\nError types:");
@@ -263,6 +288,11 @@ public class Test262Runner {
         if (!mismatchedFiles.isEmpty()) {
             System.out.println("\nFirst 20 mismatched files:");
             mismatchedFiles.forEach(f -> System.out.println("  " + f));
+        }
+
+        if (!negativeTestsPassedFiles.isEmpty()) {
+            System.out.println("\nNegative tests that incorrectly passed (first 50):");
+            negativeTestsPassedFiles.forEach(f -> System.out.println("  " + f));
         }
 
         // Print files with unterminated template literal error
@@ -325,21 +355,24 @@ public class Test262Runner {
             System.err.println("Failed to write JSON failures file: " + e.getMessage());
         }
 
-        // Assert that we have zero failures and zero mismatches
-        if (failed.get() > 0 || mismatched.get() > 0) {
+        // Assert that we have zero failures, zero mismatches, and zero negative tests that passed
+        if (failed.get() > 0 || mismatched.get() > 0 || negativeTestsPassed.get() > 0) {
             String errorMsg = String.format(
                 "\n❌ Test262 oracle comparison FAILED:\n" +
                 "  Parse failures: %d\n" +
                 "  AST mismatches: %d\n" +
+                "  Negative tests incorrectly passed: %d\n" +
                 "  Total issues: %d out of %d files\n" +
                 "See /tmp/all_test262_failures.txt and /tmp/all_test262_failures.json for details.",
-                failed.get(), mismatched.get(), failed.get() + mismatched.get(), totalWithCache
+                failed.get(), mismatched.get(), negativeTestsPassed.get(),
+                failed.get() + mismatched.get() + negativeTestsPassed.get(), totalWithCache
             );
             System.err.println(errorMsg);
 
             // Fail the test
             assertEquals(0, failed.get(), "Should have zero parse failures");
             assertEquals(0, mismatched.get(), "Should have zero AST mismatches");
+            assertEquals(0, negativeTestsPassed.get(), "Should have zero negative tests that incorrectly passed");
         }
 
         System.out.println("\n✅ All test262 files passed! Perfect compatibility.");

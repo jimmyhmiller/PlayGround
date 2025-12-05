@@ -3797,4 +3797,23 @@ public class Parser {
 
         return false;
     }
+
+    public static boolean isNegativeParseTest(String source) {
+        // Parse Test262 YAML frontmatter for negative parse test
+        // Format:
+        //   negative:
+        //     phase: parse
+        //     type: SyntaxError
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+            "/\\*---\\n([\\s\\S]*?)\\n---\\*/");
+        java.util.regex.Matcher matcher = pattern.matcher(source);
+
+        if (!matcher.find()) return false;
+
+        String yaml = matcher.group(1);
+
+        // Check if negative section exists with phase: parse
+        // Match "negative:" followed by any content, then "phase: parse"
+        return yaml.matches("(?sm).*^negative:\\s*\\n.*?^\\s*phase:\\s*parse.*");
+    }
 }

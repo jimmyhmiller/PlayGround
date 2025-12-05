@@ -1,0 +1,97 @@
+use iongraph_rust_redux::graph::{Graph, GraphOptions};
+use iongraph_rust_redux::compilers::universal::UniversalIR;
+use iongraph_rust_redux::layout_provider::LayoutProvider;
+use iongraph_rust_redux::pure_svg_text_layout_provider::PureSVGTextLayoutProvider;
+use std::env;
+use std::fs;
+use std::process;
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() < 2 {
+        eprintln!(
+            "Usage: {} <path-to-universal-json> [output.svg]",
+            args[0]
+        );
+        process::exit(1);
+    }
+
+    let json_path = &args[1];
+    let output_path = args.get(2).map(|s| s.as_str()).unwrap_or("output.svg");
+
+    // Read and parse the JSON file
+    let json_str = fs::read_to_string(json_path).unwrap_or_else(|err| {
+        eprintln!("Error reading file {}: {}", json_path, err);
+        process::exit(1);
+    });
+
+    let universal_ir: UniversalIR = serde_json::from_str(&json_str).unwrap_or_else(|err| {
+        eprintln!("Error parsing JSON: {}", err);
+        process::exit(1);
+    });
+
+    // Validate the universal format
+    if let Err(e) = universal_ir.validate() {
+        eprintln!("Error: {}", e);
+        process::exit(1);
+    }
+
+    let func_name = universal_ir.metadata.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    eprintln!(
+        "Rendering universal IR function \"{}\"",
+        func_name
+    );
+    eprintln!("  Compiler: {}", universal_ir.compiler);
+    eprintln!("  Blocks: {}", universal_ir.blocks.len());
+
+    // Create layout provider and graph
+    let mut layout_provider = PureSVGTextLayoutProvider::new();
+
+    let options = GraphOptions {
+        sample_counts: None,
+        instruction_palette: None,
+    };
+
+    // Create the graph from Universal IR (Graph::new calls build_blocks internally)
+    let mut graph = Graph::new(layout_provider, universal_ir, options);
+
+    // Build graph layout
+    let (nodes_by_layer, layer_heights, track_heights) = graph.layout();
+
+    // Render to SVG
+    graph.render(nodes_by_layer, layer_heights, track_heights);
+
+    // Create root SVG and append graph_container to it
+    layout_provider = graph.layout_provider; // Take back the layout provider
+    let mut svg_root = layout_provider.create_svg_element("svg");
+    layout_provider.set_attribute(&mut svg_root, "xmlns", "http://www.w3.org/2000/svg");
+
+    // Add 40 pixels to width and height to match TypeScript (generate-svg-function.mjs:32-33)
+    let width = (graph.size.x + 40.0).ceil() as i32;
+    let height = (graph.size.y + 40.0).ceil() as i32;
+
+    layout_provider.set_attribute(&mut svg_root, "width", &width.to_string());
+    layout_provider.set_attribute(&mut svg_root, "height", &height.to_string());
+    layout_provider.set_attribute(
+        &mut svg_root,
+        "viewBox",
+        &format!("0 0 {} {}", width, height),
+    );
+    layout_provider.append_child(&mut svg_root, graph.graph_container);
+
+    // Get the SVG output
+    let svg_output = layout_provider.to_svg_string(&svg_root);
+
+    // Write to file
+    fs::write(output_path, svg_output).unwrap_or_else(|err| {
+        eprintln!("Error writing to {}: {}", output_path, err);
+        process::exit(1);
+    });
+
+    eprintln!("✓ SVG generated: {}", output_path);
+    eprintln!("  Dimensions: {}x{}", width, height);
+}
