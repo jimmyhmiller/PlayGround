@@ -112,7 +112,10 @@ impl Default for IrBuilder {
 impl IrBuilder {
     pub fn new() -> Self {
         IrBuilder {
-            next_register: 0,
+            // Start register allocation at 9 to avoid conflicts with argument registers x0-x8
+            // Arguments are pre-allocated with is_argument: true, regular vregs have is_argument: false
+            // but they share the same index space, so we need to avoid overlap
+            next_register: 9,
             next_label: 0,
             instructions: Vec::new(),
         }

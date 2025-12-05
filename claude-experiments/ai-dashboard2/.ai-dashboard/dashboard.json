@@ -225,7 +225,7 @@
       "x": 0,
       "y": 532,
       "width": 380,
-      "height": 408,
+      "height": 436,
       "label": "Bugs",
       "items": [
         {
@@ -263,6 +263,10 @@
         {
           "text": "When tools are added, it goes above the message and causes weird scrolling behavior",
           "done": false
+        },
+        {
+          "text": "Web component doesn't have unique instances",
+          "done": false
         }
       ]
     },
@@ -289,8 +293,8 @@
       "id": "demo-nested-dashboard",
       "type": "nested-dashboard",
       "x": 0,
-      "y": 952,
-      "width": 660,
+      "y": 980,
+      "width": 884,
       "height": 604,
       "label": "Nested Dashboard Demo",
       "dashboard": {
@@ -320,7 +324,7 @@
             "label": "Test Coverage",
             "value": 87,
             "text": "87% covered",
-            "x": 840,
+            "x": 960,
             "y": 336,
             "width": 240,
             "height": 120
@@ -341,8 +345,8 @@
               10,
               14
             ],
-            "x": 480,
-            "y": 72,
+            "x": 432,
+            "y": 0,
             "width": 300,
             "height": 200
           },
@@ -403,7 +407,7 @@
             "id": "custom-command-example",
             "type": "codeEditor",
             "x": 456,
-            "y": 264,
+            "y": 288,
             "width": 380,
             "height": 496,
             "label": "Custom Command Demo",
@@ -430,24 +434,52 @@
       }
     },
     {
-      "id": "drag-to-nested-docs",
-      "type": "markdown",
-      "x": 700,
-      "y": 980,
-      "width": 632,
-      "height": 408,
-      "label": "Drag-to-Nested Dashboard Feature",
-      "filePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/.ai-dashboard/drag-to-nested-feature.md"
-    },
-    {
       "id": "render-optimization-docs",
       "type": "markdown",
-      "x": 672,
-      "y": 1428,
+      "x": 1260,
+      "y": 1008,
       "width": 660,
       "height": 492,
       "label": "Render Optimization Analysis",
       "filePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/.ai-dashboard/render-optimization-analysis.md"
+    },
+    {
+      "id": "recent-changes",
+      "type": "diffList",
+      "x": 1344,
+      "y": 476,
+      "width": 380,
+      "height": 400,
+      "label": "Recent Changes",
+      "items": [
+        [
+          "main.ts",
+          3,
+          1
+        ],
+        [
+          "src/components/ui/Widget.tsx",
+          45,
+          12
+        ],
+        [
+          "src/components/GridItem.tsx",
+          8,
+          2
+        ],
+        [
+          "src/App.tsx",
+          6,
+          0
+        ],
+        [
+          ".ai-dashboard/render-optimization-analysis.md",
+          350,
+          0
+        ]
+      ],
+      "dataSource": "script",
+      "regenerateCommand": "git diff --numstat HEAD~5 HEAD | awk '{if ($1 == \"-\") $1=0; if ($2 == \"-\") $2=0; print \"[\\\"\"$3\"\\\", \"$1\", \"$2\"]\"}' | jq -s '.'"
     }
   ],
   "_sourcePath": "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/ai-dashboard2/.ai-dashboard/dashboard.json"

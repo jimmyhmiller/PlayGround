@@ -82,6 +82,7 @@ public class Lexer {
                 updateContext(lastTokenType, token);
                 lastTokenType = token.type();
                 atLineStart = false;
+
             }
         }
 
@@ -1192,10 +1193,18 @@ public class Lexer {
         }
 
         String lexeme = source.substring(startPos, position);
+        String patternStr = pattern.toString();
+        String flagsStr = flags.toString();
+
+        // Validate regex according to ECMAScript specification
+        com.jsparser.regex.RegexValidator.validate(
+            patternStr, flagsStr,
+            startPos, startLine, startColumn
+        );
 
         // Return token with regex info in literal
         return new Token(TokenType.REGEX, lexeme,
-            new Literal.RegexInfo(pattern.toString(), flags.toString()),
+            new Literal.RegexInfo(patternStr, flagsStr),
             startLine, startColumn, startPos, position);
     }
 

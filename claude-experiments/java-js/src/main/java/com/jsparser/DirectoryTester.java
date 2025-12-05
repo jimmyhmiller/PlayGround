@@ -165,13 +165,18 @@ public class DirectoryTester {
 
             processed.incrementAndGet();
 
+            String relativePath = targetDir.relativize(file).toString();
+
+            // Print current file
+            System.out.println("Parsing file " + processed.get() + "/" + jsFiles.size() + ": " + relativePath);
+            System.out.flush();
+
+            // Print progress summary every 100 files
             if (processed.get() % 100 == 0) {
                 System.out.printf("Progress: %d/%d (%d matched, %d mismatched, %d Java failed, %d Java too permissive, %d both failed)%n",
                     processed.get(), jsFiles.size(), matched.get(), mismatched.get(),
                     javaFailedAcornSucceeded.get(), javaSucceededAcornFailed.get(), bothFailed.get());
             }
-
-            String relativePath = targetDir.relativize(file).toString();
 
             try {
                 String source = Files.readString(file);
@@ -197,10 +202,14 @@ public class DirectoryTester {
                     // We know the correct mode from Acorn
                     boolean isModule = acornResult.sourceType.equals("module");
                     try {
-                        javaAst = Parser.parse(source, isModule);
+                        // Parse with timeout to prevent hanging on large files
+                        javaAst = parseWithTimeout(source, isModule, 5);
                         javaSucceeded = true;
                         usedModuleMode = isModule;
                         javaSuccess.incrementAndGet();
+                    } catch (java.util.concurrent.TimeoutException e) {
+                        javaFailed.incrementAndGet();
+                        javaError = "Timeout after 5 seconds";
                     } catch (ParseException e) {
                         javaFailed.incrementAndGet();
                         javaError = e.getMessage();
@@ -258,13 +267,13 @@ public class DirectoryTester {
                     Exception moduleError = null;
 
                     try {
-                        scriptAst = Parser.parse(source, false);
+                        scriptAst = parseWithTimeout(source, false, 5);
                     } catch (Exception e) {
                         scriptError = e;
                     }
 
                     try {
-                        moduleAst = Parser.parse(source, true);
+                        moduleAst = parseWithTimeout(source, true, 5);
                     } catch (Exception e) {
                         moduleError = e;
                     }
@@ -451,6 +460,12 @@ public class DirectoryTester {
         // Try both script and module mode, prefer the one that succeeds
         // If both succeed, prefer module if file is .mjs or has import/export
         AcornResult scriptResult = tryParseWithAcorn(source, filePath, "script");
+
+        // If script mode timed out, don't bother trying module mode
+        if (scriptResult.error != null && scriptResult.error.contains("Timeout")) {
+            return scriptResult;
+        }
+
         AcornResult moduleResult = tryParseWithAcorn(source, filePath, "module");
 
         // If both succeed, prefer module for .mjs files or files with import/export
@@ -511,8 +526,21 @@ public class DirectoryTester {
                 }
             });
 
-            int exitCode = process.waitFor();
-            String errorOutput = errorFuture.get();
+            // Add timeout to prevent hanging on problematic files
+            boolean finished = process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                tempFile.toFile().delete();
+                return new AcornResult(false, null, "script", "Timeout after 2 seconds");
+            }
+
+            int exitCode = process.exitValue();
+            String errorOutput = "";
+            try {
+                errorOutput = errorFuture.get(1, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (java.util.concurrent.TimeoutException e) {
+                errorOutput = "Timeout reading error output";
+            }
 
             if (exitCode != 0) {
                 Files.deleteIfExists(tempFile);
@@ -611,6 +639,29 @@ public class DirectoryTester {
             for (int i = 0; i < Math.min(expList.size(), actList.size()); i++) {
                 normalizeBigIntValues(expList.get(i), actList.get(i));
             }
+        }
+    }
+
+    /**
+     * Parse with timeout to prevent hanging on problematic files
+     */
+    private static Program parseWithTimeout(String source, boolean isModule, int timeoutSeconds)
+            throws Exception {
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            java.util.concurrent.Future<Program> future = executor.submit(() -> Parser.parse(source, isModule));
+            return future.get(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            executor.shutdownNow();
+            throw e;
+        } catch (java.util.concurrent.ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception) {
+                throw (Exception) cause;
+            }
+            throw new RuntimeException(cause);
+        } finally {
+            executor.shutdown();
         }
     }
 

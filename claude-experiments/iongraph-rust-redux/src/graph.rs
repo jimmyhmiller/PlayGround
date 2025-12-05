@@ -1,8 +1,7 @@
 // Port of Graph.ts - Core graph structure and rendering
 
-use crate::iongraph::{
-    BlockID, BlockPtr, InsPtr, LIRInstruction, MIRInstruction, Pass,
-};
+// No longer need Ion-specific types
+use crate::compilers::universal::{UniversalIR, UniversalInstruction};
 use crate::layout_provider::{LayoutProvider, Vec2};
 use std::collections::HashSet;
 
@@ -33,45 +32,38 @@ const MIN_ZOOM: f64 = 0.10;
 const TRANSLATION_CLAMP_AMOUNT: f64 = 40.0;
 
 pub struct Block<E> {
-    pub ptr: BlockPtr,
-    pub id: BlockID,
+    pub id: String,  // Universal format uses string IDs
     pub attributes: Vec<String>,
     pub predecessors: Vec<usize>, // indices into blocks vec
-    pub successors: Vec<usize>,   // indices into blocks vec (not BlockPtrs!)
+    pub successors: Vec<usize>,   // indices into blocks vec
     pub succs: Vec<usize>,        // Copy for convenience
-    pub instructions: Vec<MIRInstruction>,
-    pub lir: Option<LIRBlockData>,
+    pub instructions: Vec<UniversalInstruction>,
     pub element: Option<Box<E>>,
     pub size: Vec2,
     pub layer: i32,
-    pub loop_id: BlockID,
+    pub loop_id: String,  // String ID instead of BlockID
     pub loop_depth: u32,
     pub layout_node: Option<usize>, // Index into layout nodes (global)
 }
 
 impl<E> Block<E> {
-    /// Check if this block has a semantic attribute using Ion attribute mapping
+    /// Check if this block has a semantic attribute
     pub fn has_semantic_attribute(&self, semantic: crate::core::SemanticAttribute) -> bool {
         use crate::core::semantic_attrs::AttributeSemantics;
-        use crate::compilers::IonIR;
+        use crate::compilers::UniversalCompilerIR;
 
-        IonIR::has_semantic_attribute(&self.attributes, semantic)
+        UniversalCompilerIR::has_semantic_attribute(&self.attributes, semantic)
     }
 
-    /// Check if this block is a loop header (Ion-specific helper)
+    /// Check if this block is a loop header
     pub fn is_loop_header(&self) -> bool {
         self.has_semantic_attribute(crate::core::SemanticAttribute::LoopHeader)
     }
 
-    /// Check if this block is a backedge (Ion-specific helper)
+    /// Check if this block is a backedge
     pub fn is_backedge(&self) -> bool {
         self.has_semantic_attribute(crate::core::SemanticAttribute::Backedge)
     }
-}
-
-#[derive(Clone)]
-pub struct LIRBlockData {
-    pub instructions: Vec<LIRInstruction>,
 }
 
 #[derive(Clone)]
@@ -122,13 +114,13 @@ pub const SC_TOTAL: usize = 0;
 pub const SC_SELF: usize = 1;
 
 pub struct GraphNavigation {
-    pub visited: Vec<BlockPtr>,
+    pub visited: Vec<String>,  // Block IDs
     pub current_index: i32,
-    pub siblings: Vec<BlockPtr>,
+    pub siblings: Vec<String>,  // Block IDs
 }
 
 pub struct HighlightedInstruction {
-    pub ptr: InsPtr,
+    pub id: String,  // Instruction ID from metadata
     pub palette_color: usize,
 }
 
@@ -137,8 +129,8 @@ pub struct GraphState {
     pub zoom: f64,
     pub heatmap_mode: usize,
     pub highlighted_instructions: Vec<HighlightedInstruction>,
-    pub selected_block_ptrs: HashSet<BlockPtr>,
-    pub last_selected_block_ptr: BlockPtr,
+    pub selected_block_ids: HashSet<String>,  // Block IDs
+    pub last_selected_block_id: String,  // Block ID
     pub viewport_pos_of_selected_block: Option<Vec2>,
 }
 
@@ -161,10 +153,10 @@ pub struct Graph<P: LayoutProvider> {
     pub viewport_size: Vec2,
     pub graph_container: Box<P::Element>,
 
-    // Core iongraph data
-    pub pass: Pass,
+    // Core graph data (now Universal IR format)
+    pub ir: UniversalIR,
     pub blocks: Vec<Block<P::Element>>,
-    pub blocks_by_id: std::collections::HashMap<BlockID, usize>,
+    pub blocks_by_id: std::collections::HashMap<String, usize>,  // String IDs now
 
     // Layout state
     pub loops: Vec<LoopHeader>,
@@ -189,7 +181,7 @@ pub enum LayoutNode {
 }
 
 impl<P: LayoutProvider> Graph<P> {
-    pub fn new(mut layout_provider: P, pass: Pass, options: GraphOptions) -> Self {
+    pub fn new(mut layout_provider: P, ir: UniversalIR, options: GraphOptions) -> Self {
         let viewport = layout_provider.create_element("div");
         let mut graph_container = layout_provider.create_svg_element("g");
         layout_provider.add_class(&mut graph_container, "ig-graph");
@@ -199,7 +191,7 @@ impl<P: LayoutProvider> Graph<P> {
             viewport,
             viewport_size: Vec2 { x: 800.0, y: 600.0 },
             graph_container,
-            pass,
+            ir,
             blocks: Vec::new(),
             blocks_by_id: std::collections::HashMap::new(),
             loops: Vec::new(),
@@ -217,8 +209,8 @@ impl<P: LayoutProvider> Graph<P> {
                 zoom: 1.0,
                 heatmap_mode: 0,
                 highlighted_instructions: Vec::new(),
-                selected_block_ptrs: HashSet::new(),
-                last_selected_block_ptr: BlockPtr(0),
+                selected_block_ids: HashSet::new(),
+                last_selected_block_id: String::new(),
                 viewport_pos_of_selected_block: None,
             },
         };
@@ -230,81 +222,38 @@ impl<P: LayoutProvider> Graph<P> {
     }
 
     fn build_blocks(&mut self) {
-        // Build blocks from MIR or LIR
-        if let Some(mir_pass) = &self.pass.mir {
-            for mir_block in &mir_pass.blocks {
-                let block_idx = self.blocks.len();
+        // Build blocks from Universal IR
+        for universal_block in &self.ir.blocks {
+            let block_idx = self.blocks.len();
 
-                // Start with a placeholder size - will be measured after rendering
-                let size = Vec2 { x: 0.0, y: 0.0 };
+            // Start with a placeholder size - will be measured after rendering
+            let size = Vec2 { x: 0.0, y: 0.0 };
 
-                let block = Block {
-                    ptr: mir_block.ptr,
-                    id: BlockID(mir_block.id),
-                    attributes: mir_block.attributes.clone(),
-                    predecessors: Vec::new(),
-                    successors: Vec::new(),
-                    succs: Vec::new(),
-                    instructions: mir_block.instructions.clone(),
-                    lir: None,
-                    element: None,
-                    size,
-                    layer: -1,
-                    loop_id: BlockID(0),
-                    loop_depth: mir_block.loop_depth,
-                    layout_node: None,
-                };
-                self.blocks.push(block);
-                self.blocks_by_id.insert(BlockID(mir_block.id), block_idx);
-            }
+            let block = Block {
+                id: universal_block.id.clone(),
+                attributes: universal_block.attributes.clone(),
+                predecessors: Vec::new(),
+                successors: Vec::new(),
+                succs: Vec::new(),
+                instructions: universal_block.instructions.clone(),
+                element: None,
+                size,
+                layer: -1,
+                loop_id: String::new(),
+                loop_depth: universal_block.loop_depth,
+                layout_node: None,
+            };
+            self.blocks.push(block);
+            self.blocks_by_id.insert(universal_block.id.clone(), block_idx);
+        }
 
-            // Build successor/predecessor relationships
-            for (idx, mir_block) in mir_pass.blocks.iter().enumerate() {
-                for succ_ptr in &mir_block.successors {
-                    if let Some(&succ_idx) = self.blocks_by_id.get(&BlockID(succ_ptr.0)) {
-                        self.blocks[idx].successors.push(succ_idx);
-                        self.blocks[idx].succs.push(succ_idx);
-                        self.blocks[succ_idx].predecessors.push(idx);
-                    }
-                }
-            }
-        } else if let Some(lir_pass) = &self.pass.lir {
-            for lir_block in &lir_pass.blocks {
-                let block_idx = self.blocks.len();
-
-                // Start with a placeholder size - will be measured after rendering
-                let size = Vec2 { x: 0.0, y: 0.0 };
-
-                let block = Block {
-                    ptr: lir_block.ptr,
-                    id: BlockID(lir_block.id),
-                    attributes: lir_block.attributes.clone(),
-                    predecessors: Vec::new(),
-                    successors: Vec::new(),
-                    succs: Vec::new(),
-                    instructions: Vec::new(),
-                    lir: Some(LIRBlockData {
-                        instructions: lir_block.instructions.clone(),
-                    }),
-                    element: None,
-                    size,
-                    layer: -1,
-                    loop_id: BlockID(0),
-                    loop_depth: lir_block.loop_depth,
-                    layout_node: None,
-                };
-                self.blocks.push(block);
-                self.blocks_by_id.insert(BlockID(lir_block.id), block_idx);
-            }
-
-            // Build successor/predecessor relationships
-            for (idx, lir_block) in lir_pass.blocks.iter().enumerate() {
-                for succ_ptr in &lir_block.successors {
-                    if let Some(&succ_idx) = self.blocks_by_id.get(&BlockID(succ_ptr.0)) {
-                        self.blocks[idx].successors.push(succ_idx);
-                        self.blocks[idx].succs.push(succ_idx);
-                        self.blocks[succ_idx].predecessors.push(idx);
-                    }
+        // Build successor/predecessor relationships
+        for (idx, universal_block) in self.ir.blocks.iter().enumerate() {
+            for succ_id in &universal_block.successors {
+                if let Some(&succ_idx) = self.blocks_by_id.get(succ_id) {
+                    self.blocks[idx].successors.push(succ_idx);
+                    self.blocks[idx].succs.push(succ_idx);
+                    self.blocks[succ_idx].predecessors.push(idx);
                 }
             }
         }
@@ -347,10 +296,8 @@ impl<P: LayoutProvider> Graph<P> {
 
     fn render_block_element(&mut self, block_idx: usize) -> Box<P::Element> {
         // Clone the data we need to avoid borrow checker issues
-        let block_ptr = self.blocks[block_idx].ptr;
-        let block_id = self.blocks[block_idx].id;
+        let block_id = self.blocks[block_idx].id.clone();
         let attributes = self.blocks[block_idx].attributes.clone();
-        let lir = self.blocks[block_idx].lir.clone();
         let instructions = self.blocks[block_idx].instructions.clone();
         let num_successors = self.blocks[block_idx].successors.len();
 
@@ -364,13 +311,8 @@ impl<P: LayoutProvider> Graph<P> {
             self.layout_provider.add_class(&mut el, &class_name);
         }
 
-        self.layout_provider.set_attribute(
-            &mut el,
-            "data-ig-block-ptr",
-            &format!("{}", block_ptr.0),
-        );
         self.layout_provider
-            .set_attribute(&mut el, "data-ig-block-id", &format!("{}", block_id.0));
+            .set_attribute(&mut el, "data-ig-block-id", &block_id);
 
         // Create header
         let mut desc = String::new();
@@ -386,7 +328,7 @@ impl<P: LayoutProvider> Graph<P> {
         self.layout_provider
             .add_class(&mut header, "ig-block-header");
         self.layout_provider
-            .set_inner_text(&mut header, &format!("Block {}{}", block_id.0, desc));
+            .set_inner_text(&mut header, &format!("Block {}{}", block_id, desc));
         self.layout_provider.append_child(&mut el, header);
 
         // Create instructions container
@@ -396,16 +338,9 @@ impl<P: LayoutProvider> Graph<P> {
 
         let mut insns = self.layout_provider.create_element("table");
 
-        if let Some(ref lir_data) = lir {
-            for ins in &lir_data.instructions {
-                let ins_row = self.render_lir_instruction(ins);
-                self.layout_provider.append_child(&mut insns, ins_row);
-            }
-        } else {
-            for ins in &instructions {
-                let ins_row = self.render_mir_instruction(ins);
-                self.layout_provider.append_child(&mut insns, ins_row);
-            }
+        for (idx, ins) in instructions.iter().enumerate() {
+            let ins_row = self.render_universal_instruction(ins, idx);
+            self.layout_provider.append_child(&mut insns, ins_row);
         }
 
         self.layout_provider
@@ -432,23 +367,24 @@ impl<P: LayoutProvider> Graph<P> {
         el
     }
 
-    fn render_mir_instruction(&mut self, ins: &MIRInstruction) -> Box<P::Element> {
+    fn render_universal_instruction(&mut self, ins: &UniversalInstruction, idx: usize) -> Box<P::Element> {
         let mut row = self.layout_provider.create_element("tr");
         self.layout_provider.add_class(&mut row, "ig-ins");
 
         // Add instruction attributes as classes
-        if let Some(ref attrs) = ins.attributes {
-            for attr in attrs {
-                let class_name = format!("ig-ins-att-{}", attr);
-                self.layout_provider.add_class(&mut row, &class_name);
-            }
+        for attr in &ins.attributes {
+            let class_name = format!("ig-ins-att-{}", attr);
+            self.layout_provider.add_class(&mut row, &class_name);
         }
 
-        // ID column
+        // ID column (use index if no ID in metadata)
         let mut id_cell = self.layout_provider.create_element("td");
         self.layout_provider.add_class(&mut id_cell, "ig-ins-num");
-        self.layout_provider
-            .set_inner_text(&mut id_cell, &format!("{}", ins.id));
+        let id_str = ins.metadata.get("id")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| idx.to_string());
+        self.layout_provider.set_inner_text(&mut id_cell, &id_str);
         self.layout_provider.append_child(&mut row, id_cell);
 
         // Opcode column
@@ -457,57 +393,23 @@ impl<P: LayoutProvider> Graph<P> {
             .set_inner_text(&mut opcode_cell, &ins.opcode);
         self.layout_provider.append_child(&mut row, opcode_cell);
 
-        // Type column
-        let mut type_cell = self.layout_provider.create_element("td");
-        self.layout_provider
-            .add_class(&mut type_cell, "ig-ins-type");
+        // Type column (if present)
         if let Some(ref type_) = ins.type_ {
+            let mut type_cell = self.layout_provider.create_element("td");
+            self.layout_provider
+                .add_class(&mut type_cell, "ig-ins-type");
             self.layout_provider.set_inner_text(&mut type_cell, type_);
-        }
-        self.layout_provider.append_child(&mut row, type_cell);
-
-        row
-    }
-
-    fn render_lir_instruction(&mut self, ins: &LIRInstruction) -> Box<P::Element> {
-        let mut row = self.layout_provider.create_element("tr");
-        self.layout_provider.add_class(&mut row, "ig-ins");
-
-        // Add instruction attributes as classes
-        if let Some(ref attrs) = ins.attributes {
-            for attr in attrs {
-                let class_name = format!("ig-ins-att-{}", attr);
-                self.layout_provider.add_class(&mut row, &class_name);
-            }
+            self.layout_provider.append_child(&mut row, type_cell);
         }
 
-        // ID column
-        let mut id_cell = self.layout_provider.create_element("td");
-        self.layout_provider.add_class(&mut id_cell, "ig-ins-num");
-        self.layout_provider
-            .set_inner_text(&mut id_cell, &format!("{}", ins.id));
-        self.layout_provider.append_child(&mut row, id_cell);
-
-        // Opcode column
-        let mut opcode_cell = self.layout_provider.create_element("td");
-        self.layout_provider
-            .set_inner_text(&mut opcode_cell, &ins.opcode);
-        self.layout_provider.append_child(&mut row, opcode_cell);
-
-        if self.sample_counts.is_some() {
+        // Sample counts (if profiling data available)
+        if let Some(ref profiling) = ins.profiling {
             // Total count column
             let mut total_cell = self.layout_provider.create_element("td");
             self.layout_provider
                 .add_class(&mut total_cell, "ig-ins-samples");
-            self.layout_provider.set_inner_text(&mut total_cell, "0");
+            self.layout_provider.set_inner_text(&mut total_cell, &profiling.sample_count.to_string());
             self.layout_provider.append_child(&mut row, total_cell);
-
-            // Self count column
-            let mut self_cell = self.layout_provider.create_element("td");
-            self.layout_provider
-                .add_class(&mut self_cell, "ig-ins-samples");
-            self.layout_provider.set_inner_text(&mut self_cell, "0");
-            self.layout_provider.append_child(&mut row, self_cell);
         }
 
         row
@@ -571,7 +473,7 @@ impl<P: LayoutProvider> Graph<P> {
             for node in layer {
                 let (pos, size, _block_id, _flags) = match node {
                     LayoutNode::BlockNode(n) => {
-                        (n.pos, n.size, Some(self.blocks[n.block].id), n.flags)
+                        (n.pos, n.size, Some(self.blocks[n.block].id.clone()), n.flags)
                     }
                     LayoutNode::DummyNode(n) => (n.pos, n.size, None, n.flags),
                 };

@@ -1,7 +1,6 @@
 // Port of Graph.ts layout algorithms and rendering
 
 use crate::graph::*;
-use crate::iongraph::BlockID;
 use crate::layout_provider::{LayoutProvider, Vec2};
 
 #[derive(Clone)]
@@ -49,11 +48,11 @@ impl<P: LayoutProvider> Graph<P> {
         (layout_nodes_by_layer, layer_heights, track_heights)
     }
 
-    fn find_loops(&mut self, block_idx: usize, loop_ids_by_depth: Option<Vec<BlockID>>) {
-        let mut loop_ids = loop_ids_by_depth.unwrap_or_else(|| vec![self.blocks[block_idx].id]);
+    fn find_loops(&mut self, block_idx: usize, loop_ids_by_depth: Option<Vec<String>>) {
+        let mut loop_ids = loop_ids_by_depth.unwrap_or_else(|| vec![self.blocks[block_idx].id.clone()]);
 
         // Early out if we already have a loop ID
-        if self.blocks[block_idx].loop_id.0 != 0 {
+        if !self.blocks[block_idx].loop_id.is_empty() {
             return;
         }
 
@@ -61,7 +60,7 @@ impl<P: LayoutProvider> Graph<P> {
 
         if is_loop_header {
             // This is a true loop header
-            let parent_id = loop_ids[loop_ids.len() - 1];
+            let parent_id = loop_ids[loop_ids.len() - 1].clone();
 
             // Find or create loop header for this block
             let current_loop_idx = self.loops.iter().position(|lh| lh.block_idx == block_idx);
@@ -93,7 +92,7 @@ impl<P: LayoutProvider> Graph<P> {
                 self.loops[current_loop_idx].parent_loop = parent_loop_idx;
             }
 
-            loop_ids.push(self.blocks[block_idx].id);
+            loop_ids.push(self.blocks[block_idx].id.clone());
         }
 
         // Adjust loop depth if necessary
@@ -105,7 +104,7 @@ impl<P: LayoutProvider> Graph<P> {
             self.blocks[block_idx].loop_depth = (loop_ids.len() - 1) as u32;
         }
 
-        self.blocks[block_idx].loop_id = loop_ids[self.blocks[block_idx].loop_depth as usize];
+        self.blocks[block_idx].loop_id = loop_ids[self.blocks[block_idx].loop_depth as usize].clone();
 
         // Recurse to successors (except for backedges)
         if !self.blocks[block_idx].is_backedge() {
@@ -134,7 +133,7 @@ impl<P: LayoutProvider> Graph<P> {
 
         // Update loop heights for all parent loops
         // TypeScript recalculates height for each parent loop level based on that loop's own layer
-        let block_loop_id = self.blocks[block_idx].loop_id;
+        let block_loop_id = self.blocks[block_idx].loop_id.clone();
         let block_layer = self.blocks[block_idx].layer;
 
         if let Some(&loop_header_idx) = self.blocks_by_id.get(&block_loop_id) {
@@ -157,7 +156,7 @@ impl<P: LayoutProvider> Graph<P> {
         // Track outgoing edges and layer successors
         let block_loop_depth = self.blocks[block_idx].loop_depth;
         let succs = self.blocks[block_idx].succs.clone();
-        let block_loop_id = self.blocks[block_idx].loop_id;
+        let block_loop_id = self.blocks[block_idx].loop_id.clone();
 
         for succ_idx in succs {
             let succ_loop_depth = self.blocks[succ_idx].loop_depth;
@@ -332,14 +331,14 @@ impl<P: LayoutProvider> Graph<P> {
             // Track which blocks will get backedge dummy nodes
             #[derive(Clone)]
             struct PendingLoopDummy {
-                loop_id: BlockID,
+                loop_id: String,  // Now String instead of BlockID
                 block_idx: usize,
             }
             let mut pending_loop_dummies: Vec<PendingLoopDummy> = Vec::new();
 
             for &block_idx in block_indices {
                 // Walk up the parent loop chain (matches TypeScript lines 560-579)
-                let mut current_loop_id = self.blocks[block_idx].loop_id;
+                let mut current_loop_id = self.blocks[block_idx].loop_id.clone();
 
                 loop {
                     // Find the loop header for current_loop_id
@@ -356,7 +355,7 @@ impl<P: LayoutProvider> Graph<P> {
                             } else {
                                 // New loop encountered
                                 pending_loop_dummies.push(PendingLoopDummy {
-                                    loop_id: current_loop_id,
+                                    loop_id: current_loop_id.clone(),
                                     block_idx,
                                 });
                             }
@@ -368,7 +367,7 @@ impl<P: LayoutProvider> Graph<P> {
                                 if let Some(parent_idx) = loop_header.parent_loop {
                                     // Get the parent loop's block ID and continue
                                     current_loop_id =
-                                        self.blocks[self.loops[parent_idx].block_idx].id;
+                                        self.blocks[self.loops[parent_idx].block_idx].id.clone();
                                     continue;
                                 }
                             }
@@ -776,7 +775,7 @@ impl<P: LayoutProvider> Graph<P> {
         let mut block_to_loop_header: std::collections::HashMap<usize, usize> =
             std::collections::HashMap::new();
         for (idx, block) in self.blocks.iter().enumerate() {
-            let loop_id = block.loop_id;
+            let loop_id = block.loop_id.clone();
             if let Some(&loop_header_idx) = self.blocks_by_id.get(&loop_id) {
                 // Only include actual loop headers (TypeScript uses asLH which checks this)
                 if self.blocks[loop_header_idx].is_loop_header() {

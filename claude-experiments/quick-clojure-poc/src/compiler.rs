@@ -30,6 +30,13 @@ pub struct Compiler {
     /// Each scope maps variable name → register
     /// Stack of scopes allows for nested lets
     local_scopes: Vec<HashMap<String, IrValue>>,
+
+    /// Compiled function registry: function_id → code_pointer
+    /// Used to track compiled nested functions
+    function_registry: HashMap<usize, usize>,
+
+    /// Next function ID for tracking nested functions
+    next_function_id: usize,
 }
 
 impl Compiler {
@@ -75,6 +82,8 @@ impl Compiler {
             used_namespaces,
             builder: IrBuilder::new(),
             local_scopes: Vec::new(),
+            function_registry: HashMap::new(),
+            next_function_id: 0,
         }
     }
 

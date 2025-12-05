@@ -1,5 +1,6 @@
 use iongraph_rust_redux::graph::{Graph, GraphOptions};
-use iongraph_rust_redux::iongraph::{IonJSON, Pass};
+use iongraph_rust_redux::compilers::ion::schema::{IonJSON, Pass};  // Use new Ion module
+use iongraph_rust_redux::compilers::universal::pass_to_universal;
 use iongraph_rust_redux::pure_svg_text_layout_provider::PureSVGTextLayoutProvider;
 use std::env;
 use std::fs;
@@ -107,6 +108,9 @@ fn main() {
 }
 
 fn render_pass(pass: Pass, iterations: usize) {
+    // Convert to Universal IR once (not in the loop)
+    let universal_ir = pass_to_universal(&pass, "benchmark");
+
     let options = GraphOptions {
         sample_counts: None,
         instruction_palette: None,
@@ -115,7 +119,7 @@ fn render_pass(pass: Pass, iterations: usize) {
     // Warmup
     for _ in 0..10 {
         let layout_provider = PureSVGTextLayoutProvider::new();
-        let mut graph = Graph::new(layout_provider, pass.clone(), options.clone());
+        let mut graph = Graph::new(layout_provider, universal_ir.clone(), options.clone());
         let (nodes_by_layer, layer_heights, track_heights) = graph.layout();
         graph.render(nodes_by_layer, layer_heights, track_heights);
     }
@@ -124,7 +128,7 @@ fn render_pass(pass: Pass, iterations: usize) {
     let start = std::time::Instant::now();
     for _ in 0..iterations {
         let layout_provider = PureSVGTextLayoutProvider::new();
-        let mut graph = Graph::new(layout_provider, pass.clone(), options.clone());
+        let mut graph = Graph::new(layout_provider, universal_ir.clone(), options.clone());
         let (nodes_by_layer, layer_heights, track_heights) = graph.layout();
         graph.render(nodes_by_layer, layer_heights, track_heights);
     }

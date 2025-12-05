@@ -135,6 +135,8 @@ impl HeapObject {
 pub enum BuiltInTypes {
     Int,
     String,
+    Function,    // Regular functions (no closures) - just tagged code pointers
+    Closure,     // Closures - heap objects with code pointer + closure values
     HeapObject,
 }
 
@@ -143,7 +145,21 @@ impl BuiltInTypes {
         match self {
             BuiltInTypes::Int => 0b000,
             BuiltInTypes::String => 0b010,
+            BuiltInTypes::Function => 0b100,
+            BuiltInTypes::Closure => 0b101,
             BuiltInTypes::HeapObject => 0b110,
+        }
+    }
+
+    /// Get the type from a tagged value
+    pub fn get_kind(value: usize) -> Self {
+        match value & 0b111 {
+            0b000 => BuiltInTypes::Int,
+            0b010 => BuiltInTypes::String,
+            0b100 => BuiltInTypes::Function,
+            0b101 => BuiltInTypes::Closure,
+            0b110 => BuiltInTypes::HeapObject,
+            _ => panic!("Unknown tag: {}", value & 0b111),
         }
     }
 
@@ -674,12 +690,14 @@ impl GCRuntime {
             heap_obj.write_field(3 + i, *value);
         }
 
-        Ok(BuiltInTypes::HeapObject.tagged(fn_ptr))
+        // Tag with Closure tag (0b101) - closures are heap objects with captured values
+        Ok(BuiltInTypes::Closure.tagged(fn_ptr))
     }
 
-    /// Get function code pointer
+    /// Get function code pointer from closure
+    /// NOTE: This should only be called on Closure-tagged values (0b101)
     pub fn function_code_ptr(&self, fn_ptr: usize) -> usize {
-        let untagged = BuiltInTypes::HeapObject.untag(fn_ptr);
+        let untagged = BuiltInTypes::Closure.untag(fn_ptr);
         eprintln!("DEBUG function_code_ptr: fn_ptr={:x}, untagged={:x}", fn_ptr, untagged);
         let heap_obj = HeapObject::from_untagged(untagged);
         let code_ptr = heap_obj.get_field(1);
@@ -688,15 +706,18 @@ impl GCRuntime {
     }
 
     /// Get closure count
+    /// Get closure count from closure
+    /// NOTE: This should only be called on Closure-tagged values (0b101)
     pub fn function_closure_count(&self, fn_ptr: usize) -> usize {
-        let untagged = BuiltInTypes::HeapObject.untag(fn_ptr);
+        let untagged = BuiltInTypes::Closure.untag(fn_ptr);
         let heap_obj = HeapObject::from_untagged(untagged);
         heap_obj.get_field(2)  // closure_count is field 2
     }
 
-    /// Get closure value by index
+    /// Get closure value by index from closure
+    /// NOTE: This should only be called on Closure-tagged values (0b101)
     pub fn function_get_closure(&self, fn_ptr: usize, index: usize) -> usize {
-        let untagged = BuiltInTypes::HeapObject.untag(fn_ptr);
+        let untagged = BuiltInTypes::Closure.untag(fn_ptr);
         let heap_obj = HeapObject::from_untagged(untagged);
         let closure_count = heap_obj.get_field(2);
         if index >= closure_count {

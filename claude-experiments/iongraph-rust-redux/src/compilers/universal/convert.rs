@@ -1,7 +1,6 @@
 // Converters from other IR formats to Universal format
 use super::schema::{UniversalIR, UniversalBlock, UniversalInstruction, UNIVERSAL_VERSION};
 use crate::compilers::ion::schema::{IonJSON, Pass};
-use crate::compilers::llvm::schema::LLVMModule;
 use std::collections::HashMap;
 
 /// Convert Ion JSON to Universal format
@@ -207,7 +206,14 @@ pub fn pass_to_universal(pass: &Pass, function_name: &str) -> UniversalIR {
                         attributes: ins.attributes.clone().unwrap_or_default(),
                         type_: ins.type_.clone(),
                         profiling: None,
-                        metadata: HashMap::new(),
+                        metadata: {
+                            let mut meta = HashMap::new();
+                            meta.insert(
+                                "id".to_string(),
+                                serde_json::Value::Number(ins.id.into()),
+                            );
+                            meta
+                        },
                     })
                     .collect(),
                 metadata: HashMap::new(),
@@ -224,53 +230,3 @@ pub fn pass_to_universal(pass: &Pass, function_name: &str) -> UniversalIR {
     }
 }
 
-/// Convert LLVM MIR to Universal format
-pub fn llvm_to_universal(llvm: &LLVMModule) -> UniversalIR {
-    let mut blocks = Vec::new();
-    let mut metadata = HashMap::new();
-
-    metadata.insert("name".to_string(), serde_json::Value::String(llvm.name.clone()));
-    metadata.insert("target".to_string(), serde_json::Value::String(llvm.target.clone()));
-
-    // Convert all blocks from all functions
-    for func in &llvm.functions {
-        for block in &func.blocks {
-            let universal_block = UniversalBlock {
-                id: block.label.clone(),
-                attributes: block.attributes.clone(),
-                loop_depth: block.loop_depth,
-                predecessors: block.predecessors.clone(),
-                successors: block.successors.clone(),
-                instructions: block
-                    .instructions
-                    .iter()
-                    .map(|ins| UniversalInstruction {
-                        opcode: ins.opcode.clone(),
-                        attributes: ins.attributes.clone(),
-                        type_: Some(ins.ty.clone()),
-                        profiling: None,
-                        metadata: {
-                            let mut meta = HashMap::new();
-                            if let Some(ref result) = ins.result {
-                                meta.insert("result".to_string(), serde_json::Value::String(result.clone()));
-                            }
-                            if !ins.operands.is_empty() {
-                                meta.insert("operands".to_string(), serde_json::json!(ins.operands));
-                            }
-                            meta
-                        },
-                    })
-                    .collect(),
-                metadata: HashMap::new(),
-            };
-            blocks.push(universal_block);
-        }
-    }
-
-    UniversalIR {
-        format: UNIVERSAL_VERSION.to_string(),
-        compiler: "llvm-mir".to_string(),
-        metadata,
-        blocks,
-    }
-}

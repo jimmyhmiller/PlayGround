@@ -219,6 +219,7 @@ impl LinearScan {
         // ARM64 calling convention: arguments are passed in x0-x7
         // Also pre-allocate x8 for closure self parameter
         // Virtual registers with is_argument=true should map directly to their index
+        eprintln!("DEBUG: Pre-allocation phase - checking {} virtual registers", self.lifetimes.len());
         for (vreg, _interval) in &self.lifetimes {
             if vreg.is_argument && vreg.index <= 8 {
                 // Map argument virtual register to corresponding physical register (x0-x8)
@@ -227,7 +228,24 @@ impl LinearScan {
                     is_argument: false,
                 };
                 self.allocated_registers.insert(*vreg, physical_reg);
-                eprintln!("DEBUG: Pre-allocated argument register v{} -> x{}", vreg.index, vreg.index);
+                eprintln!("DEBUG: Pre-allocated argument register v{} (is_argument: {}) -> x{}", vreg.index, vreg.is_argument, vreg.index);
+            } else if vreg.is_argument {
+                eprintln!("DEBUG: Argument register v{} NOT pre-allocated (index > 8)", vreg.index);
+            }
+        }
+
+        // DEBUG: Check allocation map IMMEDIATELY after pre-allocation
+        eprintln!("DEBUG: Allocation map AFTER pre-allocation ({} entries):", self.allocated_registers.len());
+        for (vreg, physical) in &self.allocated_registers {
+            eprintln!("DEBUG:   v{} (is_argument: {}) -> x{}", vreg.index, vreg.is_argument, physical.index);
+        }
+
+        // DEBUG: Check if there are multiple v8 entries in lifetimes
+        let v8_entries: Vec<_> = self.lifetimes.iter().filter(|(v, _)| v.index == 8).collect();
+        if v8_entries.len() > 1 {
+            eprintln!("DEBUG: CRITICAL! Multiple v8 entries in lifetimes:");
+            for (v, interval) in v8_entries {
+                eprintln!("DEBUG:   v{} (is_argument: {}) lifetime: {:?}", v.index, v.is_argument, interval);
             }
         }
 
@@ -250,12 +268,25 @@ impl LinearScan {
             // Free registers that are no longer live
             self.expire_old_intervals(start, &mut active);
 
+            // DEBUG: Print active list if v8 is involved
+            let has_v8_in_active = active.iter().any(|(_, _, v)| v.index == 8);
+            if has_v8_in_active || vreg.index == 8 {
+                eprintln!("DEBUG: Processing interval for v{}, active list:", vreg.index);
+                for (s, e, v) in &active {
+                    eprintln!("DEBUG:   v{} (is_arg: {}) [{}, {}]", v.index, v.is_argument, s, e);
+                }
+            }
+
             // Check if we need to spill
             if active.len() >= self.max_registers {
                 self.spill_at_interval(start, end, vreg, &mut active);
             } else {
                 // Allocate a free register
                 if let Some(physical_reg) = self.free_registers.pop() {
+                    if vreg.index == 8 && vreg.is_argument {
+                        eprintln!("DEBUG: UNEXPECTED! Allocating v8 (is_argument: true) during linear scan to x{}!", physical_reg.index);
+                        eprintln!("DEBUG: This should have been filtered out!");
+                    }
                     self.allocated_registers.insert(vreg, physical_reg);
                     active.push((start, end, vreg));
                     active.sort_by_key(|(_, end, _)| *end);
@@ -268,6 +299,24 @@ impl LinearScan {
 
         // Replace spilled registers with Spill values, then replace allocated registers
         self.replace_spilled_registers();
+
+        // DEBUG: Check if v8 is in allocation map
+        let v8_arg = VirtualRegister { index: 8, is_argument: true };
+        if let Some(physical) = self.allocated_registers.get(&v8_arg) {
+            eprintln!("DEBUG: v8 (is_argument: true) allocated to x{} (is_argument: {})", physical.index, physical.is_argument);
+        } else {
+            eprintln!("DEBUG: v8 (is_argument: true) NOT in allocation map!");
+        }
+
+        // DEBUG: Print all allocations that involve index 8
+        eprintln!("DEBUG: All allocations involving index 8:");
+        for (vreg, physical) in &self.allocated_registers {
+            if vreg.index == 8 || physical.index == 8 {
+                eprintln!("DEBUG:   v{} (is_argument: {}) -> x{} (is_argument: {})",
+                    vreg.index, vreg.is_argument, physical.index, physical.is_argument);
+            }
+        }
+
         self.replace_allocated_registers();
 
         // Debug output disabled
@@ -434,7 +483,18 @@ impl LinearScan {
         active.sort_by_key(|(_, end, _)| *end);
 
         // Get the interval that ends last (spill candidate)
-        let spill = *active.last().unwrap();
+        // IMPORTANT: Never spill argument registers (x0-x8)! They're reserved for calling convention
+        let spill_candidate_index = active.iter().rposition(|(_, _, v)| !v.is_argument);
+
+        if spill_candidate_index.is_none() {
+            // All active registers are argument registers - spill current interval instead
+            let stack_slot = self.allocate_stack_slot();
+            eprintln!("DEBUG LinearScan: Spilling v{} to stack slot {} (all active are arg regs)", vreg.index, stack_slot);
+            self.spill_locations.insert(vreg, stack_slot);
+            return;
+        }
+
+        let spill = active[spill_candidate_index.unwrap()];
         let (_, spill_end, spill_vreg) = spill;
 
         if spill_end > end {
@@ -448,6 +508,10 @@ impl LinearScan {
             self.spill_locations.insert(spill_vreg, stack_slot);
 
             // Allocate the freed physical register to current interval
+            if spill_vreg.index == 8 && spill_vreg.is_argument {
+                eprintln!("DEBUG: CRITICAL BUG! Spilling v8 (is_argument: true) which has physical reg x{}", physical_reg.index);
+                eprintln!("DEBUG:   Allocating x{} to v{} instead", physical_reg.index, vreg.index);
+            }
             self.allocated_registers.insert(vreg, physical_reg);
 
             // Remove from active and add current interval
@@ -464,6 +528,9 @@ impl LinearScan {
 
     /// Free a physical register
     fn free_register(&mut self, register: VirtualRegister) {
+        if register.index == 8 {
+            eprintln!("DEBUG: CRITICAL! Freeing x8 (is_argument: {}) - this should NEVER happen for argument registers!", register.is_argument);
+        }
         self.free_registers.push(register);
     }
 

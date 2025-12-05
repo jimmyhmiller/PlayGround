@@ -533,59 +533,95 @@ impl Arm64CodeGen {
 
             Instruction::MakeFunction(dst, label, closure_values) => {
                 eprintln!("DEBUG: MakeFunction - dst={:?}, label={}, closure_values={:?}", dst, label, closure_values);
-                // MakeFunction: Create a function object with closure values
-                // Call trampoline to allocate function object on heap
-                //
-                // trampoline_allocate_function(name_ptr, code_ptr, closure_count, c0-c4)
-                //
-                // Args:
-                //   x0 = name_ptr (0 for anonymous)
-                //   x1 = code_ptr (address of function code)
-                //   x2 = closure_count
-                //   x3-x7 = closure values (max 5 supported)
-
-                if closure_values.len() > 5 {
-                    return Err(format!("Too many closure variables: {} (max 5 supported)", closure_values.len()));
-                }
 
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
-                // IMPORTANT: Move closure values to argument registers FIRST
-                // because they might be in x0-x2 which we're about to overwrite!
-                // x3-x7 = closure values
-                for (i, value) in closure_values.iter().enumerate() {
-                    let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
-                    let dest_arg_reg = 3 + i;  // x3, x4, x5, x6, x7
-                    eprintln!("DEBUG: MakeFunction - moving closure value from x{} to x{}", src_reg, dest_arg_reg);
-                    if src_reg != dest_arg_reg {
-                        self.emit_mov(dest_arg_reg, src_reg);
+                if closure_values.is_empty() {
+                    // Regular function (no closures) - just tag the code pointer
+                    // Tagged value = (code_ptr << 3) | 0b100
+                    eprintln!("DEBUG: MakeFunction - creating regular function (no closures)");
+
+                    // Load code address with ADR into a temporary register
+                    let temp_reg = 10;  // Use x10 as temporary
+                    self.emit_adr(temp_reg, label.clone());
+
+                    // Shift left by 3 and add Function tag (0b100)
+                    // LSL Xd, Xn, #3 = UBFM Xd, Xn, #61, #60
+                    // From Beagle: immr = 64 - shift = 61, imms = immr - 1 = 60
+                    // Base: 0b0_10_100110_0_000000_000000_00000_00000 = 0x53000000
+                    // With sf=1, n=1: 0xD37DF000 | (rn << 5) | rd
+                    let lsl_instruction = 0xD37DF000u32 | ((temp_reg as u32) << 5) | (dst_reg as u32);
+                    self.code.push(lsl_instruction);
+
+                    // ADD Xd, Xn, #0b100 (set tag bits)
+                    // After LSL by 3, low 3 bits are 0, so we can add the tag
+                    // ADD Xd, Xn, #imm12 = 0x91000000 | (imm12 << 10) | (rn << 5) | rd
+                    let add_instruction = 0x91000000u32 | (0b100 << 10) | ((dst_reg as u32) << 5) | (dst_reg as u32);
+                    self.code.push(add_instruction);
+
+                    eprintln!("DEBUG: MakeFunction - tagged function pointer in x{}", dst_reg);
+                } else {
+                    // Closure - allocate heap object with closure values
+                    eprintln!("DEBUG: MakeFunction - creating closure with {} captured values", closure_values.len());
+
+                    if closure_values.len() > 5 {
+                        return Err(format!("Too many closure variables: {} (max 5 supported)", closure_values.len()));
                     }
-                }
 
-                // NOW set up the other arguments (after closure values are safe)
-                // x0 = 0 (anonymous function - no name for now)
-                self.emit_mov_imm(0, 0);
+                    // IMPORTANT: Save closure values to callee-saved registers FIRST
+                    // Because setting up x0-x2 might overwrite closure values if they're in x0-x2!
+                    // Use x19-x23 as temporary storage (callee-saved, won't be clobbered)
+                    let mut saved_regs = Vec::new();
+                    for (i, value) in closure_values.iter().enumerate() {
+                        let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
+                        let temp_reg = 19 + i;  // x19, x20, x21, x22, x23
+                        eprintln!("DEBUG: MakeFunction - saving closure value {}: IrValue={:?}, from x{} to temp x{}", i, value, src_reg, temp_reg);
+                        self.emit_mov(temp_reg, src_reg);
+                        saved_regs.push(temp_reg);
+                    }
 
-                // x1 = code_ptr (address of the label)
-                // Use ADR instruction to load label address into x1
-                // This will be patched with the actual PC-relative offset later
-                self.emit_adr(1, label.clone());
+                    // Set up arguments for trampoline call
+                    // x0 = 0 (anonymous function - no name for now)
+                    self.emit_mov_imm(0, 0);
 
-                // x2 = closure_count
-                self.emit_mov_imm(2, closure_values.len() as i64);
+                    // x1 = code_ptr (address of the label)
+                    self.emit_adr(1, label.clone());
 
-                // Call trampoline
-                let func_addr = crate::trampoline::trampoline_allocate_function as usize;
-                eprintln!("DEBUG: MakeFunction - calling trampoline_allocate_function at {:x}", func_addr);
-                self.emit_mov_imm(15, func_addr as i64);
-                self.emit_blr(15);
-                eprintln!("DEBUG: MakeFunction - trampoline returned, dst_reg={}", dst_reg);
+                    // x2 = closure_count
+                    self.emit_mov_imm(2, closure_values.len() as i64);
 
-                // Result is in x0 (tagged function pointer)
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
-                    eprintln!("DEBUG: MakeFunction - moved result from x0 to x{}", dst_reg);
+                    // NOW move closure values from temp storage to x3-x7
+                    for (i, temp_reg) in saved_regs.iter().enumerate() {
+                        let dest_arg_reg = 3 + i;  // x3, x4, x5, x6, x7
+                        eprintln!("DEBUG: MakeFunction - moving saved closure value {} from temp x{} to arg x{}", i, temp_reg, dest_arg_reg);
+                        self.emit_mov(dest_arg_reg, *temp_reg);
+                    }
+
+                    // Call trampoline to allocate closure heap object
+                    // IMPORTANT: We need to preserve X30 (link register) because BLR will overwrite it
+                    // Allocate stack space and save X30
+                    // sub sp, sp, #16  (allocate 16 bytes for X30)
+                    self.emit_sub_sp_imm(16);
+                    // str x30, [sp]  (save X30 to stack)
+                    self.emit_str_offset(30, 31, 0);  // x31 = sp
+
+                    let func_addr = crate::trampoline::trampoline_allocate_function as usize;
+                    eprintln!("DEBUG: MakeFunction - calling trampoline_allocate_function for closure at {:x}", func_addr);
+                    self.emit_mov_imm(15, func_addr as i64);
+                    self.emit_blr(15);
+
+                    // Restore X30 after the call
+                    // ldr x30, [sp]  (restore X30 from stack)
+                    self.emit_ldr_offset(30, 31, 0);  // x31 = sp
+                    // add sp, sp, #16  (deallocate)
+                    self.emit_add_sp_imm(16);
+
+                    // Result is in x0 (tagged closure pointer with 0b101 tag)
+                    if dst_reg != 0 {
+                        self.emit_mov(dst_reg, 0);
+                        eprintln!("DEBUG: MakeFunction - moved closure result from x0 to x{}", dst_reg);
+                    }
                 }
 
                 self.store_spill(dst_reg, dest_spill);
@@ -593,30 +629,28 @@ impl Arm64CodeGen {
             }
 
             Instruction::LoadClosure(dst, fn_obj, index) => {
-                // LoadClosure: Load a captured variable from function object
-                // Call trampoline: trampoline_function_get_closure(fn_ptr, index)
+                // LoadClosure: Load a captured variable from closure object
+                // The closure object is expected to be in fn_obj register (typically x8 for closures)
+                // IMPORTANT: fn_obj is TAGGED with Closure tag (0b101), must untag first!
+                // Layout: [header(8), code_ptr(8), num_closures(8), closure_values...]
+                // So closure value N is at offset: 8 + 8 + 8 + (N * 8) = 24 + (N * 8)
 
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 let fn_obj_reg = self.get_physical_reg_for_irvalue(fn_obj, false)?;
+                eprintln!("DEBUG: LoadClosure - fn_obj={:?}, fn_obj_reg=x{}, index={}", fn_obj, fn_obj_reg, index);
 
-                // x0 = function pointer (tagged)
-                if fn_obj_reg != 0 {
-                    self.emit_mov(0, fn_obj_reg);
-                }
+                // Untag the closure pointer (shift right by 3)
+                // LSR Xd, Xn, #3 - From Beagle: 0xD343FC00
+                let untagged_reg = 11;  // Use x11 as temporary for untagged pointer
+                let lsr_instruction = 0xD343FC00u32 | ((fn_obj_reg as u32) << 5) | (untagged_reg as u32);
+                self.code.push(lsr_instruction);
 
-                // x1 = index
-                self.emit_mov_imm(1, *index as i64);
-
-                // Call trampoline
-                let func_addr = crate::trampoline::trampoline_function_get_closure as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-                self.emit_blr(15);
-
-                // Result is in x0 (tagged closure value)
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
-                }
+                // Load closure value from heap object using untagged pointer
+                // Offset = header(8) + field0(8) + field1(8) + field2(8) + (index * 8)
+                //        = 32 + (index * 8) bytes
+                let offset = 32 + (*index as i32 * 8);
+                self.emit_ldr_offset(dst_reg, untagged_reg, offset);
 
                 self.store_spill(dst_reg, dest_spill);
             }
@@ -624,23 +658,25 @@ impl Arm64CodeGen {
             Instruction::Call(dst, fn_val, args) => {
                 eprintln!("DEBUG: Call - dst={:?}, fn_val={:?}", dst, fn_val);
                 // Call: Invoke a function with arguments
-                // This is the most complex instruction!
                 //
-                // Steps:
-                // 0. Save function and arguments to callee-saved registers (before trampolines clobber them)
-                // 1. Get function code pointer from function object
-                // 2. Check if function is a closure (closure_count > 0)
-                // 3a. If closure: pass function object in x8, args in x0-x7
-                // 3b. If regular function: args in x0-x7
-                // 4. Call the function
-                // 5. Get result from x0
+                // New approach - check tag inline (NO trampoline calls!):
+                // 1. Save function and arguments to callee-saved registers
+                // 2. Extract tag from function value (fn_val & 0b111)
+                // 3. If Function tag (0b100): untag to get code_ptr, use normal calling convention
+                // 4. If Closure tag (0b101): load code_ptr from heap, use closure calling convention
+                // 5. Call the function
+                // 6. Get result from x0
 
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
-                // Step 0: Save function and arguments to callee-saved registers BEFORE trampolines
+                if args.len() > 8 {
+                    return Err("Call with more than 8 arguments not yet supported".to_string());
+                }
+
+                // Step 1: Save function to callee-saved register
                 let fn_reg = self.get_physical_reg_for_irvalue(fn_val, false)?;
-                let saved_fn_reg = 19;  // Use x19 for function object
+                let saved_fn_reg = 19;  // Use x19 for function value
                 if fn_reg != saved_fn_reg {
                     self.emit_mov(saved_fn_reg, fn_reg);
                 }
@@ -648,10 +684,6 @@ impl Arm64CodeGen {
                 // Save arguments to x21-x28 (callee-saved)
                 let mut saved_arg_regs = Vec::new();
                 for (i, arg) in args.iter().enumerate() {
-                    if i >= 8 {
-                        return Err("Call with more than 8 arguments not yet supported".to_string());
-                    }
-
                     let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
                     let saved_reg = 21 + i;  // x21, x22, x23, ...
                     saved_arg_regs.push(saved_reg);
@@ -660,74 +692,64 @@ impl Arm64CodeGen {
                     }
                 }
 
-                // Step 1: Get code pointer
-                // Call trampoline to get code pointer
-                // x0 = function pointer (tagged)
-                self.emit_mov(0, saved_fn_reg);
+                // Step 2: Extract tag (fn_val & 0b111)
+                let tag_reg = 10;  // Use x10 for tag
+                // AND Xd, Xn, #0b111
+                self.emit_and_imm(tag_reg, saved_fn_reg, 0b111);
 
-                let func_addr = crate::trampoline::trampoline_function_code_ptr as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-                self.emit_blr(15);
+                // Step 3: Check if Function (0b100) or Closure (0b101)
+                // Compare tag with 0b100 (Function)
+                self.emit_cmp_imm(tag_reg, 0b100);
 
-                // Code pointer now in x0, save it
-                let code_ptr_reg = 20; // Use x20 to store code pointer
-                self.emit_mov(code_ptr_reg, 0);
+                let is_function_label = self.new_label();
+                self.emit_branch_cond(is_function_label.clone(), 0); // 0 = EQ (if tag == 0b100)
 
-                // Step 2: Get closure count to determine calling convention
-                // Call trampoline: trampoline_function_closure_count(fn_ptr) -> x0
-                self.emit_mov(0, saved_fn_reg);
+                // === Closure path (tag == 0b101) ===
+                eprintln!("DEBUG: Call - emitting closure path");
 
-                let func_addr = crate::trampoline::trampoline_function_closure_count as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-                self.emit_blr(15);
+                // Untag closure pointer (shift right by 3)
+                let closure_ptr_reg = 11;  // x11 = untagged closure pointer
+                // LSR Xd, Xn, #3 - Logical shift right by 3 = UBFM Xd, Xn, #3, #63
+                // From Beagle: base = 0x53000000, sf=1, n=1, immr=3, imms=63
+                let lsr_instruction = 0xD343FC00u32 | ((saved_fn_reg as u32) << 5) | (closure_ptr_reg as u32);
+                self.code.push(lsr_instruction);
 
-                // closure_count now in x0, save it
-                let closure_count_reg = 10;  // Use x10 temporarily
-                self.emit_mov(closure_count_reg, 0);
+                // Load code_ptr from heap object field 1
+                // LDR Xt, [Xn, #8]  (field 1 is at offset 8 bytes after header)
+                let code_ptr_reg = 20;  // x20 = code pointer
+                self.emit_ldr_offset(code_ptr_reg, closure_ptr_reg, 16); // Skip header(8) + field0(8) = 16
 
-                // Step 3: Set up arguments based on whether this is a closure
-                // if (closure_count > 0) { /* closure calling convention */ } else { /* normal */ }
-
-                // Compare closure_count with 0
-                self.emit_cmp_imm(closure_count_reg, 0);
-
-                // Branch if equal (not a closure) - skip closure setup
-                let normal_call_label = self.new_label();
-                self.emit_branch_cond(normal_call_label.clone(), 0); // 0 = EQ
-
-                // Closure path: pass function object in x8
-                self.emit_mov(8, saved_fn_reg);
-                // Args go in x0-x7
+                // Set up closure calling convention: x8 = closure object, args in x0-x7
+                self.emit_mov(8, saved_fn_reg);  // x8 = tagged closure pointer
                 for (i, saved_reg) in saved_arg_regs.iter().enumerate() {
-                    if *saved_reg != i {
-                        self.emit_mov(i, *saved_reg);
-                    }
+                    self.emit_mov(i, *saved_reg);  // Always move: x0=x21, x1=x22, etc.
                 }
+
                 let after_call_label = self.new_label();
                 self.emit_jump(after_call_label.clone());
 
-                // Normal function path: args in x0-x7
-                self.emit_label(normal_call_label);
+                // === Function path (tag == 0b100) ===
+                self.emit_label(is_function_label);
+                eprintln!("DEBUG: Call - emitting function path");
+
+                // Untag function pointer to get code_ptr (shift right by 3)
+                // LSR Xd, Xn, #3 - Logical shift right by 3 = UBFM Xd, Xn, #3, #63
+                let lsr_instruction = 0xD343FC00u32 | ((saved_fn_reg as u32) << 5) | (code_ptr_reg as u32);
+                self.code.push(lsr_instruction);
+
+                // Set up normal calling convention: args in x0-x7 (no x8)
                 for (i, saved_reg) in saved_arg_regs.iter().enumerate() {
-                    if *saved_reg != i {
-                        self.emit_mov(i, *saved_reg);
-                    }
+                    self.emit_mov(i, *saved_reg);  // Always move: x0=x21, x1=x22, etc.
                 }
 
-                // Step 4: Call the function
+                // === Call the function ===
                 self.emit_label(after_call_label);
                 self.emit_blr(code_ptr_reg);
 
-                // Step 5: Result is in x0
+                // Step 6: Result is in x0
                 eprintln!("DEBUG: Call - result will be moved from x0 to x{}", dst_reg);
-                let code_pos_before = self.code.len();
                 if dst_reg != 0 {
                     self.emit_mov(dst_reg, 0);
-                }
-                let code_pos_after = self.code.len();
-                if code_pos_after > code_pos_before {
-                    eprintln!("DEBUG: Call - emitted mov instruction: 0x{:08x} at position {}",
-                             self.code[code_pos_before], code_pos_before);
                 }
 
                 self.store_spill(dst_reg, dest_spill);
@@ -925,6 +947,50 @@ impl Arm64CodeGen {
         // MOV is ORR Xd, XZR, Xm
         // This works for normal registers but treats register 31 as XZR
         let instruction = 0xAA0003E0 | ((src as u32) << 16) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    /// Generate ORR with immediate (for setting tag bits)
+    /// ORR Xd, Xn, #imm
+    fn emit_orr_imm(&mut self, dst: usize, src: usize, imm: u32) {
+        // For small immediates like 0b100, we can use the logical immediate encoding
+        // ORR Xd, Xn, #imm
+        // This is a simplified version for our specific use case (imm < 256)
+        // Full ARM64 immediate encoding is complex, but for small values we can use:
+        // 0xB2400000 | (imms << 10) | (src << 5) | dst
+        // For imm=0b100 (4), we use pattern: immr=0, imms=2 (encodes value 0b111 >> (64-3))
+        // Simplified: just use 0xB2400000 as base with imm encoding
+        let instruction = if imm == 0b100 {
+            // ORR X, X, #0b100 - special case for Function tag
+            0xB2400C00u32 | ((src as u32) << 5) | (dst as u32)
+        } else {
+            panic!("ORR immediate only implemented for 0b100");
+        };
+        self.code.push(instruction);
+    }
+
+    /// Generate AND with immediate (for extracting tag bits)
+    /// AND Xd, Xn, #imm
+    fn emit_and_imm(&mut self, dst: usize, src: usize, imm: u32) {
+        // AND Xd, Xn, #0b111 to extract the last 3 bits (tag)
+        // ARM64 logical immediate encoding for 0b111 (3 ones)
+        // immr=0, imms=2 (encodes a pattern of 3 ones)
+        let instruction = if imm == 0b111 {
+            // AND X, X, #0b111
+            0x92400C00u32 | ((src as u32) << 5) | (dst as u32)
+        } else {
+            panic!("AND immediate only implemented for 0b111");
+        };
+        self.code.push(instruction);
+    }
+
+    /// Generate LDR with offset (load from memory)
+    /// LDR Xt, [Xn, #offset]
+    fn emit_ldr_offset(&mut self, dst: usize, base: usize, offset: i32) {
+        // LDR Xt, [Xn, #offset]
+        // Offset is in bytes, needs to be divided by 8 for encoding (unsigned 12-bit)
+        let offset_scaled = (offset / 8) as u32;
+        let instruction = 0xF9400000 | (offset_scaled << 10) | ((base as u32) << 5) | (dst as u32);
         self.code.push(instruction);
     }
 

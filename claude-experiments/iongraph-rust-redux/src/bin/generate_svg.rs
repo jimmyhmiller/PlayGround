@@ -1,5 +1,6 @@
 use iongraph_rust_redux::graph::{Graph, GraphOptions};
-use iongraph_rust_redux::iongraph::IonJSON;
+use iongraph_rust_redux::compilers::ion::schema::IonJSON;  // Use new Ion module
+use iongraph_rust_redux::compilers::universal::pass_to_universal;
 use iongraph_rust_redux::layout_provider::LayoutProvider;
 use iongraph_rust_redux::pure_svg_text_layout_provider::PureSVGTextLayoutProvider;
 use std::env;
@@ -71,6 +72,11 @@ fn main() {
         eprintln!("  MIR blocks: {}", mir.blocks.len());
     }
 
+    // Convert Ion pass to Universal IR format
+    let universal_ir = pass_to_universal(pass, func_name);
+
+    eprintln!("  Converted to Universal IR: {} blocks", universal_ir.blocks.len());
+
     // Create layout provider and graph
     let mut layout_provider = PureSVGTextLayoutProvider::new();
 
@@ -79,8 +85,8 @@ fn main() {
         instruction_palette: None,
     };
 
-    // Create the graph (Graph::new calls build_blocks internally)
-    let mut graph = Graph::new(layout_provider, pass.clone(), options);
+    // Create the graph from Universal IR (Graph::new calls build_blocks internally)
+    let mut graph = Graph::new(layout_provider, universal_ir, options);
 
     // Build graph layout
     let (nodes_by_layer, layer_heights, track_heights) = graph.layout();

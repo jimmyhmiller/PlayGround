@@ -150,17 +150,19 @@ pub extern "C" fn trampoline_allocate_function(
             }
         };
 
-        match rt.allocate_function(name, code_ptr, closure_values) {
+        let result = match rt.allocate_function(name, code_ptr, closure_values) {
             Ok(fn_ptr) => {
                 eprintln!("DEBUG: Function allocated successfully: fn_ptr={:x}", fn_ptr);
-                eprintln!("DEBUG: trampoline_allocate_function RETURNING fn_ptr={:x}", fn_ptr);
                 fn_ptr
             },
             Err(msg) => {
                 eprintln!("Error allocating function: {}", msg);
                 7 // Return nil on error
             }
-        }
+        };
+        eprintln!("DEBUG: trampoline_allocate_function RETURNING fn_ptr={:x}", result);
+        eprintln!("DEBUG: trampoline_allocate_function about to return...");
+        result
     }
 }
 
