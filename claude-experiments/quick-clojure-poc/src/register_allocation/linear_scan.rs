@@ -203,6 +203,17 @@ impl LinearScan {
                     if let IrValue::Register(r) = arg { regs.push(*r); }
                 }
             }
+
+            Instruction::CallWithSaves(dst, fn_val, args, saves) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = fn_val { regs.push(*r); }
+                for arg in args {
+                    if let IrValue::Register(r) = arg { regs.push(*r); }
+                }
+                for save in saves {
+                    if let IrValue::Register(r) = save { regs.push(*r); }
+                }
+            }
         }
 
         regs
@@ -418,6 +429,17 @@ impl LinearScan {
                     replace(arg);
                 }
             }
+
+            Instruction::CallWithSaves(dst, fn_val, args, saves) => {
+                replace(dst);
+                replace(fn_val);
+                for arg in args {
+                    replace(arg);
+                }
+                for save in saves {
+                    replace(save);
+                }
+            }
         }
     }
 
@@ -626,11 +648,93 @@ impl LinearScan {
                     replace(arg);
                 }
             }
+
+            Instruction::CallWithSaves(dst, fn_val, args, saves) => {
+                replace(dst);
+                replace(fn_val);
+                for arg in args {
+                    replace(arg);
+                }
+                for save in saves {
+                    replace(save);
+                }
+            }
+        }
+    }
+
+    /// Transform Call instructions to CallWithSaves after register allocation
+    ///
+    /// This analyzes which registers are live across each call site and generates
+    /// CallWithSaves instructions with explicit register preservation.
+    fn transform_calls_to_saves(&mut self) {
+        eprintln!("DEBUG: transform_calls_to_saves - analyzing {} instructions", self.instructions.len());
+
+        for i in 0..self.instructions.len() {
+            // Check if this is a Call instruction
+            let is_call = matches!(self.instructions[i], Instruction::Call(_, _, _));
+
+            if !is_call {
+                continue;
+            }
+
+            eprintln!("DEBUG: Found Call instruction at index {}", i);
+
+            // Extract the Call instruction components
+            let (dest, func, args) = if let Instruction::Call(d, f, a) = &self.instructions[i] {
+                (*d, *f, a.clone())
+            } else {
+                continue; // Not a Call (shouldn't happen due to check above)
+            };
+
+            // Find registers live across this call
+            let mut saves = Vec::new();
+
+            for (vreg, (start, end)) in &self.lifetimes {
+                // Register is live across the call if:
+                // 1. It starts before the call (start < i)
+                // 2. It ends after the call (end > i) - must be used after the call
+                // 3. It's not spilled (has a physical register allocation)
+                if *start < i && *end > i && !self.spill_locations.contains_key(vreg) {
+                    // Get the physical register
+                    if let Some(&physical_reg) = self.allocated_registers.get(vreg) {
+                        // Don't save the destination register (it's about to be overwritten)
+                        let is_dest = match dest {
+                            IrValue::Register(dest_vreg) => {
+                                self.allocated_registers.get(&dest_vreg)
+                                    .map(|&dest_phys| dest_phys == physical_reg)
+                                    .unwrap_or(false)
+                            }
+                            _ => false,
+                        };
+
+                        if !is_dest {
+                            eprintln!("DEBUG:   Register {:?} (physical {:?}) is live across call (lifetime {}-{})",
+                                     vreg, physical_reg, start, end);
+                            saves.push(IrValue::Register(physical_reg));
+                        }
+                    }
+                }
+            }
+
+            // Remove duplicates from saves (same physical register might be used by multiple virtuals)
+            saves.sort_by_key(|v| match v {
+                IrValue::Register(r) => r.index(),
+                _ => 0,
+            });
+            saves.dedup();
+
+            eprintln!("DEBUG: Transforming Call at index {} with {} saves", i, saves.len());
+
+            // Transform Call → CallWithSaves
+            self.instructions[i] = Instruction::CallWithSaves(dest, func, args, saves);
         }
     }
 
     /// Get the allocated instructions (consumes self)
-    pub fn finish(self) -> Vec<Instruction> {
+    pub fn finish(mut self) -> Vec<Instruction> {
+        // Transform Call instructions to CallWithSaves after register allocation
+        self.transform_calls_to_saves();
+
         self.instructions
     }
 }

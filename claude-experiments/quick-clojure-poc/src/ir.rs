@@ -65,7 +65,7 @@ impl PartialOrd for VirtualRegister {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum IrValue {
     Register(VirtualRegister),
     TaggedConstant(isize),  // For tagged integers
@@ -116,6 +116,7 @@ pub enum Instruction {
     MakeFunction(IrValue, Label, Vec<IrValue>), // MakeFunction(dst, code_label, closure_values) - create function object
     LoadClosure(IrValue, IrValue, usize),   // LoadClosure(dst, fn_obj, index) - load closure variable
     Call(IrValue, IrValue, Vec<IrValue>),   // Call(dst, fn, args) - invoke function
+    CallWithSaves(IrValue, IrValue, Vec<IrValue>, Vec<IrValue>),  // CallWithSaves(dst, fn, args, saves) - call with register preservation
 
     // Return
     Ret(IrValue),

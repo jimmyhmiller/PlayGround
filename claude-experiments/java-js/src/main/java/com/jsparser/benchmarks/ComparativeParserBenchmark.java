@@ -4,8 +4,6 @@ import com.jsparser.Parser;
 import com.jsparser.ast.Program;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Source;
-import org.mozilla.javascript.CompilerEnvirons;
-import org.mozilla.javascript.ast.AstRoot;
 import org.openjdk.jmh.annotations.*;
 
 import java.util.concurrent.TimeUnit;
@@ -13,9 +11,10 @@ import java.util.concurrent.TimeUnit;
 /**
  * Comparative benchmarks between different JVM JavaScript parsers:
  * - Our custom parser (java-js-parser)
- * - Mozilla Rhino
  * - Nashorn
  * - GraalVM JavaScript (GraalJS)
+ *
+ * Focuses on modern JavaScript features (ES6+)
  *
  * Quick run (recommended):
  *   ./run-benchmarks.sh ComparativeParserBenchmark
@@ -247,40 +246,6 @@ public class ComparativeParserBenchmark {
     public Program ourParser_LargeModule() {
         Parser parser = new Parser(LARGE_MODULE, false);
         return parser.parse();
-    }
-
-    // === Rhino Parser Benchmarks ===
-
-    @Benchmark
-    public AstRoot rhinoParser_SmallFunction() {
-        CompilerEnvirons env = new CompilerEnvirons();
-        env.setRecoverFromErrors(true);
-        org.mozilla.javascript.Parser parser = new org.mozilla.javascript.Parser(env);
-        return parser.parse(SMALL_FUNCTION, null, 1);
-    }
-
-    @Benchmark
-    public AstRoot rhinoParser_SmallClass() {
-        CompilerEnvirons env = new CompilerEnvirons();
-        env.setRecoverFromErrors(true);
-        org.mozilla.javascript.Parser parser = new org.mozilla.javascript.Parser(env);
-        return parser.parse(SMALL_CLASS, null, 1);
-    }
-
-    @Benchmark
-    public AstRoot rhinoParser_MediumAsyncModule() {
-        CompilerEnvirons env = new CompilerEnvirons();
-        env.setRecoverFromErrors(true);
-        org.mozilla.javascript.Parser parser = new org.mozilla.javascript.Parser(env);
-        return parser.parse(MEDIUM_ASYNC_MODULE, null, 1);
-    }
-
-    @Benchmark
-    public AstRoot rhinoParser_LargeModule() {
-        CompilerEnvirons env = new CompilerEnvirons();
-        env.setRecoverFromErrors(true);
-        org.mozilla.javascript.Parser parser = new org.mozilla.javascript.Parser(env);
-        return parser.parse(LARGE_MODULE, null, 1);
     }
 
     // === Nashorn Parser Benchmarks ===

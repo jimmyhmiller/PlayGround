@@ -31,6 +31,16 @@ pub struct Arm64CodeGen {
 
     /// Counter for generating unique labels
     label_counter: usize,
+
+    /// Track placeholder positions for deferred stack allocation
+    /// Maps function label -> (prologue_index, epilogue_index)
+    placeholder_positions: HashMap<Label, (usize, usize)>,
+
+    /// Track current function's accumulated stack bytes (for CallWithSaves)
+    current_function_stack_bytes: usize,
+
+    /// Number of stack slots needed (from register allocator)
+    num_stack_slots: usize,
 }
 
 impl Default for Arm64CodeGen {
@@ -50,6 +60,9 @@ impl Arm64CodeGen {
             pending_adr_fixups: Vec::new(),
             temp_register_pool: vec![11, 10, 9],  // Start with x11, x10, x9 available
             label_counter: 0,
+            placeholder_positions: HashMap::new(),
+            current_function_stack_bytes: 0,
+            num_stack_slots: 0,
         }
     }
 
@@ -73,6 +86,9 @@ impl Arm64CodeGen {
         self.label_positions.clear();
         self.pending_fixups.clear();
         self.pending_adr_fixups.clear();
+        self.placeholder_positions.clear();
+        self.current_function_stack_bytes = 0;
+        self.num_stack_slots = 0;
 
         // Run linear scan register allocation
         let mut allocator = LinearScan::new(instructions.to_vec(), num_registers);
@@ -132,6 +148,9 @@ impl Arm64CodeGen {
         } else {
             0
         };
+
+        // Store for use in calculate_stack_size
+        self.num_stack_slots = num_stack_slots;
 
         eprintln!("DEBUG: Allocating {} bytes of stack space", stack_space);
 
@@ -211,6 +230,10 @@ impl Arm64CodeGen {
 
         // Emit return instruction
         self.emit_ret();
+
+        // Patch all placeholder instructions before applying fixups
+        // (Currently not used for top-level, but ready for per-function frames)
+        self.patch_stack_placeholders();
 
         // NOW apply jump fixups after all labels are defined
         self.apply_fixups()?;
@@ -763,7 +786,7 @@ impl Arm64CodeGen {
                 }
 
                 let after_call_label = self.new_label();
-                self.emit_jump(after_call_label.clone());
+                self.emit_jump(&after_call_label);
 
                 // === Function path (tag == 0b100) ===
                 self.emit_label(is_function_label);
@@ -809,6 +832,86 @@ impl Arm64CodeGen {
                 // Only the top-level code needs the epilogue to restore frame before returning to trampoline.
                 eprintln!("DEBUG: Emitting ret instruction");
                 self.emit_ret();
+            }
+
+            Instruction::CallWithSaves(dst, fn_val, args, saves) => {
+                eprintln!("DEBUG: CallWithSaves - saving {} registers before call", saves.len());
+
+                // STEP 1: Save volatile registers to stack (in pairs for 16-byte alignment)
+                for save_pair in saves.chunks(2) {
+                    if save_pair.len() == 2 {
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
+                        eprintln!("DEBUG: CallWithSaves - stp x{}, x{}, [sp, #-16]!", r1, r2);
+                        self.emit_stp(r1, r2, 31, -2);  // stp r1, r2, [sp, #-16]!
+                    } else {
+                        // Odd number - pair with xzr to maintain 16-byte alignment
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        eprintln!("DEBUG: CallWithSaves - stp x{}, xzr, [sp, #-16]!", r1);
+                        self.emit_stp(r1, 31, 31, -2);  // stp r1, xzr, [sp, #-16]!
+                    }
+                }
+
+                // Track stack bytes for patching
+                let save_bytes = ((saves.len() + 1) / 2) * 16;
+                self.current_function_stack_bytes += save_bytes;
+                eprintln!("DEBUG: CallWithSaves - allocated {} bytes for saves", save_bytes);
+
+                // STEP 2: Simplified call logic (closures not yet supported)
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+
+                if args.len() > 8 {
+                    return Err("Call with more than 8 arguments not yet supported".to_string());
+                }
+
+                // Get function register
+                let fn_reg = self.get_physical_reg_for_irvalue(fn_val, false)?;
+
+                // Move arguments to x0-x7 in reverse order (to avoid clobbering)
+                for (arg_index, arg) in args.iter().enumerate().rev() {
+                    let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
+                    if arg_index != arg_reg {
+                        self.emit_mov(arg_index, arg_reg);
+                    }
+                }
+
+                // Untag function pointer (shift right by 3 to remove tag)
+                // Use x16 as temp for untagged function pointer
+                let code_ptr_reg = 16;
+
+                // LSR Xd, Xn, #3 - Logical shift right by 3
+                let lsr_instruction = 0xD343FC00u32 | ((fn_reg as u32) << 5) | (code_ptr_reg as u32);
+                self.code.push(lsr_instruction);
+
+                // Call the function
+                self.emit_blr(code_ptr_reg);
+
+                // Move result from x0 to destination
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
+                }
+
+                self.store_spill(dst_reg, dest_spill);
+
+                // STEP 3: Restore volatile registers (reverse order)
+                for save_pair in saves.chunks(2).rev() {
+                    if save_pair.len() == 2 {
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
+                        eprintln!("DEBUG: CallWithSaves - ldp x{}, x{}, [sp], #16", r1, r2);
+                        self.emit_ldp(r1, r2, 31, 2);  // ldp r1, r2, [sp], #16
+                    } else {
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        eprintln!("DEBUG: CallWithSaves - ldp x{}, xzr, [sp], #16", r1);
+                        self.emit_ldp(r1, 31, 31, 2);  // ldp r1, xzr, [sp], #16
+                    }
+                }
+
+                // Decrement stack counter (deallocate what we allocated)
+                self.current_function_stack_bytes -= save_bytes;
+                eprintln!("DEBUG: CallWithSaves - deallocated {} bytes, now at {} bytes",
+                         save_bytes, self.current_function_stack_bytes);
             }
         }
 
@@ -1176,13 +1279,25 @@ impl Arm64CodeGen {
         self.label_positions.insert(label, pos);
     }
 
-    fn emit_jump(&mut self, label: Label) {
+    fn emit_jump(&mut self, label: &Label) {
         // B label (unconditional branch)
         let fixup_index = self.code.len();
-        self.pending_fixups.push((fixup_index, label));
+        self.pending_fixups.push((fixup_index, label.clone()));
 
         // Emit placeholder
         let instruction = 0x14000000;
+        self.code.push(instruction);
+    }
+
+    fn emit_conditional_branch(&mut self, label: &Label, condition: u32) {
+        // B.cond label (conditional branch)
+        // Encoding: 0101_0100 | imm19 << 5 | cond
+        // condition: 0=EQ, 1=NE, 10=GE, 11=LT, 12=GT, 13=LE
+        let fixup_index = self.code.len();
+        self.pending_fixups.push((fixup_index, label.clone()));
+
+        // Emit placeholder with condition
+        let instruction = 0x54000000 | condition;
         self.code.push(instruction);
     }
 
@@ -1210,6 +1325,147 @@ impl Arm64CodeGen {
         eprintln!("DEBUG emit_store_to_fp: offset={}, offset_bits={:03x}, instruction={:08x}",
                   offset, offset_bits, instruction);
         self.code.push(instruction);
+    }
+
+    /// Emit function prologue with placeholder for stack allocation
+    /// This follows Beagle's pattern of deferred stack allocation
+    fn emit_prologue_with_placeholder(&mut self, label: &Label) {
+        // Save FP and LR
+        self.emit_stp(29, 30, 31, -2);  // stp x29, x30, [sp, #-16]!
+        self.emit_mov(29, 31);           // mov x29, sp
+
+        // Emit placeholder SUB instruction (will be patched later)
+        let prologue_idx = self.code.len();
+        self.emit_sub_sp_imm(0x1111);    // Magic placeholder value
+
+        // Record placeholder position
+        self.placeholder_positions.entry(label.clone())
+            .or_insert((prologue_idx, 0))
+            .0 = prologue_idx;
+
+        // Reset stack counter for this function
+        self.current_function_stack_bytes = 0;
+    }
+
+    /// Emit function epilogue with placeholder for stack deallocation
+    fn emit_epilogue_with_placeholder(&mut self, label: &Label) {
+        // Emit placeholder ADD instruction (will be patched later)
+        let epilogue_idx = self.code.len();
+        self.emit_add_sp_imm(0x1111);    // Magic placeholder value
+
+        // Record placeholder position
+        if let Some((_, epi)) = self.placeholder_positions.get_mut(label) {
+            *epi = epilogue_idx;
+        }
+
+        // Restore FP and LR
+        self.emit_ldp(29, 30, 31, 2);    // ldp x29, x30, [sp], #16
+
+        // Emit return
+        self.emit_ret();
+    }
+
+    /// Calculate total stack size for a function
+    fn calculate_stack_size(&self, _label: &Label) -> i64 {
+        // Stack size = spill slots + CallWithSaves accumulated bytes
+        let spill_bytes = if self.num_stack_slots > 0 {
+            (self.num_stack_slots * 8 + 8) as i64  // Add 8 bytes padding
+        } else {
+            0
+        };
+
+        let total = spill_bytes + self.current_function_stack_bytes as i64;
+
+        // Round up to 16-byte alignment
+        ((total + 15) / 16) * 16
+    }
+
+    /// Generate SUB instruction sequence for arbitrary stack sizes
+    /// Handles sizes > 4095 bytes by generating multiple instructions
+    fn generate_stack_sub_sequence(&self, bytes: i64) -> Vec<u32> {
+        const MAX_IMM12: i64 = 4095;
+
+        if bytes == 0 {
+            // No stack needed - return NOP
+            vec![0xD503201F]  // NOP
+        } else if bytes <= MAX_IMM12 {
+            // Single SUB: sub sp, sp, #bytes
+            vec![0xD10003FF | (((bytes as u32) & 0xFFF) << 10)]
+        } else {
+            // Multiple SUB instructions for large frames
+            let mut result = Vec::new();
+            let mut remaining = bytes;
+
+            while remaining > MAX_IMM12 {
+                result.push(0xD10003FF | ((MAX_IMM12 as u32) << 10));
+                remaining -= MAX_IMM12;
+            }
+
+            if remaining > 0 {
+                result.push(0xD10003FF | ((remaining as u32) << 10));
+            }
+
+            result
+        }
+    }
+
+    /// Generate ADD instruction sequence for arbitrary stack sizes
+    fn generate_stack_add_sequence(&self, bytes: i64) -> Vec<u32> {
+        const MAX_IMM12: i64 = 4095;
+
+        if bytes == 0 {
+            // No stack allocated - return NOP
+            vec![0xD503201F]  // NOP
+        } else if bytes <= MAX_IMM12 {
+            // Single ADD: add sp, sp, #bytes
+            vec![0x910003FF | (((bytes as u32) & 0xFFF) << 10)]
+        } else {
+            // Multiple ADD instructions
+            let mut result = Vec::new();
+            let mut remaining = bytes;
+
+            while remaining > MAX_IMM12 {
+                result.push(0x910003FF | ((MAX_IMM12 as u32) << 10));
+                remaining -= MAX_IMM12;
+            }
+
+            if remaining > 0 {
+                result.push(0x910003FF | ((remaining as u32) << 10));
+            }
+
+            result
+        }
+    }
+
+    /// Patch all placeholder instructions with actual stack sizes
+    /// Called after all code generation is complete
+    fn patch_stack_placeholders(&mut self) {
+        for (label, (prologue_idx, epilogue_idx)) in self.placeholder_positions.clone() {
+            let stack_bytes = self.calculate_stack_size(&label);
+
+            eprintln!("DEBUG: Patching function '{}': stack_bytes={}", label, stack_bytes);
+
+            // Patch prologue SUB
+            let sub_sequence = self.generate_stack_sub_sequence(stack_bytes);
+            if sub_sequence.len() == 1 {
+                // Simple case - replace instruction in place
+                self.code[prologue_idx] = sub_sequence[0];
+            } else {
+                // Complex case - need to splice multiple instructions
+                // This will shift all subsequent instructions, so we need to update fixups
+                panic!("Multi-instruction stack allocation not yet implemented - stack size {} exceeds 4095 bytes", stack_bytes);
+            }
+
+            // Patch epilogue ADD
+            let add_sequence = self.generate_stack_add_sequence(stack_bytes);
+            if add_sequence.len() == 1 {
+                // Simple case - replace instruction in place
+                self.code[epilogue_idx] = add_sequence[0];
+            } else {
+                // Complex case
+                panic!("Multi-instruction stack deallocation not yet implemented - stack size {} exceeds 4095 bytes", stack_bytes);
+            }
+        }
     }
 
     fn emit_stp(&mut self, rt: usize, rt2: usize, rn: usize, offset: i32) {

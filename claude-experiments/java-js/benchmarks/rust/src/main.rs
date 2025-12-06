@@ -3,14 +3,20 @@
  *
  * Compares performance of JavaScript parsers written in Rust:
  * - OXC (oxc_parser) - Claims to be the fastest JavaScript parser
+ * - SWC (swc_ecma_parser) - Super fast TypeScript/JavaScript compiler
  */
 
 use std::time::Instant;
+use std::sync::Arc;
 
 // OXC imports
 use oxc_allocator::Allocator;
 use oxc_parser::Parser as OxcParser;
 use oxc_span::SourceType;
+
+// SWC imports
+use swc_common::SourceMap;
+use swc_ecma_parser::{Parser as SwcParser, StringInput, Syntax, EsSyntax};
 
 const SMALL_FUNCTION: &str = r#"function add(a, b) {
     return a + b;
@@ -228,6 +234,29 @@ fn parse_with_oxc(code: &str) {
     let _ = OxcParser::new(&allocator, code, source_type).parse();
 }
 
+/// Parse with SWC
+fn parse_with_swc(code: &str) {
+    let cm = Arc::new(SourceMap::default());
+    let fm = cm.new_source_file(swc_common::FileName::Anon.into(), code.to_string());
+    let input = StringInput::from(&*fm);
+
+    let syntax = Syntax::Es(EsSyntax {
+        jsx: false,
+        fn_bind: false,
+        decorators: false,
+        decorators_before_export: false,
+        export_default_from: false,
+        import_attributes: true,
+        allow_super_outside_method: false,
+        allow_return_outside_function: false,
+        auto_accessors: false,
+        explicit_resource_management: false,
+    });
+
+    let mut parser = SwcParser::new(syntax, input, None);
+    let _ = parser.parse_module();
+}
+
 /// Run benchmark suite for a specific code sample
 fn run_benchmark_suite(suite_name: &str, code: &str, iterations: usize) {
     println!("\n{}", "=".repeat(60));
@@ -237,6 +266,7 @@ fn run_benchmark_suite(suite_name: &str, code: &str, iterations: usize) {
 
     let mut results = vec![
         benchmark("OXC (Rust)", |c| parse_with_oxc(c), code, iterations),
+        benchmark("SWC (Rust)", |c| parse_with_swc(c), code, iterations),
     ];
 
     // Sort by performance (fastest first)

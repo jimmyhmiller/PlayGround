@@ -7,11 +7,21 @@ edition = "2021"
 name = "benchmark"
 path = "src/main.rs"
 
+[[bin]]
+name = "benchmark-real-world"
+path = "src/benchmark_real_world.rs"
+
 [dependencies]
 # OXC - The fastest JavaScript parser
 oxc_parser = "0.38"
 oxc_allocator = "0.38"
 oxc_span = "0.38"
+
+# SWC - Super fast TypeScript/JavaScript compiler
+# Note: Using latest versions due to serde compatibility
+swc_ecma_parser = "29"
+swc_common = "18"
+swc_ecma_ast = "19"
 
 [profile.release]
 opt-level = 3

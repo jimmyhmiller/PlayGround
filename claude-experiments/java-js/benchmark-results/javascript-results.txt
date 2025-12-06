@@ -1,0 +1,193 @@
+
+════════════════════════════════════════════════════════════
+JavaScript Parser Benchmarks (JavaScript-based parsers)
+════════════════════════════════════════════════════════════
+Warmup iterations: 1000
+Measurement iterations: 10000
+Node.js version: v24.3.0
+════════════════════════════════════════════════════════════
+
+============================================================
+Benchmark: Small Function
+Code size: 40 characters
+============================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up Esprima...
+Benchmarking Esprima...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+------------------------------------------------------------
+Parser               |   Avg Time (µs) |      vs Fastest
+------------------------------------------------------------
+🥇 Meriyah            |           1.341 |            1.00x
+🥈 Esprima            |           2.158 |            1.61x
+🥉 Acorn              |           2.896 |            2.16x
+   @babel/parser      |           3.300 |            2.46x
+
+============================================================
+Benchmark: Small Class
+Code size: 183 characters
+============================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up Esprima...
+Benchmarking Esprima...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+------------------------------------------------------------
+Parser               |   Avg Time (µs) |      vs Fastest
+------------------------------------------------------------
+🥇 Meriyah            |           3.270 |            1.00x
+🥈 @babel/parser      |           5.849 |            1.79x
+🥉 Esprima            |           5.884 |            1.80x
+   Acorn              |           7.071 |            2.16x
+
+============================================================
+Benchmark: Medium Async Module
+Code size: 1507 characters
+============================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up Esprima...
+Benchmarking Esprima...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+------------------------------------------------------------
+Parser               |   Avg Time (µs) |      vs Fastest
+------------------------------------------------------------
+🥇 Meriyah            |          24.023 |            1.00x
+🥈 Esprima            |          32.241 |            1.34x
+🥉 @babel/parser      |          32.724 |            1.36x
+   Acorn              |          39.813 |            1.66x
+
+============================================================
+Benchmark: Large Module
+Code size: 2673 characters
+============================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up Esprima...
+Benchmarking Esprima...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+------------------------------------------------------------
+Parser               |   Avg Time (µs) |      vs Fastest
+------------------------------------------------------------
+🥇 Meriyah            |          41.629 |            1.00x
+🥈 @babel/parser      |          56.276 |            1.35x
+🥉 Esprima            |          57.196 |            1.37x
+   Acorn              |          66.203 |            1.59x
+
+════════════════════════════════════════════════════════════
+SUMMARY
+════════════════════════════════════════════════════════════
+
+Small Function:
+  🥇 Meriyah: 1.341 µs
+
+Small Class:
+  🥇 Meriyah: 3.270 µs
+
+Medium Async Module:
+  🥇 Meriyah: 24.023 µs
+
+Large Module:
+  🥇 Meriyah: 41.629 µs
+
+════════════════════════════════════════════════════════════
+JSON Results (for integration):
+{
+  "Small Function": [
+    {
+      "parser": "Meriyah",
+      "avgMicros": 1.341
+    },
+    {
+      "parser": "Esprima",
+      "avgMicros": 2.158
+    },
+    {
+      "parser": "Acorn",
+      "avgMicros": 2.896
+    },
+    {
+      "parser": "@babel/parser",
+      "avgMicros": 3.3
+    }
+  ],
+  "Small Class": [
+    {
+      "parser": "Meriyah",
+      "avgMicros": 3.27
+    },
+    {
+      "parser": "@babel/parser",
+      "avgMicros": 5.849
+    },
+    {
+      "parser": "Esprima",
+      "avgMicros": 5.884
+    },
+    {
+      "parser": "Acorn",
+      "avgMicros": 7.071
+    }
+  ],
+  "Medium Async Module": [
+    {
+      "parser": "Meriyah",
+      "avgMicros": 24.023
+    },
+    {
+      "parser": "Esprima",
+      "avgMicros": 32.241
+    },
+    {
+      "parser": "@babel/parser",
+      "avgMicros": 32.724
+    },
+    {
+      "parser": "Acorn",
+      "avgMicros": 39.813
+    }
+  ],
+  "Large Module": [
+    {
+      "parser": "Meriyah",
+      "avgMicros": 41.629
+    },
+    {
+      "parser": "@babel/parser",
+      "avgMicros": 56.276
+    },
+    {
+      "parser": "Esprima",
+      "avgMicros": 57.196
+    },
+    {
+      "parser": "Acorn",
+      "avgMicros": 66.203
+    }
+  ]
+}
