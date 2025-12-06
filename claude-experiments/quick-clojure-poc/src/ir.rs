@@ -14,23 +14,48 @@ pub enum Condition {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct VirtualRegister {
-    pub index: usize,
-    pub is_argument: bool,
+pub enum VirtualRegister {
+    Temp(usize),      // Compiler-generated temporary registers
+    Argument(usize),  // Function argument registers (x0-x7)
 }
 
 impl VirtualRegister {
+    /// Create a new temporary register (for backwards compatibility)
     pub fn new(index: usize) -> Self {
-        VirtualRegister {
-            index,
-            is_argument: false,
+        VirtualRegister::Temp(index)
+    }
+
+    /// Get the index (for display/debugging)
+    pub fn index(&self) -> usize {
+        match self {
+            VirtualRegister::Temp(n) => *n,
+            VirtualRegister::Argument(n) => *n,
+        }
+    }
+
+    /// Check if this is an argument register
+    pub fn is_argument(&self) -> bool {
+        matches!(self, VirtualRegister::Argument(_))
+    }
+
+    /// Display name for debugging
+    pub fn display_name(&self) -> String {
+        match self {
+            VirtualRegister::Temp(n) => format!("v{}", n),
+            VirtualRegister::Argument(n) => format!("v_arg{}", n),
         }
     }
 }
 
 impl Ord for VirtualRegister {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.index.cmp(&other.index)
+        // Order by type first (Argument < Temp), then by index
+        match (self, other) {
+            (VirtualRegister::Argument(a), VirtualRegister::Argument(b)) => a.cmp(b),
+            (VirtualRegister::Temp(a), VirtualRegister::Temp(b)) => a.cmp(b),
+            (VirtualRegister::Argument(_), VirtualRegister::Temp(_)) => Ordering::Less,
+            (VirtualRegister::Temp(_), VirtualRegister::Argument(_)) => Ordering::Greater,
+        }
     }
 }
 
@@ -98,7 +123,8 @@ pub enum Instruction {
 
 /// IR builder - helps construct IR instructions
 pub struct IrBuilder {
-    next_register: usize,
+    next_temp_register: usize,
+    next_argument_register: usize,
     next_label: usize,
     pub instructions: Vec<Instruction>,
 }
@@ -112,18 +138,25 @@ impl Default for IrBuilder {
 impl IrBuilder {
     pub fn new() -> Self {
         IrBuilder {
-            // Start register allocation at 9 to avoid conflicts with argument registers x0-x8
-            // Arguments are pre-allocated with is_argument: true, regular vregs have is_argument: false
-            // but they share the same index space, so we need to avoid overlap
-            next_register: 9,
+            // Temp registers start at 0 (no more conflicts!)
+            next_temp_register: 0,
+            next_argument_register: 0,
             next_label: 0,
             instructions: Vec::new(),
         }
     }
 
+    /// Create a new temporary register
     pub fn new_register(&mut self) -> IrValue {
-        let reg = VirtualRegister::new(self.next_register);
-        self.next_register += 1;
+        let reg = VirtualRegister::Temp(self.next_temp_register);
+        self.next_temp_register += 1;
+        IrValue::Register(reg)
+    }
+
+    /// Create a new argument register (for function parameters)
+    pub fn new_argument_register(&mut self) -> IrValue {
+        let reg = VirtualRegister::Argument(self.next_argument_register);
+        self.next_argument_register += 1;
         IrValue::Register(reg)
     }
 
@@ -134,12 +167,21 @@ impl IrBuilder {
     }
 
     pub fn emit(&mut self, instruction: Instruction) {
+        // if let Instruction::MakeFunction(_, _, ref closure_values) = instruction {
+        //     eprintln!("DEBUG IrBuilder::emit - MakeFunction with closure_values = {:?}", closure_values);
+        // }
         self.instructions.push(instruction);
     }
 
     /// Take the instructions without consuming the builder, clearing the buffer
     pub fn take_instructions(&mut self) -> Vec<Instruction> {
-        std::mem::take(&mut self.instructions)
+        let instructions = std::mem::take(&mut self.instructions);
+        // for inst in &instructions {
+        //     if let Instruction::MakeFunction(_, _, closure_values) = inst {
+        //         eprintln!("DEBUG IrBuilder::take_instructions - MakeFunction with closure_values = {:?}", closure_values);
+        //     }
+        // }
+        instructions
     }
 }
 

@@ -24,10 +24,17 @@ public class Lexer {
     private Stack<Boolean> functionIsGeneratorStack = new Stack<>(); // Track if each function level is a generator
 
 
+    private boolean strictMode;
+
     public Lexer(String source) {
+        this(source, false);
+    }
+
+    public Lexer(String source, boolean strictMode) {
         this.source = source;
         this.buf = source.toCharArray();
         this.length = buf.length;
+        this.strictMode = strictMode;
         // Initialize with statement context
         contextStack.push(LexerContext.B_STAT);
     }
@@ -610,15 +617,21 @@ public class Lexer {
                         case 'b' -> value.append('\b'); // backspace
                         case '0', '1', '2', '3', '4', '5', '6', '7' -> {
                             // Legacy octal escape sequences (allowed only in non-strict mode)
+                            // EXCEPT: \0 when not followed by a digit IS allowed in strict mode
                             // Grammar:
                             //   OctalDigit [lookahead ∉ OctalDigit]
                             //   ZeroToThree OctalDigit [lookahead ∉ OctalDigit]
                             //   FourToSeven OctalDigit
                             //   ZeroToThree OctalDigit OctalDigit
+
                             StringBuilder octalBuilder = new StringBuilder();
                             octalBuilder.append(escaped);
 
                             if (!isAtEnd() && peek() >= '0' && peek() <= '7') {
+                                // This is a multi-digit octal escape - NOT allowed in strict mode
+                                if (strictMode) {
+                                    throw new RuntimeException("Octal escape sequences are not allowed in strict mode");
+                                }
                                 // Second digit
                                 char secondDigit = peek();
                                 octalBuilder.append(secondDigit);
@@ -634,6 +647,11 @@ public class Lexer {
                                         octalBuilder.append(thirdDigit);
                                         advance();
                                     }
+                                }
+                            } else {
+                                // Single digit octal - check if it's \1-\7 in strict mode
+                                if (strictMode && escaped != '0') {
+                                    throw new RuntimeException("Octal escape sequences are not allowed in strict mode");
                                 }
                             }
 
@@ -988,9 +1006,11 @@ public class Lexer {
 
     private Token scanIdentifier(int startLine, int startColumn, int startPos) {
         StringBuilder actualName = new StringBuilder();
+        boolean hasEscapes = false;  // Track escapes during scanning - zero allocations
 
         // Handle first character (could be unicode escape or regular)
         if (peek() == '\\' && peekNext() == 'u') {
+            hasEscapes = true;
             advance(); // consume \
             advance(); // consume u
             // scanUnicodeEscape now returns String (may be 1 or 2 chars for surrogate pairs)
@@ -1007,6 +1027,7 @@ public class Lexer {
         // Handle remaining characters
         while (!isAtEnd() && (isAlphaNumeric(peek()) || (peek() == '\\' && peekNext() == 'u'))) {
             if (peek() == '\\') {
+                hasEscapes = true;
                 advance(); // consume \
                 advance(); // consume u
                 // scanUnicodeEscape now returns String (may be 1 or 2 chars for surrogate pairs)
@@ -1021,13 +1042,10 @@ public class Lexer {
             }
         }
 
-        String lexeme = source.substring(startPos, position);
+        // OPTIMIZED: No substring() or contains() calls - use tracked boolean flag
         String identifierName = actualName.toString();
 
         // Keywords with escape sequences should be treated as identifiers
-        // Only check for keywords if the lexeme doesn't contain escapes
-        boolean hasEscapes = lexeme.contains("\\");
-
         TokenType type = TokenType.IDENTIFIER;
         if (!hasEscapes) {
             type = switch (identifierName) {

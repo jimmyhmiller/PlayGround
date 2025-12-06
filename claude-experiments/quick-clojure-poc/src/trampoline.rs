@@ -111,20 +111,20 @@ pub extern "C" fn trampoline_set_binding(var_ptr: usize, value: usize) -> usize 
 /// Trampoline: Allocate function object
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = name_ptr (0 for anonymous), x1 = code_ptr, x2 = closure_count, x3+ = closure values
+/// - Args: x0 = name_ptr (0 for anonymous), x1 = code_ptr, x2 = closure_count, x3 = values_ptr
 /// - Returns: x0 = function pointer (tagged)
 ///
-/// Note: For simplicity, we limit closures to 5 values (uses x3-x7)
+/// Note: values_ptr points to an array of closure_count tagged values on the stack
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_allocate_function(
     name_ptr: usize,
     code_ptr: usize,
     closure_count: usize,
-    c0: usize, c1: usize, c2: usize, c3: usize, c4: usize,
+    values_ptr: *const usize,
 ) -> usize {
     unsafe {
         eprintln!("DEBUG: trampoline_allocate_function called: name_ptr={:x}, code_ptr={:x}, closure_count={}", name_ptr, code_ptr, closure_count);
-        eprintln!("DEBUG:   closure values: c0={:x}, c1={:x}, c2={:x}, c3={:x}, c4={:x}", c0, c1, c2, c3, c4);
+        eprintln!("DEBUG:   values_ptr={:p}", values_ptr);
 
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -136,18 +136,13 @@ pub extern "C" fn trampoline_allocate_function(
             None
         };
 
-        // Collect closure values
-        let closure_values = match closure_count {
-            0 => vec![],
-            1 => vec![c0],
-            2 => vec![c0, c1],
-            3 => vec![c0, c1, c2],
-            4 => vec![c0, c1, c2, c3],
-            5 => vec![c0, c1, c2, c3, c4],
-            _ => {
-                eprintln!("Error: Too many closure variables (max 5 supported)");
-                return 7; // Return nil on error
-            }
+        // Read closure values from the pointer
+        let closure_values = if closure_count > 0 {
+            let values_slice = std::slice::from_raw_parts(values_ptr, closure_count);
+            eprintln!("DEBUG:   closure values: {:x?}", values_slice);
+            values_slice.to_vec()
+        } else {
+            vec![]
         };
 
         let result = match rt.allocate_function(name, code_ptr, closure_values) {
@@ -161,7 +156,6 @@ pub extern "C" fn trampoline_allocate_function(
             }
         };
         eprintln!("DEBUG: trampoline_allocate_function RETURNING fn_ptr={:x}", result);
-        eprintln!("DEBUG: trampoline_allocate_function about to return...");
         result
     }
 }

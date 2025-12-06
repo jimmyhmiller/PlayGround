@@ -92,16 +92,16 @@ impl Arm64CodeGen {
         eprintln!("DEBUG: {} spills, {} total stack slots", num_spills, num_stack_slots);
         eprintln!("DEBUG: Spill locations from codegen allocator:");
         for (vreg, slot) in &allocator.spill_locations {
-            eprintln!("  v{} -> slot {}", vreg.index, slot);
+            eprintln!("  {} -> slot {}", vreg.display_name(), slot);
         }
 
         // Store the register allocation map for use in codegen
         self.register_map = allocator.allocated_registers.clone();
 
         // Debug: print allocation for v27 if it exists
-        let v27 = crate::ir::VirtualRegister { index: 27, is_argument: false };
+        let v27 = crate::ir::VirtualRegister::Temp(27);
         if let Some(physical) = self.register_map.get(&v27) {
-            eprintln!("DEBUG: v27 allocated to x{}", physical.index);
+            eprintln!("DEBUG: v27 allocated to x{}", physical.index());
         } else {
             eprintln!("DEBUG: v27 not in allocation map (might be physical already or not used)");
         }
@@ -110,7 +110,7 @@ impl Arm64CodeGen {
         let result_physical = if let IrValue::Register(vreg) = result_reg {
             allocator.allocated_registers.get(vreg)
                 .ok_or_else(|| format!("Result register {:?} not allocated", vreg))?
-                .index
+                .index()
         } else {
             return Err(format!("Expected register for result, got {:?}", result_reg));
         };
@@ -319,6 +319,8 @@ impl Arm64CodeGen {
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
                 let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
+                // eprintln!("DEBUG: AddInt - dst={:?} (x{}), src1={:?} (x{}), src2={:?} (x{}), spill={:?}",
+                //          dst, dst_reg, src1, src1_reg, src2, src2_reg, dest_spill);
                 self.emit_add(dst_reg, src1_reg, src2_reg);
                 self.store_spill(dst_reg, dest_spill);
             }
@@ -563,25 +565,31 @@ impl Arm64CodeGen {
                     eprintln!("DEBUG: MakeFunction - tagged function pointer in x{}", dst_reg);
                 } else {
                     // Closure - allocate heap object with closure values
+                    // NEW APPROACH: Stack-based capture (no limit on number of values!)
                     eprintln!("DEBUG: MakeFunction - creating closure with {} captured values", closure_values.len());
 
-                    if closure_values.len() > 5 {
-                        return Err(format!("Too many closure variables: {} (max 5 supported)", closure_values.len()));
+                    // Step 1: Allocate stack space for all values at once (maintains 16-byte alignment)
+                    let total_stack_space = closure_values.len() * 8;
+                    // Round up to 16-byte alignment
+                    let aligned_stack_space = ((total_stack_space + 15) / 16) * 16;
+                    if aligned_stack_space > 0 {
+                        self.emit_sub_sp_imm(aligned_stack_space as i64);
                     }
 
-                    // IMPORTANT: Save closure values to callee-saved registers FIRST
-                    // Because setting up x0-x2 might overwrite closure values if they're in x0-x2!
-                    // Use x19-x23 as temporary storage (callee-saved, won't be clobbered)
-                    let mut saved_regs = Vec::new();
+                    // Step 2: Store values directly to stack (avoids register conflicts)
                     for (i, value) in closure_values.iter().enumerate() {
                         let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
-                        let temp_reg = 19 + i;  // x19, x20, x21, x22, x23
-                        eprintln!("DEBUG: MakeFunction - saving closure value {}: IrValue={:?}, from x{} to temp x{}", i, value, src_reg, temp_reg);
-                        self.emit_mov(temp_reg, src_reg);
-                        saved_regs.push(temp_reg);
+                        let offset = i * 8;
+                        eprintln!("DEBUG: MakeFunction - storing closure value {} from x{} (IrValue={:?}) at SP+{}", i, src_reg, value, offset);
+                        self.emit_str_offset(src_reg, 31, offset as i32);  // x31 = sp
                     }
 
-                    // Set up arguments for trampoline call
+                    // Step 4: Save stack pointer (points to start of values array)
+                    // Use x10 as temp (won't conflict with callee-saved x19-x28)
+                    let values_ptr_reg = 10;  // x10 for values pointer
+                    self.emit_mov(values_ptr_reg, 31);  // x31 = sp
+
+                    // Step 4: Set up arguments for trampoline call
                     // x0 = 0 (anonymous function - no name for now)
                     self.emit_mov_imm(0, 0);
 
@@ -591,33 +599,21 @@ impl Arm64CodeGen {
                     // x2 = closure_count
                     self.emit_mov_imm(2, closure_values.len() as i64);
 
-                    // NOW move closure values from temp storage to x3-x7
-                    for (i, temp_reg) in saved_regs.iter().enumerate() {
-                        let dest_arg_reg = 3 + i;  // x3, x4, x5, x6, x7
-                        eprintln!("DEBUG: MakeFunction - moving saved closure value {} from temp x{} to arg x{}", i, temp_reg, dest_arg_reg);
-                        self.emit_mov(dest_arg_reg, *temp_reg);
-                    }
+                    // x3 = values_ptr (pointer to values on stack)
+                    self.emit_mov(3, values_ptr_reg);
 
-                    // Call trampoline to allocate closure heap object
-                    // IMPORTANT: We need to preserve X30 (link register) because BLR will overwrite it
-                    // Allocate stack space and save X30
-                    // sub sp, sp, #16  (allocate 16 bytes for X30)
-                    self.emit_sub_sp_imm(16);
-                    // str x30, [sp]  (save X30 to stack)
-                    self.emit_str_offset(30, 31, 0);  // x31 = sp
-
+                    // Step 5: Call trampoline to allocate closure heap object
                     let func_addr = crate::trampoline::trampoline_allocate_function as usize;
                     eprintln!("DEBUG: MakeFunction - calling trampoline_allocate_function for closure at {:x}", func_addr);
-                    self.emit_mov_imm(15, func_addr as i64);
-                    self.emit_blr(15);
+                    self.emit_external_call(func_addr, "trampoline_allocate_function");
 
-                    // Restore X30 after the call
-                    // ldr x30, [sp]  (restore X30 from stack)
-                    self.emit_ldr_offset(30, 31, 0);  // x31 = sp
-                    // add sp, sp, #16  (deallocate)
-                    self.emit_add_sp_imm(16);
+                    // Step 6: Clean up stack (pop all values with correct alignment)
+                    if aligned_stack_space > 0 {
+                        eprintln!("DEBUG: MakeFunction - cleaning up {} bytes of stack", aligned_stack_space);
+                        self.emit_add_sp_imm(aligned_stack_space as i64);
+                    }
 
-                    // Result is in x0 (tagged closure pointer with 0b101 tag)
+                    // Step 7: Result is in x0 (tagged closure pointer with 0b101 tag)
                     if dst_reg != 0 {
                         self.emit_mov(dst_reg, 0);
                         eprintln!("DEBUG: MakeFunction - moved closure result from x0 to x{}", dst_reg);
@@ -630,15 +626,14 @@ impl Arm64CodeGen {
 
             Instruction::LoadClosure(dst, fn_obj, index) => {
                 // LoadClosure: Load a captured variable from closure object
-                // The closure object is expected to be in fn_obj register (typically x8 for closures)
+                // The closure object is in fn_obj register (x0 for closures, passed as first arg)
                 // IMPORTANT: fn_obj is TAGGED with Closure tag (0b101), must untag first!
-                // Layout: [header(8), code_ptr(8), num_closures(8), closure_values...]
-                // So closure value N is at offset: 8 + 8 + 8 + (N * 8) = 24 + (N * 8)
+                // Layout: [header(8), name_ptr(8), code_ptr(8), closure_count(8), closure_values...]
+                // Using constants from gc_runtime::closure_layout
 
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 let fn_obj_reg = self.get_physical_reg_for_irvalue(fn_obj, false)?;
-                eprintln!("DEBUG: LoadClosure - fn_obj={:?}, fn_obj_reg=x{}, index={}", fn_obj, fn_obj_reg, index);
 
                 // Untag the closure pointer (shift right by 3)
                 // LSR Xd, Xn, #3 - From Beagle: 0xD343FC00
@@ -647,9 +642,11 @@ impl Arm64CodeGen {
                 self.code.push(lsr_instruction);
 
                 // Load closure value from heap object using untagged pointer
-                // Offset = header(8) + field0(8) + field1(8) + field2(8) + (index * 8)
-                //        = 32 + (index * 8) bytes
-                let offset = 32 + (*index as i32 * 8);
+                // Use closure_layout constant for offset calculation
+                use crate::gc_runtime::closure_layout;
+                let offset = closure_layout::value_offset(*index) as i32;
+                // eprintln!("DEBUG: LoadClosure - index={}, offset={}, dst={:?} -> x{}, spill={:?}",
+                //          index, offset, dst, dst_reg, dest_spill);
                 self.emit_ldr_offset(dst_reg, untagged_reg, offset);
 
                 self.store_spill(dst_reg, dest_spill);
@@ -662,8 +659,8 @@ impl Arm64CodeGen {
                 // New approach - check tag inline (NO trampoline calls!):
                 // 1. Save function and arguments to callee-saved registers
                 // 2. Extract tag from function value (fn_val & 0b111)
-                // 3. If Function tag (0b100): untag to get code_ptr, use normal calling convention
-                // 4. If Closure tag (0b101): load code_ptr from heap, use closure calling convention
+                // 3. If Function tag (0b100): untag to get code_ptr, args in x0-x7
+                // 4. If Closure tag (0b101): load code_ptr from heap, closure in x0, user args in x1-x7
                 // 5. Call the function
                 // 6. Get result from x0
 
@@ -681,19 +678,17 @@ impl Arm64CodeGen {
                     self.emit_mov(saved_fn_reg, fn_reg);
                 }
 
-                // Save arguments to x21-x28 (callee-saved)
-                let mut saved_arg_regs = Vec::new();
-                for (i, arg) in args.iter().enumerate() {
+                // IMPORTANT: x0-x7 are never used by the allocator (which only uses x19-x28).
+                // So we don't need intermediate saves - just track the argument source registers.
+                // We'll move them to x0-x7 later (after tag checking).
+                let mut arg_source_regs = Vec::new();
+                for arg in args.iter() {
                     let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
-                    let saved_reg = 21 + i;  // x21, x22, x23, ...
-                    saved_arg_regs.push(saved_reg);
-                    if arg_reg != saved_reg {
-                        self.emit_mov(saved_reg, arg_reg);
-                    }
+                    arg_source_regs.push(arg_reg);
                 }
 
                 // Step 2: Extract tag (fn_val & 0b111)
-                let tag_reg = 10;  // Use x10 for tag
+                let tag_reg = 16;  // Use x16 for tag (IP0 register, safe to use)
                 // AND Xd, Xn, #0b111
                 self.emit_and_imm(tag_reg, saved_fn_reg, 0b111);
 
@@ -708,21 +703,23 @@ impl Arm64CodeGen {
                 eprintln!("DEBUG: Call - emitting closure path");
 
                 // Untag closure pointer (shift right by 3)
-                let closure_ptr_reg = 11;  // x11 = untagged closure pointer
+                let closure_ptr_reg = 17;  // x17 = untagged closure pointer (IP1 register, safe to use)
                 // LSR Xd, Xn, #3 - Logical shift right by 3 = UBFM Xd, Xn, #3, #63
                 // From Beagle: base = 0x53000000, sf=1, n=1, immr=3, imms=63
                 let lsr_instruction = 0xD343FC00u32 | ((saved_fn_reg as u32) << 5) | (closure_ptr_reg as u32);
                 self.code.push(lsr_instruction);
 
-                // Load code_ptr from heap object field 1
-                // LDR Xt, [Xn, #8]  (field 1 is at offset 8 bytes after header)
-                let code_ptr_reg = 20;  // x20 = code pointer
-                self.emit_ldr_offset(code_ptr_reg, closure_ptr_reg, 16); // Skip header(8) + field0(8) = 16
+                // Load code_ptr from heap object field 1 (using closure_layout constants)
+                use crate::gc_runtime::closure_layout;
+                let code_ptr_reg = 18;  // x18 = code pointer (PR register, safe to use)
+                self.emit_ldr_offset(code_ptr_reg, closure_ptr_reg, closure_layout::FIELD_1_CODE_PTR as i32);
 
-                // Set up closure calling convention: x8 = closure object, args in x0-x7
-                self.emit_mov(8, saved_fn_reg);  // x8 = tagged closure pointer
-                for (i, saved_reg) in saved_arg_regs.iter().enumerate() {
-                    self.emit_mov(i, *saved_reg);  // Always move: x0=x21, x1=x22, etc.
+                // Set up closure calling convention: x0 = closure object, user args in x1-x7
+                self.emit_mov(0, saved_fn_reg);  // x0 = tagged closure pointer
+                for (i, &src_reg) in arg_source_regs.iter().enumerate() {
+                    if i + 1 != src_reg {  // Only move if source != destination
+                        self.emit_mov(i + 1, src_reg);  // x1, x2, x3, etc.
+                    }
                 }
 
                 let after_call_label = self.new_label();
@@ -737,9 +734,12 @@ impl Arm64CodeGen {
                 let lsr_instruction = 0xD343FC00u32 | ((saved_fn_reg as u32) << 5) | (code_ptr_reg as u32);
                 self.code.push(lsr_instruction);
 
-                // Set up normal calling convention: args in x0-x7 (no x8)
-                for (i, saved_reg) in saved_arg_regs.iter().enumerate() {
-                    self.emit_mov(i, *saved_reg);  // Always move: x0=x21, x1=x22, etc.
+                // Set up normal calling convention: args in x0-x7
+                for (i, &src_reg) in arg_source_regs.iter().enumerate() {
+                    eprintln!("DEBUG: Call - moving arg {} from x{} to x{}", i, src_reg, i);
+                    if i != src_reg {  // Only move if source != destination
+                        self.emit_mov(i, src_reg);  // x0, x1, x2, etc.
+                    }
                 }
 
                 // === Call the function ===
@@ -811,16 +811,24 @@ impl Arm64CodeGen {
     }
 
     fn get_physical_reg(&mut self, vreg: &VirtualRegister) -> usize {
-        // After register allocation, the IR has been rewritten with physical registers
-        // Physical registers are represented as VirtualRegister { index: X, is_argument: false }
-        // where X is the physical register number.
-        //
-        // If the register is in the allocation map, it's an original virtual register
-        // and we need to look up its physical register.
-        // If not in the map, it's already a physical register, so just use its index.
-        self.register_map.get(vreg)
-            .map(|physical| physical.index)
-            .unwrap_or(vreg.index)  // Already physical, use index directly
+        // IMPORTANT: Don't look up Argument registers in the map!
+        // The allocator maps Argument(n) -> Temp(n) to represent physical xn,
+        // but Temp(n) might also exist as a virtual register with a different allocation.
+        // Instead, get Argument registers' physical location directly from their variant.
+        match vreg {
+            VirtualRegister::Argument(n) => *n,  // Arguments are already physical (x0-x7)
+            _ => {
+                // After register allocation, the IR has been rewritten with physical registers
+                // Physical registers are represented as VirtualRegister::Temp(X) where X is the physical register number.
+                //
+                // If the register is in the allocation map, it's an original virtual register
+                // and we need to look up its physical register.
+                // If not in the map, it's already a physical register, so just use its index.
+                self.register_map.get(vreg)
+                    .map(|physical| physical.index())
+                    .unwrap_or_else(|| vreg.index())  // Already physical, use index directly
+            }
+        }
     }
 
     /// Check if a destination is a spill and return its stack offset
@@ -1190,6 +1198,35 @@ impl Arm64CodeGen {
         // Calls function at address in Xn, stores return address in X30
         let instruction = 0xD63F0000 | ((rn as u32) << 5);
         self.code.push(instruction);
+    }
+
+    /// Emit an external function call with automatic X30 (link register) preservation
+    ///
+    /// This helper automates the common pattern of:
+    /// 1. Save X30 to stack
+    /// 2. Load function address into register
+    /// 3. Call function via BLR
+    /// 4. Restore X30 from stack
+    ///
+    /// # Parameters
+    /// - `target_fn`: Address of the external function to call
+    /// - `_description`: Human-readable description for debugging (currently unused)
+    fn emit_external_call(&mut self, target_fn: usize, _description: &str) {
+        // Save X30 (link register) to stack
+        // sub sp, sp, #16
+        self.emit_sub_sp_imm(16);
+        // str x30, [sp]
+        self.emit_str_offset(30, 31, 0);  // x31 = sp
+
+        // Load function address and call
+        self.emit_mov_imm(15, target_fn as i64);  // Use x15 as temp
+        self.emit_blr(15);
+
+        // Restore X30 from stack
+        // ldr x30, [sp]
+        self.emit_ldr_offset(30, 31, 0);
+        // add sp, sp, #16
+        self.emit_add_sp_imm(16);
     }
 
     fn emit_adr(&mut self, dst: usize, label: Label) {

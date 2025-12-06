@@ -97,9 +97,37 @@ public class Test262Runner {
                          Path relativePath = test262Dir.relativize(path);
                          Path cacheFile = cacheDir.resolve(relativePath.toString() + ".json");
 
-                         // If no cache, skip (esprima couldn't parse it either)
+                         // If no cache and not a negative parse test, skip (esprima couldn't parse it either)
                          if (!Files.exists(cacheFile)) {
-                             noCache.incrementAndGet();
+                             if (isNegativeParseTest) {
+                                 // For negative parse tests, we still want to verify our parser rejects them
+                                 // Try to parse - if it succeeds, that's a bug
+                                 try {
+                                     boolean isModule = Parser.hasModuleFlag(source) ||
+                                         path.toString().endsWith("_FIXTURE.js");
+                                     boolean isOnlyStrict = Parser.hasOnlyStrictFlag(source);
+                                     Parser.parse(source, isModule, isOnlyStrict);
+
+                                     // Parsing succeeded but should have failed!
+                                     negativeTestsPassed.incrementAndGet();
+                                     if (negativeTestsPassedFiles.size() < 50) {
+                                         negativeTestsPassedFiles.add(path.toString());
+                                     }
+
+                                     Map<String, Object> errorJson = new HashMap<>();
+                                     errorJson.put("file", path.toString());
+                                     errorJson.put("errorType", "NegativeTestPassed");
+                                     errorJson.put("message", "Test marked as negative (expected parse failure) but parsing succeeded");
+                                     allFailuresJson.add(errorJson);
+
+                                     allFailures.add(path.toString() + ": Negative test incorrectly passed (expected parse failure)");
+                                 } catch (Exception e) {
+                                     // Good! Parser correctly rejected it
+                                     // Don't count as matched since there's no AST to compare
+                                 }
+                             } else {
+                                 noCache.incrementAndGet();
+                             }
                              continue;
                          }
 
@@ -110,9 +138,10 @@ public class Test262Runner {
                          // Also treat _FIXTURE.js files as modules (they are module fixtures)
                          boolean isModule = Parser.hasModuleFlag(source) ||
                              path.toString().endsWith("_FIXTURE.js");
+                         boolean isOnlyStrict = Parser.hasOnlyStrictFlag(source);
 
                          // Parse with our parser using correct sourceType
-                         Program actualProgram = Parser.parse(source, isModule);
+                         Program actualProgram = Parser.parse(source, isModule, isOnlyStrict);
 
                          // If this is a negative parse test and we successfully parsed, that's an error
                          if (isNegativeParseTest) {
@@ -268,7 +297,8 @@ public class Test262Runner {
             mismatched.get(), totalWithCache > 0 ? (mismatched.get() * 100.0 / totalWithCache) : 0);
         System.out.printf("  ⚠ Parse failures: %d (%.2f%%)%n",
             failed.get(), totalWithCache > 0 ? (failed.get() * 100.0 / totalWithCache) : 0);
-        System.out.printf("  ❌ Negative tests incorrectly passed: %d (%.2f%%)%n",
+        System.out.printf("  %s Negative tests incorrectly passed: %d (%.2f%%)%n",
+            negativeTestsPassed.get() > 0 ? "❌" : "✓",
             negativeTestsPassed.get(), totalWithCache > 0 ? (negativeTestsPassed.get() * 100.0 / totalWithCache) : 0);
 
         if (!errorTypes.isEmpty()) {

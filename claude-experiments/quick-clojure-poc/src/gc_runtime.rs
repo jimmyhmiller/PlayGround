@@ -13,6 +13,37 @@ const TYPE_ID_NAMESPACE: u8 = 10;
 const TYPE_ID_VAR: u8 = 11;
 const TYPE_ID_FUNCTION: u8 = 12;
 
+/// Closure heap object layout constants
+///
+/// Layout: Header | name_ptr | code_ptr | closure_count | [closure_values...]
+pub mod closure_layout {
+    /// Size of header in bytes (always 8 bytes for all heap objects)
+    pub const HEADER_SIZE: usize = 8;
+
+    /// Field offsets (in bytes from start of object, including header)
+    pub const FIELD_0_NAME_PTR: usize = 8;      // Offset 8: name pointer (0 for anonymous)
+    pub const FIELD_1_CODE_PTR: usize = 16;     // Offset 16: code pointer (untagged)
+    pub const FIELD_2_CLOSURE_COUNT: usize = 24; // Offset 24: number of captured values
+    pub const FIELD_3_FIRST_VALUE: usize = 32;  // Offset 32: first captured value
+
+    /// Offset where closure values start
+    pub const VALUES_OFFSET: usize = FIELD_3_FIRST_VALUE;
+
+    /// Size of each value in bytes
+    pub const VALUE_SIZE: usize = 8;
+
+    /// Calculate byte offset for closure value at given index
+    pub const fn value_offset(index: usize) -> usize {
+        VALUES_OFFSET + (index * VALUE_SIZE)
+    }
+
+    /// Field indices (for HeapObject::get_field / write_field methods)
+    pub const FIELD_NAME_PTR: usize = 0;
+    pub const FIELD_CODE_PTR: usize = 1;
+    pub const FIELD_CLOSURE_COUNT: usize = 2;
+    pub const FIELD_FIRST_VALUE: usize = 3;
+}
+
 /// Header for heap-allocated objects
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Header {
@@ -681,13 +712,13 @@ impl GCRuntime {
         let fn_ptr = self.allocate_raw(size_words, TYPE_ID_FUNCTION)?;
         let mut heap_obj = HeapObject::from_untagged(fn_ptr);
 
-        heap_obj.write_field(0, name_ptr);
-        heap_obj.write_field(1, code_ptr);
-        heap_obj.write_field(2, closure_values.len());
+        heap_obj.write_field(closure_layout::FIELD_NAME_PTR, name_ptr);
+        heap_obj.write_field(closure_layout::FIELD_CODE_PTR, code_ptr);
+        heap_obj.write_field(closure_layout::FIELD_CLOSURE_COUNT, closure_values.len());
 
         // Write closure values
         for (i, value) in closure_values.iter().enumerate() {
-            heap_obj.write_field(3 + i, *value);
+            heap_obj.write_field(closure_layout::FIELD_FIRST_VALUE + i, *value);
         }
 
         // Tag with Closure tag (0b101) - closures are heap objects with captured values
@@ -700,18 +731,17 @@ impl GCRuntime {
         let untagged = BuiltInTypes::Closure.untag(fn_ptr);
         eprintln!("DEBUG function_code_ptr: fn_ptr={:x}, untagged={:x}", fn_ptr, untagged);
         let heap_obj = HeapObject::from_untagged(untagged);
-        let code_ptr = heap_obj.get_field(1);
+        let code_ptr = heap_obj.get_field(closure_layout::FIELD_CODE_PTR);
         eprintln!("DEBUG function_code_ptr: returning code_ptr={:x}", code_ptr);
         code_ptr
     }
 
-    /// Get closure count
     /// Get closure count from closure
     /// NOTE: This should only be called on Closure-tagged values (0b101)
     pub fn function_closure_count(&self, fn_ptr: usize) -> usize {
         let untagged = BuiltInTypes::Closure.untag(fn_ptr);
         let heap_obj = HeapObject::from_untagged(untagged);
-        heap_obj.get_field(2)  // closure_count is field 2
+        heap_obj.get_field(closure_layout::FIELD_CLOSURE_COUNT)
     }
 
     /// Get closure value by index from closure
@@ -719,11 +749,11 @@ impl GCRuntime {
     pub fn function_get_closure(&self, fn_ptr: usize, index: usize) -> usize {
         let untagged = BuiltInTypes::Closure.untag(fn_ptr);
         let heap_obj = HeapObject::from_untagged(untagged);
-        let closure_count = heap_obj.get_field(2);
+        let closure_count = heap_obj.get_field(closure_layout::FIELD_CLOSURE_COUNT);
         if index >= closure_count {
             panic!("Closure index out of bounds: {} >= {}", index, closure_count);
         }
-        heap_obj.get_field(3 + index)
+        heap_obj.get_field(closure_layout::FIELD_FIRST_VALUE + index)
     }
 
     /// Get function name (for debugging/printing)

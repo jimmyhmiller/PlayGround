@@ -592,10 +592,13 @@ impl Compiler {
         let free_vars = self.find_free_variables_in_arity(arity, name)?;
 
         // Step 2: Capture free variables (evaluate them in current scope)
+        // IMPORTANT: This must happen BEFORE compiling the function body to capture
+        // the correct registers from the outer scope (Argument registers, not Temps)
         let mut closure_values = Vec::new();
         for var_name in &free_vars {
             // Look up the variable in the current scope
             if let Some(value_reg) = self.lookup_local(var_name) {
+                // eprintln!("DEBUG compile_fn: Capturing free var '{}' = {:?}", var_name, value_reg);
                 closure_values.push(value_reg);
             } else {
                 return Err(format!("Free variable not found in scope: {}", var_name));
@@ -622,28 +625,24 @@ impl Compiler {
         // For now, we'll skip this as it requires having the function object
         // which we haven't created yet (chicken-and-egg problem)
 
-        // Bind parameters to argument registers
-        // ARM64 calling convention: arguments are in x0, x1, x2, etc.
-        for (i, param) in arity.params.iter().enumerate() {
-            let arg_reg = IrValue::Register(crate::ir::VirtualRegister {
-                index: i,
-                is_argument: true,
-            });
-            self.bind_local(param.clone(), arg_reg);
-        }
-
         // Create a virtual register for the function object (self) if this function has closures
-        // This will be passed in a special way for closures
+        // For closures, the closure object is passed as the first argument (x0)
+        // User parameters are shifted to x1, x2, etc.
         let self_reg = if !free_vars.is_empty() {
-            // For closures, we'll use a special calling convention where the function object
-            // is passed in x8 (a callee-saved register that won't conflict with args)
-            Some(IrValue::Register(crate::ir::VirtualRegister {
-                index: 8,  // x8 - outside normal argument range
-                is_argument: true,
-            }))
+            Some(IrValue::Register(crate::ir::VirtualRegister::Argument(0)))
         } else {
             None
         };
+
+        // Bind parameters to argument registers
+        // ARM64 calling convention:
+        // - Regular functions: arguments are in x0, x1, x2, etc.
+        // - Closures: x0 = closure object, user args in x1, x2, x3, etc.
+        let param_offset = if self_reg.is_some() { 1 } else { 0 };
+        for (i, param) in arity.params.iter().enumerate() {
+            let arg_reg = IrValue::Register(crate::ir::VirtualRegister::Argument(i + param_offset));
+            self.bind_local(param.clone(), arg_reg);
+        }
 
         // Bind rest parameter if variadic
         if let Some(rest) = &arity.rest_param {
@@ -654,11 +653,11 @@ impl Compiler {
         }
 
         // Bind closure variables
-        // Load them from the function object (self_reg = x8) using LoadClosure
+        // Load them from the function object (self_reg = x0 for closures) using LoadClosure
         if let Some(self_reg) = &self_reg {
             for (i, var_name) in free_vars.iter().enumerate() {
                 let closure_reg = self.builder.new_register();
-                // Emit LoadClosure to load from function object in x8
+                // Emit LoadClosure to load from function object in x0
                 self.builder.emit(Instruction::LoadClosure(closure_reg, self_reg.clone(), i));
                 self.bind_local(var_name.clone(), closure_reg);
             }
@@ -676,19 +675,9 @@ impl Compiler {
         // Function exit (after inline code)
         self.builder.emit(Instruction::Label(fn_end_label));
 
-        // Step 4: Gather closure values from current scope
-        // Look up each free variable in the current scope and collect its value
-        let mut closure_values = Vec::new();
-        for var_name in &free_vars {
-            if let Some(value) = self.lookup_local(var_name) {
-                closure_values.push(value.clone());
-            } else {
-                return Err(format!("Free variable '{}' not found in scope", var_name));
-            }
-        }
-
-        // Step 5: Create function object with closure values
+        // Step 4: Create function object with closure values (collected in step 2)
         let fn_obj_reg = self.builder.new_register();
+        // eprintln!("DEBUG compile_fn: About to emit MakeFunction with closure_values = {:?}", closure_values);
         self.builder.emit(Instruction::MakeFunction(fn_obj_reg, fn_start_label, closure_values));
 
         Ok(fn_obj_reg)

@@ -24,22 +24,27 @@ public class Parser {
     private java.util.Stack<Boolean> strictModeStack = new java.util.Stack<>();
 
     public Parser(String source) {
-        this(source, false);
+        this(source, false, false);
     }
 
     public Parser(String source, boolean forceModuleMode) {
+        this(source, forceModuleMode, false);
+    }
+
+    public Parser(String source, boolean forceModuleMode, boolean forceStrictMode) {
         this.source = source;
         this.sourceBuf = source.toCharArray();
         this.sourceLength = sourceBuf.length;
-        this.lexer = new Lexer(source);
+
+        // Module mode is always strict
+        // Force strict mode can also be enabled via flag
+        boolean initialStrictMode = forceModuleMode || forceStrictMode;
+        this.strictMode = initialStrictMode;
+
+        this.lexer = new Lexer(source, initialStrictMode);
         this.tokens = lexer.tokenize();
         this.forceModuleMode = forceModuleMode;
         this.lineOffsets = buildLineOffsetIndex();
-
-        // Module mode is always strict
-        if (forceModuleMode) {
-            this.strictMode = true;
-        }
     }
 
     public Program parse() {
@@ -309,10 +314,52 @@ public class Parser {
 
         if (check(TokenType.IN)) {
             advance(); // consume 'in'
-            // Convert left to pattern if it's an expression (for destructuring)
-            if (initOrLeft instanceof Expression) {
+
+            // Validate for-in initializers
+            // 1. Assignment expressions are never allowed: for (a = 0 in obj)
+            // 2. Variable declaration initializers are only allowed in sloppy mode (Annex B): for (var a = 0 in obj)
+            if (initOrLeft instanceof VariableDeclaration) {
+                VariableDeclaration varDecl = (VariableDeclaration) initOrLeft;
+
+                // Check if any declarator has an initializer
+                for (VariableDeclarator declarator : varDecl.declarations()) {
+                    if (declarator.init() != null) {
+                        // Destructuring patterns (ObjectPattern/ArrayPattern) with initializers are NEVER allowed
+                        Pattern pattern = declarator.id();
+                        if (pattern instanceof ObjectPattern || pattern instanceof ArrayPattern) {
+                            throw new ParseException("SyntaxError", peek(), null, "for-in statement",
+                                "for-in loop variable declaration with destructuring may not have an initializer");
+                        }
+
+                        // In strict mode, initializers are never allowed
+                        if (strictMode) {
+                            throw new ParseException("SyntaxError", peek(), null, "for-in statement",
+                                "for-in loop variable declaration may not have an initializer in strict mode");
+                        }
+                        // In sloppy mode, only single 'var' declarations with initializers are allowed (Annex B)
+                        // let/const are never allowed, even in sloppy mode
+                        if (!varDecl.kind().equals("var")) {
+                            throw new ParseException("SyntaxError", peek(), null, "for-in statement",
+                                "for-in loop " + varDecl.kind() + " declaration may not have an initializer");
+                        }
+                        if (varDecl.declarations().size() > 1) {
+                            throw new ParseException("SyntaxError", peek(), null, "for-in statement",
+                                "for-in loop variable declaration may not have an initializer");
+                        }
+                    }
+                }
+            } else if (initOrLeft instanceof Expression) {
+                // Check if it's an assignment expression
+                Expression expr = (Expression) initOrLeft;
+                if (expr instanceof AssignmentExpression) {
+                    throw new ParseException("SyntaxError", peek(), null, "for-in statement",
+                        "Invalid left-hand side in for-in loop: assignment expression not allowed");
+                }
+
+                // Convert left to pattern if it's an expression (for destructuring)
                 initOrLeft = convertToPatternIfNeeded(initOrLeft);
             }
+
             Expression right = parseExpression();
             consume(TokenType.RPAREN, "Expected ')' after for-in");
             Statement body = parseStatement();
@@ -3621,7 +3668,8 @@ public class Parser {
     }
 
     private boolean isAtEnd() {
-        return peek().type() == TokenType.EOF;
+        // Fast path: direct position check instead of peek() + type() + enum comparison
+        return current >= tokens.size() - 1;
     }
 
     private Token peek() {
@@ -3768,6 +3816,10 @@ public class Parser {
         return new Parser(source, forceModuleMode).parse();
     }
 
+    public static Program parse(String source, boolean forceModuleMode, boolean forceStrictMode) {
+        return new Parser(source, forceModuleMode, forceStrictMode).parse();
+    }
+
     /**
      * Check if source has 'module' flag in Test262 frontmatter
      */
@@ -3815,5 +3867,30 @@ public class Parser {
         // Check if negative section exists with phase: parse
         // Match "negative:" followed by any content, then "phase: parse"
         return yaml.matches("(?sm).*^negative:\\s*\\n.*?^\\s*phase:\\s*parse.*");
+    }
+
+    public static boolean hasOnlyStrictFlag(String source) {
+        // Parse Test262 YAML frontmatter for onlyStrict flag
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+            "/\\*---\\n([\\s\\S]*?)\\n---\\*/");
+        java.util.regex.Matcher matcher = pattern.matcher(source);
+
+        if (!matcher.find()) return false;
+
+        String yaml = matcher.group(1);
+
+        // Check inline format: flags: [onlyStrict]
+        if (yaml.matches("(?sm).*^flags:\\s*\\[[^\\]]*\\bonlyStrict\\b[^\\]]*\\].*")) {
+            return true;
+        }
+
+        // Check multiline format:
+        //   flags:
+        //     - onlyStrict
+        if (yaml.matches("(?sm).*^flags:\\s*\\n(?:\\s+-\\s+\\w+\\s*\\n)*?\\s+-\\s+onlyStrict\\s*(?:\\n|$).*")) {
+            return true;
+        }
+
+        return false;
     }
 }

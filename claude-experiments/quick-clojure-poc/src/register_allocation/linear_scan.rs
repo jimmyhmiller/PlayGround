@@ -32,12 +32,9 @@ pub struct LinearScan {
     pub max_registers: usize,
 }
 
-/// Create a physical register
+/// Create a physical register (callee-saved registers x19-x28)
 fn physical(index: usize) -> VirtualRegister {
-    VirtualRegister {
-        index,
-        is_argument: false,
-    }
+    VirtualRegister::Temp(index)
 }
 
 impl LinearScan {
@@ -217,43 +214,33 @@ impl LinearScan {
 
         // PRE-ALLOCATE ARGUMENT REGISTERS
         // ARM64 calling convention: arguments are passed in x0-x7
-        // Also pre-allocate x8 for closure self parameter
-        // Virtual registers with is_argument=true should map directly to their index
+        // Virtual registers with Argument variant should map directly to their index
         eprintln!("DEBUG: Pre-allocation phase - checking {} virtual registers", self.lifetimes.len());
         for (vreg, _interval) in &self.lifetimes {
-            if vreg.is_argument && vreg.index <= 8 {
-                // Map argument virtual register to corresponding physical register (x0-x8)
-                let physical_reg = VirtualRegister {
-                    index: vreg.index,
-                    is_argument: false,
-                };
-                self.allocated_registers.insert(*vreg, physical_reg);
-                eprintln!("DEBUG: Pre-allocated argument register v{} (is_argument: {}) -> x{}", vreg.index, vreg.is_argument, vreg.index);
-            } else if vreg.is_argument {
-                eprintln!("DEBUG: Argument register v{} NOT pre-allocated (index > 8)", vreg.index);
+            if let VirtualRegister::Argument(n) = vreg {
+                if *n <= 7 {
+                    // Map argument virtual register to corresponding physical register (x0-x7)
+                    // Physical registers are represented as Temp(index) since they're not function args
+                    let physical_reg = VirtualRegister::Temp(*n);
+                    self.allocated_registers.insert(*vreg, physical_reg);
+                    eprintln!("DEBUG: Pre-allocated argument register v_arg{} -> x{}", n, n);
+                } else {
+                    eprintln!("DEBUG: Argument register v_arg{} NOT pre-allocated (index > 7, will use stack)", n);
+                }
             }
         }
 
         // DEBUG: Check allocation map IMMEDIATELY after pre-allocation
         eprintln!("DEBUG: Allocation map AFTER pre-allocation ({} entries):", self.allocated_registers.len());
         for (vreg, physical) in &self.allocated_registers {
-            eprintln!("DEBUG:   v{} (is_argument: {}) -> x{}", vreg.index, vreg.is_argument, physical.index);
-        }
-
-        // DEBUG: Check if there are multiple v8 entries in lifetimes
-        let v8_entries: Vec<_> = self.lifetimes.iter().filter(|(v, _)| v.index == 8).collect();
-        if v8_entries.len() > 1 {
-            eprintln!("DEBUG: CRITICAL! Multiple v8 entries in lifetimes:");
-            for (v, interval) in v8_entries {
-                eprintln!("DEBUG:   v{} (is_argument: {}) lifetime: {:?}", v.index, v.is_argument, interval);
-            }
+            eprintln!("DEBUG:   {} -> x{}", vreg.display_name(), physical.index());
         }
 
         // Create sorted list of intervals (start, end, register)
         let mut intervals: Vec<(usize, usize, VirtualRegister)> = self
             .lifetimes
             .iter()
-            .filter(|(vreg, _)| !vreg.is_argument)  // Skip argument registers - already allocated
+            .filter(|(vreg, _)| !matches!(vreg, VirtualRegister::Argument(_)))  // Skip argument registers - already allocated
             .map(|(register, (start, end))| (*start, *end, *register))
             .collect();
 
@@ -268,25 +255,12 @@ impl LinearScan {
             // Free registers that are no longer live
             self.expire_old_intervals(start, &mut active);
 
-            // DEBUG: Print active list if v8 is involved
-            let has_v8_in_active = active.iter().any(|(_, _, v)| v.index == 8);
-            if has_v8_in_active || vreg.index == 8 {
-                eprintln!("DEBUG: Processing interval for v{}, active list:", vreg.index);
-                for (s, e, v) in &active {
-                    eprintln!("DEBUG:   v{} (is_arg: {}) [{}, {}]", v.index, v.is_argument, s, e);
-                }
-            }
-
             // Check if we need to spill
             if active.len() >= self.max_registers {
                 self.spill_at_interval(start, end, vreg, &mut active);
             } else {
                 // Allocate a free register
                 if let Some(physical_reg) = self.free_registers.pop() {
-                    if vreg.index == 8 && vreg.is_argument {
-                        eprintln!("DEBUG: UNEXPECTED! Allocating v8 (is_argument: true) during linear scan to x{}!", physical_reg.index);
-                        eprintln!("DEBUG: This should have been filtered out!");
-                    }
                     self.allocated_registers.insert(vreg, physical_reg);
                     active.push((start, end, vreg));
                     active.sort_by_key(|(_, end, _)| *end);
@@ -297,27 +271,20 @@ impl LinearScan {
             }
         }
 
-        // Replace spilled registers with Spill values, then replace allocated registers
+        // DEBUG: Check allocation map AFTER all allocation (disabled)
+        // eprintln!("DEBUG: Allocation map AFTER all allocation ({} entries):", self.allocated_registers.len());
+        // for (vreg, physical) in &self.allocated_registers {
+        //     eprintln!("DEBUG:   {} -> x{}", vreg.display_name(), physical.index());
+        // }
+
+        // Replace spilled registers with Spill values
         self.replace_spilled_registers();
 
-        // DEBUG: Check if v8 is in allocation map
-        let v8_arg = VirtualRegister { index: 8, is_argument: true };
-        if let Some(physical) = self.allocated_registers.get(&v8_arg) {
-            eprintln!("DEBUG: v8 (is_argument: true) allocated to x{} (is_argument: {})", physical.index, physical.is_argument);
-        } else {
-            eprintln!("DEBUG: v8 (is_argument: true) NOT in allocation map!");
-        }
-
-        // DEBUG: Print all allocations that involve index 8
-        eprintln!("DEBUG: All allocations involving index 8:");
-        for (vreg, physical) in &self.allocated_registers {
-            if vreg.index == 8 || physical.index == 8 {
-                eprintln!("DEBUG:   v{} (is_argument: {}) -> x{} (is_argument: {})",
-                    vreg.index, vreg.is_argument, physical.index, physical.is_argument);
-            }
-        }
-
-        self.replace_allocated_registers();
+        // DON'T replace allocated registers in the IR!
+        // This causes namespace collisions when physical registers (Temp(N)) conflict
+        // with virtual registers (also Temp(N)). The code generator will look up
+        // each virtual register in register_map instead.
+        // self.replace_allocated_registers();
 
         // Debug output disabled
         // eprintln!("\nFinal allocation:");
@@ -463,8 +430,13 @@ impl LinearScan {
             }
 
             // Interval has expired - free its register
+            // IMPORTANT: We free the physical register but DON'T remove from allocated_registers!
+            // The allocated_registers map is used by code generation to look up physical registers.
+            // Removing expired registers would break lookups for non-overlapping intervals that
+            // share the same physical register.
             if let Some(&physical_reg) = self.allocated_registers.get(&vreg) {
                 self.free_register(physical_reg);
+                // DON'T remove from allocated_registers - needed for code generation lookups!
             }
 
             active.remove(0);
@@ -483,13 +455,13 @@ impl LinearScan {
         active.sort_by_key(|(_, end, _)| *end);
 
         // Get the interval that ends last (spill candidate)
-        // IMPORTANT: Never spill argument registers (x0-x8)! They're reserved for calling convention
-        let spill_candidate_index = active.iter().rposition(|(_, _, v)| !v.is_argument);
+        // IMPORTANT: Never spill argument registers (x0-x7)! They're reserved for calling convention
+        let spill_candidate_index = active.iter().rposition(|(_, _, v)| !matches!(v, VirtualRegister::Argument(_)));
 
         if spill_candidate_index.is_none() {
             // All active registers are argument registers - spill current interval instead
             let stack_slot = self.allocate_stack_slot();
-            eprintln!("DEBUG LinearScan: Spilling v{} to stack slot {} (all active are arg regs)", vreg.index, stack_slot);
+            eprintln!("DEBUG LinearScan: Spilling {} to stack slot {} (all active are arg regs)", vreg.display_name(), stack_slot);
             self.spill_locations.insert(vreg, stack_slot);
             return;
         }
@@ -504,14 +476,10 @@ impl LinearScan {
             // Remove the spilled register from allocated_registers and mark it as spilled
             self.allocated_registers.remove(&spill_vreg);
             let stack_slot = self.allocate_stack_slot();
-            eprintln!("DEBUG LinearScan: Spilling v{} to stack slot {}", spill_vreg.index, stack_slot);
+            eprintln!("DEBUG LinearScan: Spilling {} to stack slot {}", spill_vreg.display_name(), stack_slot);
             self.spill_locations.insert(spill_vreg, stack_slot);
 
             // Allocate the freed physical register to current interval
-            if spill_vreg.index == 8 && spill_vreg.is_argument {
-                eprintln!("DEBUG: CRITICAL BUG! Spilling v8 (is_argument: true) which has physical reg x{}", physical_reg.index);
-                eprintln!("DEBUG:   Allocating x{} to v{} instead", physical_reg.index, vreg.index);
-            }
             self.allocated_registers.insert(vreg, physical_reg);
 
             // Remove from active and add current interval
@@ -521,16 +489,13 @@ impl LinearScan {
         } else {
             // Current interval is shorter, spill it instead
             let stack_slot = self.allocate_stack_slot();
-            eprintln!("DEBUG LinearScan: Spilling v{} to stack slot {} (short interval)", vreg.index, stack_slot);
+            eprintln!("DEBUG LinearScan: Spilling {} to stack slot {} (short interval)", vreg.display_name(), stack_slot);
             self.spill_locations.insert(vreg, stack_slot);
         }
     }
 
     /// Free a physical register
     fn free_register(&mut self, register: VirtualRegister) {
-        if register.index == 8 {
-            eprintln!("DEBUG: CRITICAL! Freeing x8 (is_argument: {}) - this should NEVER happen for argument registers!", register.is_argument);
-        }
         self.free_registers.push(register);
     }
 
@@ -547,10 +512,18 @@ impl LinearScan {
         allocation: &BTreeMap<VirtualRegister, VirtualRegister>,
     ) {
         let replace = |val: &mut IrValue| {
-            if let IrValue::Register(vreg) = val
-                && let Some(&physical) = allocation.get(vreg) {
+            if let IrValue::Register(vreg) = val {
+                // IMPORTANT: Don't replace Argument registers!
+                // They're already physical registers (x0-x7) and should not be looked up in the allocation map.
+                // The allocator maps Argument(n) -> Temp(n), but Temp(n) might be a virtual register
+                // with a different allocation, causing wrong physical register lookups.
+                if matches!(vreg, VirtualRegister::Argument(_)) {
+                    return;  // Keep Argument registers as-is
+                }
+                if let Some(&physical) = allocation.get(vreg) {
                     *val = IrValue::Register(physical);
                 }
+            }
         };
 
         match inst {
@@ -686,8 +659,9 @@ mod tests {
         // Verify all registers are now physical (x19-x28)
         for inst in &allocated {
             for reg in LinearScan::get_registers_in_instruction(inst) {
-                assert!(reg.index >= 19 && reg.index <= 28,
-                    "Register {} should be physical (19-28)", reg.index);
+                let idx = reg.index();
+                assert!(idx >= 19 && idx <= 28,
+                    "Register {} should be physical (19-28)", reg.display_name());
             }
         }
     }
