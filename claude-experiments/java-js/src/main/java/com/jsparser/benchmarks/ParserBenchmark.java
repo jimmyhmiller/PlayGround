@@ -9,8 +9,15 @@ import java.util.concurrent.TimeUnit;
 /**
  * JMH benchmarks for the JavaScript parser.
  *
- * Run with: mvn clean install && java -jar target/benchmarks.jar
- * Or: mvn exec:java -Dexec.mainClass="org.openjdk.jmh.Main" -Dexec.args="ParserBenchmark"
+ * Quick run (recommended):
+ *   ./run-benchmarks.sh ParserBenchmark
+ *
+ * Full benchmark run:
+ *   ./run-benchmarks.sh ParserBenchmark -f 1 -wi 3 -i 5
+ *
+ * Manual run:
+ *   mvn clean package -DskipTests
+ *   java --enable-preview -jar target/benchmarks.jar ParserBenchmark
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.MICROSECONDS)

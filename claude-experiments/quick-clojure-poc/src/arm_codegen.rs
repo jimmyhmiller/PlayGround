@@ -115,6 +115,16 @@ impl Arm64CodeGen {
             return Err(format!("Expected register for result, got {:?}", result_reg));
         };
 
+        // Determine which callee-saved registers (x19-x28) are used
+        let mut used_callee_saved: Vec<usize> = allocator.allocated_registers
+            .values()
+            .map(|vreg| vreg.index())
+            .filter(|&idx| idx >= 19 && idx <= 28)
+            .collect();
+        used_callee_saved.sort_unstable();
+        used_callee_saved.dedup();
+        eprintln!("DEBUG: Saving/restoring callee-saved registers: {:?}", used_callee_saved);
+
         // Count spills to determine stack space needed
         // Add 8 bytes padding so spills are above SP (ARM64 requirement)
         let stack_space = if num_stack_slots > 0 {
@@ -127,11 +137,30 @@ impl Arm64CodeGen {
 
         let allocated_instructions = allocator.finish();
 
+        // Collect function entry point labels (used in MakeFunction)
+        let mut function_labels = std::collections::HashSet::new();
+        for inst in &allocated_instructions {
+            if let Instruction::MakeFunction(_, label, _) = inst {
+                function_labels.insert(label.clone());
+            }
+        }
+
         // Emit function prologue
-        // Note: Callee-saved registers (x19-x28) are saved by the trampoline, not here
+        // FIXED: Save callee-saved registers (x19-x28) that are actually used
+        // Previously relied on trampoline, but BLR calls don't go through trampoline!
         // Save FP and LR
         self.emit_stp(29, 30, 31, -2);  // stp x29, x30, [sp, #-16]!
         self.emit_mov(29, 31);           // mov x29, sp (set frame pointer)
+
+        // Save used callee-saved registers in pairs (for 16-byte alignment)
+        for chunk in used_callee_saved.chunks(2) {
+            if chunk.len() == 2 {
+                self.emit_stp(chunk[0], chunk[1], 31, -2);  // stp xN, xM, [sp, #-16]!
+            } else {
+                // Odd number - save single register with padding
+                self.emit_stp(chunk[0], 31, 31, -2);  // stp xN, xzr, [sp, #-16]!
+            }
+        }
 
         // Allocate stack space for spills if needed
         if stack_space > 0 {
@@ -167,7 +196,16 @@ impl Arm64CodeGen {
         }
 
         // Emit function epilogue
-        // Note: Callee-saved registers (x19-x28) are restored by the trampoline, not here
+        // FIXED: Restore callee-saved registers in reverse order
+        for chunk in used_callee_saved.chunks(2).rev() {
+            if chunk.len() == 2 {
+                self.emit_ldp(chunk[0], chunk[1], 31, 2);  // ldp xN, xM, [sp], #16
+            } else {
+                // Odd number - restore single register (ignore padding)
+                self.emit_ldp(chunk[0], 31, 31, 2);  // ldp xN, xzr, [sp], #16
+            }
+        }
+
         // Restore FP and LR
         self.emit_ldp(29, 30, 31, 2);    // ldp x29, x30, [sp], #16
 
@@ -300,6 +338,7 @@ impl Arm64CodeGen {
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                // eprintln!("DEBUG: Untag - dst={:?} (x{}), src={:?} (x{})", dst, dst_reg, src, src_reg);
                 // Untag: arithmetic right shift by 3
                 self.emit_asr_imm(dst_reg, src_reg, 3);
                 self.store_spill(dst_reg, dest_spill);
@@ -309,6 +348,7 @@ impl Arm64CodeGen {
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                // eprintln!("DEBUG: Tag - dst={:?} (x{}), src={:?} (x{})", dst, dst_reg, src, src_reg);
                 // Tag: left shift by 3 (int tag is 000)
                 self.emit_lsl_imm(dst_reg, src_reg, 3);
                 self.store_spill(dst_reg, dest_spill);
@@ -319,8 +359,8 @@ impl Arm64CodeGen {
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
                 let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
-                // eprintln!("DEBUG: AddInt - dst={:?} (x{}), src1={:?} (x{}), src2={:?} (x{}), spill={:?}",
-                //          dst, dst_reg, src1, src1_reg, src2, src2_reg, dest_spill);
+                // eprintln!("DEBUG: AddInt - dst={:?} (x{}), src1={:?} (x{}), src2={:?} (x{})",
+                //          dst, dst_reg, src1, src1_reg, src2, src2_reg);
                 self.emit_add(dst_reg, src1_reg, src2_reg);
                 self.store_spill(dst_reg, dest_spill);
             }

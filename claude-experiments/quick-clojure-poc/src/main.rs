@@ -387,6 +387,21 @@ fn run_script(filename: &str) {
                         match compiler.compile(&ast) {
                             Ok(result_reg) => {
                                 let instructions = compiler.take_instructions();
+
+                                // DEBUG: Print ALL IR
+                                if instructions.len() > 2 {
+                                    eprintln!("\n===== IR for {:?} ({} instructions) =====",
+                                        match &ast {
+                                            Expr::Def { name, .. } => format!("def {}", name),
+                                            _ => "expression".to_string()
+                                        },
+                                        instructions.len());
+                                    for (i, inst) in instructions.iter().enumerate() {
+                                        eprintln!("{:3}: {:?}", i, inst);
+                                    }
+                                    eprintln!("Result register: {:?}\n", result_reg);
+                                }
+
                                 let mut codegen = Arm64CodeGen::new();
 
                                 match codegen.compile(&instructions, &result_reg, 0) {

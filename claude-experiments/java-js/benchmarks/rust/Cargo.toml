@@ -1,0 +1,19 @@
+[package]
+name = "javascript-parser-benchmarks"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "benchmark"
+path = "src/main.rs"
+
+[dependencies]
+# OXC - The fastest JavaScript parser
+oxc_parser = "0.38"
+oxc_allocator = "0.38"
+oxc_span = "0.38"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

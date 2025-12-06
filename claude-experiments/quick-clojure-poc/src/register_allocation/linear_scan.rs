@@ -95,6 +95,17 @@ impl LinearScan {
                 }
             }
         }
+
+        // DEBUG: Print lifetimes for multi-call cases (disabled)
+        // if result.len() > 8 {
+        //     eprintln!("DEBUG: Computed lifetimes for {} registers:", result.len());
+        //     let mut sorted_lifetimes: Vec<_> = result.iter().collect();
+        //     sorted_lifetimes.sort_by_key(|(_, (start, _))| *start);
+        //     for (reg, (start, end)) in sorted_lifetimes {
+        //         eprintln!("  {} lifetime: {} - {}", reg.display_name(), start, end);
+        //     }
+        // }
+
         result
     }
 

@@ -14,9 +14,18 @@ import java.util.concurrent.TimeUnit;
  * Comparative benchmarks between different JVM JavaScript parsers:
  * - Our custom parser (java-js-parser)
  * - Mozilla Rhino
+ * - Nashorn
  * - GraalVM JavaScript (GraalJS)
  *
- * Run with: mvn clean compile && mvn exec:exec@run-benchmarks -Dexec.args="ComparativeParserBenchmark"
+ * Quick run (recommended):
+ *   ./run-benchmarks.sh ComparativeParserBenchmark
+ *
+ * Full benchmark run:
+ *   ./run-benchmarks.sh ComparativeParserBenchmark -f 1 -wi 3 -i 5
+ *
+ * Manual run:
+ *   mvn clean package -DskipTests
+ *   java --enable-preview -jar target/benchmarks.jar ComparativeParserBenchmark
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.MICROSECONDS)

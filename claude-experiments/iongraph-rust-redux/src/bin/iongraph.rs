@@ -3,7 +3,9 @@
 // Usage:
 //   iongraph <universal-json> [output.svg]                              # Universal IR (default)
 //   iongraph --ion <ion-json> <function-index> [pass-index] [output.svg] # Ion format
-//   iongraph --html <ion-json> <function-index> [output.html]           # HTML format (all passes)
+//   iongraph --html <ion-json> [output.html]                            # HTML format (pre-rendered, ~18MB)
+//   iongraph --wasm <ion-json> [output.html]                            # WASM format (client-side, ~1-2MB)
+//   iongraph --viewer [output.html]                                     # WASM viewer (drag-and-drop, ~350KB)
 
 use iongraph_rust_redux::graph::{Graph, GraphOptions};
 use iongraph_rust_redux::compilers::ion::schema::{IonJSON, Pass};
@@ -13,6 +15,7 @@ use iongraph_rust_redux::html_templates::HTMLTemplate;
 use iongraph_rust_redux::javascript_generator::JavaScriptGenerator;
 use iongraph_rust_redux::layout_provider::LayoutProvider;
 use iongraph_rust_redux::pure_svg_text_layout_provider::PureSVGTextLayoutProvider;
+use iongraph_rust_redux::wasm_html_generator::{generate_wasm_html, generate_wasm_viewer};
 use std::env;
 use std::fs;
 use std::process;
@@ -21,12 +24,16 @@ fn print_usage(program_name: &str) {
     eprintln!("Usage:");
     eprintln!("  {} <universal-json> [output.svg]", program_name);
     eprintln!("  {} --ion <ion-json> <function-index> [pass-index] [output.svg]", program_name);
-    eprintln!("  {} --html <ion-json> [output.html]", program_name);
+    eprintln!("  {} --html <ion-json> [output.html]        # Pre-rendered HTML (~18MB)", program_name);
+    eprintln!("  {} --wasm <ion-json> [output.html]        # WASM-based HTML (~1-2MB)", program_name);
+    eprintln!("  {} --viewer [output.html]                 # WASM viewer w/ drag-and-drop (~350KB)", program_name);
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  {} universal.json output.svg", program_name);
     eprintln!("  {} --ion mega-complex.json 0 0 output.svg", program_name);
-    eprintln!("  {} --html mega-complex.json output.html    # All functions", program_name);
+    eprintln!("  {} --html mega-complex.json output.html    # Pre-rendered (large)", program_name);
+    eprintln!("  {} --wasm mega-complex.json output.html    # Embedded JSON (medium)", program_name);
+    eprintln!("  {} --viewer viewer.html                    # Drag-and-drop any JSON (tiny)", program_name);
 }
 
 fn main() {
@@ -42,6 +49,8 @@ fn main() {
     match args[1].as_str() {
         "--ion" => handle_ion_format(&args),
         "--html" => handle_html_format(&args),
+        "--wasm" => handle_wasm_format(&args),
+        "--viewer" => handle_viewer_format(&args),
         _ => handle_universal_format(&args),
     }
 }
@@ -495,4 +504,80 @@ fn render_all_functions_to_html(data: &IonJSON, output_path: &str) {
 
     eprintln!("✓ HTML generated: {}", output_path);
     eprintln!("  {} functions, {} total passes", data.functions.len(), total_passes);
+}
+
+fn handle_wasm_format(args: &[String]) {
+    // args[0] = program name
+    // args[1] = --wasm
+    // args[2] = json path
+    // args[3] = output path (optional)
+
+    if args.len() < 3 {
+        eprintln!("Error: WASM format requires <ion-json>");
+        print_usage(&args[0]);
+        process::exit(1);
+    }
+
+    let json_path = &args[2];
+    let output_path = args.get(3).map(|s| s.as_str()).unwrap_or("output.html");
+
+    // Read and parse the JSON file
+    let json_str = fs::read_to_string(json_path).unwrap_or_else(|err| {
+        eprintln!("Error reading file {}: {}", json_path, err);
+        process::exit(1);
+    });
+
+    let data: IonJSON = serde_json::from_str(&json_str).unwrap_or_else(|err| {
+        eprintln!("Error parsing Ion JSON: {}", err);
+        process::exit(1);
+    });
+
+    eprintln!(
+        "Generating WASM HTML for {} functions",
+        data.functions.len()
+    );
+
+    // Generate WASM-based HTML
+    generate_wasm_html(&data, output_path).unwrap_or_else(|err| {
+        eprintln!("Error generating WASM HTML: {}", err);
+        eprintln!();
+        eprintln!("Make sure you have built the WASM binary first:");
+        eprintln!("  wasm-pack build --target web --out-dir pkg");
+        process::exit(1);
+    });
+
+    eprintln!("✓ WASM HTML generated: {}", output_path);
+    eprintln!("  {} functions, client-side rendering enabled", data.functions.len());
+    eprintln!();
+    eprintln!("Note: This HTML file uses WASM for client-side rendering.");
+    eprintln!("      Graphs will be rendered on-demand in the browser.");
+}
+
+fn handle_viewer_format(args: &[String]) {
+    // args[0] = program name
+    // args[1] = --viewer
+    // args[2] = output path (optional)
+
+    let output_path = args.get(2).map(|s| s.as_str()).unwrap_or("iongraph-viewer.html");
+
+    eprintln!("Generating standalone WASM viewer...");
+
+    // Generate WASM viewer HTML
+    generate_wasm_viewer(output_path).unwrap_or_else(|err| {
+        eprintln!("Error generating WASM viewer: {}", err);
+        eprintln!();
+        eprintln!("Make sure you have built the WASM binary first:");
+        eprintln!("  wasm-pack build --target web --out-dir pkg");
+        process::exit(1);
+    });
+
+    eprintln!("✓ WASM viewer generated: {}", output_path);
+    eprintln!();
+    eprintln!("Features:");
+    eprintln!("  • Drag-and-drop any Ion JSON file");
+    eprintln!("  • Or click 'Choose File' to select a file");
+    eprintln!("  • Client-side rendering with WASM");
+    eprintln!("  • Works offline (WASM embedded)");
+    eprintln!();
+    eprintln!("Open in browser: open {}", output_path);
 }

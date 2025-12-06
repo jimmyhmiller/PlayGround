@@ -10,6 +10,11 @@ pub mod javascript_generator;
 pub mod layout_provider;
 pub mod pure_svg_text_layout_provider;
 pub mod utils;
+pub mod wasm_html_generator;
+
+// WASM module (conditionally compiled for wasm32 target)
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
 
 // Re-export core traits for easy access
 pub use core::{CompilerIR, IRInstruction, IRBlock, SemanticAttribute};
