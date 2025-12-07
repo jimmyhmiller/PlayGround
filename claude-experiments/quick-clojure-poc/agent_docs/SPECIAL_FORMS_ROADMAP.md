@@ -2,7 +2,7 @@
 
 ## Current Status
 
-### ✅ Already Implemented (8/18)
+### ✅ Already Implemented (12/18)
 1. ✅ **def** - Define vars with metadata support
 2. ✅ **if** - Conditional expressions
 3. ✅ **do** - Sequential expression evaluation
@@ -11,18 +11,18 @@
 6. ✅ **ns** - Namespace declaration (custom, not standard Clojure)
 7. ✅ **use** - Import namespaces (custom, not standard Clojure)
 8. ✅ **binding** - Dynamic binding (custom, not standard Clojure)
+9. ✅ **let** - Local bindings
+10. ✅ **fn** - Function definitions (with closures, multi-arity)
+11. ✅ **loop** - Recursion point with tail-call optimization
+12. ✅ **recur** - Tail recursion (works in both loop and fn)
 
-### ❌ Missing Core Special Forms (10/18)
-1. ❌ **let** - Local bindings ⭐ **HIGHEST PRIORITY**
-2. ❌ **fn** - Function definitions ⭐ **HIGHEST PRIORITY**
-3. ❌ **loop** - Recursion point
-4. ❌ **recur** - Tail recursion
-5. ❌ **var** - Get var object
-6. ❌ **throw** - Throw exceptions
-7. ❌ **try/catch/finally** - Exception handling
-8. ❌ **monitor-enter/monitor-exit** - Low-level synchronization
-9. ❌ **.** (dot) - Java interop (method/field access)
-10. ❌ **new** - Java object creation
+### ❌ Missing Core Special Forms (6/18)
+1. ❌ **var** - Get var object
+2. ❌ **throw** - Throw exceptions
+3. ❌ **try/catch/finally** - Exception handling
+4. ❌ **monitor-enter/monitor-exit** - Low-level synchronization
+5. ❌ **.** (dot) - Java interop (method/field access)
+6. ❌ **new** - Java object creation
 
 ## Priority Ranking
 

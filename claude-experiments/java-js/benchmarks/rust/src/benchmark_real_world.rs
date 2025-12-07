@@ -24,12 +24,14 @@ struct BenchmarkResult {
     throughput_kb_per_ms: f64,
 }
 
+const WARMUP_ITERATIONS: usize = 5;
+
 fn benchmark<F>(name: &str, library: &str, code: &str, mut parse_fn: F, iterations: usize) -> BenchmarkResult
 where
     F: FnMut(&str),
 {
     // Warmup
-    for _ in 0..3 {
+    for _ in 0..WARMUP_ITERATIONS {
         parse_fn(code);
     }
 
@@ -136,6 +138,7 @@ fn main() {
     println!("\n{}", "═".repeat(80));
     println!("Real-World JavaScript Library Benchmarks (Rust)");
     println!("{}", "═".repeat(80));
+    println!("Warmup iterations: {}", WARMUP_ITERATIONS);
     println!("Measurement iterations: {}", ITERATIONS);
     println!("{}", "═".repeat(80));
 

@@ -42,6 +42,7 @@ impl VirtualRegister {
     }
 
     /// Display name for debugging
+    #[allow(dead_code)]
     pub fn display_name(&self) -> String {
         match self {
             VirtualRegister::Temp(n) => format!("v{}", n),
@@ -98,7 +99,8 @@ pub enum Instruction {
 
     // Constants
     LoadConstant(IrValue, IrValue),
-    LoadVar(IrValue, IrValue),  // LoadVar(dest_reg, var_ptr) - dereferences var at runtime, checks dynamic bindings
+    LoadVar(IrValue, IrValue),  // LoadVar(dest_reg, var_ptr) - direct load for non-dynamic vars
+    LoadVarDynamic(IrValue, IrValue),  // LoadVarDynamic(dest_reg, var_ptr) - trampoline call for ^:dynamic vars
     StoreVar(IrValue, IrValue), // StoreVar(var_ptr, value_reg) - stores value into var at runtime
     LoadTrue(IrValue),
     LoadFalse(IrValue),
@@ -117,8 +119,7 @@ pub enum Instruction {
     Assign(IrValue, IrValue),  // dst, src
 
     // Function operations
-    MakeFunction(IrValue, Label, Vec<IrValue>), // MakeFunction(dst, code_label, closure_values) - create function object (for inline compilation)
-    MakeFunctionPtr(IrValue, usize, Vec<IrValue>), // MakeFunctionPtr(dst, code_ptr, closure_values) - create function with raw code pointer (for per-function compilation)
+    MakeFunctionPtr(IrValue, usize, Vec<IrValue>), // MakeFunctionPtr(dst, code_ptr, closure_values) - create function with raw code pointer
     LoadClosure(IrValue, IrValue, usize),   // LoadClosure(dst, fn_obj, index) - load closure variable
     Call(IrValue, IrValue, Vec<IrValue>),   // Call(dst, fn, args) - invoke function
     CallWithSaves(IrValue, IrValue, Vec<IrValue>, Vec<IrValue>),  // CallWithSaves(dst, fn, args, saves) - call with register preservation

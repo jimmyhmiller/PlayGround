@@ -42,10 +42,6 @@ pub struct Arm64CodeGen {
     /// Number of stack slots needed (from register allocator)
     num_stack_slots: usize,
 
-    /// Set of labels that are function entry points (from MakeFunction instructions)
-    /// These need their own prologue/epilogue for proper callee-saved register handling
-    function_labels: std::collections::HashSet<Label>,
-
     /// Callee-saved registers that were saved in the function prologue (for per-function compilation)
     /// This is used by Ret to emit the correct epilogue
     saved_callee_registers: Vec<usize>,
@@ -78,7 +74,6 @@ impl Arm64CodeGen {
             placeholder_positions: HashMap::new(),
             current_function_stack_bytes: 0,
             num_stack_slots: 0,
-            function_labels: std::collections::HashSet::new(),
             saved_callee_registers: Vec::new(),
             function_stack_space: 0,
             is_per_function_compilation: false,
@@ -208,7 +203,6 @@ impl Arm64CodeGen {
         self.placeholder_positions.clear();
         self.current_function_stack_bytes = 0;
         self.num_stack_slots = 0;
-        self.function_labels.clear();
 
         // Run linear scan register allocation
         let mut allocator = LinearScan::new(instructions.to_vec(), num_registers);
@@ -224,23 +218,18 @@ impl Arm64CodeGen {
 
         // Debug output BEFORE consuming allocator
         let num_stack_slots = allocator.next_stack_slot;
-        let num_spills = allocator.spill_locations.len();
-        eprintln!("DEBUG: {} spills, {} total stack slots", num_spills, num_stack_slots);
-        eprintln!("DEBUG: Spill locations from codegen allocator:");
-        for (vreg, slot) in &allocator.spill_locations {
-            eprintln!("  {} -> slot {}", vreg.display_name(), slot);
-        }
+        // eprintln!("DEBUG: {} spills, {} total stack slots", allocator.spill_locations.len(), num_stack_slots);
 
         // Store the register allocation map for use in codegen
         self.register_map = allocator.allocated_registers.clone();
 
         // Debug: print allocation for v27 if it exists
-        let v27 = crate::ir::VirtualRegister::Temp(27);
-        if let Some(physical) = self.register_map.get(&v27) {
-            eprintln!("DEBUG: v27 allocated to x{}", physical.index());
-        } else {
-            eprintln!("DEBUG: v27 not in allocation map (might be physical already or not used)");
-        }
+        // let v27 = crate::ir::VirtualRegister::Temp(27);
+        // if let Some(physical) = self.register_map.get(&v27) {
+        //     eprintln!("DEBUG: v27 allocated to x{}", physical.index());
+        // } else {
+        //     eprintln!("DEBUG: v27 not in allocation map (might be physical already or not used)");
+        // }
 
         // Find the physical register for the result (before consuming allocator)
         let result_physical = if let IrValue::Register(vreg) = result_reg {
@@ -259,7 +248,7 @@ impl Arm64CodeGen {
             .collect();
         used_callee_saved.sort_unstable();
         used_callee_saved.dedup();
-        eprintln!("DEBUG: Saving/restoring callee-saved registers: {:?}", used_callee_saved);
+        // eprintln!("DEBUG: Saving/restoring callee-saved registers: {:?}", used_callee_saved);
 
         // Count spills to determine stack space needed
         // Add 8 bytes padding so spills are above SP (ARM64 requirement)
@@ -272,18 +261,9 @@ impl Arm64CodeGen {
         // Store for use in calculate_stack_size
         self.num_stack_slots = num_stack_slots;
 
-        eprintln!("DEBUG: Allocating {} bytes of stack space", stack_space);
+        // eprintln!("DEBUG: Allocating {} bytes of stack space", stack_space);
 
         let allocated_instructions = allocator.finish();
-
-        // Collect function entry point labels (used in MakeFunction)
-        // These labels need their own prologue/epilogue for proper nested call support
-        for inst in &allocated_instructions {
-            if let Instruction::MakeFunction(_, label, _) = inst {
-                self.function_labels.insert(label.clone());
-            }
-        }
-        eprintln!("DEBUG: Function entry point labels: {:?}", self.function_labels);
 
         // Emit function prologue
         // FIXED: Save callee-saved registers (x19-x28) that are actually used
@@ -324,7 +304,7 @@ impl Arm64CodeGen {
         // But for top-level code that falls through (no explicit Ret), we need to move result to x0
         // Since both paths go through here, and Ret already ensures result is in x0,
         // this is a harmless mov x0, x0 for functions with Ret, but necessary for top-level code
-        eprintln!("DEBUG: Epilogue - result_physical=x{}", result_physical);
+        // eprintln!("DEBUG: Epilogue - result_physical=x{}", result_physical);
         if result_physical != 0 {
             self.emit_mov(0, result_physical);
         }
@@ -389,18 +369,42 @@ impl Arm64CodeGen {
             }
 
             Instruction::LoadVar(dst, var_ptr) => {
-                // LoadVar: call trampoline to check dynamic bindings
-                // ARM64 calling convention:
-                // - x0 = argument (var_ptr, tagged)
-                // - x0 = return value (tagged)
-                // - x30 = link register (return address)
-                // - x19-x28 are callee-saved (our allocator uses these, so they're safe)
+                // LoadVar: Direct memory load from var's value field (non-dynamic vars)
+                // Var layout: [header(8)] [ns_ptr(8)] [symbol_ptr(8)] [value(8)]
+                // Value is at offset 24 (3 * 8 bytes)
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
                 match var_ptr {
                     IrValue::TaggedConstant(tagged_ptr) => {
-                        eprintln!("DEBUG LoadVar codegen: var_ptr={:x}", tagged_ptr);
+                        // Untag var pointer (shift right 3)
+                        let untagged_ptr = (*tagged_ptr as usize) >> 3;
+
+                        // Load untagged pointer into temp register
+                        let temp_reg = 15;  // x15 as temp
+                        self.emit_mov_imm(temp_reg, untagged_ptr as i64);
+
+                        // Load value field (offset 24)
+                        self.emit_ldr_offset(dst_reg, temp_reg, 24);
+                    }
+                    _ => return Err(format!("LoadVar requires constant var pointer: {:?}", var_ptr)),
+                }
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::LoadVarDynamic(dst, var_ptr) => {
+                // LoadVarDynamic: Call trampoline to check dynamic bindings (^:dynamic vars)
+                // This is slower but necessary for vars that may have thread-local bindings
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+
+                match var_ptr {
+                    IrValue::TaggedConstant(tagged_ptr) => {
+                        // Save x0-x7 to stack (argument registers that might be in use)
+                        self.emit_stp(0, 1, 31, -2);
+                        self.emit_stp(2, 3, 31, -2);
+                        self.emit_stp(4, 5, 31, -2);
+                        self.emit_stp(6, 7, 31, -2);
 
                         // Load tagged var_ptr into x0 (first argument)
                         self.emit_mov_imm(0, *tagged_ptr as i64);
@@ -410,53 +414,51 @@ impl Arm64CodeGen {
                         self.emit_mov_imm(15, func_addr as i64);
 
                         // Call the trampoline
-                        // BLR x15 - stores return address in x30, jumps to x15
                         self.emit_blr(15);
 
-                        // Result is in x0, move to destination if needed
-                        if dst_reg != 0 {
-                            self.emit_mov(dst_reg, 0);
+                        // Result is in x0, save to temp register x9
+                        let temp_result = 9;
+                        self.emit_mov(temp_result, 0);
+
+                        // Restore x0-x7 from stack (reverse order)
+                        self.emit_ldp(6, 7, 31, 2);
+                        self.emit_ldp(4, 5, 31, 2);
+                        self.emit_ldp(2, 3, 31, 2);
+                        self.emit_ldp(0, 1, 31, 2);
+
+                        // Move result from temp to final destination
+                        if dst_reg != temp_result {
+                            self.emit_mov(dst_reg, temp_result);
                         }
                     }
-                    _ => return Err(format!("LoadVar requires constant var pointer: {:?}", var_ptr)),
+                    _ => return Err(format!("LoadVarDynamic requires constant var pointer: {:?}", var_ptr)),
                 }
                 self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::StoreVar(var_ptr, value) => {
-                eprintln!("DEBUG: StoreVar - var_ptr={:?}, value={:?}", var_ptr, value);
-                eprintln!("DEBUG: StoreVar - code position before: {}", self.code.len());
+                // eprintln!("DEBUG: StoreVar - var_ptr={:?}, value={:?}", var_ptr, value);
+                // eprintln!("DEBUG: StoreVar - code position before: {}", self.code.len());
                 // StoreVar: store value into var at runtime
                 // Var layout: [header(8)] [ns_ptr(8)] [symbol_ptr(8)] [value(8)]
                 // We want to write to field 2 (value) which is at offset 24 bytes (3 * 8)
                 let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
-                eprintln!("DEBUG: StoreVar - value_reg=x{}, code position: {}", value_reg, self.code.len());
+                // eprintln!("DEBUG: StoreVar - value_reg=x{}, code position: {}", value_reg, self.code.len());
 
                 match var_ptr {
                     IrValue::TaggedConstant(tagged_ptr) => {
                         // Untag the var pointer (shift right by 3)
                         let untagged_ptr = (*tagged_ptr as usize) >> 3;
-                        eprintln!("DEBUG: StoreVar - untagged_ptr={:x}", untagged_ptr);
 
-                        let code_pos_before_movimm = self.code.len();
                         // Load var pointer into a temp register
                         // Use x15 as temp register - it's the highest general purpose register
                         // and unlikely to be allocated by our simple allocator
                         let temp_reg = 15;
                         self.emit_mov_imm(temp_reg, untagged_ptr as i64);
-                        let code_pos_after_movimm = self.code.len();
-                        eprintln!("DEBUG: StoreVar - emit_mov_imm emitted {} instructions from {} to {}",
-                                 code_pos_after_movimm - code_pos_before_movimm,
-                                 code_pos_before_movimm, code_pos_after_movimm - 1);
 
                         // Store value into var (offset 24 = header + ns_ptr + symbol_ptr)
                         // str value_reg, [temp_reg, #24]
-                        let code_pos_before_str = self.code.len();
                         self.emit_str_offset(value_reg, temp_reg, 24);
-                        eprintln!("DEBUG: StoreVar - emit_str at position {}, storing x{} to [x{}+24]",
-                                 code_pos_before_str, value_reg, temp_reg);
-                        eprintln!("DEBUG: StoreVar - actual str instruction: 0x{:08x}",
-                                 self.code[code_pos_before_str]);
                     }
                     _ => return Err(format!("StoreVar requires constant var pointer: {:?}", var_ptr)),
                 }
@@ -642,7 +644,7 @@ impl Arm64CodeGen {
             Instruction::Label(label) => {
                 // Record position of this label
                 let pos = self.code.len();
-                eprintln!("DEBUG: Label {} at code position {}", label, pos);
+                // eprintln!("DEBUG: Label {} at code position {}", label, pos);
                 self.label_positions.insert(label.clone(), pos);
                 // Note: With per-function compilation, functions are NOT compiled inline.
                 // Each function has its own prologue/epilogue emitted by compile_function().
@@ -652,7 +654,7 @@ impl Arm64CodeGen {
                 // Emit unconditional branch
                 // We'll fix up the offset later
                 let fixup_index = self.code.len();
-                eprintln!("DEBUG: Jump to {} from code position {}", label, fixup_index);
+                // eprintln!("DEBUG: Jump to {} from code position {}", label, fixup_index);
                 self.pending_fixups.push((fixup_index, label.clone()));
                 // Placeholder - will be patched in apply_fixups
                 self.code.push(0x14000000); // B #0
@@ -719,101 +721,9 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            Instruction::MakeFunction(dst, label, closure_values) => {
-                eprintln!("DEBUG: MakeFunction - dst={:?}, label={}, closure_values={:?}", dst, label, closure_values);
-
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-
-                if closure_values.is_empty() {
-                    // Regular function (no closures) - just tag the code pointer
-                    // Tagged value = (code_ptr << 3) | 0b100
-                    eprintln!("DEBUG: MakeFunction - creating regular function (no closures)");
-
-                    // Load code address with ADR into a temporary register
-                    let temp_reg = 10;  // Use x10 as temporary
-                    self.emit_adr(temp_reg, label.clone());
-
-                    // Shift left by 3 and add Function tag (0b100)
-                    // LSL Xd, Xn, #3 = UBFM Xd, Xn, #61, #60
-                    // From Beagle: immr = 64 - shift = 61, imms = immr - 1 = 60
-                    // Base: 0b0_10_100110_0_000000_000000_00000_00000 = 0x53000000
-                    // With sf=1, n=1: 0xD37DF000 | (rn << 5) | rd
-                    let lsl_instruction = 0xD37DF000u32 | ((temp_reg as u32) << 5) | (dst_reg as u32);
-                    self.code.push(lsl_instruction);
-
-                    // ADD Xd, Xn, #0b100 (set tag bits)
-                    // After LSL by 3, low 3 bits are 0, so we can add the tag
-                    // ADD Xd, Xn, #imm12 = 0x91000000 | (imm12 << 10) | (rn << 5) | rd
-                    let add_instruction = 0x91000000u32 | (0b100 << 10) | ((dst_reg as u32) << 5) | (dst_reg as u32);
-                    self.code.push(add_instruction);
-
-                    eprintln!("DEBUG: MakeFunction - tagged function pointer in x{}", dst_reg);
-                } else {
-                    // Closure - allocate heap object with closure values
-                    // NEW APPROACH: Stack-based capture (no limit on number of values!)
-                    eprintln!("DEBUG: MakeFunction - creating closure with {} captured values", closure_values.len());
-
-                    // Step 1: Allocate stack space for all values at once (maintains 16-byte alignment)
-                    let total_stack_space = closure_values.len() * 8;
-                    // Round up to 16-byte alignment
-                    let aligned_stack_space = ((total_stack_space + 15) / 16) * 16;
-                    if aligned_stack_space > 0 {
-                        self.emit_sub_sp_imm(aligned_stack_space as i64);
-                    }
-
-                    // Step 2: Store values directly to stack (avoids register conflicts)
-                    for (i, value) in closure_values.iter().enumerate() {
-                        let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
-                        let offset = i * 8;
-                        eprintln!("DEBUG: MakeFunction - storing closure value {} from x{} (IrValue={:?}) at SP+{}", i, src_reg, value, offset);
-                        self.emit_str_offset(src_reg, 31, offset as i32);  // x31 = sp
-                    }
-
-                    // Step 4: Save stack pointer (points to start of values array)
-                    // Use x10 as temp (won't conflict with callee-saved x19-x28)
-                    let values_ptr_reg = 10;  // x10 for values pointer
-                    self.emit_mov(values_ptr_reg, 31);  // x31 = sp
-
-                    // Step 4: Set up arguments for trampoline call
-                    // x0 = 0 (anonymous function - no name for now)
-                    self.emit_mov_imm(0, 0);
-
-                    // x1 = code_ptr (address of the label)
-                    self.emit_adr(1, label.clone());
-
-                    // x2 = closure_count
-                    self.emit_mov_imm(2, closure_values.len() as i64);
-
-                    // x3 = values_ptr (pointer to values on stack)
-                    self.emit_mov(3, values_ptr_reg);
-
-                    // Step 5: Call trampoline to allocate closure heap object
-                    let func_addr = crate::trampoline::trampoline_allocate_function as usize;
-                    eprintln!("DEBUG: MakeFunction - calling trampoline_allocate_function for closure at {:x}", func_addr);
-                    self.emit_external_call(func_addr, "trampoline_allocate_function");
-
-                    // Step 6: Clean up stack (pop all values with correct alignment)
-                    if aligned_stack_space > 0 {
-                        eprintln!("DEBUG: MakeFunction - cleaning up {} bytes of stack", aligned_stack_space);
-                        self.emit_add_sp_imm(aligned_stack_space as i64);
-                    }
-
-                    // Step 7: Result is in x0 (tagged closure pointer with 0b101 tag)
-                    if dst_reg != 0 {
-                        self.emit_mov(dst_reg, 0);
-                        eprintln!("DEBUG: MakeFunction - moved closure result from x0 to x{}", dst_reg);
-                    }
-                }
-
-                self.store_spill(dst_reg, dest_spill);
-                eprintln!("DEBUG: MakeFunction - done, spill={:?}", dest_spill);
-            }
-
             Instruction::MakeFunctionPtr(dst, code_ptr, closure_values) => {
-                // MakeFunctionPtr: Like MakeFunction but with a raw code pointer
-                // Used for per-function compilation where code is already compiled
-                eprintln!("DEBUG: MakeFunctionPtr - dst={:?}, code_ptr={:x}, closure_values={:?}", dst, code_ptr, closure_values);
+                // MakeFunctionPtr: create function with raw code pointer
+                // eprintln!("DEBUG: MakeFunctionPtr - dst={:?}, code_ptr={:x}, closure_values={:?}", dst, code_ptr, closure_values);
 
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
@@ -821,7 +731,7 @@ impl Arm64CodeGen {
                 if closure_values.is_empty() {
                     // Regular function (no closures) - just tag the code pointer
                     // Tagged value = (code_ptr << 3) | 0b100
-                    eprintln!("DEBUG: MakeFunctionPtr - creating regular function (no closures)");
+                    // eprintln!("DEBUG: MakeFunctionPtr - creating regular function (no closures)");
 
                     // Load raw code pointer into temp register
                     let temp_reg = 10;  // Use x10 as temporary
@@ -835,10 +745,10 @@ impl Arm64CodeGen {
                     let add_instruction = 0x91000000u32 | (0b100 << 10) | ((dst_reg as u32) << 5) | (dst_reg as u32);
                     self.code.push(add_instruction);
 
-                    eprintln!("DEBUG: MakeFunctionPtr - tagged function pointer in x{}", dst_reg);
+                    // eprintln!("DEBUG: MakeFunctionPtr - tagged function pointer in x{}", dst_reg);
                 } else {
                     // Closure - allocate heap object with closure values
-                    eprintln!("DEBUG: MakeFunctionPtr - creating closure with {} captured values", closure_values.len());
+                    // eprintln!("DEBUG: MakeFunctionPtr - creating closure with {} captured values", closure_values.len());
 
                     // Step 1: Allocate stack space for all values
                     let total_stack_space = closure_values.len() * 8;
@@ -880,7 +790,7 @@ impl Arm64CodeGen {
                 }
 
                 self.store_spill(dst_reg, dest_spill);
-                eprintln!("DEBUG: MakeFunctionPtr - done");
+                // eprintln!("DEBUG: MakeFunctionPtr - done");
             }
 
             Instruction::LoadClosure(dst, fn_obj, index) => {
@@ -912,7 +822,7 @@ impl Arm64CodeGen {
             }
 
             Instruction::Call(dst, fn_val, args) => {
-                eprintln!("DEBUG: Call - dst={:?}, fn_val={:?}", dst, fn_val);
+                // eprintln!("DEBUG: Call - dst={:?}, fn_val={:?}", dst, fn_val);
                 // Call: Invoke a function with arguments
                 //
                 // Following Beagle's approach - NO hardcoded x19!
@@ -954,7 +864,7 @@ impl Arm64CodeGen {
                 self.emit_branch_cond(is_function_label.clone(), 0); // 0 = EQ (if tag == 0b100)
 
                 // === Closure path (tag == 0b101) ===
-                eprintln!("DEBUG: Call - emitting closure path");
+                // eprintln!("DEBUG: Call - emitting closure path");
 
                 // Untag closure pointer (shift right by 3)
                 let closure_ptr_reg = 17;  // x17 = untagged closure pointer (IP1 register, safe to use)
@@ -980,7 +890,7 @@ impl Arm64CodeGen {
 
                 // === Function path (tag == 0b100) ===
                 self.emit_label(is_function_label);
-                eprintln!("DEBUG: Call - emitting function path");
+                // eprintln!("DEBUG: Call - emitting function path");
 
                 // Untag function pointer to get code_ptr (shift right by 3)
                 let lsr_instruction = 0xD343FC00u32 | ((fn_reg as u32) << 5) | (code_ptr_reg as u32);
@@ -988,7 +898,7 @@ impl Arm64CodeGen {
 
                 // Set up normal calling convention: args in x0-x7
                 for (i, &src_reg) in arg_source_regs.iter().enumerate() {
-                    eprintln!("DEBUG: Call - moving arg {} from x{} to x{}", i, src_reg, i);
+                    // eprintln!("DEBUG: Call - moving arg {} from x{} to x{}", i, src_reg, i);
                     if i != src_reg {  // Only move if source != destination
                         self.emit_mov(i, src_reg);  // x0, x1, x2, etc.
                     }
@@ -999,20 +909,20 @@ impl Arm64CodeGen {
                 self.emit_blr(code_ptr_reg);
 
                 // Result is in x0
-                eprintln!("DEBUG: Call - result will be moved from x0 to x{}", dst_reg);
+                // eprintln!("DEBUG: Call - result will be moved from x0 to x{}", dst_reg);
                 if dst_reg != 0 {
                     self.emit_mov(dst_reg, 0);
                 }
 
                 self.store_spill(dst_reg, dest_spill);
-                eprintln!("DEBUG: Call - done, dst_reg=x{}, spill={:?}", dst_reg, dest_spill);
+                // eprintln!("DEBUG: Call - done, dst_reg=x{}, spill={:?}", dst_reg, dest_spill);
             }
 
             Instruction::Ret(value) => {
-                eprintln!("DEBUG: Compiling Ret instruction with value: {:?}", value);
+                // eprintln!("DEBUG: Compiling Ret instruction with value: {:?}", value);
                 // Move result to x0 (return register)
                 let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
-                eprintln!("DEBUG: Ret - src_reg={}, moving to x0", src_reg);
+                // eprintln!("DEBUG: Ret - src_reg={}, moving to x0", src_reg);
                 if src_reg != 0 {
                     self.emit_mov(0, src_reg);
                 }
@@ -1045,29 +955,25 @@ impl Arm64CodeGen {
                     self.emit_ldp(29, 30, 31, 2);
                 } else {
                     // For top-level code (compile method), just jump to epilogue
-                    eprintln!("DEBUG: Ret - jumping to epilogue (top-level)");
+                    // eprintln!("DEBUG: Ret - jumping to epilogue (top-level)");
                     self.emit_jump(&"__epilogue".to_string());
                     return Ok(());  // Don't emit ret here, epilogue will do it
                 }
 
-                eprintln!("DEBUG: Emitting ret instruction");
+                // eprintln!("DEBUG: Emitting ret instruction");
                 self.emit_ret();
             }
 
             Instruction::CallWithSaves(dst, fn_val, args, saves) => {
-                eprintln!("DEBUG: CallWithSaves - saving {} registers before call", saves.len());
-
                 // STEP 1: Save volatile registers to stack (in pairs for 16-byte alignment)
                 for save_pair in saves.chunks(2) {
                     if save_pair.len() == 2 {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
                         let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
-                        eprintln!("DEBUG: CallWithSaves - stp x{}, x{}, [sp, #-16]!", r1, r2);
                         self.emit_stp(r1, r2, 31, -2);  // stp r1, r2, [sp, #-16]!
                     } else {
                         // Odd number - pair with xzr to maintain 16-byte alignment
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
-                        eprintln!("DEBUG: CallWithSaves - stp x{}, xzr, [sp, #-16]!", r1);
                         self.emit_stp(r1, 31, 31, -2);  // stp r1, xzr, [sp, #-16]!
                     }
                 }
@@ -1075,7 +981,6 @@ impl Arm64CodeGen {
                 // Track stack bytes for patching
                 let save_bytes = ((saves.len() + 1) / 2) * 16;
                 self.current_function_stack_bytes += save_bytes;
-                eprintln!("DEBUG: CallWithSaves - allocated {} bytes for saves", save_bytes);
 
                 // STEP 2: Tag-aware call logic (supports both functions and closures)
                 // Following Beagle's approach - NO hardcoded x19!
@@ -1107,7 +1012,6 @@ impl Arm64CodeGen {
                 self.emit_branch_cond(is_function_label.clone(), 0); // 0 = EQ (if tag == 0b100)
 
                 // === Closure path (tag == 0b101) ===
-                eprintln!("DEBUG: CallWithSaves - emitting closure path");
 
                 // Untag closure pointer (shift right by 3)
                 let closure_ptr_reg = 17;  // x17 = untagged closure pointer
@@ -1132,7 +1036,6 @@ impl Arm64CodeGen {
 
                 // === Function path (tag == 0b100) ===
                 self.emit_label(is_function_label);
-                eprintln!("DEBUG: CallWithSaves - emitting function path");
 
                 // Untag function pointer to get code_ptr (shift right by 3)
                 let lsr_instruction = 0xD343FC00u32 | ((fn_reg as u32) << 5) | (code_ptr_reg as u32);
@@ -1161,19 +1064,15 @@ impl Arm64CodeGen {
                     if save_pair.len() == 2 {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
                         let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
-                        eprintln!("DEBUG: CallWithSaves - ldp x{}, x{}, [sp], #16", r1, r2);
                         self.emit_ldp(r1, r2, 31, 2);  // ldp r1, r2, [sp], #16
                     } else {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
-                        eprintln!("DEBUG: CallWithSaves - ldp x{}, xzr, [sp], #16", r1);
                         self.emit_ldp(r1, 31, 31, 2);  // ldp r1, xzr, [sp], #16
                     }
                 }
 
                 // Decrement stack counter (deallocate what we allocated)
                 self.current_function_stack_bytes -= save_bytes;
-                eprintln!("DEBUG: CallWithSaves - deallocated {} bytes, now at {} bytes",
-                         save_bytes, self.current_function_stack_bytes);
             }
         }
 
@@ -1793,32 +1692,16 @@ impl Arm64CodeGen {
         self.emit_add_sp_imm(16);
     }
 
-    fn emit_adr(&mut self, dst: usize, label: Label) {
-        // ADR Xd, <label>
-        // Loads PC-relative address of label into Xd
-        // Encoding: 0x10000000 | (immlo << 29) | (immhi << 5) | rd
-        // immlo: 2 bits (bits 30-29)
-        // immhi: 19 bits (bits 23-5)
-        // rd: 5 bits (bits 4-0)
-        //
-        // For now, emit placeholder (offset 0) and record for fixup
-        let fixup_index = self.code.len();
-        self.pending_adr_fixups.push((fixup_index, label));
-
-        // ADR with offset 0 (placeholder)
-        let instruction = 0x10000000 | (dst as u32);
-        self.code.push(instruction);
-    }
-
     /// Execute the compiled code (for testing)
     ///
     /// Uses a trampoline to safely execute JIT code with proper stack management
     pub fn execute(&self) -> Result<i64, String> {
-        eprintln!("DEBUG: execute() called with {} instructions", self.code.len());
-        eprintln!("DEBUG: JIT code:");
-        for (i, inst) in self.code.iter().enumerate() {
-            eprintln!("  {:04x}: {:08x}", i * 4, inst);
-        }
+        // Debug output disabled for performance
+        // eprintln!("DEBUG: execute() called with {} instructions", self.code.len());
+        // eprintln!("DEBUG: JIT code:");
+        // for (i, inst) in self.code.iter().enumerate() {
+        //     eprintln!("  {:04x}: {:08x}", i * 4, inst);
+        // }
         let code_size = self.code.len() * 4;
 
         unsafe {
@@ -1859,11 +1742,8 @@ impl Arm64CodeGen {
             }
 
             // Execute through trampoline for safety
-            eprintln!("DEBUG: Creating trampoline...");
             let trampoline = Trampoline::new(64 * 1024); // 64KB stack
-            eprintln!("DEBUG: Calling trampoline.execute()...");
             let result = trampoline.execute(ptr as *const u8);
-            eprintln!("DEBUG: Trampoline returned: {}", result);
 
             // Explicitly drop trampoline before cleaning up JIT code
             drop(trampoline);

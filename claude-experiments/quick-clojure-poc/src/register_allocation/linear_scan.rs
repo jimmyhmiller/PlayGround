@@ -141,6 +141,7 @@ impl LinearScan {
 
             Instruction::LoadConstant(dst, _)
             | Instruction::LoadVar(dst, _)
+            | Instruction::LoadVarDynamic(dst, _)
             | Instruction::LoadTrue(dst)
             | Instruction::LoadFalse(dst) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
@@ -182,13 +183,6 @@ impl LinearScan {
             Instruction::SetVar(var_ptr, value) => {
                 if let IrValue::Register(r) = var_ptr { regs.push(*r); }
                 if let IrValue::Register(r) = value { regs.push(*r); }
-            }
-
-            Instruction::MakeFunction(dst, _label, closure_values) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                for val in closure_values {
-                    if let IrValue::Register(r) = val { regs.push(*r); }
-                }
             }
 
             Instruction::MakeFunctionPtr(dst, _code_ptr, closure_values) => {
@@ -244,7 +238,7 @@ impl LinearScan {
         // PRE-ALLOCATE ARGUMENT REGISTERS
         // ARM64 calling convention: arguments are passed in x0-x7
         // Virtual registers with Argument variant should map directly to their index
-        eprintln!("DEBUG: Pre-allocation phase - checking {} virtual registers", self.lifetimes.len());
+        // eprintln!("DEBUG: Pre-allocation phase - checking {} virtual registers", self.lifetimes.len());
         for (vreg, _interval) in &self.lifetimes {
             if let VirtualRegister::Argument(n) = vreg {
                 if *n <= 7 {
@@ -252,18 +246,18 @@ impl LinearScan {
                     // Physical registers are represented as Temp(index) since they're not function args
                     let physical_reg = VirtualRegister::Temp(*n);
                     self.allocated_registers.insert(*vreg, physical_reg);
-                    eprintln!("DEBUG: Pre-allocated argument register v_arg{} -> x{}", n, n);
+                    // eprintln!("DEBUG: Pre-allocated argument register v_arg{} -> x{}", n, n);
                 } else {
-                    eprintln!("DEBUG: Argument register v_arg{} NOT pre-allocated (index > 7, will use stack)", n);
+                    // eprintln!("DEBUG: Argument register v_arg{} NOT pre-allocated (index > 7, will use stack)", n);
                 }
             }
         }
 
         // DEBUG: Check allocation map IMMEDIATELY after pre-allocation
-        eprintln!("DEBUG: Allocation map AFTER pre-allocation ({} entries):", self.allocated_registers.len());
-        for (vreg, physical) in &self.allocated_registers {
-            eprintln!("DEBUG:   {} -> x{}", vreg.display_name(), physical.index());
-        }
+        // eprintln!("DEBUG: Allocation map AFTER pre-allocation ({} entries):", self.allocated_registers.len());
+        // for (vreg, physical) in &self.allocated_registers {
+        //     eprintln!("DEBUG:   {} -> x{}", vreg.display_name(), physical.index());
+        // }
 
         // Create sorted list of intervals (start, end, register)
         let mut intervals: Vec<(usize, usize, VirtualRegister)> = self
@@ -375,6 +369,7 @@ impl LinearScan {
 
             Instruction::LoadConstant(dst, _)
             | Instruction::LoadVar(dst, _)
+            | Instruction::LoadVarDynamic(dst, _)
             | Instruction::LoadTrue(dst)
             | Instruction::LoadFalse(dst) => {
                 replace(dst);
@@ -415,13 +410,6 @@ impl LinearScan {
             Instruction::SetVar(var_ptr, value) => {
                 replace(var_ptr);
                 replace(value);
-            }
-
-            Instruction::MakeFunction(dst, _label, closure_values) => {
-                replace(dst);
-                for val in closure_values {
-                    replace(val);
-                }
             }
 
             Instruction::MakeFunctionPtr(dst, _code_ptr, closure_values) => {
@@ -508,7 +496,7 @@ impl LinearScan {
         if spill_candidate_index.is_none() {
             // All active registers are argument registers - spill current interval instead
             let stack_slot = self.allocate_stack_slot();
-            eprintln!("DEBUG LinearScan: Spilling {} to stack slot {} (all active are arg regs)", vreg.display_name(), stack_slot);
+            // eprintln!("DEBUG LinearScan: Spilling {} to stack slot {} (all active are arg regs)", vreg.display_name(), stack_slot);
             self.spill_locations.insert(vreg, stack_slot);
             return;
         }
@@ -523,7 +511,7 @@ impl LinearScan {
             // Remove the spilled register from allocated_registers and mark it as spilled
             self.allocated_registers.remove(&spill_vreg);
             let stack_slot = self.allocate_stack_slot();
-            eprintln!("DEBUG LinearScan: Spilling {} to stack slot {}", spill_vreg.display_name(), stack_slot);
+            // eprintln!("DEBUG LinearScan: Spilling {} to stack slot {}", spill_vreg.display_name(), stack_slot);
             self.spill_locations.insert(spill_vreg, stack_slot);
 
             // Allocate the freed physical register to current interval
@@ -536,7 +524,7 @@ impl LinearScan {
         } else {
             // Current interval is shorter, spill it instead
             let stack_slot = self.allocate_stack_slot();
-            eprintln!("DEBUG LinearScan: Spilling {} to stack slot {} (short interval)", vreg.display_name(), stack_slot);
+            // eprintln!("DEBUG LinearScan: Spilling {} to stack slot {} (short interval)", vreg.display_name(), stack_slot);
             self.spill_locations.insert(vreg, stack_slot);
         }
     }
@@ -601,6 +589,7 @@ impl LinearScan {
 
             Instruction::LoadConstant(dst, _)
             | Instruction::LoadVar(dst, _)
+            | Instruction::LoadVarDynamic(dst, _)
             | Instruction::LoadTrue(dst)
             | Instruction::LoadFalse(dst) => {
                 replace(dst);
@@ -643,13 +632,6 @@ impl LinearScan {
                 replace(value);
             }
 
-            Instruction::MakeFunction(dst, _label, closure_values) => {
-                replace(dst);
-                for val in closure_values {
-                    replace(val);
-                }
-            }
-
             Instruction::MakeFunctionPtr(dst, _code_ptr, closure_values) => {
                 replace(dst);
                 for val in closure_values {
@@ -688,7 +670,7 @@ impl LinearScan {
     /// This analyzes which registers are live across each call site and generates
     /// CallWithSaves instructions with explicit register preservation.
     fn transform_calls_to_saves(&mut self) {
-        eprintln!("DEBUG: transform_calls_to_saves - analyzing {} instructions", self.instructions.len());
+        // eprintln!("DEBUG: transform_calls_to_saves - analyzing {} instructions", self.instructions.len());
 
         for i in 0..self.instructions.len() {
             // Check if this is a Call instruction
@@ -698,7 +680,7 @@ impl LinearScan {
                 continue;
             }
 
-            eprintln!("DEBUG: Found Call instruction at index {}", i);
+            // eprintln!("DEBUG: Found Call instruction at index {}", i);
 
             // Extract the Call instruction components
             let (dest, func, args) = if let Instruction::Call(d, f, a) = &self.instructions[i] {
@@ -729,8 +711,8 @@ impl LinearScan {
                         };
 
                         if !is_dest {
-                            eprintln!("DEBUG:   Register {:?} (physical {:?}) is live across call (lifetime {}-{})",
-                                     vreg, physical_reg, start, end);
+                            // eprintln!("DEBUG:   Register {:?} (physical {:?}) is live across call (lifetime {}-{})",
+                            //          vreg, physical_reg, start, end);
                             saves.push(IrValue::Register(physical_reg));
                         }
                     }
@@ -744,7 +726,7 @@ impl LinearScan {
             });
             saves.dedup();
 
-            eprintln!("DEBUG: Transforming Call at index {} with {} saves", i, saves.len());
+            // eprintln!("DEBUG: Transforming Call at index {} with {} saves", i, saves.len());
 
             // Transform Call → CallWithSaves
             self.instructions[i] = Instruction::CallWithSaves(dest, func, args, saves);

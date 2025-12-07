@@ -23,7 +23,7 @@ const __dirname = dirname(__filename);
 
 const LIBS_DIR = join(__dirname, '..', 'real-world-libs');
 
-const WARMUP_ITERATIONS = 3;
+const WARMUP_ITERATIONS = 5;
 const MEASUREMENT_ITERATIONS = 10;
 
 /**

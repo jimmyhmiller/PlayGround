@@ -7,8 +7,8 @@ public record LogicalExpression(
     int start,
     int end,
     SourceLocation loc,
-    String operator,  // "&&" | "||" | "??"
     Expression left,
+    String operator,  // "&&" | "||" | "??"
     Expression right
 ) implements Expression {
     @Override

@@ -63,6 +63,19 @@ pub enum Expr {
         body: Vec<Expr>,  // Body expressions (returns last)
     },
 
+    /// (loop [x 0 sum 0] body...)
+    /// Establishes bindings (like let) and a recursion point for recur
+    Loop {
+        bindings: Vec<(String, Box<Expr>)>,
+        body: Vec<Expr>,
+    },
+
+    /// (recur expr1 expr2 ...)
+    /// Jumps back to nearest loop/fn with new values for bindings
+    Recur {
+        args: Vec<Expr>,
+    },
+
     /// (fn name? [params*] exprs*)
     /// (fn name? ([params*] exprs*)+)
     /// Function definition - first-class values
@@ -141,6 +154,8 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
                     "if" => analyze_if(items),
                     "do" => analyze_do(items),
                     "let" => analyze_let(items),
+                    "loop" => analyze_loop(items),
+                    "recur" => analyze_recur(items),
                     "fn" => analyze_fn(items),
                     "quote" => analyze_quote(items),
                     "ns" => analyze_ns(items),
@@ -374,6 +389,52 @@ fn analyze_let(items: &im::Vector<Value>) -> Result<Expr, String> {
     }
 
     Ok(Expr::Let { bindings, body })
+}
+
+fn analyze_loop(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // (loop [x 0 sum 0] body...)
+    if items.len() < 2 {
+        return Err("loop requires at least 1 argument: bindings vector".to_string());
+    }
+
+    let bindings_vec = match &items[1] {
+        Value::Vector(v) => v,
+        _ => return Err("loop requires a vector of bindings as first argument".to_string()),
+    };
+
+    if bindings_vec.len() % 2 != 0 {
+        return Err("loop bindings must contain an even number of forms".to_string());
+    }
+
+    let mut bindings = Vec::new();
+    for i in (0..bindings_vec.len()).step_by(2) {
+        let name = match &bindings_vec[i] {
+            Value::Symbol(s) => s.clone(),
+            _ => return Err(format!("loop binding names must be symbols, got {:?}", bindings_vec[i])),
+        };
+        let value_expr = analyze(&bindings_vec[i + 1])?;
+        bindings.push((name, Box::new(value_expr)));
+    }
+
+    let mut body = Vec::new();
+    for i in 2..items.len() {
+        body.push(analyze(&items[i])?);
+    }
+
+    if body.is_empty() {
+        body.push(Expr::Literal(Value::Nil));
+    }
+
+    Ok(Expr::Loop { bindings, body })
+}
+
+fn analyze_recur(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // (recur expr1 expr2 ...)
+    let mut args = Vec::new();
+    for i in 1..items.len() {
+        args.push(analyze(&items[i])?);
+    }
+    Ok(Expr::Recur { args })
 }
 
 fn analyze_fn(items: &im::Vector<Value>) -> Result<Expr, String> {

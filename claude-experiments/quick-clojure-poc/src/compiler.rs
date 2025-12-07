@@ -1,11 +1,18 @@
 use crate::clojure_ast::Expr;
 use crate::value::Value;
-use crate::ir::{Instruction, IrValue, IrBuilder, Condition};
+use crate::ir::{Instruction, IrValue, IrBuilder, Condition, Label};
 use crate::gc_runtime::GCRuntime;
 use crate::arm_codegen::Arm64CodeGen;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::cell::UnsafeCell;
+
+/// Context for loop/recur
+#[derive(Clone)]
+struct LoopContext {
+    label: Label,
+    binding_registers: Vec<IrValue>,
+}
 
 /// Clojure to IR compiler
 ///
@@ -31,6 +38,9 @@ pub struct Compiler {
     /// Each scope maps variable name → register
     /// Stack of scopes allows for nested lets
     local_scopes: Vec<HashMap<String, IrValue>>,
+
+    /// Stack of loop contexts for recur
+    loop_contexts: Vec<LoopContext>,
 
     /// Compiled function registry: function_id → code_pointer
     /// Used to track compiled nested functions
@@ -85,6 +95,7 @@ impl Compiler {
             used_namespaces,
             builder: IrBuilder::new(),
             local_scopes: Vec::new(),
+            loop_contexts: Vec::new(),
             function_registry: HashMap::new(),
             next_function_id: 0,
         }
@@ -102,6 +113,8 @@ impl Compiler {
             Expr::If { test, then, else_ } => self.compile_if(test, then, else_),
             Expr::Do { exprs } => self.compile_do(exprs),
             Expr::Let { bindings, body } => self.compile_let(bindings, body),
+            Expr::Loop { bindings, body } => self.compile_loop(bindings, body),
+            Expr::Recur { args } => self.compile_recur(args),
             Expr::Fn { name, arities } => self.compile_fn(name, arities),
             Expr::Binding { bindings, body } => self.compile_binding(bindings, body),
             Expr::Call { func, args } => self.compile_call(func, args),
@@ -160,13 +173,22 @@ impl Compiler {
         } else {
             // Try current namespace first
             if let Some(var_ptr) = rt.namespace_lookup(self.current_namespace_ptr, name) {
-                eprintln!("DEBUG compile_var (current ns): found var '{}' at {:x}", name, var_ptr);
-                // Emit LoadVar - will dereference at runtime!
+                // eprintln!("DEBUG compile_var (current ns): found var '{}' at {:x}", name, var_ptr);
                 let result = self.builder.new_register();
-                self.builder.emit(Instruction::LoadVar(
-                    result,
-                    IrValue::TaggedConstant(var_ptr as isize),
-                ));
+                // Check if var is dynamic at compile time
+                if rt.is_var_dynamic(var_ptr) {
+                    // Dynamic var - use trampoline for binding lookup
+                    self.builder.emit(Instruction::LoadVarDynamic(
+                        result,
+                        IrValue::TaggedConstant(var_ptr as isize),
+                    ));
+                } else {
+                    // Non-dynamic var - direct memory load
+                    self.builder.emit(Instruction::LoadVar(
+                        result,
+                        IrValue::TaggedConstant(var_ptr as isize),
+                    ));
+                }
                 return Ok(result);
             }
 
@@ -176,13 +198,20 @@ impl Compiler {
                 for used_ns in used {
                     if let Some(&used_ns_ptr) = self.namespace_registry.get(used_ns)
                         && let Some(var_ptr) = rt.namespace_lookup(used_ns_ptr, name) {
-                            eprintln!("DEBUG compile_var (used ns {}): found var '{}' at {:x}", used_ns, name, var_ptr);
-                            // Emit LoadVar - will dereference at runtime!
+                            // eprintln!("DEBUG compile_var (used ns {}): found var '{}' at {:x}", used_ns, name, var_ptr);
                             let result = self.builder.new_register();
-                            self.builder.emit(Instruction::LoadVar(
-                                result,
-                                IrValue::TaggedConstant(var_ptr as isize),
-                            ));
+                            // Check if var is dynamic at compile time
+                            if rt.is_var_dynamic(var_ptr) {
+                                self.builder.emit(Instruction::LoadVarDynamic(
+                                    result,
+                                    IrValue::TaggedConstant(var_ptr as isize),
+                                ));
+                            } else {
+                                self.builder.emit(Instruction::LoadVar(
+                                    result,
+                                    IrValue::TaggedConstant(var_ptr as isize),
+                                ));
+                            }
                             return Ok(result);
                         }
                 }
@@ -193,13 +222,22 @@ impl Compiler {
 
         // Look up in specified namespace
         if let Some(var_ptr) = rt.namespace_lookup(ns_ptr, name) {
-            eprintln!("DEBUG compile_var: found var '{}' at {:x}", name, var_ptr);
-            // Emit LoadVar - will dereference at runtime!
+            // eprintln!("DEBUG compile_var: found var '{}' at {:x}", name, var_ptr);
             let result = self.builder.new_register();
-            self.builder.emit(Instruction::LoadVar(
-                result,
-                IrValue::TaggedConstant(var_ptr as isize),
-            ));
+            // Check if var is dynamic at compile time
+            if rt.is_var_dynamic(var_ptr) {
+                // Dynamic var - use trampoline for binding lookup
+                self.builder.emit(Instruction::LoadVarDynamic(
+                    result,
+                    IrValue::TaggedConstant(var_ptr as isize),
+                ));
+            } else {
+                // Non-dynamic var - direct memory load
+                self.builder.emit(Instruction::LoadVar(
+                    result,
+                    IrValue::TaggedConstant(var_ptr as isize),
+                ));
+            }
             Ok(result)
         } else {
             Err(format!("Undefined variable: {}/{}", namespace.as_ref().unwrap(), name))
@@ -212,9 +250,6 @@ impl Compiler {
     }
 
     fn compile_def(&mut self, name: &str, value_expr: &Expr, metadata: &Option<im::HashMap<String, Value>>) -> Result<IrValue, String> {
-        // Compile the value expression
-        let value_reg = self.compile(value_expr)?;
-
         // Check if var has ^:dynamic metadata
         let is_dynamic = metadata
             .as_ref()
@@ -227,6 +262,8 @@ impl Compiler {
             .unwrap_or(false);
 
         // SAFETY: Single-threaded REPL - no concurrent access during compilation
+        // IMPORTANT: Create/lookup the Var BEFORE compiling the value expression.
+        // This allows recursive functions to resolve their own name via LoadVar.
         let var_ptr = unsafe {
             let rt = &mut *self.runtime.get();
 
@@ -234,11 +271,11 @@ impl Compiler {
             if let Some(existing_var_ptr) = rt.namespace_lookup(self.current_namespace_ptr, name) {
                 existing_var_ptr
             } else {
-                // Create new var with a placeholder value (0)
+                // Create new var with nil placeholder (7) - will be overwritten after compilation
                 let new_var_ptr = rt.allocate_var(
                     self.current_namespace_ptr,
                     name,
-                    0, // placeholder
+                    7, // nil placeholder
                 ).unwrap();
 
                 // Mark as dynamic ONLY if metadata indicates it
@@ -246,7 +283,8 @@ impl Compiler {
                     rt.mark_var_dynamic(new_var_ptr);
                 }
 
-                // Add var to namespace
+                // Add var to namespace BEFORE compiling value
+                // This enables recursive function references
                 let new_ns_ptr = rt
                     .namespace_add_binding(self.current_namespace_ptr, name, new_var_ptr)
                     .unwrap();
@@ -266,6 +304,9 @@ impl Compiler {
                 new_var_ptr
             }
         };
+
+        // NOW compile the value expression - recursive refs will resolve via LoadVar
+        let value_reg = self.compile(value_expr)?;
 
         // Emit StoreVar instruction to update the var at runtime
         // Pass var_ptr as a tagged constant directly
@@ -453,6 +494,74 @@ impl Compiler {
         Ok(result)
     }
 
+    fn compile_loop(&mut self, bindings: &[(String, Box<Expr>)], body: &[Expr]) -> Result<IrValue, String> {
+        self.push_scope();
+
+        // Compile each binding and track registers
+        let mut binding_registers = Vec::new();
+        for (name, value_expr) in bindings {
+            let value_reg = self.compile(value_expr)?;
+            self.bind_local(name.clone(), value_reg);
+            binding_registers.push(value_reg);
+        }
+
+        // Create and emit loop label
+        let loop_label = self.builder.new_label();
+        self.builder.emit(Instruction::Label(loop_label.clone()));
+
+        // Push loop context for recur
+        self.loop_contexts.push(LoopContext {
+            label: loop_label,
+            binding_registers,
+        });
+
+        // Compile body
+        let mut result = IrValue::Null;
+        for expr in body {
+            result = self.compile(expr)?;
+        }
+
+        self.loop_contexts.pop();
+        self.pop_scope();
+
+        Ok(result)
+    }
+
+    fn compile_recur(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        let context = self.loop_contexts.last()
+            .ok_or_else(|| "recur not in loop or fn context".to_string())?
+            .clone();
+
+        if args.len() != context.binding_registers.len() {
+            return Err(format!(
+                "recur arity mismatch: expected {}, got {}",
+                context.binding_registers.len(),
+                args.len()
+            ));
+        }
+
+        // Compile ALL new values first (before any assignments)
+        let mut new_values = Vec::new();
+        for arg in args {
+            new_values.push(self.compile(arg)?);
+        }
+
+        // Then assign to binding registers
+        for (binding_reg, new_value) in context.binding_registers.iter().zip(new_values.iter()) {
+            if binding_reg != new_value {
+                self.builder.emit(Instruction::Assign(*binding_reg, *new_value));
+            }
+        }
+
+        // Jump back to loop
+        self.builder.emit(Instruction::Jump(context.label));
+
+        // Return dummy (recur never returns normally)
+        let dummy = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(dummy, IrValue::Null));
+        Ok(dummy)
+    }
+
     fn compile_binding(&mut self, bindings: &[(String, Box<Expr>)], body: &[Expr]) -> Result<IrValue, String> {
         // (binding [var1 val1 var2 val2 ...] body)
         // 1. Compile and push all bindings
@@ -625,9 +734,11 @@ impl Compiler {
         // - Regular functions: arguments are in x0, x1, x2, etc.
         // - Closures: x0 = closure object, user args in x1, x2, x3, etc.
         let param_offset = if self_reg.is_some() { 1 } else { 0 };
+        let mut param_registers = Vec::new();
         for (i, param) in arity.params.iter().enumerate() {
             let arg_reg = IrValue::Register(crate::ir::VirtualRegister::Argument(i + param_offset));
             self.bind_local(param.clone(), arg_reg);
+            param_registers.push(arg_reg);
         }
 
         // Bind rest parameter if variadic
@@ -647,8 +758,19 @@ impl Compiler {
             }
         }
 
+        // Push loop context for recur in fn body
+        let fn_entry_label = self.builder.new_label();
+        self.builder.emit(Instruction::Label(fn_entry_label.clone()));
+        self.loop_contexts.push(LoopContext {
+            label: fn_entry_label,
+            binding_registers: param_registers,
+        });
+
         // Compile body (implicit do)
         let result = self.compile_body(&arity.body)?;
+
+        // Pop fn's loop context
+        self.loop_contexts.pop();
 
         // Return result
         self.builder.emit(Instruction::Ret(result));
@@ -829,6 +951,23 @@ impl Compiler {
                 }
                 for expr in body {
                     self.collect_free_vars_from_expr(expr, bound, free);
+                }
+            }
+
+            Expr::Loop { bindings, body } => {
+                let mut new_bound = bound.clone();
+                for (name, value_expr) in bindings {
+                    self.collect_free_vars_from_expr(value_expr, &new_bound, free);
+                    new_bound.insert(name.clone());
+                }
+                for expr in body {
+                    self.collect_free_vars_from_expr(expr, &new_bound, free);
+                }
+            }
+
+            Expr::Recur { args } => {
+                for arg in args {
+                    self.collect_free_vars_from_expr(arg, bound, free);
                 }
             }
 

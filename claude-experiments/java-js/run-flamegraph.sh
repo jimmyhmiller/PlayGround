@@ -48,12 +48,10 @@ fi
 echo "✓ Found async-profiler: $ASYNC_PROFILER"
 echo ""
 
-# Build if needed
-if [ ! -f "target/benchmarks.jar" ]; then
-    echo "📦 Building project..."
-    mvn clean package -q -DskipTests
-    echo ""
-fi
+# Always rebuild to ensure we're profiling the latest code
+echo "📦 Building project..."
+mvn clean package -q -DskipTests
+echo ""
 
 # Benchmark selection
 echo "Select benchmark to profile:"

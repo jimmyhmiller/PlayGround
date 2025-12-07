@@ -172,4 +172,55 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>native</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-shade-plugin</artifactId>
+                        <version>3.5.1</version>
+                        <executions>
+                            <execution>
+                                <phase>none</phase>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.graalvm.buildtools</groupId>
+                        <artifactId>native-maven-plugin</artifactId>
+                        <version>0.10.3</version>
+                        <extensions>true</extensions>
+                        <executions>
+                            <execution>
+                                <id>build-native</id>
+                                <goals>
+                                    <goal>compile-no-fork</goal>
+                                </goals>
+                                <phase>package</phase>
+                            </execution>
+                        </executions>
+                        <configuration>
+                            <imageName>jsparser</imageName>
+                            <mainClass>com.jsparser.ParseOne</mainClass>
+                            <classpath>
+                                <param>${project.build.outputDirectory}</param>
+                                <param>${settings.localRepository}/com/fasterxml/jackson/core/jackson-databind/2.16.1/jackson-databind-2.16.1.jar</param>
+                                <param>${settings.localRepository}/com/fasterxml/jackson/core/jackson-annotations/2.16.1/jackson-annotations-2.16.1.jar</param>
+                                <param>${settings.localRepository}/com/fasterxml/jackson/core/jackson-core/2.16.1/jackson-core-2.16.1.jar</param>
+                                <param>${settings.localRepository}/com/fasterxml/jackson/module/jackson-module-parameter-names/2.16.1/jackson-module-parameter-names-2.16.1.jar</param>
+                            </classpath>
+                            <buildArgs>
+                                <buildArg>--no-fallback</buildArg>
+                                <buildArg>-H:+ReportExceptionStackTraces</buildArg>
+                                <buildArg>--initialize-at-build-time=com.fasterxml.jackson</buildArg>
+                            </buildArgs>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

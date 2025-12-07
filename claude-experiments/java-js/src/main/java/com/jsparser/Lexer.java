@@ -1099,11 +1099,15 @@ public class Lexer {
             default -> null;
         };
 
-        // Always use the decoded name for identifiers and keywords (not the raw lexeme with escapes)
-        // This ensures \u0063onst becomes "const" not "\u0063onst"
+        // For AST purposes, use the decoded name as the lexeme (identifierName).
+        // But for position tracking, we need the raw source length.
+        // Token's endColumn should reflect the actual source position.
         String tokenLexeme = identifierName;
         // endPosition is current position (after consuming all chars including escapes)
-        return new Token(type, tokenLexeme, literal, startLine, startColumn, startPos, position);
+        // Use raw source length for end column calculation
+        int rawLength = position - startPos;
+        int endColumn = startColumn + rawLength;
+        return new Token(type, tokenLexeme, literal, startLine, startColumn, startPos, position, startLine, endColumn, null);
     }
 
     private String scanUnicodeEscape() {
@@ -1423,7 +1427,8 @@ public class Lexer {
                 // Raw value is the processed string with normalized line continuations
                 String rawValue = raw.toString();
                 // endPosition should be current position (after the closing `)
-                return new Token(type, lexeme, cookedValue, startLine, startColumn, startPos, position, rawValue);
+                // Use current line/column as endLine/endColumn since we've advanced past the `
+                return new Token(type, lexeme, cookedValue, startLine, startColumn, startPos, position, line, column, rawValue);
             } else if (c == '$' && peekNext() == '{') {
                 // Start of interpolation
                 advance(); // consume $
@@ -1444,7 +1449,8 @@ public class Lexer {
                 // Raw value is the processed string with normalized line continuations
                 String rawValue = raw.toString();
                 // endPosition should be current position (after the ${)
-                return new Token(type, lexeme, cookedValue, startLine, startColumn, startPos, position, rawValue);
+                // Use current line/column as endLine/endColumn since we've advanced past the ${
+                return new Token(type, lexeme, cookedValue, startLine, startColumn, startPos, position, line, column, rawValue);
             } else if (c == '\\') {
                 // Escape sequence
                 raw.append(c);

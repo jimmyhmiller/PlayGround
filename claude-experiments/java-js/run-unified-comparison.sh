@@ -2,6 +2,20 @@
 # Unified Cross-Language Parser Benchmark
 # Runs our Java parser alongside Rust and JavaScript parsers
 # Produces a single comparison table for each library
+#
+# METHODOLOGY:
+# Each implementation:
+#   1. Starts a single process
+#   2. Loads all test files into memory
+#   3. For each file: performs internal warmup, then measurement
+#   4. Reports only parsing time (excludes process startup/file I/O)
+#
+# This ensures we measure parsing performance consistently across all
+# implementations without including JIT compilation or process startup costs.
+#
+# Configuration (consistent across all implementations):
+#   - Warmup iterations: 5
+#   - Measurement iterations: 10
 
 set -e
 
@@ -13,8 +27,13 @@ echo "════════════════════════�
 echo "  Unified Cross-Language Parser Benchmark"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
-echo "Benchmarking all parsers on real-world JavaScript libraries:"
-echo "  • Our Java Parser"
+echo "Methodology: Each process performs internal warmup then measurement"
+echo "  • Warmup: 5 iterations (excludes from timing)"
+echo "  • Measurement: 10 iterations (averaged)"
+echo "  • Only parsing time measured (no startup/I/O)"
+echo ""
+echo "Parsers:"
+echo "  • Our Java Parser (JMH)"
 echo "  • Rust: OXC, SWC"
 echo "  • JavaScript: Babel, Acorn, Meriyah"
 echo ""
@@ -31,14 +50,11 @@ echo ""
 
 # 1. Build and run our Java parser
 echo "[1/3] Running Our Java Parser..."
-if [ ! -f "target/benchmarks.jar" ]; then
-    echo "  Building Java benchmarks..."
-    mvn clean package -q -DskipTests
-fi
-java -jar target/benchmarks.jar RealWorldBenchmark \
-    -f 1 -wi 2 -i 5 -rf json \
-    -rff "$RESULTS_DIR/java_our_${TIMESTAMP}.json" \
-    2>&1 | grep -E "(Benchmark|completed)" || true
+echo "  Building..."
+mvn compile -q -DskipTests
+echo "  Running benchmark..."
+mvn exec:java -q -Dexec.mainClass="com.jsparser.benchmarks.SimpleBenchmark" \
+    2>&1 | tee "$RESULTS_DIR/java_our_${TIMESTAMP}.txt"
 echo "  ✓ Java benchmarks complete"
 echo ""
 
@@ -71,20 +87,41 @@ python3 - <<'PYTHON_SCRIPT'
 import json
 import re
 
-# Parse Java JMH JSON results
-def parse_java_jmh(json_file):
+# Parse Java text output
+def parse_java_txt(txt_file):
     results = {}
     try:
-        with open(json_file) as f:
-            data = json.load(f)
-            for bench in data:
-                name = bench['benchmark']
-                # Extract library name: RealWorldBenchmark.parseReact -> react
-                if 'parse' in name:
-                    lib = name.split('.parse')[1].lower()
-                    # Convert ms to match (JMH outputs in ms/op already)
-                    time_ms = bench['primaryMetric']['score']
-                    results[lib] = time_ms
+        with open(txt_file) as f:
+            content = f.read()
+            current_lib = None
+
+            for line in content.split('\n'):
+                if line.startswith('Library:'):
+                    lib_match = re.search(r'Library: (.*?)$', line)
+                    if lib_match:
+                        lib_name = lib_match.group(1).strip().lower()
+                        if 'react dom' in lib_name:
+                            current_lib = 'reactdom'
+                        elif 'react' in lib_name and 'dom' not in lib_name:
+                            current_lib = 'react'
+                        elif 'vue' in lib_name:
+                            current_lib = 'vue'
+                        elif 'lodash' in lib_name:
+                            current_lib = 'lodash'
+                        elif 'three' in lib_name:
+                            current_lib = 'threejs'
+                        elif 'typescript' in lib_name:
+                            current_lib = 'typescript'
+
+                elif current_lib and 'Our Java Parser' in line and '|' in line:
+                    # Parse result line: "🥇 Our Java Parser    |         123.456 |              100.0"
+                    parts = [p.strip() for p in line.split('|')]
+                    if len(parts) >= 2:
+                        try:
+                            time = float(parts[1].strip())
+                            results[current_lib] = time
+                        except:
+                            pass
     except Exception as e:
         print(f"Warning: Could not parse Java results: {e}")
     return results
@@ -178,11 +215,11 @@ import os
 
 RESULTS_DIR = "benchmark-results"
 
-latest_java = max(glob.glob(f'{RESULTS_DIR}/java_our_*.json'), default=None, key=os.path.getctime)
+latest_java = max(glob.glob(f'{RESULTS_DIR}/java_our_*.txt'), default=None, key=os.path.getctime)
 latest_rust = max(glob.glob(f'{RESULTS_DIR}/rust_*.txt'), default=None, key=os.path.getctime)
 latest_js = max(glob.glob(f'{RESULTS_DIR}/js_*.txt'), default=None, key=os.path.getctime)
 
-java_results = parse_java_jmh(latest_java) if latest_java else {}
+java_results = parse_java_txt(latest_java) if latest_java else {}
 rust_results = parse_rust_txt(latest_rust) if latest_rust else {}
 js_results = parse_js_txt(latest_js) if latest_js else {}
 
@@ -199,6 +236,9 @@ libraries = [
 print("\n" + "=" * 110)
 print(" " * 25 + "UNIFIED CROSS-LANGUAGE PARSER BENCHMARK")
 print("=" * 110)
+
+# Track aggregate stats per parser
+parser_totals = {}  # parser -> {'total_time': x, 'total_size': y, 'libs': n}
 
 for lib_key, lib_name, size_kb in libraries:
     print(f"\n{lib_name} ({size_kb:.1f} KB)")
@@ -237,7 +277,7 @@ for lib_key, lib_name, size_kb in libraries:
     times.sort(key=lambda x: x[1])
     fastest_time = times[0][1]
 
-    # Print sorted results
+    # Print sorted results and accumulate totals
     for i, (parser, time) in enumerate(times):
         vs_fastest = time / fastest_time
         throughput = size_kb / time if time > 0 else 0
@@ -252,6 +292,41 @@ for lib_key, lib_name, size_kb in libraries:
 
         print(f"{medal}{parser:<30} | {time:>12.3f} | {vs_fastest:>11.2f}x | {throughput:>20.1f}")
 
+        # Accumulate totals
+        if parser not in parser_totals:
+            parser_totals[parser] = {'total_time': 0, 'total_size': 0, 'libs': 0}
+        parser_totals[parser]['total_time'] += time
+        parser_totals[parser]['total_size'] += size_kb
+        parser_totals[parser]['libs'] += 1
+
+# Print overall ranking
+print("\n" + "=" * 110)
+print(" " * 35 + "OVERALL RANKING")
+print("=" * 110)
+print(f"\n{'Parser':<30} | {'Total Time (ms)':>15} | {'vs Fastest':>12} | {'Avg Throughput (KB/ms)':>22} | {'Libs':>5}")
+print("-" * 110)
+
+# Sort by total time
+ranking = [(p, d['total_time'], d['total_size'], d['libs'])
+           for p, d in parser_totals.items()]
+ranking.sort(key=lambda x: x[1])
+
+if ranking:
+    fastest_total = ranking[0][1]
+    for i, (parser, total_time, total_size, libs) in enumerate(ranking):
+        vs_fastest = total_time / fastest_total if fastest_total > 0 else 0
+        avg_throughput = total_size / total_time if total_time > 0 else 0
+
+        medal = ''
+        if i == 0:
+            medal = '🥇 '
+        elif i == 1:
+            medal = '🥈 '
+        elif i == 2:
+            medal = '🥉 '
+
+        print(f"{medal}{parser:<30} | {total_time:>15.3f} | {vs_fastest:>11.2f}x | {avg_throughput:>22.1f} | {libs:>5}")
+
 print("\n" + "=" * 110)
 print()
 PYTHON_SCRIPT
@@ -259,7 +334,7 @@ PYTHON_SCRIPT
 echo "✅ Unified benchmark complete!"
 echo ""
 echo "Raw results saved to:"
-echo "  • Java:       $RESULTS_DIR/java_our_${TIMESTAMP}.json"
+echo "  • Java:       $RESULTS_DIR/java_our_${TIMESTAMP}.txt"
 echo "  • Rust:       $RESULTS_DIR/rust_${TIMESTAMP}.txt"
 echo "  • JavaScript: $RESULTS_DIR/js_${TIMESTAMP}.txt"
 echo ""

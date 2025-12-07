@@ -32,19 +32,9 @@ pub fn set_runtime(runtime: Arc<UnsafeCell<GCRuntime>>) {
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_var_get_value_dynamic(var_ptr: usize) -> usize {
     unsafe {
-        eprintln!("DEBUG: trampoline_var_get_value_dynamic called with var_ptr={:x}", var_ptr);
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
-
-        // Debug: check what's actually in the var
-        let untagged = (var_ptr >> 3) as *const usize;
-        let value_ptr = untagged.add(3); // field 3 is the value
-        let stored_value = *value_ptr;
-        eprintln!("DEBUG: trampoline_var_get_value_dynamic - stored value at var: {:x}", stored_value);
-
-        let result = rt.var_get_value_dynamic(var_ptr);
-        eprintln!("DEBUG: trampoline_var_get_value_dynamic returning {:x}", result);
-        result
+        rt.var_get_value_dynamic(var_ptr)
     }
 }
 
@@ -398,14 +388,9 @@ impl Trampoline {
     /// The jit_fn must be valid ARM64 code
     pub unsafe fn execute(&self, jit_fn: *const u8) -> i64 {
         unsafe {
-            eprintln!("DEBUG: trampoline.execute() - jit_fn address: {:p}", jit_fn);
-            eprintln!("DEBUG: trampoline.execute() - trampoline address: {:p}", self.code_ptr);
             let trampoline_fn: extern "C" fn(u64, u64) -> i64 =
                 std::mem::transmute(self.code_ptr);
-            eprintln!("DEBUG: About to call trampoline function...");
-            let result = trampoline_fn(0, jit_fn as u64);
-            eprintln!("DEBUG: Trampoline function returned: {} (0x{:x})", result, result);
-            result
+            trampoline_fn(0, jit_fn as u64)
         }
     }
 

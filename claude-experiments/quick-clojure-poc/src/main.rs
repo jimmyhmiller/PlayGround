@@ -110,6 +110,26 @@ fn print_ast(ast: &Expr, indent: usize) {
                 print_ast(expr, indent + 3);
             }
         }
+        Expr::Loop { bindings, body } => {
+            println!("{}Loop", prefix);
+            println!("{}  bindings:", prefix);
+            for (name, value) in bindings {
+                println!("{}    {} =", prefix, name);
+                print_ast(value, indent + 3);
+            }
+            println!("{}  body:", prefix);
+            for (i, expr) in body.iter().enumerate() {
+                println!("{}    [{}]:", prefix, i);
+                print_ast(expr, indent + 3);
+            }
+        }
+        Expr::Recur { args } => {
+            println!("{}Recur", prefix);
+            for (i, arg) in args.iter().enumerate() {
+                println!("{}  [{}]:", prefix, i);
+                print_ast(arg, indent + 2);
+            }
+        }
         Expr::Binding { bindings, body } => {
             println!("{}Binding", prefix);
             println!("{}  bindings:", prefix);
