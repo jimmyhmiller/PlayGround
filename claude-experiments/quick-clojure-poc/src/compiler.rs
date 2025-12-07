@@ -50,6 +50,10 @@ pub struct Compiler {
     /// Next function ID for tracking nested functions
     #[allow(dead_code)]
     next_function_id: usize,
+
+    /// Compiled function IRs for display (name, instructions)
+    /// Cleared after each top-level compile
+    compiled_function_irs: Vec<(Option<String>, Vec<Instruction>)>,
 }
 
 impl Compiler {
@@ -98,6 +102,7 @@ impl Compiler {
             loop_contexts: Vec::new(),
             function_registry: HashMap::new(),
             next_function_id: 0,
+            compiled_function_irs: Vec::new(),
         }
     }
 
@@ -780,6 +785,10 @@ impl Compiler {
 
         // Step 4: Compile this function's IR separately
         let fn_instructions = self.builder.take_instructions();
+
+        // Store the function IR for display purposes (before compiling)
+        self.compiled_function_irs.push((name.clone(), fn_instructions.clone()));
+
         let code_ptr = Arm64CodeGen::compile_function(&fn_instructions)?;
 
         // Step 5: Restore the outer IR builder
@@ -1177,6 +1186,12 @@ impl Compiler {
     /// This clears the instruction buffer, allowing the compiler to be reused
     pub fn take_instructions(&mut self) -> Vec<Instruction> {
         self.builder.take_instructions()
+    }
+
+    /// Take compiled function IRs (for display purposes)
+    /// Returns vector of (function_name, instructions) for each nested function
+    pub fn take_compiled_function_irs(&mut self) -> Vec<(Option<String>, Vec<Instruction>)> {
+        std::mem::take(&mut self.compiled_function_irs)
     }
 }
 

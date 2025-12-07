@@ -930,8 +930,6 @@ impl Arm64CodeGen {
                 // Emit function epilogue
                 if self.is_per_function_compilation {
                     // Per-function compilation: restore what was saved and return
-                    eprintln!("DEBUG: Emitting per-function epilogue (saved_regs={:?}, stack={})",
-                             self.saved_callee_registers, self.function_stack_space);
 
                     // Deallocate spill stack space
                     if self.function_stack_space > 0 {
@@ -1156,7 +1154,7 @@ impl Arm64CodeGen {
             //   [FP - (N+1)*8]: spill slot N
             //   [FP - stack_space]: SP
             let offset = -((stack_offset as i32 + 1) * 8);
-            eprintln!("DEBUG store_spill: slot {} -> offset {}", stack_offset, offset);
+            // eprintln!("DEBUG store_spill: slot {} -> offset {}", stack_offset, offset);
             self.emit_store_to_fp(src_reg, offset);
         }
     }
@@ -1215,8 +1213,8 @@ impl Arm64CodeGen {
             // ADR uses byte offsets, so multiply by 4
             let byte_offset = offset_instructions * 4;
 
-            eprintln!("DEBUG ADR fixup: code_index={}, label={}, target_pos={}, offset_instructions={}, byte_offset={}",
-                      code_index, label, target_pos, offset_instructions, byte_offset);
+            // eprintln!("DEBUG ADR fixup: code_index={}, label={}, target_pos={}, offset_instructions={}, byte_offset={}",
+            //           code_index, label, target_pos, offset_instructions, byte_offset);
 
             // Check if offset fits in 21-bit signed immediate
             if !(-1048576..=1048575).contains(&byte_offset) {
@@ -1231,8 +1229,8 @@ impl Arm64CodeGen {
             let instruction = self.code[*code_index];
             self.code[*code_index] = (instruction & 0x9F00001F) | (immlo << 29) | (immhi << 5);
 
-            eprintln!("DEBUG ADR: patched instruction at {} from {:08x} to {:08x}",
-                      code_index, instruction, self.code[*code_index]);
+            // eprintln!("DEBUG ADR: patched instruction at {} from {:08x} to {:08x}",
+            //           code_index, instruction, self.code[*code_index]);
         }
 
         Ok(())
@@ -1487,8 +1485,8 @@ impl Arm64CodeGen {
         // Using STUR for signed 9-bit offset
         let offset_bits = (offset as u32) & 0x1FF; // 9-bit signed
         let instruction = 0xF8000000 | (offset_bits << 12) | (29 << 5) | (src as u32);
-        eprintln!("DEBUG emit_store_to_fp: offset={}, offset_bits={:03x}, instruction={:08x}",
-                  offset, offset_bits, instruction);
+        // eprintln!("DEBUG emit_store_to_fp: offset={}, offset_bits={:03x}, instruction={:08x}",
+        //           offset, offset_bits, instruction);
         self.code.push(instruction);
     }
 
@@ -1610,7 +1608,7 @@ impl Arm64CodeGen {
         for (label, (prologue_idx, epilogue_idx)) in self.placeholder_positions.clone() {
             let stack_bytes = self.calculate_stack_size(&label);
 
-            eprintln!("DEBUG: Patching function '{}': stack_bytes={}", label, stack_bytes);
+            // eprintln!("DEBUG: Patching function '{}': stack_bytes={}", label, stack_bytes);
 
             // Patch prologue SUB
             let sub_sequence = self.generate_stack_sub_sequence(stack_bytes);

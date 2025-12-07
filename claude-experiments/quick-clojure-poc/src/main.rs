@@ -234,6 +234,69 @@ fn disassemble_arm64(inst: u32) -> String {
             let rm = (i >> 16) & 0x1F;
             format!("mul x{}, x{}, x{}", rd, rn, rm)
         }
+        i if (i & 0xFFC00000) == 0x91000000 => {
+            // ADD (immediate) 64-bit
+            let rd = i & 0x1F;
+            let rn = (i >> 5) & 0x1F;
+            let imm = (i >> 10) & 0xFFF;
+            let shift = if (i >> 22) & 1 == 1 { 12 } else { 0 };
+            let actual_imm = imm << shift;
+            if rn == 31 && actual_imm == 0 {
+                format!("mov x{}, sp", rd)
+            } else if rn == 31 {
+                format!("add x{}, sp, #{}", rd, actual_imm)
+            } else {
+                format!("add x{}, x{}, #{}", rd, rn, actual_imm)
+            }
+        }
+        i if (i & 0xFFC00000) == 0xD1000000 => {
+            // SUB (immediate) 64-bit
+            let rd = i & 0x1F;
+            let rn = (i >> 5) & 0x1F;
+            let imm = (i >> 10) & 0xFFF;
+            let shift = if (i >> 22) & 1 == 1 { 12 } else { 0 };
+            let actual_imm = imm << shift;
+            if rd == 31 {
+                format!("sub sp, x{}, #{}", rn, actual_imm)
+            } else if rn == 31 {
+                format!("sub x{}, sp, #{}", rd, actual_imm)
+            } else {
+                format!("sub x{}, x{}, #{}", rd, rn, actual_imm)
+            }
+        }
+        i if (i & 0xFF800000) == 0x92800000 => {
+            // MOVN (move wide with NOT) 64-bit
+            let rd = i & 0x1F;
+            let imm = (i >> 5) & 0xFFFF;
+            let hw = (i >> 21) & 0x3;
+            format!("movn x{}, #{}, lsl #{}", rd, imm, hw * 16)
+        }
+        i if (i & 0xFFC00000) == 0x92400000 => {
+            // AND (immediate) 64-bit
+            let rd = i & 0x1F;
+            let rn = (i >> 5) & 0x1F;
+            // Simplified - just show the raw immediate fields
+            let imms = (i >> 10) & 0x3F;
+            format!("and x{}, x{}, #<imm:{}>", rd, rn, imms)
+        }
+        i if (i & 0xFFC00000) == 0xF1000000 => {
+            // SUBS (immediate) - CMP when Rd=XZR
+            let rd = i & 0x1F;
+            let rn = (i >> 5) & 0x1F;
+            let imm = (i >> 10) & 0xFFF;
+            if rd == 31 {
+                format!("cmp x{}, #{}", rn, imm)
+            } else {
+                format!("subs x{}, x{}, #{}", rd, rn, imm)
+            }
+        }
+        i if (i & 0xFFE0FC00) == 0xD3400000 => {
+            // LSR (logical shift right) - UBFM alias
+            let rd = i & 0x1F;
+            let rn = (i >> 5) & 0x1F;
+            let immr = (i >> 16) & 0x3F;
+            format!("lsr x{}, x{}, #{}", rd, rn, immr)
+        }
         i if (i & 0xFFE00000) == 0xAA000000 => {
             let rd = i & 0x1F;
             let rm = (i >> 16) & 0x1F;
@@ -648,8 +711,19 @@ fn main() {
                                         // Use the REPL compiler so we can access defined vars
                                         match repl_compiler.compile(&ast) {
                                             Ok(_) => {
+                                                // First show any nested function IRs
+                                                let fn_irs = repl_compiler.take_compiled_function_irs();
+                                                for (fn_name, fn_instructions) in &fn_irs {
+                                                    let name_str = fn_name.as_ref().map(|s| s.as_str()).unwrap_or("<anonymous>");
+                                                    println!("\nFunction '{}' IR ({} instructions):", name_str, fn_instructions.len());
+                                                    for (i, inst) in fn_instructions.iter().enumerate() {
+                                                        println!("  {:3}: {:?}", i, inst);
+                                                    }
+                                                }
+
+                                                // Then show top-level IR
                                                 let instructions = repl_compiler.take_instructions();
-                                                println!("\nIR ({} instructions):", instructions.len());
+                                                println!("\nTop-level IR ({} instructions):", instructions.len());
                                                 for (i, inst) in instructions.iter().enumerate() {
                                                     println!("  {:3}: {:?}", i, inst);
                                                 }

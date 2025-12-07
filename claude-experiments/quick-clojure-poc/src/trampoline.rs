@@ -113,9 +113,6 @@ pub extern "C" fn trampoline_allocate_function(
     values_ptr: *const usize,
 ) -> usize {
     unsafe {
-        eprintln!("DEBUG: trampoline_allocate_function called: name_ptr={:x}, code_ptr={:x}, closure_count={}", name_ptr, code_ptr, closure_count);
-        eprintln!("DEBUG:   values_ptr={:p}", values_ptr);
-
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
@@ -129,24 +126,18 @@ pub extern "C" fn trampoline_allocate_function(
         // Read closure values from the pointer
         let closure_values = if closure_count > 0 {
             let values_slice = std::slice::from_raw_parts(values_ptr, closure_count);
-            eprintln!("DEBUG:   closure values: {:x?}", values_slice);
             values_slice.to_vec()
         } else {
             vec![]
         };
 
-        let result = match rt.allocate_function(name, code_ptr, closure_values) {
-            Ok(fn_ptr) => {
-                eprintln!("DEBUG: Function allocated successfully: fn_ptr={:x}", fn_ptr);
-                fn_ptr
-            },
+        match rt.allocate_function(name, code_ptr, closure_values) {
+            Ok(fn_ptr) => fn_ptr,
             Err(msg) => {
                 eprintln!("Error allocating function: {}", msg);
                 7 // Return nil on error
             }
-        };
-        eprintln!("DEBUG: trampoline_allocate_function RETURNING fn_ptr={:x}", result);
-        result
+        }
     }
 }
 
@@ -160,9 +151,7 @@ pub extern "C" fn trampoline_function_code_ptr(fn_ptr: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
-        let code_ptr = rt.function_code_ptr(fn_ptr);
-        eprintln!("DEBUG: trampoline_function_code_ptr({:x}) -> {:x}", fn_ptr, code_ptr);
-        code_ptr
+        rt.function_code_ptr(fn_ptr)
     }
 }
 
@@ -218,12 +207,6 @@ impl Trampoline {
         };
 
         trampoline.generate_trampoline();
-
-        // Debug: print trampoline code
-        eprintln!("DEBUG: Trampoline instructions:");
-        for (i, inst) in trampoline.code.iter().enumerate() {
-            eprintln!("  {:04x}: {:08x}", i * 4, inst);
-        }
 
         trampoline.allocate_code();
 
