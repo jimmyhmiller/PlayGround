@@ -39,7 +39,7 @@ fn main() {
         process::exit(1);
     });
 
-    let ion_json: IonJSON = serde_json::from_str(&json_str).unwrap_or_else(|e| {
+    let ion_json: IonJSON = iongraph_rust_redux::json_compat::parse_as(&json_str).unwrap_or_else(|e| {
         eprintln!("Failed to parse JSON: {}", e);
         process::exit(1);
     });

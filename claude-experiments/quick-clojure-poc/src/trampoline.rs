@@ -342,6 +342,56 @@ impl Trampoline {
         }
     }
 
+    /// Allocate executable memory and copy code into it
+    /// Returns the code pointer (executable memory address)
+    pub fn execute_code(code: &[u32]) -> usize {
+        unsafe {
+            let code_size = code.len() * 4;
+
+            if code_size == 0 {
+                panic!("Code size is zero!");
+            }
+
+            // Allocate as READ+WRITE first
+            let ptr = libc::mmap(
+                std::ptr::null_mut(),
+                code_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+
+            if ptr == libc::MAP_FAILED {
+                panic!("Failed to allocate code memory");
+            }
+
+            // Copy code
+            let code_bytes = std::slice::from_raw_parts(
+                code.as_ptr() as *const u8,
+                code_size,
+            );
+            std::ptr::copy_nonoverlapping(code_bytes.as_ptr(), ptr as *mut u8, code_size);
+
+            // Make executable (can't be writeable and executable at same time on macOS)
+            if libc::mprotect(ptr, code_size, libc::PROT_READ | libc::PROT_EXEC) != 0 {
+                libc::munmap(ptr, code_size);
+                panic!("Failed to make code executable");
+            }
+
+            // Clear instruction cache on ARM64
+            #[cfg(target_os = "macos")]
+            {
+                unsafe extern "C" {
+                    fn sys_icache_invalidate(start: *const libc::c_void, size: libc::size_t);
+                }
+                sys_icache_invalidate(ptr, code_size);
+            }
+
+            ptr as usize
+        }
+    }
+
     /// Execute JIT code through the trampoline
     ///
     /// # Safety

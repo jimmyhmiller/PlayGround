@@ -8,6 +8,10 @@ import java.util.Map;
 
 import static java.util.Map.entry;
 
+import com.jsparser.OperatorInfo.PrefixHandler;
+import com.jsparser.OperatorInfo.InfixHandler;
+import com.jsparser.OperatorInfo.InfixOp;
+
 public class Parser {
     /**
      * Complete precedence table for JavaScript operators.
@@ -100,6 +104,207 @@ public class Parser {
         entry(TokenType.STAR_STAR, new OperatorInfo(15, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.BINARY))
     );
 
+    /**
+     * Statement parser dispatch table.
+     * Maps token types to statement parsing methods for simple cases.
+     * Complex cases (LET, IMPORT, IDENTIFIER) require lookahead and are handled separately.
+     *
+     * Using java.util.function.Function<Parser, Statement> to allow instance method dispatch.
+     */
+    private static final Map<TokenType, java.util.function.Function<Parser, Statement>> STATEMENT_PARSERS = Map.ofEntries(
+        // Variable declarations
+        entry(TokenType.VAR, Parser::parseVariableDeclaration),
+        entry(TokenType.CONST, Parser::parseVariableDeclaration),
+        // Note: LET requires lookahead - handled specially
+
+        // Block statement
+        entry(TokenType.LBRACE, Parser::parseBlockStatement),
+
+        // Control flow statements
+        entry(TokenType.IF, Parser::parseIfStatement),
+        entry(TokenType.WHILE, Parser::parseWhileStatement),
+        entry(TokenType.DO, Parser::parseDoWhileStatement),
+        entry(TokenType.FOR, Parser::parseForStatement),
+        entry(TokenType.SWITCH, Parser::parseSwitchStatement),
+
+        // Jump statements
+        entry(TokenType.RETURN, Parser::parseReturnStatement),
+        entry(TokenType.BREAK, Parser::parseBreakStatement),
+        entry(TokenType.CONTINUE, Parser::parseContinueStatement),
+        entry(TokenType.THROW, Parser::parseThrowStatement),
+
+        // Exception handling
+        entry(TokenType.TRY, Parser::parseTryStatement),
+
+        // Other statements
+        entry(TokenType.WITH, Parser::parseWithStatement),
+        entry(TokenType.DEBUGGER, Parser::parseDebuggerStatement),
+        entry(TokenType.SEMICOLON, Parser::parseEmptyStatement),
+
+        // Declarations
+        entry(TokenType.FUNCTION, p -> p.parseFunctionDeclaration(false)),
+        entry(TokenType.CLASS, Parser::parseClassDeclaration),
+
+        // Module declarations
+        // Note: IMPORT requires lookahead for dynamic import - handled specially
+        entry(TokenType.EXPORT, Parser::parseExportDeclaration)
+    );
+
+    // ========================================================================
+    // Binding Power Constants for Pratt Parser
+    // ========================================================================
+    // Higher binding power = tighter binding (higher precedence)
+    // These values correspond to JavaScript operator precedence levels
+    private static final int BP_NONE = 0;           // Lowest - used as minimum for top-level
+    private static final int BP_COMMA = 1;          // Comma/Sequence operator
+    private static final int BP_ASSIGNMENT = 2;     // Assignment (=, +=, etc.) - right-associative
+    private static final int BP_TERNARY = 3;        // Conditional (? :)
+    private static final int BP_NULLISH = 4;        // Nullish coalescing (??)
+    private static final int BP_OR = 5;             // Logical OR (||)
+    private static final int BP_AND = 6;            // Logical AND (&&)
+    private static final int BP_BIT_OR = 7;         // Bitwise OR (|)
+    private static final int BP_BIT_XOR = 8;        // Bitwise XOR (^)
+    private static final int BP_BIT_AND = 9;        // Bitwise AND (&)
+    private static final int BP_EQUALITY = 10;      // Equality (==, !=, ===, !==)
+    private static final int BP_RELATIONAL = 11;    // Relational (<, <=, >, >=, instanceof, in)
+    private static final int BP_SHIFT = 12;         // Shift (<<, >>, >>>)
+    private static final int BP_ADDITIVE = 13;      // Additive (+, -)
+    private static final int BP_MULTIPLICATIVE = 14;// Multiplicative (*, /, %)
+    private static final int BP_EXPONENT = 15;      // Exponentiation (**) - right-associative
+    private static final int BP_UNARY = 16;         // Prefix unary (!, -, +, ~, typeof, void, delete, ++, --)
+    private static final int BP_POSTFIX = 17;       // Postfix (x++, x--, call, member access, optional chaining)
+
+    // ========================================================================
+    // PREFIX_HANDLERS: Token -> Prefix expression handler
+    // ========================================================================
+    // These handle tokens that START an expression (NUD in Pratt parsing)
+    private static final Map<TokenType, PrefixHandler> PREFIX_HANDLERS = Map.ofEntries(
+        // Literals
+        entry(TokenType.NUMBER, Parser::prefixNumber),
+        entry(TokenType.STRING, Parser::prefixString),
+        entry(TokenType.TRUE, Parser::prefixTrue),
+        entry(TokenType.FALSE, Parser::prefixFalse),
+        entry(TokenType.NULL, Parser::prefixNull),
+        entry(TokenType.REGEX, Parser::prefixRegex),
+
+        // Identifiers and keywords
+        entry(TokenType.IDENTIFIER, Parser::prefixIdentifier),
+        entry(TokenType.THIS, Parser::prefixThis),
+        entry(TokenType.SUPER, Parser::prefixSuper),
+
+        // Grouping and collections
+        entry(TokenType.LPAREN, Parser::prefixGroupedOrArrow),
+        entry(TokenType.LBRACKET, Parser::prefixArray),
+        entry(TokenType.LBRACE, Parser::prefixObject),
+
+        // Function/class expressions
+        entry(TokenType.FUNCTION, Parser::prefixFunction),
+        entry(TokenType.CLASS, Parser::prefixClass),
+        entry(TokenType.NEW, Parser::prefixNew),
+
+        // Unary operators
+        entry(TokenType.BANG, Parser::prefixUnary),
+        entry(TokenType.MINUS, Parser::prefixUnary),
+        entry(TokenType.PLUS, Parser::prefixUnary),
+        entry(TokenType.TILDE, Parser::prefixUnary),
+        entry(TokenType.TYPEOF, Parser::prefixUnary),
+        entry(TokenType.VOID, Parser::prefixUnary),
+        entry(TokenType.DELETE, Parser::prefixUnary),
+        entry(TokenType.INCREMENT, Parser::prefixUpdate),
+        entry(TokenType.DECREMENT, Parser::prefixUpdate),
+
+        // Templates
+        entry(TokenType.TEMPLATE_LITERAL, Parser::prefixTemplate),
+        entry(TokenType.TEMPLATE_HEAD, Parser::prefixTemplate),
+
+        // Special
+        entry(TokenType.IMPORT, Parser::prefixImport),
+        entry(TokenType.HASH, Parser::prefixPrivateIdentifier)
+    );
+
+    // ========================================================================
+    // INFIX_HANDLERS: Token -> (BindingPower, Infix handler)
+    // ========================================================================
+    // These handle tokens that appear AFTER an expression (LED in Pratt parsing)
+    private static final Map<TokenType, InfixOp> INFIX_HANDLERS = Map.ofEntries(
+        // Comma (sequence expression)
+        entry(TokenType.COMMA, InfixOp.left(BP_COMMA, Parser::infixComma)),
+
+        // Assignment operators (right-associative)
+        entry(TokenType.ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.PLUS_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.MINUS_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.STAR_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.SLASH_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.PERCENT_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.STAR_STAR_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.LEFT_SHIFT_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.RIGHT_SHIFT_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.UNSIGNED_RIGHT_SHIFT_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.BIT_AND_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.BIT_OR_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.BIT_XOR_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.AND_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.OR_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+        entry(TokenType.QUESTION_QUESTION_ASSIGN, InfixOp.right(BP_ASSIGNMENT, Parser::infixAssignment)),
+
+        // Ternary conditional
+        entry(TokenType.QUESTION, InfixOp.right(BP_TERNARY, Parser::infixTernary)),
+
+        // Logical operators
+        entry(TokenType.QUESTION_QUESTION, InfixOp.left(BP_NULLISH, Parser::infixLogical)),
+        entry(TokenType.OR, InfixOp.left(BP_OR, Parser::infixLogical)),
+        entry(TokenType.AND, InfixOp.left(BP_AND, Parser::infixLogical)),
+
+        // Bitwise operators
+        entry(TokenType.BIT_OR, InfixOp.left(BP_BIT_OR, Parser::infixBinary)),
+        entry(TokenType.BIT_XOR, InfixOp.left(BP_BIT_XOR, Parser::infixBinary)),
+        entry(TokenType.BIT_AND, InfixOp.left(BP_BIT_AND, Parser::infixBinary)),
+
+        // Equality operators
+        entry(TokenType.EQ, InfixOp.left(BP_EQUALITY, Parser::infixBinary)),
+        entry(TokenType.NE, InfixOp.left(BP_EQUALITY, Parser::infixBinary)),
+        entry(TokenType.EQ_STRICT, InfixOp.left(BP_EQUALITY, Parser::infixBinary)),
+        entry(TokenType.NE_STRICT, InfixOp.left(BP_EQUALITY, Parser::infixBinary)),
+
+        // Relational operators
+        entry(TokenType.LT, InfixOp.left(BP_RELATIONAL, Parser::infixBinary)),
+        entry(TokenType.LE, InfixOp.left(BP_RELATIONAL, Parser::infixBinary)),
+        entry(TokenType.GT, InfixOp.left(BP_RELATIONAL, Parser::infixBinary)),
+        entry(TokenType.GE, InfixOp.left(BP_RELATIONAL, Parser::infixBinary)),
+        entry(TokenType.INSTANCEOF, InfixOp.left(BP_RELATIONAL, Parser::infixBinary)),
+        entry(TokenType.IN, InfixOp.left(BP_RELATIONAL, Parser::infixBinary)),
+
+        // Shift operators
+        entry(TokenType.LEFT_SHIFT, InfixOp.left(BP_SHIFT, Parser::infixBinary)),
+        entry(TokenType.RIGHT_SHIFT, InfixOp.left(BP_SHIFT, Parser::infixBinary)),
+        entry(TokenType.UNSIGNED_RIGHT_SHIFT, InfixOp.left(BP_SHIFT, Parser::infixBinary)),
+
+        // Additive operators
+        entry(TokenType.PLUS, InfixOp.left(BP_ADDITIVE, Parser::infixBinary)),
+        entry(TokenType.MINUS, InfixOp.left(BP_ADDITIVE, Parser::infixBinary)),
+
+        // Multiplicative operators
+        entry(TokenType.STAR, InfixOp.left(BP_MULTIPLICATIVE, Parser::infixBinary)),
+        entry(TokenType.SLASH, InfixOp.left(BP_MULTIPLICATIVE, Parser::infixBinary)),
+        entry(TokenType.PERCENT, InfixOp.left(BP_MULTIPLICATIVE, Parser::infixBinary)),
+
+        // Exponentiation (right-associative)
+        entry(TokenType.STAR_STAR, InfixOp.right(BP_EXPONENT, Parser::infixBinary)),
+
+        // Postfix operators and member access
+        entry(TokenType.DOT, InfixOp.postfix(BP_POSTFIX, Parser::infixMember)),
+        entry(TokenType.QUESTION_DOT, InfixOp.postfix(BP_POSTFIX, Parser::infixOptionalChain)),
+        entry(TokenType.LBRACKET, InfixOp.postfix(BP_POSTFIX, Parser::infixComputed)),
+        entry(TokenType.LPAREN, InfixOp.postfix(BP_POSTFIX, Parser::infixCall)),
+
+        // Tagged templates
+        entry(TokenType.TEMPLATE_LITERAL, InfixOp.postfix(BP_POSTFIX, Parser::infixTaggedTemplate)),
+        entry(TokenType.TEMPLATE_HEAD, InfixOp.postfix(BP_POSTFIX, Parser::infixTaggedTemplate))
+
+        // Note: Postfix ++/-- are handled specially in parseExpr due to line terminator restriction
+    );
+
     private final List<Token> tokens;
     private final int sourceLength;
     private final Lexer lexer;
@@ -116,6 +321,10 @@ public class Parser {
     // Strict mode tracking
     private boolean strictMode = false;
     private java.util.Stack<Boolean> strictModeStack = new java.util.Stack<>();
+
+    // Pratt parser context - tracks outer expression start for proper location
+    private int exprStartPos = 0;
+    private SourceLocation.Position exprStartLoc = null;
 
     public Parser(String source) {
         this(source, false, false);
@@ -182,110 +391,138 @@ public class Parser {
         return new Program(0, sourceLength, loc, statements, sourceType);
     }
 
+    /**
+     * Parse a statement using table-driven dispatch.
+     *
+     * Most statement types are handled by the STATEMENT_PARSERS table.
+     * Special cases requiring lookahead are handled explicitly:
+     * - LET: Could be identifier or declaration keyword
+     * - IMPORT: Could be dynamic import expression or import declaration
+     * - IDENTIFIER: Could be async function, labeled statement, or expression
+     */
     private Statement parseStatement() {
         Token token = peek();
+        TokenType type = token.type();
 
-        return switch (token.type()) {
-            case VAR, CONST -> parseVariableDeclaration();
-            case LET -> {
-                // Check if 'let' is used as identifier (e.g., let = 5, let[0]) or as declaration keyword
-                // If followed by = (not part of destructuring), it's an identifier being assigned
-                // If followed by line terminator, ASI applies and 'let' is an identifier
-                Token letToken = peek();
-                if (checkAhead(1, TokenType.ASSIGN)) {
-                    // Parse as expression statement (let as identifier)
-                    Expression expr = parseExpression();
-                    consumeSemicolon("Expected ';' after expression");
-                    Token endToken = previous();
-                    yield new ExpressionStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), expr);
-                } else if (current + 1 < tokens.size() && letToken.line() != tokens.get(current + 1).line()) {
-                    // Line terminator after 'let' - treat as identifier with ASI
-                    Expression expr = parseExpression();
-                    consumeSemicolon("Expected ';' after expression");
-                    Token endToken = previous();
-                    yield new ExpressionStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), expr);
-                } else {
-                    // Parse as variable declaration (includes let x, let [x], let {x}, etc.)
-                    yield parseVariableDeclaration();
-                }
+        // Try table-driven dispatch first (handles most cases)
+        java.util.function.Function<Parser, Statement> parser = STATEMENT_PARSERS.get(type);
+        if (parser != null) {
+            return parser.apply(this);
+        }
+
+        // Handle special cases requiring lookahead
+
+        // LET: Check if used as identifier or declaration keyword
+        if (type == TokenType.LET) {
+            return parseLetStatementOrExpression(token);
+        }
+
+        // IMPORT: Check for dynamic import vs import declaration
+        if (type == TokenType.IMPORT) {
+            return parseImportStatementOrExpression(token);
+        }
+
+        // IDENTIFIER: Check for async function or labeled statement
+        if (type == TokenType.IDENTIFIER) {
+            return parseIdentifierStatement(token);
+        }
+
+        // Default: Parse as expression statement
+        return parseExpressionStatement(token);
+    }
+
+    /**
+     * Handle LET which can be either a declaration keyword or an identifier.
+     * - let x = 1     → VariableDeclaration
+     * - let = 5       → ExpressionStatement (let as identifier)
+     * - let[0] = 1    → ExpressionStatement (let as identifier)
+     * - let\n x       → ExpressionStatement with ASI
+     */
+    private Statement parseLetStatementOrExpression(Token token) {
+        Token letToken = peek();
+
+        // If followed by = (not part of destructuring), it's an identifier being assigned
+        if (checkAhead(1, TokenType.ASSIGN)) {
+            return parseExpressionStatement(token);
+        }
+
+        // If followed by line terminator, ASI applies and 'let' is an identifier
+        if (current + 1 < tokens.size() && letToken.line() != tokens.get(current + 1).line()) {
+            return parseExpressionStatement(token);
+        }
+
+        // Parse as variable declaration (includes let x, let [x], let {x}, etc.)
+        return parseVariableDeclaration();
+    }
+
+    /**
+     * Handle IMPORT which can be either a declaration or an expression.
+     * - import { foo } from 'module'  → ImportDeclaration
+     * - import('./module.js')         → ExpressionStatement (dynamic import)
+     * - import.meta                   → ExpressionStatement (import.meta)
+     */
+    private Statement parseImportStatementOrExpression(Token token) {
+        if (current + 1 < tokens.size()) {
+            TokenType nextType = tokens.get(current + 1).type();
+            if (nextType == TokenType.LPAREN || nextType == TokenType.DOT) {
+                // Dynamic import or import.meta - parse as expression statement
+                return parseExpressionStatement(token);
             }
-            case LBRACE -> parseBlockStatement();
-            case RETURN -> parseReturnStatement();
-            case IF -> parseIfStatement();
-            case WHILE -> parseWhileStatement();
-            case DO -> parseDoWhileStatement();
-            case FOR -> parseForStatement();
-            case BREAK -> parseBreakStatement();
-            case CONTINUE -> parseContinueStatement();
-            case SWITCH -> parseSwitchStatement();
-            case THROW -> parseThrowStatement();
-            case TRY -> parseTryStatement();
-            case WITH -> parseWithStatement();
-            case DEBUGGER -> parseDebuggerStatement();
-            case SEMICOLON -> parseEmptyStatement();
-            case FUNCTION -> parseFunctionDeclaration(false);
-            case CLASS -> parseClassDeclaration();
-            case IMPORT -> {
-                // Check if this is a dynamic import expression: import('./module.js')
-                // or import.meta expression
-                // vs an import declaration: import { foo } from 'module'
-                if (current + 1 < tokens.size()) {
-                    TokenType nextType = tokens.get(current + 1).type();
-                    if (nextType == TokenType.LPAREN || nextType == TokenType.DOT) {
-                        // Dynamic import or import.meta - parse as expression statement
-                        Expression expr = parseExpression();
-                        consumeSemicolon("Expected ';' after expression");
-                        Token endToken = previous();
-                        yield new ExpressionStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), expr);
-                    } else {
-                        // Import declaration
-                        yield parseImportDeclaration();
-                    }
-                } else {
-                    // Import declaration
-                    yield parseImportDeclaration();
-                }
-            }
-            case EXPORT -> parseExportDeclaration();
-            case IDENTIFIER -> {
-                // Check for async function declaration
-                // No line terminator is allowed between async and function
-                if (token.lexeme().equals("async") && current + 1 < tokens.size() &&
-                    tokens.get(current + 1).type() == TokenType.FUNCTION &&
-                    tokens.get(current).line() == tokens.get(current + 1).line()) {
-                    yield parseFunctionDeclaration(true);
-                }
-                // Otherwise, it's an expression statement
-                Expression expr = parseExpression();
+        }
+        // Import declaration
+        return parseImportDeclaration();
+    }
 
-                // Check if this is a labeled statement (identifier followed by colon)
-                if (expr instanceof Identifier id && check(TokenType.COLON)) {
-                    advance(); // consume ':'
-                    Statement labeledBody = parseStatement();
-                    Token endToken = previous();
-                    yield new LabeledStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), id, labeledBody);
-                }
+    /**
+     * Handle IDENTIFIER which can be async function, labeled statement, or expression.
+     * - async function foo() {}  → FunctionDeclaration
+     * - label: statement         → LabeledStatement
+     * - expression;              → ExpressionStatement
+     */
+    private Statement parseIdentifierStatement(Token token) {
+        // Check for async function declaration
+        // No line terminator is allowed between async and function
+        if (token.lexeme().equals("async") && current + 1 < tokens.size() &&
+            tokens.get(current + 1).type() == TokenType.FUNCTION &&
+            tokens.get(current).line() == tokens.get(current + 1).line()) {
+            return parseFunctionDeclaration(true);
+        }
 
-                consumeSemicolon("Expected ';' after expression");
-                Token endToken = previous();
-                yield new ExpressionStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), expr);
-            }
-            default -> {
-                Expression expr = parseExpression();
+        // Parse as expression first
+        Expression expr = parseExpression();
 
-                // Check if this is a labeled statement (identifier followed by colon)
-                if (expr instanceof Identifier id && check(TokenType.COLON)) {
-                    advance(); // consume ':'
-                    Statement labeledBody = parseStatement();
-                    Token endToken = previous();
-                    yield new LabeledStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), id, labeledBody);
-                }
+        // Check if this is a labeled statement (identifier followed by colon)
+        if (expr instanceof Identifier id && check(TokenType.COLON)) {
+            advance(); // consume ':'
+            Statement labeledBody = parseStatement();
+            Token endToken = previous();
+            return new LabeledStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), id, labeledBody);
+        }
 
-                consumeSemicolon("Expected ';' after expression");
-                Token endToken = previous();
-                yield new ExpressionStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), expr);
-            }
-        };
+        // Regular expression statement
+        consumeSemicolon("Expected ';' after expression");
+        Token endToken = previous();
+        return new ExpressionStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), expr);
+    }
+
+    /**
+     * Parse an expression statement (default case for unknown statement types).
+     * Also handles labeled statements if the expression is an identifier followed by colon.
+     */
+    private Statement parseExpressionStatement(Token token) {
+        Expression expr = parseExpression();
+
+        // Check if this is a labeled statement (identifier followed by colon)
+        if (expr instanceof Identifier id && check(TokenType.COLON)) {
+            advance(); // consume ':'
+            Statement labeledBody = parseStatement();
+            Token endToken = previous();
+            return new LabeledStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), id, labeledBody);
+        }
+
+        consumeSemicolon("Expected ';' after expression");
+        Token endToken = previous();
+        return new ExpressionStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), expr);
     }
 
     private WhileStatement parseWhileStatement() {
@@ -850,7 +1087,7 @@ public class Parser {
         Expression superClass = null;
         if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("extends")) {
             advance(); // consume 'extends'
-            superClass = parseConditional(); // Parse the superclass expression (can be any expression except assignment)
+            superClass = parseExpr(BP_TERNARY + 1); // Parse the superclass expression (can be any expression except assignment or ternary)
         }
 
         // Parse class body
@@ -1841,8 +2078,1153 @@ public class Parser {
     // sequence -> assignment ( "," assignment )*
     // assignment -> conditional ( "=" assignment )?
     private Expression parseExpression() {
-        return parseSequence();
+        return parseExpr(BP_COMMA);
     }
+
+    // ========================================================================
+    // Unified Pratt Parser - parseExpr(int minBp)
+    // ========================================================================
+    // This is the core of the Pratt parsing algorithm.
+    // It parses expressions with binding power >= minBp.
+    //
+    // The algorithm:
+    // 1. Parse a prefix expression (NUD)
+    // 2. While the next token has binding power >= minBp, parse infix (LED)
+    //
+    // This collapses the 8-method chain:
+    //   parseExpression → parseSequence → parseAssignment → parseConditional
+    //   → parseBinaryExpression → parseUnary → parsePostfix → parsePrimary
+    // into a single unified method with flat call stack.
+
+    private Expression parseExpr(int minBp) {
+        Token startToken = peek();
+
+        // Handle contextual keywords: yield and await
+        // These have assignment-level precedence and need special handling
+        if (inGenerator && check(TokenType.IDENTIFIER) && peek().lexeme().equals("yield")) {
+            if (!checkAhead(1, TokenType.ASSIGN) && !checkAhead(1, TokenType.PLUS_ASSIGN) &&
+                !checkAhead(1, TokenType.MINUS_ASSIGN) && !checkAhead(1, TokenType.STAR_ASSIGN) &&
+                !checkAhead(1, TokenType.SLASH_ASSIGN) && !checkAhead(1, TokenType.PERCENT_ASSIGN)) {
+                Expression yieldExpr = parseYieldExpr();
+                return continueInfix(yieldExpr, startToken, minBp);
+            }
+        }
+
+        if (shouldParseAwait()) {
+            Expression awaitExpr = parseAwaitExpr();
+            return continueInfix(awaitExpr, startToken, minBp);
+        }
+
+        // Handle arrow functions: async? (params) => ... or async? id => ...
+        Expression arrowResult = tryParseArrowFunction(startToken);
+        if (arrowResult != null) {
+            return continueInfix(arrowResult, startToken, minBp);
+        }
+
+        // Prefix handling (NUD - Null Denotation)
+        Token token = peek();
+        PrefixHandler prefix = PREFIX_HANDLERS.get(token.type());
+        if (prefix == null) {
+            throw new UnexpectedTokenException(token, "expression");
+        }
+        advance();
+        Expression left = prefix.parse(this, previous());
+
+        return continueInfix(left, startToken, minBp);
+    }
+
+    // Continue parsing infix operators after we have a left-hand expression
+    private Expression continueInfix(Expression left, Token startToken, int minBp) {
+        // Store the outer expression start - we need these local vars because handlers may recursively call parseExpr
+        int outerStartPos = getStart(startToken);
+        SourceLocation.Position outerStartLoc = new SourceLocation.Position(startToken.line(), startToken.column());
+
+        // Track optional chaining for ChainExpression wrapping
+        boolean hasOptionalChaining = false;
+
+        // Infix/Postfix loop (LED - Left Denotation)
+        while (true) {
+            Token token = peek();
+
+            // Special case: postfix ++/-- with line terminator restriction
+            if ((token.type() == TokenType.INCREMENT || token.type() == TokenType.DECREMENT)) {
+                Token prevToken = previous();
+                if (prevToken.line() < token.line()) {
+                    // Line terminator before postfix operator - stop
+                    break;
+                }
+                // Handle as postfix update
+                if (BP_POSTFIX >= minBp) {
+                    advance();
+                    Token endToken = previous();
+                    SourceLocation loc = createLocation(startToken, endToken);
+                    left = new UpdateExpression(outerStartPos, getEnd(endToken), loc, token.lexeme(), false, left);
+                    continue;
+                }
+                break;
+            }
+
+            InfixOp infix = INFIX_HANDLERS.get(token.type());
+            if (infix == null || infix.lbp() < minBp) {
+                break;
+            }
+
+            // Special case: 'in' operator respects allowIn flag
+            if (token.type() == TokenType.IN && !allowIn) {
+                break;
+            }
+
+            // Track optional chaining
+            if (token.type() == TokenType.QUESTION_DOT) {
+                hasOptionalChaining = true;
+            }
+
+            advance();
+            // Set instance vars for handler to use, then call handler
+            exprStartPos = outerStartPos;
+            exprStartLoc = outerStartLoc;
+            left = infix.handler().parse(this, left, previous());
+            // Note: handler may have overwritten exprStartPos/exprStartLoc via recursive parseExpr calls,
+            // but we have our local outerStartPos/outerStartLoc preserved
+        }
+
+        // Wrap in ChainExpression if we used optional chaining
+        if (hasOptionalChaining) {
+            Token endToken = previous();
+            SourceLocation loc = createLocation(startToken, endToken);
+            left = new ChainExpression(outerStartPos, getEnd(endToken), loc, left);
+        }
+
+        return left;
+    }
+
+    // ========================================================================
+    // Prefix Handlers (NUD)
+    // ========================================================================
+
+    private static Expression prefixNumber(Parser p, Token token) {
+        SourceLocation loc = p.createLocation(token, token);
+        String lexeme = token.lexeme();
+
+        // Check for BigInt literal (ends with 'n')
+        if (lexeme.endsWith("n")) {
+            String bigintValue = lexeme.substring(0, lexeme.length() - 1).replace("_", "");
+            // Convert hex/octal/binary to decimal
+            if (bigintValue.startsWith("0x") || bigintValue.startsWith("0X")) {
+                try {
+                    java.math.BigInteger bi = new java.math.BigInteger(bigintValue.substring(2), 16);
+                    bigintValue = bi.toString();
+                } catch (NumberFormatException e) { /* keep original */ }
+            } else if (bigintValue.startsWith("0o") || bigintValue.startsWith("0O")) {
+                try {
+                    java.math.BigInteger bi = new java.math.BigInteger(bigintValue.substring(2), 8);
+                    bigintValue = bi.toString();
+                } catch (NumberFormatException e) { /* keep original */ }
+            } else if (bigintValue.startsWith("0b") || bigintValue.startsWith("0B")) {
+                try {
+                    java.math.BigInteger bi = new java.math.BigInteger(bigintValue.substring(2), 2);
+                    bigintValue = bi.toString();
+                } catch (NumberFormatException e) { /* keep original */ }
+            }
+            return new Literal(p.getStart(token), p.getEnd(token), loc, null, lexeme, null, bigintValue);
+        }
+
+        // Handle Infinity/-Infinity/NaN - value should be null per ESTree spec
+        Object literalValue = token.literal();
+        if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
+            literalValue = null;
+        }
+        return new Literal(p.getStart(token), p.getEnd(token), loc, literalValue, token.lexeme());
+    }
+
+    private static Expression prefixString(Parser p, Token token) {
+        SourceLocation loc = p.createLocation(token, token);
+        return new Literal(p.getStart(token), p.getEnd(token), loc, token.literal(), token.lexeme());
+    }
+
+    private static Expression prefixTrue(Parser p, Token token) {
+        SourceLocation loc = p.createLocation(token, token);
+        return new Literal(p.getStart(token), p.getEnd(token), loc, true, "true");
+    }
+
+    private static Expression prefixFalse(Parser p, Token token) {
+        SourceLocation loc = p.createLocation(token, token);
+        return new Literal(p.getStart(token), p.getEnd(token), loc, false, "false");
+    }
+
+    private static Expression prefixNull(Parser p, Token token) {
+        SourceLocation loc = p.createLocation(token, token);
+        return new Literal(p.getStart(token), p.getEnd(token), loc, null, "null");
+    }
+
+    private static Expression prefixRegex(Parser p, Token token) {
+        SourceLocation loc = p.createLocation(token, token);
+        return new Literal(p.getStart(token), p.getEnd(token), loc, token.literal(), token.lexeme());
+    }
+
+    private static Expression prefixIdentifier(Parser p, Token token) {
+        // Check for async function expression
+        if (token.lexeme().equals("async") && p.current < p.tokens.size() &&
+            p.tokens.get(p.current).type() == TokenType.FUNCTION &&
+            token.line() == p.tokens.get(p.current).line()) {
+            return p.parseAsyncFunctionExpressionFromIdentifier(token);
+        }
+
+        // In module/async mode, 'await' is a reserved keyword
+        if ((p.forceModuleMode || p.inAsyncContext) && !p.inClassFieldInitializer && token.lexeme().equals("await")) {
+            String context = p.forceModuleMode ? "module code" : "async function";
+            throw new ParseException("SyntaxError", token, null, null,
+                "Unexpected use of 'await' as identifier in " + context);
+        }
+
+        SourceLocation loc = p.createLocation(token, token);
+        return new Identifier(p.getStart(token), p.getEnd(token), loc, token.lexeme());
+    }
+
+    private static Expression prefixThis(Parser p, Token token) {
+        SourceLocation loc = p.createLocation(token, token);
+        return new ThisExpression(p.getStart(token), p.getEnd(token), loc);
+    }
+
+    private static Expression prefixSuper(Parser p, Token token) {
+        SourceLocation loc = p.createLocation(token, token);
+        return new Super(p.getStart(token), p.getEnd(token), loc);
+    }
+
+    private static Expression prefixGroupedOrArrow(Parser p, Token token) {
+        // This is called when we see '(' and it's NOT an arrow function
+        // (arrow functions are handled in tryParseArrowFunction before prefix dispatch)
+        // So this is a grouped/parenthesized expression
+        Expression expr = p.parseExpr(BP_COMMA);
+        p.consume(TokenType.RPAREN, "Expected ')' after expression");
+        return expr;
+    }
+
+    private static Expression prefixArray(Parser p, Token token) {
+        return p.parseArrayLiteral(token);
+    }
+
+    private static Expression prefixObject(Parser p, Token token) {
+        return p.parseObjectLiteral(token);
+    }
+
+    private static Expression prefixFunction(Parser p, Token token) {
+        return p.parseFunctionExpression(token, false);
+    }
+
+    private static Expression prefixClass(Parser p, Token token) {
+        return p.parseClassExpression(token);
+    }
+
+    private static Expression prefixNew(Parser p, Token token) {
+        return p.parseNewExpression(token);
+    }
+
+    private static Expression prefixUnary(Parser p, Token token) {
+        Expression argument = p.parseExpr(BP_UNARY);
+        Token endToken = p.previous();
+
+        // Strict mode validation: delete on identifiers is not allowed
+        if (p.strictMode && token.type() == TokenType.DELETE && argument instanceof Identifier) {
+            throw new ExpectedTokenException("Delete of an unqualified identifier is not allowed in strict mode", token);
+        }
+
+        SourceLocation loc = p.createLocation(token, endToken);
+        return new UnaryExpression(p.getStart(token), p.getEnd(endToken), loc, token.lexeme(), true, argument);
+    }
+
+    private static Expression prefixUpdate(Parser p, Token token) {
+        Expression argument = p.parseExpr(BP_UNARY);
+        Token endToken = p.previous();
+        SourceLocation loc = p.createLocation(token, endToken);
+        return new UpdateExpression(p.getStart(token), p.getEnd(endToken), loc, token.lexeme(), true, argument);
+    }
+
+    private static Expression prefixTemplate(Parser p, Token token) {
+        // Back up one token since parseTemplateLiteral expects to start at the template token
+        p.current--;
+        return p.parseTemplateLiteral();
+    }
+
+    private static Expression prefixImport(Parser p, Token token) {
+        return p.parseImportExpression(token);
+    }
+
+    private static Expression prefixPrivateIdentifier(Parser p, Token token) {
+        Token nameToken = p.peek();
+        if (!p.check(TokenType.IDENTIFIER) && !p.isKeyword(nameToken)) {
+            throw new ExpectedTokenException("identifier after '#'", p.peek());
+        }
+        p.advance();
+        SourceLocation loc = p.createLocation(token, nameToken);
+        return new PrivateIdentifier(p.getStart(token), p.getEnd(nameToken), loc, nameToken.lexeme());
+    }
+
+    // ========================================================================
+    // Infix Handlers (LED)
+    // ========================================================================
+
+    private static Expression infixComma(Parser p, Expression left, Token op) {
+        // Save outer expression start before recursive calls
+        int savedStartPos = p.exprStartPos;
+        SourceLocation.Position savedStartLoc = p.exprStartLoc;
+
+        List<Expression> expressions = new ArrayList<>();
+        expressions.add(left);
+
+        // First comma already consumed, parse rest
+        expressions.add(p.parseExpr(BP_COMMA + 1)); // Don't allow further commas at same level
+
+        // Continue parsing more comma-separated expressions
+        while (p.match(TokenType.COMMA)) {
+            expressions.add(p.parseExpr(BP_COMMA + 1));
+        }
+
+        Token endToken = p.previous();
+        int endPos = p.getEnd(endToken);
+        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
+        return new SequenceExpression(savedStartPos, endPos, loc, expressions);
+    }
+
+    private static Expression infixAssignment(Parser p, Expression left, Token op) {
+        // Save outer expression start before recursive calls
+        int savedStartPos = p.exprStartPos;
+        SourceLocation.Position savedStartLoc = p.exprStartLoc;
+
+        Expression right = p.parseExpr(BP_ASSIGNMENT); // Right-associative
+        Token endToken = p.previous();
+
+        // Convert left side to pattern if it's a destructuring target
+        Node leftNode = p.convertToPatternIfNeeded(left);
+
+        int endPos = p.getEnd(endToken);
+        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
+        return new AssignmentExpression(savedStartPos, endPos, loc, op.lexeme(), leftNode, right);
+    }
+
+    private static Expression infixTernary(Parser p, Expression test, Token question) {
+        // Save outer expression start before recursive calls
+        int savedStartPos = p.exprStartPos;
+        SourceLocation.Position savedStartLoc = p.exprStartLoc;
+
+        boolean oldAllowIn = p.allowIn;
+        p.allowIn = true;
+        Expression consequent = p.parseExpr(BP_ASSIGNMENT);
+        p.consume(TokenType.COLON, "Expected ':'");
+        Expression alternate = p.parseExpr(BP_ASSIGNMENT);
+        p.allowIn = oldAllowIn;
+
+        Token endToken = p.previous();
+        int endPos = p.getEnd(endToken);
+        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
+        return new ConditionalExpression(savedStartPos, endPos, loc, test, consequent, alternate);
+    }
+
+    private static Expression infixLogical(Parser p, Expression left, Token op) {
+        // Save outer expression start before recursive calls
+        int savedStartPos = p.exprStartPos;
+        SourceLocation.Position savedStartLoc = p.exprStartLoc;
+
+        InfixOp info = INFIX_HANDLERS.get(op.type());
+        Expression right = p.parseExpr(info.rbp());
+        Token endToken = p.previous();
+        int endPos = p.getEnd(endToken);
+        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
+        return new LogicalExpression(savedStartPos, endPos, loc, op.lexeme(), left, right);
+    }
+
+    private static Expression infixBinary(Parser p, Expression left, Token op) {
+        // Save outer expression start before recursive calls
+        int savedStartPos = p.exprStartPos;
+        SourceLocation.Position savedStartLoc = p.exprStartLoc;
+
+        InfixOp info = INFIX_HANDLERS.get(op.type());
+        Expression right = p.parseExpr(info.rbp());
+        Token endToken = p.previous();
+        int endPos = p.getEnd(endToken);
+        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
+        return new BinaryExpression(savedStartPos, endPos, loc, left, op.lexeme(), right);
+    }
+
+    private static Expression infixMember(Parser p, Expression object, Token dot) {
+        if (p.match(TokenType.HASH)) {
+            // Private field: obj.#x
+            Token hashToken = p.previous();
+            Token propertyToken = p.peek();
+            if (!p.check(TokenType.IDENTIFIER) && !p.isKeyword(propertyToken)) {
+                throw new ExpectedTokenException("identifier after '#'", p.peek());
+            }
+            p.advance();
+            Expression property = new PrivateIdentifier(p.getStart(hashToken), p.getEnd(propertyToken),
+                p.createLocation(hashToken, propertyToken), propertyToken.lexeme());
+            Token endToken = p.previous();
+            int endPos = p.getEnd(endToken);
+            SourceLocation loc = p.createLocationFromPositions(p.exprStartPos, endPos, p.exprStartLoc, endToken);
+            return new MemberExpression(p.exprStartPos, endPos, loc, object, property, false, false);
+        } else {
+            // Regular property: obj.x
+            Token propertyToken = p.peek();
+            if (!p.check(TokenType.IDENTIFIER) && !p.isKeyword(propertyToken) &&
+                !p.check(TokenType.NUMBER) && !p.check(TokenType.STRING) &&
+                !p.check(TokenType.TRUE) && !p.check(TokenType.FALSE) && !p.check(TokenType.NULL)) {
+                throw new ExpectedTokenException("property name after '.'", p.peek());
+            }
+            p.advance();
+            Expression property = new Identifier(p.getStart(propertyToken), p.getEnd(propertyToken),
+                p.createLocation(propertyToken, propertyToken), propertyToken.lexeme());
+            Token endToken = p.previous();
+            int endPos = p.getEnd(endToken);
+            SourceLocation loc = p.createLocationFromPositions(p.exprStartPos, endPos, p.exprStartLoc, endToken);
+            return new MemberExpression(p.exprStartPos, endPos, loc, object, property, false, false);
+        }
+    }
+
+    private static Expression infixOptionalChain(Parser p, Expression object, Token questionDot) {
+        // Save outer expression start before any recursive calls
+        int savedStartPos = p.exprStartPos;
+        SourceLocation.Position savedStartLoc = p.exprStartLoc;
+
+        if (p.check(TokenType.LPAREN)) {
+            // Optional call: obj?.(args)
+            p.advance(); // consume (
+            List<Expression> args = p.parseArgumentList();
+            p.consume(TokenType.RPAREN, "Expected ')' after arguments");
+            Token endToken = p.previous();
+            int endPos = p.getEnd(endToken);
+            SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
+            return new CallExpression(savedStartPos, endPos, loc, object, args, true);
+        } else if (p.check(TokenType.LBRACKET)) {
+            // Optional computed: obj?.[expr]
+            p.advance(); // consume [
+            Expression property = p.parseExpr(BP_COMMA);
+            p.consume(TokenType.RBRACKET, "Expected ']' after computed property");
+            Token endToken = p.previous();
+            int endPos = p.getEnd(endToken);
+            SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
+            return new MemberExpression(savedStartPos, endPos, loc, object, property, true, true);
+        } else if (p.match(TokenType.HASH)) {
+            // Optional private: obj?.#x
+            Token hashToken = p.previous();
+            Token propertyToken = p.peek();
+            if (!p.check(TokenType.IDENTIFIER) && !p.isKeyword(propertyToken)) {
+                throw new ExpectedTokenException("identifier after '#'", p.peek());
+            }
+            p.advance();
+            Expression property = new PrivateIdentifier(p.getStart(hashToken), p.getEnd(propertyToken),
+                p.createLocation(hashToken, propertyToken), propertyToken.lexeme());
+            Token endToken = p.previous();
+            int endPos = p.getEnd(endToken);
+            SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
+            return new MemberExpression(savedStartPos, endPos, loc, object, property, false, true);
+        } else {
+            // Optional property: obj?.x
+            Token propertyToken = p.peek();
+            if (!p.check(TokenType.IDENTIFIER) && !p.isKeyword(propertyToken) &&
+                !p.check(TokenType.NUMBER) && !p.check(TokenType.STRING) &&
+                !p.check(TokenType.TRUE) && !p.check(TokenType.FALSE) && !p.check(TokenType.NULL)) {
+                throw new ExpectedTokenException("property name after '?.'", p.peek());
+            }
+            p.advance();
+            Expression property = new Identifier(p.getStart(propertyToken), p.getEnd(propertyToken),
+                p.createLocation(propertyToken, propertyToken), propertyToken.lexeme());
+            Token endToken = p.previous();
+            int endPos = p.getEnd(endToken);
+            SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
+            return new MemberExpression(savedStartPos, endPos, loc, object, property, false, true);
+        }
+    }
+
+    private static Expression infixComputed(Parser p, Expression object, Token lbracket) {
+        // Save outer expression start before recursive parseExpr call
+        int savedStartPos = p.exprStartPos;
+        SourceLocation.Position savedStartLoc = p.exprStartLoc;
+
+        Expression property = p.parseExpr(BP_COMMA);
+        p.consume(TokenType.RBRACKET, "Expected ']' after computed property");
+        Token endToken = p.previous();
+        int endPos = p.getEnd(endToken);
+        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
+        return new MemberExpression(savedStartPos, endPos, loc, object, property, true, false);
+    }
+
+    private static Expression infixCall(Parser p, Expression callee, Token lparen) {
+        // Save outer expression start before recursive parseArgumentList calls parseExpr
+        int savedStartPos = p.exprStartPos;
+        SourceLocation.Position savedStartLoc = p.exprStartLoc;
+
+        List<Expression> args = p.parseArgumentList();
+        p.consume(TokenType.RPAREN, "Expected ')' after arguments");
+        Token endToken = p.previous();
+        int endPos = p.getEnd(endToken);
+        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
+        return new CallExpression(savedStartPos, endPos, loc, callee, args, false);
+    }
+
+    private static Expression infixTaggedTemplate(Parser p, Expression tag, Token templateStart) {
+        // Save outer expression start before parseTemplateLiteral which may call parseExpr for interpolations
+        int savedStartPos = p.exprStartPos;
+        SourceLocation.Position savedStartLoc = p.exprStartLoc;
+
+        // Back up one token since parseTemplateLiteral expects to start at the template token
+        p.current--;
+        Expression template = p.parseTemplateLiteral();
+        SourceLocation loc = p.createLocationFromPositions(savedStartPos, template.end(), savedStartLoc, p.previous());
+        return new TaggedTemplateExpression(savedStartPos, template.end(), loc, tag, (TemplateLiteral) template);
+    }
+
+    // ========================================================================
+    // Helper Methods for Pratt Parser
+    // ========================================================================
+
+    private boolean shouldParseAwait() {
+        if (!check(TokenType.IDENTIFIER) || !peek().lexeme().equals("await")) {
+            return false;
+        }
+
+        if (inAsyncContext && !inClassFieldInitializer) {
+            return true;
+        }
+
+        if (!inAsyncContext && forceModuleMode && !inClassFieldInitializer) {
+            return !checkAhead(1, TokenType.COLON) &&
+                   !checkAhead(1, TokenType.ASSIGN) &&
+                   !checkAhead(1, TokenType.PLUS_ASSIGN) &&
+                   !checkAhead(1, TokenType.MINUS_ASSIGN);
+        }
+
+        // Class field initializer validation
+        if (inClassFieldInitializer) {
+            boolean looksLikeAwaitExpression = checkAhead(1, TokenType.IDENTIFIER) ||
+                                               checkAhead(1, TokenType.LPAREN) ||
+                                               checkAhead(1, TokenType.LBRACKET) ||
+                                               checkAhead(1, TokenType.THIS) ||
+                                               checkAhead(1, TokenType.SUPER) ||
+                                               checkAhead(1, TokenType.NEW) ||
+                                               checkAhead(1, TokenType.CLASS) ||
+                                               checkAhead(1, TokenType.FUNCTION) ||
+                                               checkAhead(1, TokenType.ASYNC) ||
+                                               checkAhead(1, TokenType.STRING) ||
+                                               checkAhead(1, TokenType.NUMBER) ||
+                                               checkAhead(1, TokenType.TRUE) ||
+                                               checkAhead(1, TokenType.FALSE) ||
+                                               checkAhead(1, TokenType.NULL);
+            if (looksLikeAwaitExpression) {
+                throw new ParseException("SyntaxError", peek(), null, null,
+                    "Cannot use keyword 'await' outside an async function");
+            }
+        }
+
+        return false;
+    }
+
+    private Expression parseYieldExpr() {
+        advance(); // consume 'yield'
+        Token yieldToken = previous();
+        boolean delegate = false;
+        Expression argument = null;
+
+        if (match(TokenType.STAR)) {
+            delegate = true;
+        }
+
+        boolean hasLineTerminator = !delegate && !isAtEnd() && peek().line() > yieldToken.line();
+        if (!hasLineTerminator &&
+            !check(TokenType.SEMICOLON) && !check(TokenType.RBRACE) && !check(TokenType.EOF) &&
+            !check(TokenType.RPAREN) && !check(TokenType.COMMA) && !check(TokenType.RBRACKET) &&
+            !check(TokenType.TEMPLATE_MIDDLE) && !check(TokenType.TEMPLATE_TAIL) &&
+            !check(TokenType.COLON)) {
+            argument = parseExpr(BP_ASSIGNMENT);
+        }
+
+        Token endToken = previous();
+        SourceLocation loc = createLocation(yieldToken, endToken);
+        return new YieldExpression(getStart(yieldToken), getEnd(endToken), loc, delegate, argument);
+    }
+
+    private Expression parseAwaitExpr() {
+        Token awaitToken = advance();
+
+        Expression argument = null;
+        if (!check(TokenType.SEMICOLON) && !check(TokenType.RBRACE) && !check(TokenType.EOF) &&
+            !check(TokenType.RPAREN) && !check(TokenType.COMMA) && !check(TokenType.RBRACKET) &&
+            !check(TokenType.INSTANCEOF) && !check(TokenType.IN) &&
+            !check(TokenType.QUESTION) && !check(TokenType.COLON)) {
+            argument = parseExpr(BP_UNARY);
+        }
+
+        Token endToken = previous();
+        SourceLocation loc = createLocation(awaitToken, endToken);
+        return new AwaitExpression(getStart(awaitToken), getEnd(endToken), loc, argument);
+    }
+
+    private Expression tryParseArrowFunction(Token startToken) {
+        // Check for async arrow function: async identifier => or async (params) =>
+        boolean isAsync = false;
+        if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("async")) {
+            if (current + 1 < tokens.size()) {
+                Token asyncToken = peek();
+                Token nextToken = tokens.get(current + 1);
+
+                if (asyncToken.line() != nextToken.line()) {
+                    // Line terminator - not async arrow
+                    return null;
+                }
+
+                if (nextToken.type() == TokenType.IDENTIFIER) {
+                    if (current + 2 < tokens.size() && tokens.get(current + 2).type() == TokenType.ARROW) {
+                        advance(); // consume 'async'
+                        isAsync = true;
+                    }
+                } else if (nextToken.type() == TokenType.LPAREN) {
+                    int savedCurrent = current;
+                    advance(); // consume 'async'
+                    advance(); // consume '('
+                    boolean isArrow = isArrowFunctionParameters();
+                    current = savedCurrent;
+
+                    if (isArrow) {
+                        advance(); // consume 'async'
+                        isAsync = true;
+                    }
+                }
+            }
+        }
+
+        // Check for simple arrow: identifier => or (params) =>
+        if ((check(TokenType.IDENTIFIER) || check(TokenType.OF) || check(TokenType.LET))) {
+            Token idToken = peek();
+            if (current + 1 < tokens.size() && tokens.get(current + 1).type() == TokenType.ARROW) {
+                advance(); // consume identifier
+                List<Pattern> params = new ArrayList<>();
+                params.add(new Identifier(getStart(idToken), getEnd(idToken), createLocation(idToken, idToken), idToken.lexeme()));
+                consume(TokenType.ARROW, "Expected '=>'");
+                return parseArrowFunctionBody(startToken, params, isAsync);
+            }
+        }
+
+        // Check for parenthesized arrow: (params) =>
+        if (check(TokenType.LPAREN)) {
+            int savedCurrent = current;
+            advance(); // consume (
+
+            boolean isArrow = isArrowFunctionParameters();
+
+            if (isArrow) {
+                List<Pattern> params = new ArrayList<>();
+                if (!check(TokenType.RPAREN)) {
+                    do {
+                        if (check(TokenType.RPAREN)) break;
+                        if (match(TokenType.DOT_DOT_DOT)) {
+                            Token restStart = previous();
+                            Pattern argument = parsePatternBase();
+                            Token restEnd = previous();
+                            SourceLocation restLoc = createLocation(restStart, restEnd);
+                            params.add(new RestElement(getStart(restStart), getEnd(restEnd), restLoc, argument));
+                            if (match(TokenType.COMMA)) {
+                                throw new ParseException("ValidationError", peek(), null, "parameter list", "Rest parameter must be last");
+                            }
+                            break;
+                        } else {
+                            params.add(parsePattern());
+                        }
+                    } while (match(TokenType.COMMA));
+                }
+                consume(TokenType.RPAREN, "Expected ')' after parameters");
+                consume(TokenType.ARROW, "Expected '=>'");
+                return parseArrowFunctionBody(startToken, params, isAsync);
+            } else {
+                current = savedCurrent;
+            }
+        }
+
+        return null;
+    }
+
+    private List<Expression> parseArgumentList() {
+        List<Expression> args = new ArrayList<>();
+        if (!check(TokenType.RPAREN)) {
+            do {
+                if (check(TokenType.RPAREN)) break; // trailing comma
+                if (match(TokenType.DOT_DOT_DOT)) {
+                    Token spreadStart = previous();
+                    Expression argument = parseExpr(BP_ASSIGNMENT);
+                    Token spreadEnd = previous();
+                    SourceLocation spreadLoc = createLocation(spreadStart, spreadEnd);
+                    args.add(new SpreadElement(getStart(spreadStart), getEnd(spreadEnd), spreadLoc, argument));
+                } else {
+                    args.add(parseExpr(BP_ASSIGNMENT));
+                }
+            } while (match(TokenType.COMMA));
+        }
+        return args;
+    }
+
+    private SourceLocation createLocationFromPositions(int start, int end, SourceLocation.Position startPos, Token endToken) {
+        SourceLocation.Position endPos = new SourceLocation.Position(endToken.line(), endToken.column() + endToken.lexeme().length());
+        return new SourceLocation(startPos, endPos);
+    }
+
+    private Expression parseAsyncFunctionExpressionFromIdentifier(Token asyncToken) {
+        advance(); // consume 'function'
+
+        boolean isGenerator = match(TokenType.STAR);
+
+        Identifier id = null;
+        if (check(TokenType.IDENTIFIER)) {
+            Token nameToken = peek();
+            advance();
+            id = new Identifier(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.lexeme());
+        }
+
+        consume(TokenType.LPAREN, "Expected '(' after function");
+        List<Pattern> params = new ArrayList<>();
+
+        if (!check(TokenType.RPAREN)) {
+            do {
+                if (check(TokenType.RPAREN)) break;
+                if (match(TokenType.DOT_DOT_DOT)) {
+                    Token restStart = previous();
+                    Pattern argument = parsePatternBase();
+                    Token restEnd = previous();
+                    SourceLocation restLoc = createLocation(restStart, restEnd);
+                    params.add(new RestElement(getStart(restStart), getEnd(restEnd), restLoc, argument));
+                    if (match(TokenType.COMMA)) {
+                        throw new ParseException("ValidationError", peek(), null, "parameter list", "Rest parameter must be last");
+                    }
+                    break;
+                } else {
+                    params.add(parsePattern());
+                }
+            } while (match(TokenType.COMMA));
+        }
+
+        consume(TokenType.RPAREN, "Expected ')' after parameters");
+
+        boolean savedInGenerator = inGenerator;
+        boolean savedInAsyncContext = inAsyncContext;
+        boolean savedStrictMode = strictMode;
+        boolean savedInClassFieldInitializer = inClassFieldInitializer;
+        inGenerator = isGenerator;
+        inAsyncContext = true;
+        inClassFieldInitializer = false;
+
+        if (!forceModuleMode) {
+            strictMode = false;
+        }
+
+        BlockStatement body = parseBlockStatement(true);
+        validateNoDuplicateParameters(params, asyncToken);
+
+        inGenerator = savedInGenerator;
+        inAsyncContext = savedInAsyncContext;
+        strictMode = savedStrictMode;
+        inClassFieldInitializer = savedInClassFieldInitializer;
+
+        Token endToken = previous();
+        SourceLocation loc = createLocation(asyncToken, endToken);
+        return new FunctionExpression(getStart(asyncToken), getEnd(endToken), loc, id, false, isGenerator, true, params, body);
+    }
+
+    private Expression parseImportExpression(Token importToken) {
+        if (match(TokenType.DOT)) {
+            Token propertyToken = peek();
+            if (check(TokenType.IDENTIFIER) && propertyToken.lexeme().equals("meta")) {
+                advance();
+                SourceLocation metaLoc = createLocation(importToken, importToken);
+                SourceLocation propLoc = createLocation(propertyToken, propertyToken);
+                Identifier meta = new Identifier(getStart(importToken), getEnd(importToken), metaLoc, "import");
+                Identifier property = new Identifier(getStart(propertyToken), getEnd(propertyToken), propLoc, "meta");
+                Token endToken = previous();
+                SourceLocation loc = createLocation(importToken, endToken);
+                return new MetaProperty(getStart(importToken), getEnd(endToken), loc, meta, property);
+            }
+            throw new ExpectedTokenException("meta", peek());
+        }
+
+        // Dynamic import: import(source)
+        consume(TokenType.LPAREN, "Expected '(' after import");
+        Expression source = parseExpr(BP_ASSIGNMENT);
+
+        // Check for options argument (import attributes)
+        Expression options = null;
+        if (match(TokenType.COMMA)) {
+            if (!check(TokenType.RPAREN)) {
+                options = parseExpr(BP_ASSIGNMENT);
+            }
+        }
+
+        consume(TokenType.RPAREN, "Expected ')' after import source");
+        Token endToken = previous();
+        SourceLocation loc = createLocation(importToken, endToken);
+        return new ImportExpression(getStart(importToken), getEnd(endToken), loc, source, options);
+    }
+
+    private Expression parseNewExpression(Token newToken) {
+        // Handle new.target
+        if (match(TokenType.DOT)) {
+            Token targetToken = peek();
+            if (check(TokenType.IDENTIFIER) && targetToken.lexeme().equals("target")) {
+                advance();
+                SourceLocation metaLoc = createLocation(newToken, newToken);
+                SourceLocation propLoc = createLocation(targetToken, targetToken);
+                Identifier meta = new Identifier(getStart(newToken), getEnd(newToken), metaLoc, "new");
+                Identifier property = new Identifier(getStart(targetToken), getEnd(targetToken), propLoc, "target");
+                SourceLocation loc = createLocation(newToken, targetToken);
+                return new MetaProperty(getStart(newToken), getEnd(targetToken), loc, meta, property);
+            }
+            throw new ExpectedTokenException("target", peek());
+        }
+
+        // Parse callee - need to handle member expressions without calls
+        Expression callee = parseNewCallee();
+
+        // Optional arguments
+        List<Expression> args = new ArrayList<>();
+        if (match(TokenType.LPAREN)) {
+            args = parseArgumentList();
+            consume(TokenType.RPAREN, "Expected ')' after arguments");
+        }
+
+        Token endToken = previous();
+        SourceLocation loc = createLocation(newToken, endToken);
+        return new NewExpression(getStart(newToken), getEnd(endToken), loc, callee, args);
+    }
+
+    private Expression parseNewCallee() {
+        // Parse primary expression for new callee
+        Token token = peek();
+        Expression callee;
+
+        if (check(TokenType.NEW)) {
+            // Nested new: new new Foo()
+            advance();
+            callee = parseNewExpression(previous());
+        } else {
+            PrefixHandler prefix = PREFIX_HANDLERS.get(token.type());
+            if (prefix == null) {
+                throw new UnexpectedTokenException(token, "expression");
+            }
+            advance();
+            callee = prefix.parse(this, previous());
+        }
+
+        // Parse member access only (no calls for new callee)
+        Token startToken = token;
+        while (true) {
+            if (match(TokenType.DOT)) {
+                if (match(TokenType.HASH)) {
+                    Token hashToken = previous();
+                    Token propertyToken = peek();
+                    if (!check(TokenType.IDENTIFIER) && !isKeyword(propertyToken)) {
+                        throw new ExpectedTokenException("identifier after '#'", peek());
+                    }
+                    advance();
+                    Expression property = new PrivateIdentifier(getStart(hashToken), getEnd(propertyToken),
+                        createLocation(hashToken, propertyToken), propertyToken.lexeme());
+                    Token endToken = previous();
+                    SourceLocation loc = createLocation(startToken, endToken);
+                    callee = new MemberExpression(getStart(startToken), getEnd(endToken), loc, callee, property, false, false);
+                } else {
+                    Token propertyToken = peek();
+                    if (!check(TokenType.IDENTIFIER) && !isKeyword(propertyToken)) {
+                        throw new ExpectedTokenException("property name after '.'", peek());
+                    }
+                    advance();
+                    Expression property = new Identifier(getStart(propertyToken), getEnd(propertyToken),
+                        createLocation(propertyToken, propertyToken), propertyToken.lexeme());
+                    Token endToken = previous();
+                    SourceLocation loc = createLocation(startToken, endToken);
+                    callee = new MemberExpression(getStart(startToken), getEnd(endToken), loc, callee, property, false, false);
+                }
+            } else if (match(TokenType.LBRACKET)) {
+                Expression property = parseExpr(BP_COMMA);
+                consume(TokenType.RBRACKET, "Expected ']' after computed property");
+                Token endToken = previous();
+                SourceLocation loc = createLocation(startToken, endToken);
+                callee = new MemberExpression(getStart(startToken), getEnd(endToken), loc, callee, property, true, false);
+            } else {
+                break;
+            }
+        }
+
+        return callee;
+    }
+
+    private Expression parseFunctionExpression(Token functionToken, boolean isGenerator) {
+        if (!isGenerator) {
+            isGenerator = match(TokenType.STAR);
+        }
+
+        Identifier id = null;
+        if (check(TokenType.IDENTIFIER)) {
+            Token nameToken = peek();
+            advance();
+            id = new Identifier(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.lexeme());
+        }
+
+        consume(TokenType.LPAREN, "Expected '(' after function");
+        List<Pattern> params = new ArrayList<>();
+
+        if (!check(TokenType.RPAREN)) {
+            do {
+                if (check(TokenType.RPAREN)) break;
+                if (match(TokenType.DOT_DOT_DOT)) {
+                    Token restStart = previous();
+                    Pattern argument = parsePatternBase();
+                    Token restEnd = previous();
+                    SourceLocation restLoc = createLocation(restStart, restEnd);
+                    params.add(new RestElement(getStart(restStart), getEnd(restEnd), restLoc, argument));
+                    if (match(TokenType.COMMA)) {
+                        throw new ParseException("ValidationError", peek(), null, "parameter list", "Rest parameter must be last");
+                    }
+                    break;
+                } else {
+                    params.add(parsePattern());
+                }
+            } while (match(TokenType.COMMA));
+        }
+
+        consume(TokenType.RPAREN, "Expected ')' after parameters");
+
+        boolean savedInGenerator = inGenerator;
+        boolean savedInAsyncContext = inAsyncContext;
+        boolean savedStrictMode = strictMode;
+        boolean savedInClassFieldInitializer = inClassFieldInitializer;
+        inGenerator = isGenerator;
+        inAsyncContext = false;
+        inClassFieldInitializer = false;
+
+        if (!forceModuleMode) {
+            strictMode = false;
+        }
+
+        BlockStatement body = parseBlockStatement(true);
+        validateNoDuplicateParameters(params, functionToken);
+
+        inGenerator = savedInGenerator;
+        inAsyncContext = savedInAsyncContext;
+        strictMode = savedStrictMode;
+        inClassFieldInitializer = savedInClassFieldInitializer;
+
+        Token endToken = previous();
+        SourceLocation loc = createLocation(functionToken, endToken);
+        return new FunctionExpression(getStart(functionToken), getEnd(endToken), loc, id, false, isGenerator, false, params, body);
+    }
+
+    private Expression parseClassExpression(Token classToken) {
+        // Optional class name - but NOT if the next token is 'extends' (contextual keyword)
+        Identifier id = null;
+        if (check(TokenType.IDENTIFIER) && !peek().lexeme().equals("extends")) {
+            Token nameToken = peek();
+            advance();
+            id = new Identifier(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.lexeme());
+        }
+
+        // Optional extends
+        Expression superClass = null;
+        if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("extends")) {
+            advance(); // consume 'extends'
+            superClass = parseExpr(BP_POSTFIX + 1); // Parse the superclass expression
+        }
+
+        // Class body
+        ClassBody body = parseClassBody();
+
+        Token endToken = previous();
+        SourceLocation loc = createLocation(classToken, endToken);
+        return new ClassExpression(getStart(classToken), getEnd(endToken), loc, id, superClass, body);
+    }
+
+    private Expression parseArrayLiteral(Token lbracket) {
+        List<Expression> elements = new ArrayList<>();
+
+        while (!check(TokenType.RBRACKET) && !isAtEnd()) {
+            if (check(TokenType.COMMA)) {
+                // Elision (hole in array)
+                elements.add(null);
+                advance();
+            } else if (match(TokenType.DOT_DOT_DOT)) {
+                // Spread element
+                Token spreadStart = previous();
+                Expression argument = parseExpr(BP_ASSIGNMENT);
+                Token spreadEnd = previous();
+                SourceLocation spreadLoc = createLocation(spreadStart, spreadEnd);
+                elements.add(new SpreadElement(getStart(spreadStart), getEnd(spreadEnd), spreadLoc, argument));
+                if (!check(TokenType.RBRACKET)) {
+                    consume(TokenType.COMMA, "Expected ',' after spread element");
+                }
+            } else {
+                elements.add(parseExpr(BP_ASSIGNMENT));
+                if (!check(TokenType.RBRACKET)) {
+                    consume(TokenType.COMMA, "Expected ',' or ']'");
+                }
+            }
+        }
+
+        consume(TokenType.RBRACKET, "Expected ']' after array elements");
+        Token endToken = previous();
+        SourceLocation loc = createLocation(lbracket, endToken);
+        return new ArrayExpression(getStart(lbracket), getEnd(endToken), loc, elements);
+    }
+
+    private Expression parseObjectLiteral(Token lbrace) {
+        List<Node> properties = new ArrayList<>();
+
+        while (!check(TokenType.RBRACE) && !isAtEnd()) {
+            properties.add(parseObjectPropertyNode());
+            if (!check(TokenType.RBRACE)) {
+                consume(TokenType.COMMA, "Expected ',' or '}'");
+            }
+        }
+
+        consume(TokenType.RBRACE, "Expected '}' after object properties");
+        Token endToken = previous();
+        SourceLocation loc = createLocation(lbrace, endToken);
+        return new ObjectExpression(getStart(lbrace), getEnd(endToken), loc, properties);
+    }
+
+    private Node parseObjectPropertyNode() {
+        Token startToken = peek();
+
+        // Check for spread property - return SpreadElement directly
+        if (match(TokenType.DOT_DOT_DOT)) {
+            Token spreadStart = previous();
+            Expression argument = parseExpr(BP_ASSIGNMENT);
+            Token spreadEnd = previous();
+            SourceLocation spreadLoc = createLocation(spreadStart, spreadEnd);
+            return new SpreadElement(getStart(spreadStart), getEnd(spreadEnd), spreadLoc, argument);
+        }
+
+        // Check for method shorthand: get/set/async/generator
+        boolean isAsync = false;
+        boolean isGenerator = false;
+        String kind = "init";
+
+        if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("async")) {
+            if (current + 1 < tokens.size()) {
+                Token nextToken = tokens.get(current + 1);
+                // async without line terminator followed by property name is async method
+                if (peek().line() == nextToken.line() &&
+                    nextToken.type() != TokenType.COLON &&
+                    nextToken.type() != TokenType.COMMA &&
+                    nextToken.type() != TokenType.RBRACE &&
+                    nextToken.type() != TokenType.LPAREN) {
+                    advance(); // consume 'async'
+                    isAsync = true;
+                }
+            }
+        }
+
+        if (match(TokenType.STAR)) {
+            isGenerator = true;
+        }
+
+        if (!isAsync && !isGenerator && check(TokenType.IDENTIFIER)) {
+            String lexeme = peek().lexeme();
+            if (lexeme.equals("get") || lexeme.equals("set")) {
+                if (current + 1 < tokens.size()) {
+                    Token nextToken = tokens.get(current + 1);
+                    if (nextToken.type() != TokenType.COLON &&
+                        nextToken.type() != TokenType.COMMA &&
+                        nextToken.type() != TokenType.RBRACE &&
+                        nextToken.type() != TokenType.LPAREN) {
+                        kind = lexeme;
+                        advance(); // consume 'get' or 'set'
+                    }
+                }
+            }
+        }
+
+        // Parse property key
+        boolean computed = false;
+        Expression key;
+
+        if (match(TokenType.LBRACKET)) {
+            computed = true;
+            key = parseExpr(BP_ASSIGNMENT);
+            consume(TokenType.RBRACKET, "Expected ']' after computed property name");
+        } else if (check(TokenType.STRING) || check(TokenType.NUMBER)) {
+            Token keyToken = advance();
+            key = new Literal(getStart(keyToken), getEnd(keyToken), createLocation(keyToken, keyToken), keyToken.literal(), keyToken.lexeme());
+        } else {
+            Token keyToken = peek();
+            if (!check(TokenType.IDENTIFIER) && !isKeyword(keyToken)) {
+                throw new ExpectedTokenException("property name", keyToken);
+            }
+            advance();
+            key = new Identifier(getStart(keyToken), getEnd(keyToken), createLocation(keyToken, keyToken), keyToken.lexeme());
+        }
+
+        // Check for method or shorthand
+        if (check(TokenType.LPAREN) || isGenerator || isAsync || !kind.equals("init")) {
+            // Method
+            advance(); // consume (
+            List<Pattern> params = new ArrayList<>();
+
+            if (!check(TokenType.RPAREN)) {
+                do {
+                    if (check(TokenType.RPAREN)) break;
+                    if (match(TokenType.DOT_DOT_DOT)) {
+                        Token restStart = previous();
+                        Pattern argument = parsePatternBase();
+                        Token restEnd = previous();
+                        SourceLocation restLoc = createLocation(restStart, restEnd);
+                        params.add(new RestElement(getStart(restStart), getEnd(restEnd), restLoc, argument));
+                        if (match(TokenType.COMMA)) {
+                            throw new ParseException("ValidationError", peek(), null, "parameter list", "Rest parameter must be last");
+                        }
+                        break;
+                    } else {
+                        params.add(parsePattern());
+                    }
+                } while (match(TokenType.COMMA));
+            }
+
+            consume(TokenType.RPAREN, "Expected ')' after parameters");
+
+            boolean savedInGenerator = inGenerator;
+            boolean savedInAsyncContext = inAsyncContext;
+            boolean savedStrictMode = strictMode;
+            boolean savedInClassFieldInitializer = inClassFieldInitializer;
+            inGenerator = isGenerator;
+            inAsyncContext = isAsync;
+            inClassFieldInitializer = false;
+
+            BlockStatement body = parseBlockStatement(true);
+
+            inGenerator = savedInGenerator;
+            inAsyncContext = savedInAsyncContext;
+            strictMode = savedStrictMode;
+            inClassFieldInitializer = savedInClassFieldInitializer;
+
+            Token endToken = previous();
+            SourceLocation funcLoc = createLocation(startToken, endToken);
+            FunctionExpression value = new FunctionExpression(getStart(startToken), getEnd(endToken), funcLoc, null, false, isGenerator, isAsync, params, body);
+
+            SourceLocation propLoc = createLocation(startToken, endToken);
+            // Property: start, end, loc, method, shorthand, computed, key, value, kind
+            return new Property(getStart(startToken), getEnd(endToken), propLoc, true, false, computed, key, value, kind);
+        } else if (match(TokenType.COLON)) {
+            // Regular property
+            Expression value = parseExpr(BP_ASSIGNMENT);
+            Token endToken = previous();
+            SourceLocation loc = createLocation(startToken, endToken);
+            // Property: start, end, loc, method, shorthand, computed, key, value, kind
+            return new Property(getStart(startToken), getEnd(endToken), loc, false, false, computed, key, value, "init");
+        } else {
+            // Shorthand property: { x } means { x: x }
+            if (!(key instanceof Identifier)) {
+                throw new ExpectedTokenException("':' after property name", peek());
+            }
+            Token endToken = previous();
+            SourceLocation loc = createLocation(startToken, endToken);
+            // Property: start, end, loc, method, shorthand, computed, key, value, kind
+            return new Property(getStart(startToken), getEnd(endToken), loc, false, true, computed, key, key, "init");
+        }
+    }
+
+    // End of Pratt parser section
+    // ========================================================================
 
     private Expression parseSequence() {
         Token startToken = peek();
@@ -2172,7 +3554,7 @@ public class Parser {
                 return new ArrowFunctionExpression(getStart(startToken), getEnd(endToken), loc, null, false, false, isAsync, params, body);
             } else {
                 // Expression body: () => expr
-                Expression body = parseAssignment();
+                Expression body = parseExpr(BP_ASSIGNMENT);
             Token endToken = previous();
 
             // Use body.end() and accurate location for template literals and complex expressions
@@ -3509,7 +4891,7 @@ public class Parser {
                 Expression superClass = null;
                 if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("extends")) {
                     advance(); // consume 'extends'
-                    superClass = parseConditional(); // Parse the superclass expression (can be any expression except assignment)
+                    superClass = parseExpr(BP_TERNARY + 1); // Parse the superclass expression (can be any expression except assignment or ternary)
                 }
 
                 // Parse class body
@@ -3644,7 +5026,8 @@ public class Parser {
                type == TokenType.IN || type == TokenType.OF || type == TokenType.INSTANCEOF ||
                type == TokenType.GET || type == TokenType.SET ||
                type == TokenType.IMPORT || type == TokenType.EXPORT || type == TokenType.WITH ||
-               type == TokenType.DEBUGGER;
+               type == TokenType.DEBUGGER || type == TokenType.ASYNC || type == TokenType.AWAIT ||
+               type == TokenType.TRUE || type == TokenType.FALSE || type == TokenType.NULL;
     }
 
     private Token advance() {

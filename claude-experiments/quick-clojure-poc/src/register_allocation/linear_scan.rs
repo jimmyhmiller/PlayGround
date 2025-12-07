@@ -191,6 +191,13 @@ impl LinearScan {
                 }
             }
 
+            Instruction::MakeFunctionPtr(dst, _code_ptr, closure_values) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                for val in closure_values {
+                    if let IrValue::Register(r) = val { regs.push(*r); }
+                }
+            }
+
             Instruction::LoadClosure(dst, fn_obj, _index) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
                 if let IrValue::Register(r) = fn_obj { regs.push(*r); }
@@ -417,6 +424,13 @@ impl LinearScan {
                 }
             }
 
+            Instruction::MakeFunctionPtr(dst, _code_ptr, closure_values) => {
+                replace(dst);
+                for val in closure_values {
+                    replace(val);
+                }
+            }
+
             Instruction::LoadClosure(dst, fn_obj, _index) => {
                 replace(dst);
                 replace(fn_obj);
@@ -636,6 +650,13 @@ impl LinearScan {
                 }
             }
 
+            Instruction::MakeFunctionPtr(dst, _code_ptr, closure_values) => {
+                replace(dst);
+                for val in closure_values {
+                    replace(val);
+                }
+            }
+
             Instruction::LoadClosure(dst, fn_obj, _index) => {
                 replace(dst);
                 replace(fn_obj);
@@ -728,6 +749,11 @@ impl LinearScan {
             // Transform Call → CallWithSaves
             self.instructions[i] = Instruction::CallWithSaves(dest, func, args, saves);
         }
+    }
+
+    /// Get the number of stack slots used for spilling
+    pub fn num_stack_slots(&self) -> usize {
+        self.next_stack_slot
     }
 
     /// Get the allocated instructions (consumes self)

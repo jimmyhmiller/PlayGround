@@ -117,7 +117,8 @@ pub enum Instruction {
     Assign(IrValue, IrValue),  // dst, src
 
     // Function operations
-    MakeFunction(IrValue, Label, Vec<IrValue>), // MakeFunction(dst, code_label, closure_values) - create function object
+    MakeFunction(IrValue, Label, Vec<IrValue>), // MakeFunction(dst, code_label, closure_values) - create function object (for inline compilation)
+    MakeFunctionPtr(IrValue, usize, Vec<IrValue>), // MakeFunctionPtr(dst, code_ptr, closure_values) - create function with raw code pointer (for per-function compilation)
     LoadClosure(IrValue, IrValue, usize),   // LoadClosure(dst, fn_obj, index) - load closure variable
     Call(IrValue, IrValue, Vec<IrValue>),   // Call(dst, fn, args) - invoke function
     CallWithSaves(IrValue, IrValue, Vec<IrValue>, Vec<IrValue>),  // CallWithSaves(dst, fn, args, saves) - call with register preservation

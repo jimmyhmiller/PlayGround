@@ -23,7 +23,7 @@ fn main() {
         process::exit(1);
     });
 
-    let ion: IonJSON = serde_json::from_str(&json_str).unwrap_or_else(|err| {
+    let ion: IonJSON = iongraph_rust_redux::json_compat::parse_as(&json_str).unwrap_or_else(|err| {
         eprintln!("Error parsing Ion JSON: {}", err);
         process::exit(1);
     });
@@ -88,7 +88,7 @@ fn main() {
     };
 
     // Serialize to pretty JSON
-    let output_json = serde_json::to_string_pretty(&universal).unwrap_or_else(|err| {
+    let output_json = iongraph_rust_redux::json_compat::serialize_pretty(&universal).unwrap_or_else(|err| {
         eprintln!("Error serializing to JSON: {}", err);
         process::exit(1);
     });

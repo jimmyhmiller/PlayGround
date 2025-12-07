@@ -12,6 +12,11 @@ pub mod pure_svg_text_layout_provider;
 pub mod utils;
 pub mod wasm_html_generator;
 
+// JSON modules
+#[cfg(not(feature = "serde"))]
+pub mod json;
+pub mod json_compat;
+
 // WASM module (conditionally compiled for wasm32 target)
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;

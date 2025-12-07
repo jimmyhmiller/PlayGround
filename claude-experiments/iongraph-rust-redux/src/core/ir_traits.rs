@@ -1,4 +1,5 @@
 use crate::layout_provider::LayoutProvider;
+#[cfg(feature = "serde")]
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 
@@ -38,7 +39,11 @@ pub trait CompilerIR: Sized {
     type Block: IRBlock<Instruction = Self::Instruction>;
 
     /// Top-level container type (e.g., Ion's IonJSON with functions → passes → blocks)
+    #[cfg(feature = "serde")]
     type Container: DeserializeOwned;
+
+    #[cfg(not(feature = "serde"))]
+    type Container: crate::json::FromJson;
 
     /// Extract all blocks from the container
     ///

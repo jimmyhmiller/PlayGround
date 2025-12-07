@@ -71,7 +71,7 @@ fn handle_universal_format(args: &[String]) {
         process::exit(1);
     });
 
-    let universal_ir: UniversalIR = serde_json::from_str(&json_str).unwrap_or_else(|err| {
+    let universal_ir: UniversalIR = iongraph_rust_redux::json_compat::parse_as(&json_str).unwrap_or_else(|err| {
         eprintln!("Error parsing Universal IR JSON: {}", err);
         eprintln!("Hint: If this is an Ion format file, use the --ion flag");
         process::exit(1);
@@ -122,7 +122,7 @@ fn handle_ion_format(args: &[String]) {
         process::exit(1);
     });
 
-    let data: IonJSON = serde_json::from_str(&json_str).unwrap_or_else(|err| {
+    let data: IonJSON = iongraph_rust_redux::json_compat::parse_as(&json_str).unwrap_or_else(|err| {
         eprintln!("Error parsing Ion JSON: {}", err);
         process::exit(1);
     });
@@ -239,7 +239,7 @@ fn handle_html_format(args: &[String]) {
         process::exit(1);
     });
 
-    let data: IonJSON = serde_json::from_str(&json_str).unwrap_or_else(|err| {
+    let data: IonJSON = iongraph_rust_redux::json_compat::parse_as(&json_str).unwrap_or_else(|err| {
         eprintln!("Error parsing Ion JSON: {}", err);
         process::exit(1);
     });
@@ -527,7 +527,7 @@ fn handle_wasm_format(args: &[String]) {
         process::exit(1);
     });
 
-    let data: IonJSON = serde_json::from_str(&json_str).unwrap_or_else(|err| {
+    let data: IonJSON = iongraph_rust_redux::json_compat::parse_as(&json_str).unwrap_or_else(|err| {
         eprintln!("Error parsing Ion JSON: {}", err);
         process::exit(1);
     });

@@ -26,7 +26,7 @@ fn main() {
         process::exit(1);
     });
 
-    let universal_ir: UniversalIR = serde_json::from_str(&json_str).unwrap_or_else(|err| {
+    let universal_ir: UniversalIR = iongraph_rust_redux::json_compat::parse_as(&json_str).unwrap_or_else(|err| {
         eprintln!("Error parsing JSON: {}", err);
         process::exit(1);
     });

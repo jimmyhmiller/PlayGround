@@ -2,6 +2,7 @@ use crate::clojure_ast::Expr;
 use crate::value::Value;
 use crate::ir::{Instruction, IrValue, IrBuilder, Condition};
 use crate::gc_runtime::GCRuntime;
+use crate::arm_codegen::Arm64CodeGen;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::cell::UnsafeCell;
@@ -581,8 +582,8 @@ impl Compiler {
     }
 
     fn compile_fn(&mut self, name: &Option<String>, arities: &[crate::value::FnArity]) -> Result<IrValue, String> {
-        // For Phase 1: Simple single-arity functions without closures
-        // Multi-arity dispatch will be added in Phase 5
+        // Per-function compilation (Beagle's approach):
+        // Each function is compiled separately with its own register allocation
 
         if arities.len() != 1 {
             return Err("Multi-arity functions not yet implemented".to_string());
@@ -595,41 +596,24 @@ impl Compiler {
 
         // Step 2: Capture free variables (evaluate them in current scope)
         // IMPORTANT: This must happen BEFORE compiling the function body to capture
-        // the correct registers from the outer scope (Argument registers, not Temps)
+        // the correct registers from the outer scope
         let mut closure_values = Vec::new();
         for var_name in &free_vars {
-            // Look up the variable in the current scope
             if let Some(value_reg) = self.lookup_local(var_name) {
-                // eprintln!("DEBUG compile_fn: Capturing free var '{}' = {:?}", var_name, value_reg);
                 closure_values.push(value_reg);
             } else {
                 return Err(format!("Free variable not found in scope: {}", var_name));
             }
         }
 
-        // Step 3: Generate code for the function body
-        // We'll compile the function code inline for now
-        // In a real implementation, this would be a separate code block
-
-        let fn_start_label = self.builder.new_label();
-        let fn_end_label = self.builder.new_label();
-
-        // Jump over the function body (we're compiling it inline)
-        self.builder.emit(Instruction::Jump(fn_end_label.clone()));
-
-        // Function entry point
-        self.builder.emit(Instruction::Label(fn_start_label.clone()));
+        // Step 3: Save the current IR builder and create a new one for the function
+        let outer_builder = std::mem::replace(&mut self.builder, IrBuilder::new());
 
         // Push new scope for function parameters
         self.push_scope();
 
-        // If named, bind function name to itself (for recursion)
-        // For now, we'll skip this as it requires having the function object
-        // which we haven't created yet (chicken-and-egg problem)
-
         // Create a virtual register for the function object (self) if this function has closures
         // For closures, the closure object is passed as the first argument (x0)
-        // User parameters are shifted to x1, x2, etc.
         let self_reg = if !free_vars.is_empty() {
             Some(IrValue::Register(crate::ir::VirtualRegister::Argument(0)))
         } else {
@@ -648,7 +632,6 @@ impl Compiler {
 
         // Bind rest parameter if variadic
         if let Some(rest) = &arity.rest_param {
-            // For now, bind to nil (list construction not implemented)
             let rest_reg = self.builder.new_register();
             self.builder.emit(Instruction::LoadConstant(rest_reg, IrValue::Null));
             self.bind_local(rest.clone(), rest_reg);
@@ -659,7 +642,6 @@ impl Compiler {
         if let Some(self_reg) = &self_reg {
             for (i, var_name) in free_vars.iter().enumerate() {
                 let closure_reg = self.builder.new_register();
-                // Emit LoadClosure to load from function object in x0
                 self.builder.emit(Instruction::LoadClosure(closure_reg, self_reg.clone(), i));
                 self.bind_local(var_name.clone(), closure_reg);
             }
@@ -674,13 +656,16 @@ impl Compiler {
         // Pop function scope
         self.pop_scope();
 
-        // Function exit (after inline code)
-        self.builder.emit(Instruction::Label(fn_end_label));
+        // Step 4: Compile this function's IR separately
+        let fn_instructions = self.builder.take_instructions();
+        let code_ptr = Arm64CodeGen::compile_function(&fn_instructions)?;
 
-        // Step 4: Create function object with closure values (collected in step 2)
+        // Step 5: Restore the outer IR builder
+        self.builder = outer_builder;
+
+        // Step 6: Create function object with closure values and the compiled code pointer
         let fn_obj_reg = self.builder.new_register();
-        // eprintln!("DEBUG compile_fn: About to emit MakeFunction with closure_values = {:?}", closure_values);
-        self.builder.emit(Instruction::MakeFunction(fn_obj_reg, fn_start_label, closure_values));
+        self.builder.emit(Instruction::MakeFunctionPtr(fn_obj_reg, code_ptr, closure_values));
 
         Ok(fn_obj_reg)
     }
