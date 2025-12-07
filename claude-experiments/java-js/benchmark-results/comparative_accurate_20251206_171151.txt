@@ -1,0 +1,1119 @@
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_LargeModule
+
+# Run progress: 0.00% complete, ETA 00:06:24
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+3423.395 us/op
+# Warmup Iteration   2: 455.340 us/op
+# Warmup Iteration   3: 356.500 us/op
+Iteration   1: 324.482 us/op
+Iteration   2: 328.631 us/op
+Iteration   3: 332.229 us/op
+Iteration   4: 317.717 us/op
+Iteration   5: 313.236 us/op
+
+# Run progress: 2.08% complete, ETA 00:06:25
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+2800.977 us/op
+# Warmup Iteration   2: 431.339 us/op
+# Warmup Iteration   3: 345.411 us/op
+Iteration   1: 337.635 us/op
+Iteration   2: 324.916 us/op
+Iteration   3: 326.574 us/op
+Iteration   4: 308.133 us/op
+Iteration   5: 313.355 us/op
+
+# Run progress: 4.17% complete, ETA 00:06:17
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+2993.371 us/op
+# Warmup Iteration   2: 418.125 us/op
+# Warmup Iteration   3: 341.371 us/op
+Iteration   1: 326.743 us/op
+Iteration   2: 313.412 us/op
+Iteration   3: 308.434 us/op
+Iteration   4: 305.892 us/op
+Iteration   5: 310.822 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_LargeModule":
+  319.481 ±(99.9%) 10.538 us/op [Average]
+  (min, avg, max) = (305.892, 319.481, 337.635), stdev = 9.857
+  CI (99.9%): [308.943, 330.019] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_MediumAsyncModule
+
+# Run progress: 6.25% complete, ETA 00:06:08
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+2667.442 us/op
+# Warmup Iteration   2: 571.531 us/op
+# Warmup Iteration   3: 347.849 us/op
+Iteration   1: 337.731 us/op
+Iteration   2: 302.103 us/op
+Iteration   3: 290.969 us/op
+Iteration   4: 280.448 us/op
+Iteration   5: 280.386 us/op
+
+# Run progress: 8.33% complete, ETA 00:06:00
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+2484.005 us/op
+# Warmup Iteration   2: 393.863 us/op
+# Warmup Iteration   3: 332.409 us/op
+Iteration   1: 299.167 us/op
+Iteration   2: 282.281 us/op
+Iteration   3: 277.008 us/op
+Iteration   4: 276.011 us/op
+Iteration   5: 275.676 us/op
+
+# Run progress: 10.42% complete, ETA 00:05:52
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+2633.188 us/op
+# Warmup Iteration   2: 402.883 us/op
+# Warmup Iteration   3: 315.396 us/op
+Iteration   1: 293.891 us/op
+Iteration   2: 291.492 us/op
+Iteration   3: 279.102 us/op
+Iteration   4: 279.255 us/op
+Iteration   5: 276.301 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_MediumAsyncModule":
+  288.121 ±(99.9%) 17.401 us/op [Average]
+  (min, avg, max) = (275.676, 288.121, 337.731), stdev = 16.277
+  CI (99.9%): [270.721, 305.522] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_SmallClass
+
+# Run progress: 12.50% complete, ETA 00:05:43
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+2244.967 us/op
+# Warmup Iteration   2: 329.941 us/op
+# Warmup Iteration   3: 272.922 us/op
+Iteration   1: 246.361 us/op
+Iteration   2: 241.570 us/op
+Iteration   3: 241.416 us/op
+Iteration   4: 237.803 us/op
+Iteration   5: 240.501 us/op
+
+# Run progress: 14.58% complete, ETA 00:05:35
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+1796.035 us/op
+# Warmup Iteration   2: 319.333 us/op
+# Warmup Iteration   3: 263.054 us/op
+Iteration   1: 254.242 us/op
+Iteration   2: 247.654 us/op
+Iteration   3: 244.517 us/op
+Iteration   4: 245.013 us/op
+Iteration   5: 242.018 us/op
+
+# Run progress: 16.67% complete, ETA 00:05:27
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+2406.386 us/op
+# Warmup Iteration   2: 340.356 us/op
+# Warmup Iteration   3: 267.948 us/op
+Iteration   1: 252.596 us/op
+Iteration   2: 241.549 us/op
+Iteration   3: 239.735 us/op
+Iteration   4: 239.964 us/op
+Iteration   5: 239.011 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_SmallClass":
+  243.597 ±(99.9%) 5.183 us/op [Average]
+  (min, avg, max) = (237.803, 243.597, 254.242), stdev = 4.848
+  CI (99.9%): [238.413, 248.780] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_SmallFunction
+
+# Run progress: 18.75% complete, ETA 00:05:19
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+2255.363 us/op
+# Warmup Iteration   2: 332.826 us/op
+# Warmup Iteration   3: 283.162 us/op
+Iteration   1: 251.458 us/op
+Iteration   2: 249.026 us/op
+Iteration   3: 241.613 us/op
+Iteration   4: 240.238 us/op
+Iteration   5: 234.078 us/op
+
+# Run progress: 20.83% complete, ETA 00:05:11
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+1374.529 us/op
+# Warmup Iteration   2: 300.545 us/op
+# Warmup Iteration   3: 258.334 us/op
+Iteration   1: 241.727 us/op
+Iteration   2: 235.823 us/op
+Iteration   3: 234.673 us/op
+Iteration   4: 230.431 us/op
+Iteration   5: 230.500 us/op
+
+# Run progress: 22.92% complete, ETA 00:05:02
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+1420.434 us/op
+# Warmup Iteration   2: 295.840 us/op
+# Warmup Iteration   3: 253.700 us/op
+Iteration   1: 238.761 us/op
+Iteration   2: 235.479 us/op
+Iteration   3: 238.037 us/op
+Iteration   4: 236.043 us/op
+Iteration   5: 229.211 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_SmallFunction":
+  237.806 ±(99.9%) 6.802 us/op [Average]
+  (min, avg, max) = (229.211, 237.806, 251.458), stdev = 6.363
+  CI (99.9%): [231.004, 244.609] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_LargeModule
+
+# Run progress: 25.00% complete, ETA 00:04:54
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 58.235 us/op
+# Warmup Iteration   2: 42.482 us/op
+# Warmup Iteration   3: 42.230 us/op
+Iteration   1: 42.091 us/op
+Iteration   2: 42.009 us/op
+Iteration   3: 42.049 us/op
+Iteration   4: 42.262 us/op
+Iteration   5: 42.414 us/op
+
+# Run progress: 27.08% complete, ETA 00:04:46
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 58.705 us/op
+# Warmup Iteration   2: 42.480 us/op
+# Warmup Iteration   3: 42.321 us/op
+Iteration   1: 42.246 us/op
+Iteration   2: 42.291 us/op
+Iteration   3: 42.727 us/op
+Iteration   4: 42.312 us/op
+Iteration   5: 42.167 us/op
+
+# Run progress: 29.17% complete, ETA 00:04:38
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 59.139 us/op
+# Warmup Iteration   2: 42.142 us/op
+# Warmup Iteration   3: 42.224 us/op
+Iteration   1: 42.032 us/op
+Iteration   2: 42.148 us/op
+Iteration   3: 42.111 us/op
+Iteration   4: 42.083 us/op
+Iteration   5: 42.318 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_LargeModule":
+  42.217 ±(99.9%) 0.199 us/op [Average]
+  (min, avg, max) = (42.009, 42.217, 42.727), stdev = 0.186
+  CI (99.9%): [42.019, 42.416] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_MediumAsyncModule
+
+# Run progress: 31.25% complete, ETA 00:04:30
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 37.675 us/op
+# Warmup Iteration   2: 27.333 us/op
+# Warmup Iteration   3: 27.045 us/op
+Iteration   1: 26.821 us/op
+Iteration   2: 26.954 us/op
+Iteration   3: 26.815 us/op
+Iteration   4: 26.901 us/op
+Iteration   5: 26.861 us/op
+
+# Run progress: 33.33% complete, ETA 00:04:21
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 37.498 us/op
+# Warmup Iteration   2: 27.356 us/op
+# Warmup Iteration   3: 26.928 us/op
+Iteration   1: 26.829 us/op
+Iteration   2: 26.895 us/op
+Iteration   3: 26.991 us/op
+Iteration   4: 26.904 us/op
+Iteration   5: 26.812 us/op
+
+# Run progress: 35.42% complete, ETA 00:04:13
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 37.172 us/op
+# Warmup Iteration   2: 27.355 us/op
+# Warmup Iteration   3: 27.244 us/op
+Iteration   1: 27.157 us/op
+Iteration   2: 27.176 us/op
+Iteration   3: 27.298 us/op
+Iteration   4: 27.325 us/op
+Iteration   5: 27.176 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_MediumAsyncModule":
+  26.994 ±(99.9%) 0.194 us/op [Average]
+  (min, avg, max) = (26.812, 26.994, 27.325), stdev = 0.182
+  CI (99.9%): [26.800, 27.189] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_SmallClass
+
+# Run progress: 37.50% complete, ETA 00:04:05
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 13.882 us/op
+# Warmup Iteration   2: 10.606 us/op
+# Warmup Iteration   3: 10.273 us/op
+Iteration   1: 10.234 us/op
+Iteration   2: 10.152 us/op
+Iteration   3: 10.162 us/op
+Iteration   4: 10.157 us/op
+Iteration   5: 10.271 us/op
+
+# Run progress: 39.58% complete, ETA 00:03:57
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 14.067 us/op
+# Warmup Iteration   2: 10.324 us/op
+# Warmup Iteration   3: 10.059 us/op
+Iteration   1: 10.116 us/op
+Iteration   2: 10.153 us/op
+Iteration   3: 10.141 us/op
+Iteration   4: 10.099 us/op
+Iteration   5: 10.125 us/op
+
+# Run progress: 41.67% complete, ETA 00:03:49
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 14.016 us/op
+# Warmup Iteration   2: 10.535 us/op
+# Warmup Iteration   3: 10.306 us/op
+Iteration   1: 10.260 us/op
+Iteration   2: 10.281 us/op
+Iteration   3: 10.288 us/op
+Iteration   4: 10.256 us/op
+Iteration   5: 10.264 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_SmallClass":
+  10.197 ±(99.9%) 0.073 us/op [Average]
+  (min, avg, max) = (10.099, 10.197, 10.288), stdev = 0.068
+  CI (99.9%): [10.124, 10.271] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_SmallFunction
+
+# Run progress: 43.75% complete, ETA 00:03:40
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 10.407 us/op
+# Warmup Iteration   2: 7.986 us/op
+# Warmup Iteration   3: 7.832 us/op
+Iteration   1: 7.757 us/op
+Iteration   2: 7.821 us/op
+Iteration   3: 7.877 us/op
+Iteration   4: 7.764 us/op
+Iteration   5: 7.758 us/op
+
+# Run progress: 45.83% complete, ETA 00:03:32
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 10.219 us/op
+# Warmup Iteration   2: 8.042 us/op
+# Warmup Iteration   3: 7.665 us/op
+Iteration   1: 7.659 us/op
+Iteration   2: 7.645 us/op
+Iteration   3: 7.712 us/op
+Iteration   4: 7.745 us/op
+Iteration   5: 7.761 us/op
+
+# Run progress: 47.92% complete, ETA 00:03:24
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 11.029 us/op
+# Warmup Iteration   2: 8.046 us/op
+# Warmup Iteration   3: 7.823 us/op
+Iteration   1: 7.769 us/op
+Iteration   2: 7.836 us/op
+Iteration   3: 7.829 us/op
+Iteration   4: 7.759 us/op
+Iteration   5: 7.801 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_SmallFunction":
+  7.766 ±(99.9%) 0.067 us/op [Average]
+  (min, avg, max) = (7.645, 7.766, 7.877), stdev = 0.063
+  CI (99.9%): [7.699, 7.833] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.ourParser_LargeModule
+
+# Run progress: 50.00% complete, ETA 00:03:16
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 44.745 us/op
+# Warmup Iteration   2: 37.278 us/op
+# Warmup Iteration   3: 37.333 us/op
+Iteration   1: 37.178 us/op
+Iteration   2: 37.022 us/op
+Iteration   3: 36.991 us/op
+Iteration   4: 36.985 us/op
+Iteration   5: 36.959 us/op
+
+# Run progress: 52.08% complete, ETA 00:03:08
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 44.754 us/op
+# Warmup Iteration   2: 36.746 us/op
+# Warmup Iteration   3: 36.649 us/op
+Iteration   1: 36.653 us/op
+Iteration   2: 36.562 us/op
+Iteration   3: 36.857 us/op
+Iteration   4: 36.829 us/op
+Iteration   5: 36.566 us/op
+
+# Run progress: 54.17% complete, ETA 00:02:59
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 44.502 us/op
+# Warmup Iteration   2: 37.057 us/op
+# Warmup Iteration   3: 37.351 us/op
+Iteration   1: 37.035 us/op
+Iteration   2: 36.946 us/op
+Iteration   3: 36.803 us/op
+Iteration   4: 36.980 us/op
+Iteration   5: 36.922 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.ourParser_LargeModule":
+  36.886 ±(99.9%) 0.189 us/op [Average]
+  (min, avg, max) = (36.562, 36.886, 37.178), stdev = 0.177
+  CI (99.9%): [36.697, 37.075] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.ourParser_MediumAsyncModule
+
+# Run progress: 56.25% complete, ETA 00:02:51
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 24.894 us/op
+# Warmup Iteration   2: 20.770 us/op
+# Warmup Iteration   3: 20.770 us/op
+Iteration   1: 20.765 us/op
+Iteration   2: 20.751 us/op
+Iteration   3: 20.726 us/op
+Iteration   4: 20.813 us/op
+Iteration   5: 20.745 us/op
+
+# Run progress: 58.33% complete, ETA 00:02:43
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 25.098 us/op
+# Warmup Iteration   2: 20.978 us/op
+# Warmup Iteration   3: 20.913 us/op
+Iteration   1: 21.059 us/op
+Iteration   2: 20.959 us/op
+Iteration   3: 20.901 us/op
+Iteration   4: 21.245 us/op
+Iteration   5: 21.940 us/op
+
+# Run progress: 60.42% complete, ETA 00:02:35
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 26.682 us/op
+# Warmup Iteration   2: 21.114 us/op
+# Warmup Iteration   3: 22.068 us/op
+Iteration   1: 28.608 us/op
+Iteration   2: 29.009 us/op
+Iteration   3: 21.361 us/op
+Iteration   4: 20.755 us/op
+Iteration   5: 20.763 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.ourParser_MediumAsyncModule":
+  22.027 ±(99.9%) 2.965 us/op [Average]
+  (min, avg, max) = (20.726, 22.027, 29.009), stdev = 2.774
+  CI (99.9%): [19.061, 24.992] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.ourParser_SmallClass
+
+# Run progress: 62.50% complete, ETA 00:02:27
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 3.605 us/op
+# Warmup Iteration   2: 2.986 us/op
+# Warmup Iteration   3: 2.972 us/op
+Iteration   1: 2.972 us/op
+Iteration   2: 3.031 us/op
+Iteration   3: 3.046 us/op
+Iteration   4: 3.282 us/op
+Iteration   5: 2.963 us/op
+
+# Run progress: 64.58% complete, ETA 00:02:19
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 3.574 us/op
+# Warmup Iteration   2: 2.998 us/op
+# Warmup Iteration   3: 2.962 us/op
+Iteration   1: 2.976 us/op
+Iteration   2: 2.955 us/op
+Iteration   3: 2.962 us/op
+Iteration   4: 2.965 us/op
+Iteration   5: 2.956 us/op
+
+# Run progress: 66.67% complete, ETA 00:02:10
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 3.613 us/op
+# Warmup Iteration   2: 2.988 us/op
+# Warmup Iteration   3: 2.975 us/op
+Iteration   1: 2.974 us/op
+Iteration   2: 2.959 us/op
+Iteration   3: 2.971 us/op
+Iteration   4: 2.971 us/op
+Iteration   5: 2.960 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.ourParser_SmallClass":
+  2.996 ±(99.9%) 0.089 us/op [Average]
+  (min, avg, max) = (2.955, 2.996, 3.282), stdev = 0.084
+  CI (99.9%): [2.907, 3.086] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.ourParser_SmallFunction
+
+# Run progress: 68.75% complete, ETA 00:02:02
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 1.029 us/op
+# Warmup Iteration   2: 0.895 us/op
+# Warmup Iteration   3: 0.885 us/op
+Iteration   1: 0.882 us/op
+Iteration   2: 0.885 us/op
+Iteration   3: 0.882 us/op
+Iteration   4: 0.889 us/op
+Iteration   5: 0.914 us/op
+
+# Run progress: 70.83% complete, ETA 00:01:54
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 1.017 us/op
+# Warmup Iteration   2: 0.896 us/op
+# Warmup Iteration   3: 0.884 us/op
+Iteration   1: 0.881 us/op
+Iteration   2: 0.884 us/op
+Iteration   3: 0.885 us/op
+Iteration   4: 0.883 us/op
+Iteration   5: 0.883 us/op
+
+# Run progress: 72.92% complete, ETA 00:01:46
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 1.030 us/op
+# Warmup Iteration   2: 0.898 us/op
+# Warmup Iteration   3: 0.897 us/op
+Iteration   1: 0.895 us/op
+Iteration   2: 0.897 us/op
+Iteration   3: 0.904 us/op
+Iteration   4: 0.901 us/op
+Iteration   5: 0.902 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.ourParser_SmallFunction":
+  0.891 ±(99.9%) 0.011 us/op [Average]
+  (min, avg, max) = (0.881, 0.891, 0.914), stdev = 0.010
+  CI (99.9%): [0.880, 0.902] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.rhinoParser_LargeModule
+
+# Run progress: 75.00% complete, ETA 00:01:38
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 25.171 us/op
+# Warmup Iteration   2: 21.832 us/op
+# Warmup Iteration   3: 21.750 us/op
+Iteration   1: 21.641 us/op
+Iteration   2: 21.646 us/op
+Iteration   3: 21.593 us/op
+Iteration   4: 21.587 us/op
+Iteration   5: 21.626 us/op
+
+# Run progress: 77.08% complete, ETA 00:01:29
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 25.088 us/op
+# Warmup Iteration   2: 21.715 us/op
+# Warmup Iteration   3: 21.679 us/op
+Iteration   1: 22.090 us/op
+Iteration   2: 23.222 us/op
+Iteration   3: 21.877 us/op
+Iteration   4: 21.623 us/op
+Iteration   5: 21.431 us/op
+
+# Run progress: 79.17% complete, ETA 00:01:21
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 26.303 us/op
+# Warmup Iteration   2: 22.450 us/op
+# Warmup Iteration   3: 22.073 us/op
+Iteration   1: 22.044 us/op
+Iteration   2: 21.925 us/op
+Iteration   3: 21.855 us/op
+Iteration   4: 21.902 us/op
+Iteration   5: 21.854 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.rhinoParser_LargeModule":
+  21.861 ±(99.9%) 0.450 us/op [Average]
+  (min, avg, max) = (21.431, 21.861, 23.222), stdev = 0.421
+  CI (99.9%): [21.411, 22.311] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.rhinoParser_MediumAsyncModule
+
+# Run progress: 81.25% complete, ETA 00:01:13
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 14.635 us/op
+# Warmup Iteration   2: 12.639 us/op
+# Warmup Iteration   3: 12.526 us/op
+Iteration   1: 12.548 us/op
+Iteration   2: 12.473 us/op
+Iteration   3: 12.520 us/op
+Iteration   4: 12.458 us/op
+Iteration   5: 12.450 us/op
+
+# Run progress: 83.33% complete, ETA 00:01:05
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 14.599 us/op
+# Warmup Iteration   2: 12.659 us/op
+# Warmup Iteration   3: 12.521 us/op
+Iteration   1: 12.552 us/op
+Iteration   2: 12.513 us/op
+Iteration   3: 12.426 us/op
+Iteration   4: 12.471 us/op
+Iteration   5: 12.456 us/op
+
+# Run progress: 85.42% complete, ETA 00:00:57
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 14.867 us/op
+# Warmup Iteration   2: 12.652 us/op
+# Warmup Iteration   3: 12.566 us/op
+Iteration   1: 12.524 us/op
+Iteration   2: 12.474 us/op
+Iteration   3: 12.477 us/op
+Iteration   4: 12.473 us/op
+Iteration   5: 12.504 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.rhinoParser_MediumAsyncModule":
+  12.488 ±(99.9%) 0.040 us/op [Average]
+  (min, avg, max) = (12.426, 12.488, 12.552), stdev = 0.037
+  CI (99.9%): [12.448, 12.528] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.rhinoParser_SmallClass
+
+# Run progress: 87.50% complete, ETA 00:00:49
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 2.003 us/op
+# Warmup Iteration   2: 1.667 us/op
+# Warmup Iteration   3: 1.665 us/op
+Iteration   1: 1.658 us/op
+Iteration   2: 1.651 us/op
+Iteration   3: 1.655 us/op
+Iteration   4: 1.651 us/op
+Iteration   5: 1.649 us/op
+
+# Run progress: 89.58% complete, ETA 00:00:40
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 1.988 us/op
+# Warmup Iteration   2: 1.705 us/op
+# Warmup Iteration   3: 1.681 us/op
+Iteration   1: 1.680 us/op
+Iteration   2: 1.687 us/op
+Iteration   3: 1.693 us/op
+Iteration   4: 1.686 us/op
+Iteration   5: 1.693 us/op
+
+# Run progress: 91.67% complete, ETA 00:00:32
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 1.955 us/op
+# Warmup Iteration   2: 1.680 us/op
+# Warmup Iteration   3: 1.674 us/op
+Iteration   1: 1.669 us/op
+Iteration   2: 1.668 us/op
+Iteration   3: 1.674 us/op
+Iteration   4: 1.672 us/op
+Iteration   5: 1.664 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.rhinoParser_SmallClass":
+  1.670 ±(99.9%) 0.016 us/op [Average]
+  (min, avg, max) = (1.649, 1.670, 1.693), stdev = 0.015
+  CI (99.9%): [1.654, 1.686] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.rhinoParser_SmallFunction
+
+# Run progress: 93.75% complete, ETA 00:00:24
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 0.584 us/op
+# Warmup Iteration   2: 0.492 us/op
+# Warmup Iteration   3: 0.721 us/op
+Iteration   1: 0.541 us/op
+Iteration   2: 0.581 us/op
+Iteration   3: 0.811 us/op
+Iteration   4: 0.646 us/op
+Iteration   5: 0.912 us/op
+
+# Run progress: 95.83% complete, ETA 00:00:16
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 2.528 us/op
+# Warmup Iteration   2: 1.847 us/op
+# Warmup Iteration   3: 2.297 us/op
+Iteration   1: 1.167 us/op
+Iteration   2: 0.521 us/op
+Iteration   3: 0.488 us/op
+Iteration   4: 0.489 us/op
+Iteration   5: 0.491 us/op
+
+# Run progress: 97.92% complete, ETA 00:00:08
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 0.591 us/op
+# Warmup Iteration   2: 0.513 us/op
+# Warmup Iteration   3: 0.500 us/op
+Iteration   1: 0.491 us/op
+Iteration   2: 0.495 us/op
+Iteration   3: 0.492 us/op
+Iteration   4: 0.492 us/op
+Iteration   5: 0.490 us/op
+
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.rhinoParser_SmallFunction":
+  0.607 ±(99.9%) 0.216 us/op [Average]
+  (min, avg, max) = (0.488, 0.607, 1.167), stdev = 0.202
+  CI (99.9%): [0.391, 0.823] (assumes normal distribution)
+
+
+# Run complete. Total time: 00:06:32
+
+REMEMBER: The numbers below are just data. To gain reusable insights, you need to follow up on
+why the numbers are the way they are. Use profilers (see -prof, -lprof), design factorial
+experiments, perform baseline and negative tests that provide experimental control, make sure
+the benchmarking environment is safe on JVM/OS/HW level, ask for reviews from the domain experts.
+Do not assume the numbers tell you what you want them to tell.
+
+NOTE: Current JVM experimentally supports Compiler Blackholes, and they are in use. Please exercise
+extra caution when trusting the results, look into the generated code to check the benchmark still
+works, and factor in a small probability of new VM bugs. Additionally, while comparisons between
+different JVMs are already problematic, the performance difference caused by different Blackhole
+modes can be very significant. Please make sure you use the consistent Blackhole mode for comparisons.
+
+Benchmark                                                   Mode  Cnt    Score    Error  Units
+ComparativeParserBenchmark.graalJS_LargeModule              avgt   15  319.481 ± 10.538  us/op
+ComparativeParserBenchmark.graalJS_MediumAsyncModule        avgt   15  288.121 ± 17.401  us/op
+ComparativeParserBenchmark.graalJS_SmallClass               avgt   15  243.597 ±  5.183  us/op
+ComparativeParserBenchmark.graalJS_SmallFunction            avgt   15  237.806 ±  6.802  us/op
+ComparativeParserBenchmark.nashornParser_LargeModule        avgt   15   42.217 ±  0.199  us/op
+ComparativeParserBenchmark.nashornParser_MediumAsyncModule  avgt   15   26.994 ±  0.194  us/op
+ComparativeParserBenchmark.nashornParser_SmallClass         avgt   15   10.197 ±  0.073  us/op
+ComparativeParserBenchmark.nashornParser_SmallFunction      avgt   15    7.766 ±  0.067  us/op
+ComparativeParserBenchmark.ourParser_LargeModule            avgt   15   36.886 ±  0.189  us/op
+ComparativeParserBenchmark.ourParser_MediumAsyncModule      avgt   15   22.027 ±  2.965  us/op
+ComparativeParserBenchmark.ourParser_SmallClass             avgt   15    2.996 ±  0.089  us/op
+ComparativeParserBenchmark.ourParser_SmallFunction          avgt   15    0.891 ±  0.011  us/op
+ComparativeParserBenchmark.rhinoParser_LargeModule          avgt   15   21.861 ±  0.450  us/op
+ComparativeParserBenchmark.rhinoParser_MediumAsyncModule    avgt   15   12.488 ±  0.040  us/op
+ComparativeParserBenchmark.rhinoParser_SmallClass           avgt   15    1.670 ±  0.016  us/op
+ComparativeParserBenchmark.rhinoParser_SmallFunction        avgt   15    0.607 ±  0.216  us/op

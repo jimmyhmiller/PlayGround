@@ -2259,7 +2259,10 @@ public class Parser {
 
     private static Expression prefixRegex(Parser p, Token token) {
         SourceLocation loc = p.createLocation(token, token);
-        return new Literal(p.getStart(token), p.getEnd(token), loc, token.literal(), token.lexeme());
+        // Value is {} (empty object), the actual regex info goes in the 'regex' field
+        Literal.RegexInfo regexInfo = (Literal.RegexInfo) token.literal();
+        return new Literal(p.getStart(token), p.getEnd(token), loc,
+            java.util.Collections.emptyMap(), token.lexeme(), regexInfo);
     }
 
     private static Expression prefixIdentifier(Parser p, Token token) {
@@ -3157,7 +3160,8 @@ public class Parser {
 
         // Check for method or shorthand
         if (check(TokenType.LPAREN) || isGenerator || isAsync || !kind.equals("init")) {
-            // Method
+            // Method - FunctionExpression starts at '(' not at the method name
+            Token funcStartToken = peek(); // Save the '(' token for FunctionExpression start
             advance(); // consume (
             List<Pattern> params = new ArrayList<>();
 
@@ -3198,8 +3202,9 @@ public class Parser {
             inClassFieldInitializer = savedInClassFieldInitializer;
 
             Token endToken = previous();
-            SourceLocation funcLoc = createLocation(startToken, endToken);
-            FunctionExpression value = new FunctionExpression(getStart(startToken), getEnd(endToken), funcLoc, null, false, isGenerator, isAsync, params, body);
+            // FunctionExpression starts at '(' per ESTree spec for method definitions
+            SourceLocation funcLoc = createLocation(funcStartToken, endToken);
+            FunctionExpression value = new FunctionExpression(getStart(funcStartToken), getEnd(endToken), funcLoc, null, false, isGenerator, isAsync, params, body);
 
             SourceLocation propLoc = createLocation(startToken, endToken);
             // Property: start, end, loc, method, shorthand, computed, key, value, kind

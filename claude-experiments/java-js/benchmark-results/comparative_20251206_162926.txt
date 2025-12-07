@@ -1,0 +1,281 @@
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 2 iterations, 1 s each
+# Measurement: 3 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_LargeModule
+
+# Run progress: 0.00% complete, ETA 00:01:20
+# Fork: N/A, test runs in the host VM
+# *** WARNING: Non-forked runs may silently omit JVM options, mess up profilers, disable compiler hints, etc. ***
+# *** WARNING: Use non-forked runs only for debugging purposes, not for actual performance runs. ***
+# Warmup Iteration   1: WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+3590.723 us/op
+# Warmup Iteration   2: 451.558 us/op
+Iteration   1: 346.167 us/op
+Iteration   2: 329.654 us/op
+Iteration   3: 314.783 us/op
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_LargeModule":
+  330.201 ±(99.9%) 286.411 us/op [Average]
+  (min, avg, max) = (314.783, 330.201, 346.167), stdev = 15.699
+  CI (99.9%): [43.790, 616.612] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 2 iterations, 1 s each
+# Measurement: 3 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_MediumAsyncModule
+
+# Run progress: 6.25% complete, ETA 00:01:15
+# Fork: N/A, test runs in the host VM
+# *** WARNING: Non-forked runs may silently omit JVM options, mess up profilers, disable compiler hints, etc. ***
+# *** WARNING: Use non-forked runs only for debugging purposes, not for actual performance runs. ***
+# Warmup Iteration   1: 319.142 us/op
+# Warmup Iteration   2: 285.320 us/op
+Iteration   1: 282.527 us/op
+Iteration   2: 290.447 us/op
+Iteration   3: 319.066 us/op
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_MediumAsyncModule":
+  297.347 ±(99.9%) 350.684 us/op [Average]
+  (min, avg, max) = (282.527, 297.347, 319.066), stdev = 19.222
+  CI (99.9%): [≈ 0, 648.031] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 2 iterations, 1 s each
+# Measurement: 3 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_SmallClass
+
+# Run progress: 12.50% complete, ETA 00:01:10
+# Fork: N/A, test runs in the host VM
+# *** WARNING: Non-forked runs may silently omit JVM options, mess up profilers, disable compiler hints, etc. ***
+# *** WARNING: Use non-forked runs only for debugging purposes, not for actual performance runs. ***
+# Warmup Iteration   1: 246.121 us/op
+# Warmup Iteration   2: 243.252 us/op
+Iteration   1: 243.049 us/op
+Iteration   2: 239.878 us/op
+Iteration   3: 243.248 us/op
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_SmallClass":
+  242.058 ±(99.9%) 34.500 us/op [Average]
+  (min, avg, max) = (239.878, 242.058, 243.248), stdev = 1.891
+  CI (99.9%): [207.559, 276.558] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 2 iterations, 1 s each
+# Measurement: 3 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_SmallFunction
+
+# Run progress: 18.75% complete, ETA 00:01:05
+# Fork: N/A, test runs in the host VM
+# *** WARNING: Non-forked runs may silently omit JVM options, mess up profilers, disable compiler hints, etc. ***
+# *** WARNING: Use non-forked runs only for debugging purposes, not for actual performance runs. ***
+# Warmup Iteration   1: 238.632 us/op
+# Warmup Iteration   2: 236.311 us/op
+Iteration   1: 236.191 us/op
+Iteration   2: 236.874 us/op
+Iteration   3: 239.405 us/op
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.graalJS_SmallFunction":
+  237.490 ±(99.9%) 30.889 us/op [Average]
+  (min, avg, max) = (236.191, 237.490, 239.405), stdev = 1.693
+  CI (99.9%): [206.600, 268.379] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 2 iterations, 1 s each
+# Measurement: 3 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_LargeModule
+
+# Run progress: 25.00% complete, ETA 00:01:00
+# Fork: N/A, test runs in the host VM
+# *** WARNING: Non-forked runs may silently omit JVM options, mess up profilers, disable compiler hints, etc. ***
+# *** WARNING: Use non-forked runs only for debugging purposes, not for actual performance runs. ***
+# Warmup Iteration   1: 72.454 us/op
+# Warmup Iteration   2: 48.681 us/op
+Iteration   1: 48.649 us/op
+Iteration   2: 48.176 us/op
+Iteration   3: 48.241 us/op
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_LargeModule":
+  48.355 ±(99.9%) 4.674 us/op [Average]
+  (min, avg, max) = (48.176, 48.355, 48.649), stdev = 0.256
+  CI (99.9%): [43.681, 53.029] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 2 iterations, 1 s each
+# Measurement: 3 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_MediumAsyncModule
+
+# Run progress: 31.25% complete, ETA 00:00:55
+# Fork: N/A, test runs in the host VM
+# *** WARNING: Non-forked runs may silently omit JVM options, mess up profilers, disable compiler hints, etc. ***
+# *** WARNING: Use non-forked runs only for debugging purposes, not for actual performance runs. ***
+# Warmup Iteration   1: 31.141 us/op
+# Warmup Iteration   2: 30.918 us/op
+Iteration   1: 30.624 us/op
+Iteration   2: 30.468 us/op
+Iteration   3: 30.380 us/op
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_MediumAsyncModule":
+  30.491 ±(99.9%) 2.249 us/op [Average]
+  (min, avg, max) = (30.380, 30.491, 30.624), stdev = 0.123
+  CI (99.9%): [28.241, 32.740] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 2 iterations, 1 s each
+# Measurement: 3 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_SmallClass
+
+# Run progress: 37.50% complete, ETA 00:00:50
+# Fork: N/A, test runs in the host VM
+# *** WARNING: Non-forked runs may silently omit JVM options, mess up profilers, disable compiler hints, etc. ***
+# *** WARNING: Use non-forked runs only for debugging purposes, not for actual performance runs. ***
+# Warmup Iteration   1: 10.849 us/op
+# Warmup Iteration   2: 10.824 us/op
+Iteration   1: 10.792 us/op
+Iteration   2: 10.862 us/op
+Iteration   3: 10.787 us/op
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_SmallClass":
+  10.813 ±(99.9%) 0.766 us/op [Average]
+  (min, avg, max) = (10.787, 10.813, 10.862), stdev = 0.042
+  CI (99.9%): [10.048, 11.579] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 2 iterations, 1 s each
+# Measurement: 3 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_SmallFunction
+
+# Run progress: 43.75% complete, ETA 00:00:45
+# Fork: N/A, test runs in the host VM
+# *** WARNING: Non-forked runs may silently omit JVM options, mess up profilers, disable compiler hints, etc. ***
+# *** WARNING: Use non-forked runs only for debugging purposes, not for actual performance runs. ***
+# Warmup Iteration   1: 8.069 us/op
+# Warmup Iteration   2: 7.945 us/op
+Iteration   1: 7.982 us/op
+Iteration   2: 8.024 us/op
+Iteration   3: 7.961 us/op
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.nashornParser_SmallFunction":
+  7.989 ±(99.9%) 0.588 us/op [Average]
+  (min, avg, max) = (7.961, 7.989, 8.024), stdev = 0.032
+  CI (99.9%): [7.401, 8.577] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 2 iterations, 1 s each
+# Measurement: 3 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.ourParser_LargeModule
+
+# Run progress: 50.00% complete, ETA 00:00:40
+# Fork: N/A, test runs in the host VM
+# *** WARNING: Non-forked runs may silently omit JVM options, mess up profilers, disable compiler hints, etc. ***
+# *** WARNING: Use non-forked runs only for debugging purposes, not for actual performance runs. ***
+# Warmup Iteration   1: 41.651 us/op
+# Warmup Iteration   2: 36.704 us/op
+Iteration   1: 36.550 us/op
+Iteration   2: 36.361 us/op
+Iteration   3: 36.275 us/op
+
+Result "com.jsparser.benchmarks.ComparativeParserBenchmark.ourParser_LargeModule":
+  36.395 ±(99.9%) 2.565 us/op [Average]
+  (min, avg, max) = (36.275, 36.395, 36.550), stdev = 0.141
+  CI (99.9%): [33.830, 38.961] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 2 iterations, 1 s each
+# Measurement: 3 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.ComparativeParserBenchmark.ourParser_MediumAsyncModule
+
+# Run progress: 56.25% complete, ETA 00:00:35
+# Fork: N/A, test runs in the host VM
+# *** WARNING: Non-forked runs may silently omit JVM options, mess up profilers, disable compiler hints, etc. ***
+# *** WARNING: Use non-forked runs only for debugging purposes, not for actual performance runs. ***
+# Warmup Iteration   1: 22.126 us/op
+# Warmup Iteration   2: 21.035 us/op
+Iteration   1: 20.769 us/op
+Iteration   2: 

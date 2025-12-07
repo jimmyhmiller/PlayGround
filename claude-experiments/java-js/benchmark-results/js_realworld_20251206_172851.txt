@@ -1,0 +1,168 @@
+
+════════════════════════════════════════════════════════════════════════════════
+Real-World JavaScript Library Parser Benchmarks
+════════════════════════════════════════════════════════════════════════════════
+Warmup iterations: 3
+Measurement iterations: 10
+Node.js version: v24.3.0
+════════════════════════════════════════════════════════════════════════════════
+
+================================================================================
+Library: react.production.min.js
+Size: 10.5 KB (10,737 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up Esprima...
+Benchmarking Esprima...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Esprima            |           0.976 |            1.00x |         10.7 KB/ms
+🥈 Acorn              |           1.052 |            1.08x |         10.0 KB/ms
+🥉 @babel/parser      |           1.685 |            1.73x |          6.2 KB/ms
+   Meriyah            |           2.487 |            2.55x |          4.2 KB/ms
+
+================================================================================
+Library: vue.global.prod.js
+Size: 130.0 KB (133,165 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up Esprima...
+Benchmarking Esprima...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |           4.672 |            1.00x |         27.8 KB/ms
+🥈 @babel/parser      |          11.563 |            2.47x |         11.2 KB/ms
+🥉 Esprima            |          15.286 |            3.27x |          8.5 KB/ms
+   Acorn              |          18.023 |            3.86x |          7.2 KB/ms
+
+================================================================================
+Library: react-dom.production.min.js
+Size: 128.8 KB (131,882 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up Esprima...
+Benchmarking Esprima...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |           3.423 |            1.00x |         37.6 KB/ms
+🥈 Esprima            |           6.635 |            1.94x |         19.4 KB/ms
+🥉 Acorn              |           7.318 |            2.14x |         17.6 KB/ms
+   @babel/parser      |           7.834 |            2.29x |         16.4 KB/ms
+
+================================================================================
+Library: lodash.js
+Size: 531.3 KB (544,096 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up Esprima...
+Benchmarking Esprima...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |           4.799 |            1.00x |        110.7 KB/ms
+🥈 Acorn              |           5.884 |            1.23x |         90.3 KB/ms
+🥉 Esprima            |           6.110 |            1.27x |         87.0 KB/ms
+   @babel/parser      |           6.377 |            1.33x |         83.3 KB/ms
+
+================================================================================
+Library: three.js
+Size: 1282.3 KB (1,313,048 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up Esprima...
+  ⚠️  Esprima failed: Line 33657: Unexpected token ...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |          18.188 |            1.00x |         70.5 KB/ms
+🥈 Acorn              |          31.851 |            1.75x |         40.3 KB/ms
+🥉 @babel/parser      |          46.946 |            2.58x |         27.3 KB/ms
+
+================================================================================
+Library: typescript.js
+Size: 8808.7 KB (9,020,119 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up Esprima...
+  ⚠️  Esprima failed: Line 139: Unexpected token ?
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |         127.178 |            1.00x |         69.3 KB/ms
+🥈 Acorn              |         208.513 |            1.64x |         42.2 KB/ms
+🥉 @babel/parser      |         278.288 |            2.19x |         31.7 KB/ms
+
+════════════════════════════════════════════════════════════════════════════════
+SUMMARY
+════════════════════════════════════════════════════════════════════════════════
+
+react.production.min.js:
+  🥇 Esprima: 0.976 ms
+
+vue.global.prod.js:
+  🥇 Meriyah: 4.672 ms
+
+react-dom.production.min.js:
+  🥇 Meriyah: 3.423 ms
+
+lodash.js:
+  🥇 Meriyah: 4.799 ms
+
+three.js:
+  🥇 Meriyah: 18.188 ms
+
+typescript.js:
+  🥇 Meriyah: 127.178 ms
+
+════════════════════════════════════════════════════════════════════════════════

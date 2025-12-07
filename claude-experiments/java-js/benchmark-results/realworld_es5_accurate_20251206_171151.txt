@@ -1,0 +1,988 @@
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.graalJS_lodash_es5
+
+# Run progress: 0.00% complete, ETA 00:04:48
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+29.713 ms/op
+# Warmup Iteration   2: 8.849 ms/op
+# Warmup Iteration   3: 7.847 ms/op
+Iteration   1: 7.438 ms/op
+Iteration   2: 7.312 ms/op
+Iteration   3: 7.282 ms/op
+Iteration   4: 7.232 ms/op
+Iteration   5: 7.364 ms/op
+
+# Run progress: 2.78% complete, ETA 00:04:48
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+35.916 ms/op
+# Warmup Iteration   2: 9.518 ms/op
+# Warmup Iteration   3: 7.818 ms/op
+Iteration   1: 7.410 ms/op
+Iteration   2: 7.461 ms/op
+Iteration   3: 7.206 ms/op
+Iteration   4: 7.323 ms/op
+Iteration   5: 7.240 ms/op
+
+# Run progress: 5.56% complete, ETA 00:04:39
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+28.996 ms/op
+# Warmup Iteration   2: 8.628 ms/op
+# Warmup Iteration   3: 7.758 ms/op
+Iteration   1: 7.349 ms/op
+Iteration   2: 7.258 ms/op
+Iteration   3: 7.453 ms/op
+Iteration   4: 7.350 ms/op
+Iteration   5: 7.295 ms/op
+
+
+Result "com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.graalJS_lodash_es5":
+  7.331 ±(99.9%) 0.088 ms/op [Average]
+  (min, avg, max) = (7.206, 7.331, 7.461), stdev = 0.082
+  CI (99.9%): [7.244, 7.419] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.graalJS_reactDom_es5
+
+# Run progress: 8.33% complete, ETA 00:04:31
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+39.091 ms/op
+# Warmup Iteration   2: 11.894 ms/op
+# Warmup Iteration   3: 9.632 ms/op
+Iteration   1: 9.434 ms/op
+Iteration   2: 9.864 ms/op
+Iteration   3: 21.063 ms/op
+Iteration   4: 20.135 ms/op
+Iteration   5: 32.910 ms/op
+
+# Run progress: 11.11% complete, ETA 00:04:25
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+265.214 ms/op
+# Warmup Iteration   2: 13.170 ms/op
+# Warmup Iteration   3: 9.128 ms/op
+Iteration   1: 8.951 ms/op
+Iteration   2: 8.561 ms/op
+Iteration   3: 8.844 ms/op
+Iteration   4: 8.537 ms/op
+Iteration   5: 8.474 ms/op
+
+# Run progress: 13.89% complete, ETA 00:04:19
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+33.604 ms/op
+# Warmup Iteration   2: 10.025 ms/op
+# Warmup Iteration   3: 9.055 ms/op
+Iteration   1: 8.953 ms/op
+Iteration   2: 8.604 ms/op
+Iteration   3: 8.610 ms/op
+Iteration   4: 8.679 ms/op
+Iteration   5: 8.668 ms/op
+
+
+Result "com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.graalJS_reactDom_es5":
+  12.019 ±(99.9%) 7.595 ms/op [Average]
+  (min, avg, max) = (8.474, 12.019, 32.910), stdev = 7.104
+  CI (99.9%): [4.424, 19.614] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.graalJS_react_es5
+
+# Run progress: 16.67% complete, ETA 00:04:10
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+6.704 ms/op
+# Warmup Iteration   2: 1.363 ms/op
+# Warmup Iteration   3: 1.001 ms/op
+Iteration   1: 0.949 ms/op
+Iteration   2: 0.917 ms/op
+Iteration   3: 0.887 ms/op
+Iteration   4: 0.888 ms/op
+Iteration   5: 0.875 ms/op
+
+# Run progress: 19.44% complete, ETA 00:04:01
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+5.918 ms/op
+# Warmup Iteration   2: 1.188 ms/op
+# Warmup Iteration   3: 0.936 ms/op
+Iteration   1: 0.901 ms/op
+Iteration   2: 0.874 ms/op
+Iteration   3: 0.869 ms/op
+Iteration   4: 0.863 ms/op
+Iteration   5: 0.865 ms/op
+
+# Run progress: 22.22% complete, ETA 00:03:52
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.oracle.truffle.runtime.ModulesSupport in an unnamed module (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+5.618 ms/op
+# Warmup Iteration   2: 1.207 ms/op
+# Warmup Iteration   3: 0.943 ms/op
+Iteration   1: 0.921 ms/op
+Iteration   2: 0.889 ms/op
+Iteration   3: 0.878 ms/op
+Iteration   4: 0.896 ms/op
+Iteration   5: 0.867 ms/op
+
+
+Result "com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.graalJS_react_es5":
+  0.889 ±(99.9%) 0.026 ms/op [Average]
+  (min, avg, max) = (0.863, 0.889, 0.949), stdev = 0.024
+  CI (99.9%): [0.863, 0.915] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.nashornParser_lodash_es5
+
+# Run progress: 25.00% complete, ETA 00:03:44
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+5.785 ms/op
+# Warmup Iteration   2: 4.229 ms/op
+# Warmup Iteration   3: 4.162 ms/op
+Iteration   1: 4.125 ms/op
+Iteration   2: 4.454 ms/op
+Iteration   3: 5.971 ms/op
+Iteration   4: 17.690 ms/op
+Iteration   5: 23.949 ms/op
+
+# Run progress: 27.78% complete, ETA 00:03:35
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+219.720 ms/op
+# Warmup Iteration   2: 28.446 ms/op
+# Warmup Iteration   3: 11.191 ms/op
+Iteration   1: 4.489 ms/op
+Iteration   2: 4.278 ms/op
+Iteration   3: 4.311 ms/op
+Iteration   4: 4.299 ms/op
+Iteration   5: 4.355 ms/op
+
+# Run progress: 30.56% complete, ETA 00:03:28
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+6.595 ms/op
+# Warmup Iteration   2: 4.477 ms/op
+# Warmup Iteration   3: 4.339 ms/op
+Iteration   1: 4.326 ms/op
+Iteration   2: 4.302 ms/op
+Iteration   3: 4.334 ms/op
+Iteration   4: 4.296 ms/op
+Iteration   5: 4.317 ms/op
+
+
+Result "com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.nashornParser_lodash_es5":
+  6.633 ±(99.9%) 6.303 ms/op [Average]
+  (min, avg, max) = (4.125, 6.633, 23.949), stdev = 5.896
+  CI (99.9%): [0.330, 12.936] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.nashornParser_reactDom_es5
+
+# Run progress: 33.33% complete, ETA 00:03:19
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+6.292 ms/op
+# Warmup Iteration   2: 4.701 ms/op
+# Warmup Iteration   3: 4.604 ms/op
+Iteration   1: 4.611 ms/op
+Iteration   2: 4.588 ms/op
+Iteration   3: 4.583 ms/op
+Iteration   4: 4.584 ms/op
+Iteration   5: 4.570 ms/op
+
+# Run progress: 36.11% complete, ETA 00:03:11
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+6.488 ms/op
+# Warmup Iteration   2: 4.758 ms/op
+# Warmup Iteration   3: 4.654 ms/op
+Iteration   1: 4.635 ms/op
+Iteration   2: 4.609 ms/op
+Iteration   3: 4.597 ms/op
+Iteration   4: 4.556 ms/op
+Iteration   5: 4.648 ms/op
+
+# Run progress: 38.89% complete, ETA 00:03:02
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+6.377 ms/op
+# Warmup Iteration   2: 4.705 ms/op
+# Warmup Iteration   3: 4.565 ms/op
+Iteration   1: 4.540 ms/op
+Iteration   2: 4.530 ms/op
+Iteration   3: 4.618 ms/op
+Iteration   4: 4.636 ms/op
+Iteration   5: 4.531 ms/op
+
+
+Result "com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.nashornParser_reactDom_es5":
+  4.589 ±(99.9%) 0.041 ms/op [Average]
+  (min, avg, max) = (4.530, 4.589, 4.648), stdev = 0.038
+  CI (99.9%): [4.548, 4.630] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.nashornParser_react_es5
+
+# Run progress: 41.67% complete, ETA 00:02:54
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+0.594 ms/op
+# Warmup Iteration   2: 0.383 ms/op
+# Warmup Iteration   3: 0.375 ms/op
+Iteration   1: 0.368 ms/op
+Iteration   2: 0.371 ms/op
+Iteration   3: 0.368 ms/op
+Iteration   4: 0.364 ms/op
+Iteration   5: 0.367 ms/op
+
+# Run progress: 44.44% complete, ETA 00:02:45
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+0.579 ms/op
+# Warmup Iteration   2: 0.382 ms/op
+# Warmup Iteration   3: 0.370 ms/op
+Iteration   1: 0.375 ms/op
+Iteration   2: 0.370 ms/op
+Iteration   3: 0.368 ms/op
+Iteration   4: 0.369 ms/op
+Iteration   5: 0.367 ms/op
+
+# Run progress: 47.22% complete, ETA 00:02:37
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+0.588 ms/op
+# Warmup Iteration   2: 0.388 ms/op
+# Warmup Iteration   3: 0.378 ms/op
+Iteration   1: 0.373 ms/op
+Iteration   2: 0.370 ms/op
+Iteration   3: 0.375 ms/op
+Iteration   4: 0.370 ms/op
+Iteration   5: 0.372 ms/op
+
+
+Result "com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.nashornParser_react_es5":
+  0.370 ±(99.9%) 0.003 ms/op [Average]
+  (min, avg, max) = (0.364, 0.370, 0.375), stdev = 0.003
+  CI (99.9%): [0.366, 0.373] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.ourParser_lodash_es5
+
+# Run progress: 50.00% complete, ETA 00:02:29
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+7.455 ms/op
+# Warmup Iteration   2: 5.952 ms/op
+# Warmup Iteration   3: 5.798 ms/op
+Iteration   1: 5.832 ms/op
+Iteration   2: 5.872 ms/op
+Iteration   3: 5.810 ms/op
+Iteration   4: 5.806 ms/op
+Iteration   5: 5.811 ms/op
+
+# Run progress: 52.78% complete, ETA 00:02:20
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+7.828 ms/op
+# Warmup Iteration   2: 5.947 ms/op
+# Warmup Iteration   3: 5.891 ms/op
+Iteration   1: 5.876 ms/op
+Iteration   2: 5.887 ms/op
+Iteration   3: 5.867 ms/op
+Iteration   4: 5.895 ms/op
+Iteration   5: 5.894 ms/op
+
+# Run progress: 55.56% complete, ETA 00:02:12
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+8.339 ms/op
+# Warmup Iteration   2: 5.964 ms/op
+# Warmup Iteration   3: 5.818 ms/op
+Iteration   1: 5.778 ms/op
+Iteration   2: 5.767 ms/op
+Iteration   3: 5.701 ms/op
+Iteration   4: 5.664 ms/op
+Iteration   5: 5.687 ms/op
+
+
+Result "com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.ourParser_lodash_es5":
+  5.810 ±(99.9%) 0.083 ms/op [Average]
+  (min, avg, max) = (5.664, 5.810, 5.895), stdev = 0.077
+  CI (99.9%): [5.727, 5.892] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.ourParser_reactDom_es5
+
+# Run progress: 58.33% complete, ETA 00:02:04
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+8.675 ms/op
+# Warmup Iteration   2: 7.126 ms/op
+# Warmup Iteration   3: 7.128 ms/op
+Iteration   1: 7.051 ms/op
+Iteration   2: 7.061 ms/op
+Iteration   3: 7.056 ms/op
+Iteration   4: 7.052 ms/op
+Iteration   5: 7.046 ms/op
+
+# Run progress: 61.11% complete, ETA 00:01:55
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+8.544 ms/op
+# Warmup Iteration   2: 7.075 ms/op
+# Warmup Iteration   3: 7.054 ms/op
+Iteration   1: 6.977 ms/op
+Iteration   2: 6.963 ms/op
+Iteration   3: 7.015 ms/op
+Iteration   4: 7.010 ms/op
+Iteration   5: 6.998 ms/op
+
+# Run progress: 63.89% complete, ETA 00:01:47
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+8.793 ms/op
+# Warmup Iteration   2: 7.166 ms/op
+# Warmup Iteration   3: 7.144 ms/op
+Iteration   1: 7.168 ms/op
+Iteration   2: 7.055 ms/op
+Iteration   3: 7.075 ms/op
+Iteration   4: 7.228 ms/op
+Iteration   5: 7.079 ms/op
+
+
+Result "com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.ourParser_reactDom_es5":
+  7.056 ±(99.9%) 0.073 ms/op [Average]
+  (min, avg, max) = (6.963, 7.056, 7.228), stdev = 0.068
+  CI (99.9%): [6.983, 7.129] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.ourParser_react_es5
+
+# Run progress: 66.67% complete, ETA 00:01:39
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+0.620 ms/op
+# Warmup Iteration   2: 0.472 ms/op
+# Warmup Iteration   3: 0.461 ms/op
+Iteration   1: 0.467 ms/op
+Iteration   2: 0.472 ms/op
+Iteration   3: 0.472 ms/op
+Iteration   4: 0.456 ms/op
+Iteration   5: 0.458 ms/op
+
+# Run progress: 69.44% complete, ETA 00:01:30
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+0.569 ms/op
+# Warmup Iteration   2: 0.472 ms/op
+# Warmup Iteration   3: 0.461 ms/op
+Iteration   1: 0.460 ms/op
+Iteration   2: 0.457 ms/op
+Iteration   3: 0.457 ms/op
+Iteration   4: 0.463 ms/op
+Iteration   5: 0.467 ms/op
+
+# Run progress: 72.22% complete, ETA 00:01:22
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+0.669 ms/op
+# Warmup Iteration   2: 0.475 ms/op
+# Warmup Iteration   3: 0.475 ms/op
+Iteration   1: 0.465 ms/op
+Iteration   2: 0.463 ms/op
+Iteration   3: 0.461 ms/op
+Iteration   4: 0.463 ms/op
+Iteration   5: 0.461 ms/op
+
+
+Result "com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.ourParser_react_es5":
+  0.463 ±(99.9%) 0.005 ms/op [Average]
+  (min, avg, max) = (0.456, 0.463, 0.472), stdev = 0.005
+  CI (99.9%): [0.457, 0.468] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.rhinoParser_lodash_es5
+
+# Run progress: 75.00% complete, ETA 00:01:14
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+3.986 ms/op
+# Warmup Iteration   2: 3.193 ms/op
+# Warmup Iteration   3: 3.142 ms/op
+Iteration   1: 3.114 ms/op
+Iteration   2: 3.130 ms/op
+Iteration   3: 3.350 ms/op
+Iteration   4: 3.218 ms/op
+Iteration   5: 3.220 ms/op
+
+# Run progress: 77.78% complete, ETA 00:01:06
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+4.238 ms/op
+# Warmup Iteration   2: 3.009 ms/op
+# Warmup Iteration   3: 2.973 ms/op
+Iteration   1: 2.960 ms/op
+Iteration   2: 2.959 ms/op
+Iteration   3: 2.966 ms/op
+Iteration   4: 2.942 ms/op
+Iteration   5: 2.970 ms/op
+
+# Run progress: 80.56% complete, ETA 00:00:57
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+3.847 ms/op
+# Warmup Iteration   2: 3.102 ms/op
+# Warmup Iteration   3: 3.026 ms/op
+Iteration   1: 2.968 ms/op
+Iteration   2: 2.965 ms/op
+Iteration   3: 2.954 ms/op
+Iteration   4: 2.968 ms/op
+Iteration   5: 2.994 ms/op
+
+
+Result "com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.rhinoParser_lodash_es5":
+  3.045 ±(99.9%) 0.138 ms/op [Average]
+  (min, avg, max) = (2.942, 3.045, 3.350), stdev = 0.129
+  CI (99.9%): [2.908, 3.183] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.rhinoParser_reactDom_es5
+
+# Run progress: 83.33% complete, ETA 00:00:49
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+3.621 ms/op
+# Warmup Iteration   2: 2.764 ms/op
+# Warmup Iteration   3: 2.705 ms/op
+Iteration   1: 2.726 ms/op
+Iteration   2: 2.761 ms/op
+Iteration   3: 2.761 ms/op
+Iteration   4: 2.705 ms/op
+Iteration   5: 2.705 ms/op
+
+# Run progress: 86.11% complete, ETA 00:00:41
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+3.418 ms/op
+# Warmup Iteration   2: 2.744 ms/op
+# Warmup Iteration   3: 2.683 ms/op
+Iteration   1: 2.681 ms/op
+Iteration   2: 2.681 ms/op
+Iteration   3: 2.686 ms/op
+Iteration   4: 2.679 ms/op
+Iteration   5: 2.685 ms/op
+
+# Run progress: 88.89% complete, ETA 00:00:33
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+3.546 ms/op
+# Warmup Iteration   2: 2.719 ms/op
+# Warmup Iteration   3: 2.671 ms/op
+Iteration   1: 2.696 ms/op
+Iteration   2: 2.699 ms/op
+Iteration   3: 2.676 ms/op
+Iteration   4: 2.683 ms/op
+Iteration   5: 2.697 ms/op
+
+
+Result "com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.rhinoParser_reactDom_es5":
+  2.701 ±(99.9%) 0.029 ms/op [Average]
+  (min, avg, max) = (2.676, 2.701, 2.761), stdev = 0.027
+  CI (99.9%): [2.672, 2.731] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 25.0.1, OpenJDK 64-Bit Server VM, 25.0.1
+# VM invoker: /opt/homebrew/Cellar/openjdk/25.0.1/libexec/openjdk.jdk/Contents/Home/bin/java
+# VM options: --enable-preview
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.rhinoParser_react_es5
+
+# Run progress: 91.67% complete, ETA 00:00:24
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+0.242 ms/op
+# Warmup Iteration   2: 0.188 ms/op
+# Warmup Iteration   3: 0.186 ms/op
+Iteration   1: 0.186 ms/op
+Iteration   2: 0.185 ms/op
+Iteration   3: 0.184 ms/op
+Iteration   4: 0.184 ms/op
+Iteration   5: 0.184 ms/op
+
+# Run progress: 94.44% complete, ETA 00:00:16
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+0.278 ms/op
+# Warmup Iteration   2: 0.212 ms/op
+# Warmup Iteration   3: 0.182 ms/op
+Iteration   1: 0.195 ms/op
+Iteration   2: 0.193 ms/op
+Iteration   3: 0.192 ms/op
+Iteration   4: 0.183 ms/op
+Iteration   5: 0.182 ms/op
+
+# Run progress: 97.22% complete, ETA 00:00:08
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/java-js/target/benchmarks.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: Loaded ES5 benchmark files (Rhino-compatible only):
+  Lodash:     469.5 KB
+  React-DOM:  220.2 KB
+  React:      16.8 KB
+0.235 ms/op
+# Warmup Iteration   2: 0.185 ms/op
+# Warmup Iteration   3: 0.183 ms/op
+Iteration   1: 0.181 ms/op
+Iteration   2: 0.180 ms/op
+Iteration   3: 0.180 ms/op
+Iteration   4: 0.180 ms/op
+Iteration   5: 0.180 ms/op
+
+
+Result "com.jsparser.benchmarks.RealWorldEs5JavaBenchmark.rhinoParser_react_es5":
+  0.185 ±(99.9%) 0.005 ms/op [Average]
+  (min, avg, max) = (0.180, 0.185, 0.195), stdev = 0.005
+  CI (99.9%): [0.179, 0.190] (assumes normal distribution)
+
+
+# Run complete. Total time: 00:04:56
+
+REMEMBER: The numbers below are just data. To gain reusable insights, you need to follow up on
+why the numbers are the way they are. Use profilers (see -prof, -lprof), design factorial
+experiments, perform baseline and negative tests that provide experimental control, make sure
+the benchmarking environment is safe on JVM/OS/HW level, ask for reviews from the domain experts.
+Do not assume the numbers tell you what you want them to tell.
+
+NOTE: Current JVM experimentally supports Compiler Blackholes, and they are in use. Please exercise
+extra caution when trusting the results, look into the generated code to check the benchmark still
+works, and factor in a small probability of new VM bugs. Additionally, while comparisons between
+different JVMs are already problematic, the performance difference caused by different Blackhole
+modes can be very significant. Please make sure you use the consistent Blackhole mode for comparisons.
+
+Benchmark                                             Mode  Cnt   Score   Error  Units
+RealWorldEs5JavaBenchmark.graalJS_lodash_es5          avgt   15   7.331 ± 0.088  ms/op
+RealWorldEs5JavaBenchmark.graalJS_reactDom_es5        avgt   15  12.019 ± 7.595  ms/op
+RealWorldEs5JavaBenchmark.graalJS_react_es5           avgt   15   0.889 ± 0.026  ms/op
+RealWorldEs5JavaBenchmark.nashornParser_lodash_es5    avgt   15   6.633 ± 6.303  ms/op
+RealWorldEs5JavaBenchmark.nashornParser_reactDom_es5  avgt   15   4.589 ± 0.041  ms/op
+RealWorldEs5JavaBenchmark.nashornParser_react_es5     avgt   15   0.370 ± 0.003  ms/op
+RealWorldEs5JavaBenchmark.ourParser_lodash_es5        avgt   15   5.810 ± 0.083  ms/op
+RealWorldEs5JavaBenchmark.ourParser_reactDom_es5      avgt   15   7.056 ± 0.073  ms/op
+RealWorldEs5JavaBenchmark.ourParser_react_es5         avgt   15   0.463 ± 0.005  ms/op
+RealWorldEs5JavaBenchmark.rhinoParser_lodash_es5      avgt   15   3.045 ± 0.138  ms/op
+RealWorldEs5JavaBenchmark.rhinoParser_reactDom_es5    avgt   15   2.701 ± 0.029  ms/op
+RealWorldEs5JavaBenchmark.rhinoParser_react_es5       avgt   15   0.185 ± 0.005  ms/op
