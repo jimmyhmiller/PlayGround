@@ -62,7 +62,7 @@ fn main() {
     println!("Spills: {}", allocator.spill_locations.len());
     println!("Stack slots: {}", allocator.next_stack_slot);
     for (vreg, loc) in &allocator.spill_locations {
-        println!("  v{} spilled to slot {}", vreg.index, loc);
+        println!("  v{} spilled to slot {}", vreg.index(), loc);
     }
 
     let mut codegen = Arm64CodeGen::new();

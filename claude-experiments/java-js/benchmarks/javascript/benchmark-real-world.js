@@ -12,7 +12,6 @@
  */
 
 import * as acorn from 'acorn';
-import * as esprima from 'esprima';
 import { parse as babelParse } from '@babel/parser';
 import { parseScript as meriyahParse } from 'meriyah';
 import { readFileSync } from 'fs';
@@ -71,10 +70,6 @@ function runBenchmarkSuite(library) {
         {
             name: 'Acorn',
             parse: () => acorn.parse(library.code, { ecmaVersion: 'latest' })
-        },
-        {
-            name: 'Esprima',
-            parse: () => esprima.parseScript(library.code)
         },
         {
             name: '@babel/parser',

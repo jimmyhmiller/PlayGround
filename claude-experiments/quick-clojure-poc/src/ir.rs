@@ -4,6 +4,7 @@
 use std::cmp::Ordering;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum Condition {
     LessThan,
     LessThanOrEqual,
@@ -21,6 +22,7 @@ pub enum VirtualRegister {
 
 impl VirtualRegister {
     /// Create a new temporary register (for backwards compatibility)
+    #[allow(dead_code)]
     pub fn new(index: usize) -> Self {
         VirtualRegister::Temp(index)
     }
@@ -34,6 +36,7 @@ impl VirtualRegister {
     }
 
     /// Check if this is an argument register
+    #[allow(dead_code)]
     pub fn is_argument(&self) -> bool {
         matches!(self, VirtualRegister::Argument(_))
     }
@@ -66,6 +69,7 @@ impl PartialOrd for VirtualRegister {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum IrValue {
     Register(VirtualRegister),
     TaggedConstant(isize),  // For tagged integers
@@ -125,6 +129,7 @@ pub enum Instruction {
 /// IR builder - helps construct IR instructions
 pub struct IrBuilder {
     next_temp_register: usize,
+    #[allow(dead_code)]
     next_argument_register: usize,
     next_label: usize,
     pub instructions: Vec<Instruction>,
@@ -155,6 +160,7 @@ impl IrBuilder {
     }
 
     /// Create a new argument register (for function parameters)
+    #[allow(dead_code)]
     pub fn new_argument_register(&mut self) -> IrValue {
         let reg = VirtualRegister::Argument(self.next_argument_register);
         self.next_argument_register += 1;

@@ -16,6 +16,7 @@ const TYPE_ID_FUNCTION: u8 = 12;
 /// Closure heap object layout constants
 ///
 /// Layout: Header | name_ptr | code_ptr | closure_count | [closure_values...]
+#[allow(dead_code)]
 pub mod closure_layout {
     /// Size of header in bytes (always 8 bytes for all heap objects)
     pub const HEADER_SIZE: usize = 8;
@@ -163,6 +164,7 @@ impl HeapObject {
 
 /// Built-in type tagging
 #[derive(Debug, Copy, Clone)]
+#[allow(dead_code)]
 pub enum BuiltInTypes {
     Int,
     String,
@@ -183,6 +185,7 @@ impl BuiltInTypes {
     }
 
     /// Get the type from a tagged value
+    #[allow(dead_code)]
     pub fn get_kind(value: usize) -> Self {
         match value & 0b111 {
             0b000 => BuiltInTypes::Int,
@@ -757,6 +760,7 @@ impl GCRuntime {
     }
 
     /// Get function name (for debugging/printing)
+    #[allow(dead_code)]
     pub fn function_name(&self, fn_ptr: usize) -> String {
         let untagged = BuiltInTypes::HeapObject.untag(fn_ptr);
         let heap_obj = HeapObject::from_untagged(untagged);

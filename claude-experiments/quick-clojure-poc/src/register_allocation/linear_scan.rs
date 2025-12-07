@@ -764,20 +764,32 @@ mod tests {
         let mut allocator = LinearScan::new(instructions, 0);
         allocator.allocate();
 
+        // Note: Register replacement in IR is disabled (see replace_allocated_registers comment).
+        // The code generator looks up virtual registers in allocated_registers map instead.
+        // Verify that all virtual registers have been assigned physical registers in the map.
+        for inst in &allocator.instructions {
+            for reg in LinearScan::get_registers_in_instruction(&inst) {
+                // Either the register should be in allocated_registers, or it should be spilled
+                let is_allocated = allocator.allocated_registers.contains_key(&reg);
+                let is_spilled = allocator.spill_locations.contains_key(&reg);
+                assert!(is_allocated || is_spilled,
+                    "Register {} should be either allocated or spilled", reg.display_name());
+
+                // If allocated, verify it maps to a physical register (x19-x28)
+                if let Some(physical) = allocator.allocated_registers.get(&reg) {
+                    let idx = physical.index();
+                    assert!(idx >= 19 && idx <= 28,
+                        "Register {} mapped to {} which is not physical (19-28)",
+                        reg.display_name(), physical.display_name());
+                }
+            }
+        }
+
         let allocated = allocator.finish();
 
         println!("\nAllocated instructions:");
         for (i, inst) in allocated.iter().enumerate() {
             println!("  {}: {:?}", i, inst);
-        }
-
-        // Verify all registers are now physical (x19-x28)
-        for inst in &allocated {
-            for reg in LinearScan::get_registers_in_instruction(inst) {
-                let idx = reg.index();
-                assert!(idx >= 19 && idx <= 28,
-                    "Register {} should be physical (19-28)", reg.display_name());
-            }
         }
     }
 

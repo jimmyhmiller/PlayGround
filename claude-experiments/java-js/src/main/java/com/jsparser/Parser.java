@@ -4,8 +4,102 @@ import com.jsparser.ast.*;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+
+import static java.util.Map.entry;
 
 public class Parser {
+    /**
+     * Complete precedence table for JavaScript operators.
+     * Higher precedence values = tighter binding.
+     * Based on ECMAScript specification operator precedence.
+     *
+     * Precedence levels:
+     * 1  - Comma (handled separately by parseSequence)
+     * 2  - Assignment operators (right-associative)
+     * 3  - Conditional/Ternary (handled separately - two-token operator)
+     * 4  - Nullish coalescing (??)
+     * 5  - Logical OR (||)
+     * 6  - Logical AND (&&)
+     * 7  - Bitwise OR (|)
+     * 8  - Bitwise XOR (^)
+     * 9  - Bitwise AND (&)
+     * 10 - Equality (==, !=, ===, !==)
+     * 11 - Relational (<, <=, >, >=, instanceof, in)
+     * 12 - Shift (<<, >>, >>>)
+     * 13 - Additive (+, -)
+     * 14 - Multiplicative (*, /, %)
+     * 15 - Exponentiation (**) (right-associative)
+     */
+    private static final Map<TokenType, OperatorInfo> OPERATOR_PRECEDENCE = Map.ofEntries(
+        // Precedence 2: Assignment operators (right-associative)
+        entry(TokenType.ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.PLUS_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.MINUS_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.STAR_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.SLASH_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.PERCENT_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.STAR_STAR_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.LEFT_SHIFT_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.RIGHT_SHIFT_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.UNSIGNED_RIGHT_SHIFT_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.BIT_AND_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.BIT_OR_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.BIT_XOR_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.AND_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.OR_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+        entry(TokenType.QUESTION_QUESTION_ASSIGN, new OperatorInfo(2, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.ASSIGNMENT)),
+
+        // Precedence 4: Nullish coalescing
+        entry(TokenType.QUESTION_QUESTION, new OperatorInfo(4, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.LOGICAL)),
+
+        // Precedence 5: Logical OR
+        entry(TokenType.OR, new OperatorInfo(5, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.LOGICAL)),
+
+        // Precedence 6: Logical AND
+        entry(TokenType.AND, new OperatorInfo(6, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.LOGICAL)),
+
+        // Precedence 7: Bitwise OR
+        entry(TokenType.BIT_OR, new OperatorInfo(7, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+
+        // Precedence 8: Bitwise XOR
+        entry(TokenType.BIT_XOR, new OperatorInfo(8, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+
+        // Precedence 9: Bitwise AND
+        entry(TokenType.BIT_AND, new OperatorInfo(9, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+
+        // Precedence 10: Equality
+        entry(TokenType.EQ, new OperatorInfo(10, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+        entry(TokenType.NE, new OperatorInfo(10, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+        entry(TokenType.EQ_STRICT, new OperatorInfo(10, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+        entry(TokenType.NE_STRICT, new OperatorInfo(10, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+
+        // Precedence 11: Relational
+        entry(TokenType.LT, new OperatorInfo(11, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+        entry(TokenType.LE, new OperatorInfo(11, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+        entry(TokenType.GT, new OperatorInfo(11, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+        entry(TokenType.GE, new OperatorInfo(11, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+        entry(TokenType.INSTANCEOF, new OperatorInfo(11, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+        entry(TokenType.IN, new OperatorInfo(11, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+
+        // Precedence 12: Shift
+        entry(TokenType.LEFT_SHIFT, new OperatorInfo(12, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+        entry(TokenType.RIGHT_SHIFT, new OperatorInfo(12, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+        entry(TokenType.UNSIGNED_RIGHT_SHIFT, new OperatorInfo(12, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+
+        // Precedence 13: Additive
+        entry(TokenType.PLUS, new OperatorInfo(13, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+        entry(TokenType.MINUS, new OperatorInfo(13, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+
+        // Precedence 14: Multiplicative
+        entry(TokenType.STAR, new OperatorInfo(14, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+        entry(TokenType.SLASH, new OperatorInfo(14, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+        entry(TokenType.PERCENT, new OperatorInfo(14, OperatorInfo.Associativity.LEFT, OperatorInfo.ExpressionType.BINARY)),
+
+        // Precedence 15: Exponentiation (right-associative!)
+        entry(TokenType.STAR_STAR, new OperatorInfo(15, OperatorInfo.Associativity.RIGHT, OperatorInfo.ExpressionType.BINARY))
+    );
+
     private final List<Token> tokens;
     private final int sourceLength;
     private final Lexer lexer;
@@ -2226,10 +2320,105 @@ public class Parser {
         }
     }
 
+    /**
+     * Parse binary expressions using table-driven precedence climbing.
+     * This replaces the previous 12-method precedence hierarchy with a single unified method.
+     *
+     * Algorithm: Precedence Climbing (also known as Pratt parsing)
+     * - Start with minimum precedence
+     * - Parse left-hand side (unary expression)
+     * - While current operator has precedence >= minimum:
+     *   - Consume operator
+     *   - Calculate next precedence based on associativity
+     *   - Recursively parse right-hand side with next precedence
+     *   - Create binary/logical expression node
+     *   - Continue with result as new left-hand side
+     *
+     * This approach reduces stack depth from 17+ method calls to 1-3 calls
+     * and makes operator precedence explicit via the OPERATOR_PRECEDENCE table.
+     *
+     * @param minPrecedence Minimum operator precedence to parse (higher values = tighter binding)
+     * @return Parsed expression
+     */
+    private Expression parseBinaryExpression(int minPrecedence) {
+        Token startToken = peek();
+        Expression left = parseUnary();
+
+        while (current < tokens.size()) {
+            Token operatorToken = peek();
+            OperatorInfo opInfo = OPERATOR_PRECEDENCE.get(operatorToken.type());
+
+            // Stop parsing if:
+            // 1. Current token is not a binary operator
+            // 2. Operator precedence is lower than minimum (lower precedence = looser binding)
+            // 3. Context check fails (e.g., 'in' operator when allowIn=false)
+            if (opInfo == null || opInfo.precedence() < minPrecedence) {
+                break;
+            }
+
+            // Special case: 'in' operator respects allowIn context flag
+            // Example: for (let x in obj) - 'in' should NOT be parsed as binary operator
+            // Example: (x in obj) - 'in' SHOULD be parsed as binary operator
+            if (operatorToken.type() == TokenType.IN && !allowIn) {
+                break;
+            }
+
+            // Consume the operator token
+            advance();
+            Token operator = previous();
+
+            // Calculate next precedence level based on associativity:
+            // - Left-associative: next precedence = current + 1
+            //   Example: 1 + 2 + 3 = (1 + 2) + 3
+            //   First + parses with precedence 13, second + needs precedence 14 to stop
+            // - Right-associative: next precedence = current
+            //   Example: 2 ** 3 ** 4 = 2 ** (3 ** 4)
+            //   Both ** parse with precedence 15, allowing right recursion
+            int nextPrecedence = opInfo.isLeftAssociative()
+                ? opInfo.precedence() + 1
+                : opInfo.precedence();
+
+            // Recursively parse right-hand side with calculated precedence
+            Expression right = parseBinaryExpression(nextPrecedence);
+
+            // Create appropriate AST node based on operator type
+            Token endToken = previous();
+            SourceLocation loc = createLocation(startToken, endToken);
+
+            if (opInfo.isLogicalExpression()) {
+                // LogicalExpression for ||, &&, ?? (short-circuiting operators)
+                left = new LogicalExpression(
+                    getStart(startToken),
+                    getEnd(endToken),
+                    loc,
+                    operator.lexeme(),
+                    left,
+                    right
+                );
+            } else {
+                // BinaryExpression for all other binary operators
+                // (arithmetic, bitwise, comparison, shift, etc.)
+                left = new BinaryExpression(
+                    getStart(startToken),
+                    getEnd(endToken),
+                    loc,
+                    left,
+                    operator.lexeme(),
+                    right
+                );
+            }
+        }
+
+        return left;
+    }
+
     // conditional -> nullishCoalescing ( "?" assignment ":" assignment )?
     private Expression parseConditional() {
         Token startToken = peek();
-        Expression test = parseNullishCoalescing();
+        // Parse up to (and including) nullish coalescing level (precedence 4)
+        // This handles: ??, ||, &&, |, ^, &, ==, !=, ===, !==, <, <=, >, >=,
+        // instanceof, in, <<, >>, >>>, +, -, *, /, %, **
+        Expression test = parseBinaryExpression(4);
 
         if (match(TokenType.QUESTION)) {
             // Allow 'in' operator in ternary branches
@@ -2249,210 +2438,6 @@ public class Parser {
         }
 
         return test;
-    }
-
-    // nullishCoalescing -> logicalOr ( "??" logicalOr )*
-    private Expression parseNullishCoalescing() {
-        Token startToken = peek();
-        Expression left = parseLogicalOr();
-
-        while (match(TokenType.QUESTION_QUESTION)) {
-            Token operator = previous();
-            Expression right = parseLogicalOr();
-            Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            left = new LogicalExpression(getStart(startToken), getEnd(endToken), loc, operator.lexeme(), left, right);
-        }
-
-        return left;
-    }
-
-    // logicalOr -> logicalAnd ( "||" logicalAnd )*
-    private Expression parseLogicalOr() {
-        Token startToken = peek();
-        Expression left = parseLogicalAnd();
-
-        while (match(TokenType.OR)) {
-            Token operator = previous();
-            Expression right = parseLogicalAnd();
-            Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            left = new LogicalExpression(getStart(startToken), getEnd(endToken), loc, operator.lexeme(), left, right);
-        }
-
-        return left;
-    }
-
-    // logicalAnd -> bitwiseOr ( "&&" bitwiseOr )*
-    private Expression parseLogicalAnd() {
-        Token startToken = peek();
-        Expression left = parseBitwiseOr();
-
-        while (match(TokenType.AND)) {
-            Token operator = previous();
-            Expression right = parseBitwiseOr();
-            Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            left = new LogicalExpression(getStart(startToken), getEnd(endToken), loc, operator.lexeme(), left, right);
-        }
-
-        return left;
-    }
-
-    // bitwiseOr -> bitwiseXor ( "|" bitwiseXor )*
-    private Expression parseBitwiseOr() {
-        Token startToken = peek();
-        Expression left = parseBitwiseXor();
-
-        while (match(TokenType.BIT_OR)) {
-            Token operator = previous();
-            Expression right = parseBitwiseXor();
-            Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            left = new BinaryExpression(getStart(startToken), getEnd(endToken), loc, left, operator.lexeme(), right);
-        }
-
-        return left;
-    }
-
-    // bitwiseXor -> bitwiseAnd ( "^" bitwiseAnd )*
-    private Expression parseBitwiseXor() {
-        Token startToken = peek();
-        Expression left = parseBitwiseAnd();
-
-        while (match(TokenType.BIT_XOR)) {
-            Token operator = previous();
-            Expression right = parseBitwiseAnd();
-            Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            left = new BinaryExpression(getStart(startToken), getEnd(endToken), loc, left, operator.lexeme(), right);
-        }
-
-        return left;
-    }
-
-    // bitwiseAnd -> equality ( "&" equality )*
-    private Expression parseBitwiseAnd() {
-        Token startToken = peek();
-        Expression left = parseEquality();
-
-        while (match(TokenType.BIT_AND)) {
-            Token operator = previous();
-            Expression right = parseEquality();
-            Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            left = new BinaryExpression(getStart(startToken), getEnd(endToken), loc, left, operator.lexeme(), right);
-        }
-
-        return left;
-    }
-
-    // equality -> comparison ( ( "==" | "!=" | "===" | "!==" ) comparison )*
-    private Expression parseEquality() {
-        Token startToken = peek();
-        Expression left = parseComparison();
-
-        while (match(TokenType.EQ, TokenType.NE, TokenType.EQ_STRICT, TokenType.NE_STRICT)) {
-            Token operator = previous();
-            Expression right = parseComparison();
-            Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            left = new BinaryExpression(getStart(startToken), getEnd(endToken), loc, left, operator.lexeme(), right);
-        }
-
-        return left;
-    }
-
-    // comparison -> shift ( ( "<" | "<=" | ">" | ">=" | "instanceof" | "in" ) shift )*
-    private Expression parseComparison() {
-        Token startToken = peek();
-        Expression left = parseShift();
-
-        while (true) {
-            // Check for comparison operators, but exclude 'in' when not allowed
-            if (match(TokenType.LT, TokenType.LE, TokenType.GT, TokenType.GE, TokenType.INSTANCEOF)) {
-                Token operator = previous();
-                Expression right = parseShift();
-                Token endToken = previous();
-                SourceLocation loc = createLocation(startToken, endToken);
-                left = new BinaryExpression(getStart(startToken), getEnd(endToken), loc, left, operator.lexeme(), right);
-            } else if (allowIn && match(TokenType.IN)) {
-                Token operator = previous();
-                Expression right = parseShift();
-                Token endToken = previous();
-                SourceLocation loc = createLocation(startToken, endToken);
-                left = new BinaryExpression(getStart(startToken), getEnd(endToken), loc, left, operator.lexeme(), right);
-            } else {
-                break;
-            }
-        }
-
-        return left;
-    }
-
-    // shift -> term ( ( "<<" | ">>" | ">>>" ) term )*
-    private Expression parseShift() {
-        Token startToken = peek();
-        Expression left = parseTerm();
-
-        while (match(TokenType.LEFT_SHIFT, TokenType.RIGHT_SHIFT, TokenType.UNSIGNED_RIGHT_SHIFT)) {
-            Token operator = previous();
-            Expression right = parseTerm();
-            Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            left = new BinaryExpression(getStart(startToken), getEnd(endToken), loc, left, operator.lexeme(), right);
-        }
-
-        return left;
-    }
-
-    // term -> factor ( ( "+" | "-" ) factor )*
-    private Expression parseTerm() {
-        Token startToken = peek();
-        Expression left = parseFactor();
-
-        while (match(TokenType.PLUS, TokenType.MINUS)) {
-            Token operator = previous();
-            Expression right = parseFactor();
-            Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            left = new BinaryExpression(getStart(startToken), getEnd(endToken), loc, left, operator.lexeme(), right);
-        }
-
-        return left;
-    }
-
-    // factor -> exponential ( ( "*" | "/" | "%" ) exponential )*
-    private Expression parseFactor() {
-        Token startToken = peek();
-        Expression left = parseExponential();
-
-        while (match(TokenType.STAR, TokenType.SLASH, TokenType.PERCENT)) {
-            Token operator = previous();
-            Expression right = parseExponential();
-            Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            left = new BinaryExpression(getStart(startToken), getEnd(endToken), loc, left, operator.lexeme(), right);
-        }
-
-        return left;
-    }
-
-    // exponential -> unary ( "**" exponential )?
-    // Note: right-associative, so we recursively call parseExponential for the right side
-    private Expression parseExponential() {
-        Token startToken = peek();
-        Expression left = parseUnary();
-
-        if (match(TokenType.STAR_STAR)) {
-            Token operator = previous();
-            Expression right = parseExponential();  // Right-associative
-            Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            return new BinaryExpression(getStart(startToken), getEnd(endToken), loc, left, operator.lexeme(), right);
-        }
-
-        return left;
     }
 
     // unary -> ( "!" | "-" | "+" | "~" | "typeof" | "void" | "delete" | "++" | "--" ) unary | postfix

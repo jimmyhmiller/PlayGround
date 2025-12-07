@@ -41,6 +41,10 @@ pub struct Arm64CodeGen {
 
     /// Number of stack slots needed (from register allocator)
     num_stack_slots: usize,
+
+    /// Set of labels that are function entry points (from MakeFunction instructions)
+    /// These need their own prologue/epilogue for proper callee-saved register handling
+    function_labels: std::collections::HashSet<Label>,
 }
 
 impl Default for Arm64CodeGen {
@@ -63,11 +67,13 @@ impl Arm64CodeGen {
             placeholder_positions: HashMap::new(),
             current_function_stack_bytes: 0,
             num_stack_slots: 0,
+            function_labels: std::collections::HashSet::new(),
         }
     }
 
     fn new_label(&mut self) -> Label {
-        let label = format!("L{}", self.label_counter);
+        // Use "__internal_" prefix to avoid conflicts with IR-generated labels (L0, L1, etc.)
+        let label = format!("__internal_{}", self.label_counter);
         self.label_counter += 1;
         label
     }
@@ -89,6 +95,7 @@ impl Arm64CodeGen {
         self.placeholder_positions.clear();
         self.current_function_stack_bytes = 0;
         self.num_stack_slots = 0;
+        self.function_labels.clear();
 
         // Run linear scan register allocation
         let mut allocator = LinearScan::new(instructions.to_vec(), num_registers);
@@ -157,12 +164,13 @@ impl Arm64CodeGen {
         let allocated_instructions = allocator.finish();
 
         // Collect function entry point labels (used in MakeFunction)
-        let mut function_labels = std::collections::HashSet::new();
+        // These labels need their own prologue/epilogue for proper nested call support
         for inst in &allocated_instructions {
             if let Instruction::MakeFunction(_, label, _) = inst {
-                function_labels.insert(label.clone());
+                self.function_labels.insert(label.clone());
             }
         }
+        eprintln!("DEBUG: Function entry point labels: {:?}", self.function_labels);
 
         // Emit function prologue
         // FIXED: Save callee-saved registers (x19-x28) that are actually used
@@ -523,6 +531,23 @@ impl Arm64CodeGen {
                 let pos = self.code.len();
                 eprintln!("DEBUG: Label {} at code position {}", label, pos);
                 self.label_positions.insert(label.clone(), pos);
+
+                // If this is a function entry point, emit a function prologue
+                // This ensures each function saves/restores callee-saved registers
+                if self.function_labels.contains(label) {
+                    eprintln!("DEBUG: Emitting function prologue for {}", label);
+                    // Save FP and LR
+                    self.emit_stp(29, 30, 31, -2);  // stp x29, x30, [sp, #-16]!
+                    self.emit_mov(29, 31);          // mov x29, sp
+
+                    // Save ALL callee-saved registers (x19-x28) to be safe
+                    // This is conservative but correct for nested calls
+                    self.emit_stp(19, 20, 31, -2);  // stp x19, x20, [sp, #-16]!
+                    self.emit_stp(21, 22, 31, -2);  // stp x21, x22, [sp, #-16]!
+                    self.emit_stp(23, 24, 31, -2);  // stp x23, x24, [sp, #-16]!
+                    self.emit_stp(25, 26, 31, -2);  // stp x25, x26, [sp, #-16]!
+                    self.emit_stp(27, 28, 31, -2);  // stp x27, x28, [sp, #-16]!
+                }
             }
 
             Instruction::Jump(label) => {
@@ -827,9 +852,19 @@ impl Arm64CodeGen {
                 if src_reg != 0 {
                     self.emit_mov(0, src_reg);
                 }
-                // Return directly - don't jump to epilogue!
-                // Functions have their own stack frames and should return immediately.
-                // Only the top-level code needs the epilogue to restore frame before returning to trampoline.
+
+                // Emit function epilogue to restore callee-saved registers
+                // This matches the prologue emitted at the function entry label
+                eprintln!("DEBUG: Emitting function epilogue before ret");
+                // Restore callee-saved registers in reverse order (x27-x28, x25-x26, etc.)
+                self.emit_ldp(27, 28, 31, 2);  // ldp x27, x28, [sp], #16
+                self.emit_ldp(25, 26, 31, 2);  // ldp x25, x26, [sp], #16
+                self.emit_ldp(23, 24, 31, 2);  // ldp x23, x24, [sp], #16
+                self.emit_ldp(21, 22, 31, 2);  // ldp x21, x22, [sp], #16
+                self.emit_ldp(19, 20, 31, 2);  // ldp x19, x20, [sp], #16
+                // Restore FP and LR
+                self.emit_ldp(29, 30, 31, 2);  // ldp x29, x30, [sp], #16
+
                 eprintln!("DEBUG: Emitting ret instruction");
                 self.emit_ret();
             }
@@ -857,7 +892,7 @@ impl Arm64CodeGen {
                 self.current_function_stack_bytes += save_bytes;
                 eprintln!("DEBUG: CallWithSaves - allocated {} bytes for saves", save_bytes);
 
-                // STEP 2: Simplified call logic (closures not yet supported)
+                // STEP 2: Tag-aware call logic (supports both functions and closures)
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
@@ -865,26 +900,71 @@ impl Arm64CodeGen {
                     return Err("Call with more than 8 arguments not yet supported".to_string());
                 }
 
-                // Get function register
+                // Save function to callee-saved register (x19) before any register shuffling
                 let fn_reg = self.get_physical_reg_for_irvalue(fn_val, false)?;
+                let saved_fn_reg = 19;  // Use x19 for function value
+                if fn_reg != saved_fn_reg {
+                    self.emit_mov(saved_fn_reg, fn_reg);
+                }
 
-                // Move arguments to x0-x7 in reverse order (to avoid clobbering)
-                for (arg_index, arg) in args.iter().enumerate().rev() {
+                // Track argument source registers (x0-x7 are never used by allocator)
+                let mut arg_source_regs = Vec::new();
+                for arg in args.iter() {
                     let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
-                    if arg_index != arg_reg {
-                        self.emit_mov(arg_index, arg_reg);
+                    arg_source_regs.push(arg_reg);
+                }
+
+                // Extract tag (fn_val & 0b111)
+                let tag_reg = 16;  // Use x16 for tag (IP0 register, safe to use)
+                self.emit_and_imm(tag_reg, saved_fn_reg, 0b111);
+
+                // Check if Function (0b100) or Closure (0b101)
+                self.emit_cmp_imm(tag_reg, 0b100);
+
+                let is_function_label = self.new_label();
+                self.emit_branch_cond(is_function_label.clone(), 0); // 0 = EQ (if tag == 0b100)
+
+                // === Closure path (tag == 0b101) ===
+                eprintln!("DEBUG: CallWithSaves - emitting closure path");
+
+                // Untag closure pointer (shift right by 3)
+                let closure_ptr_reg = 17;  // x17 = untagged closure pointer
+                let lsr_instruction = 0xD343FC00u32 | ((saved_fn_reg as u32) << 5) | (closure_ptr_reg as u32);
+                self.code.push(lsr_instruction);
+
+                // Load code_ptr from heap object field 1
+                use crate::gc_runtime::closure_layout;
+                let code_ptr_reg = 18;  // x18 = code pointer
+                self.emit_ldr_offset(code_ptr_reg, closure_ptr_reg, closure_layout::FIELD_1_CODE_PTR as i32);
+
+                // Set up closure calling convention: x0 = closure object, user args in x1-x7
+                self.emit_mov(0, saved_fn_reg);  // x0 = tagged closure pointer
+                for (i, &src_reg) in arg_source_regs.iter().enumerate() {
+                    if i + 1 != src_reg {  // Only move if source != destination
+                        self.emit_mov(i + 1, src_reg);  // x1, x2, x3, etc.
                     }
                 }
 
-                // Untag function pointer (shift right by 3 to remove tag)
-                // Use x16 as temp for untagged function pointer
-                let code_ptr_reg = 16;
+                let after_call_label = self.new_label();
+                self.emit_jump(&after_call_label);
 
-                // LSR Xd, Xn, #3 - Logical shift right by 3
-                let lsr_instruction = 0xD343FC00u32 | ((fn_reg as u32) << 5) | (code_ptr_reg as u32);
+                // === Function path (tag == 0b100) ===
+                self.emit_label(is_function_label);
+                eprintln!("DEBUG: CallWithSaves - emitting function path");
+
+                // Untag function pointer to get code_ptr (shift right by 3)
+                let lsr_instruction = 0xD343FC00u32 | ((saved_fn_reg as u32) << 5) | (code_ptr_reg as u32);
                 self.code.push(lsr_instruction);
 
-                // Call the function
+                // Set up normal calling convention: args in x0-x7
+                for (i, &src_reg) in arg_source_regs.iter().enumerate() {
+                    if i != src_reg {  // Only move if source != destination
+                        self.emit_mov(i, src_reg);
+                    }
+                }
+
+                // === Call the function ===
+                self.emit_label(after_call_label);
                 self.emit_blr(code_ptr_reg);
 
                 // Move result from x0 to destination
@@ -1103,6 +1183,7 @@ impl Arm64CodeGen {
 
     /// Generate ORR with immediate (for setting tag bits)
     /// ORR Xd, Xn, #imm
+    #[allow(dead_code)]
     fn emit_orr_imm(&mut self, dst: usize, src: usize, imm: u32) {
         // For small immediates like 0b100, we can use the logical immediate encoding
         // ORR Xd, Xn, #imm
@@ -1125,10 +1206,12 @@ impl Arm64CodeGen {
     fn emit_and_imm(&mut self, dst: usize, src: usize, imm: u32) {
         // AND Xd, Xn, #0b111 to extract the last 3 bits (tag)
         // ARM64 logical immediate encoding for 0b111 (3 ones)
-        // immr=0, imms=2 (encodes a pattern of 3 ones)
+        // Format: sf(1) opc(00) 100100 N(1) immr(6) imms(6) Rn(5) Rd(5)
+        // For 64-bit AND with 3 consecutive ones: sf=1, N=1, immr=0, imms=2
+        // imms=2 means (2+1)=3 consecutive ones = 0b111
         let instruction = if imm == 0b111 {
-            // AND X, X, #0b111
-            0x92400C00u32 | ((src as u32) << 5) | (dst as u32)
+            // AND X, X, #0b111 - base encoding 0x92400800
+            0x92400800u32 | ((src as u32) << 5) | (dst as u32)
         } else {
             panic!("AND immediate only implemented for 0b111");
         };
@@ -1289,6 +1372,7 @@ impl Arm64CodeGen {
         self.code.push(instruction);
     }
 
+    #[allow(dead_code)]
     fn emit_conditional_branch(&mut self, label: &Label, condition: u32) {
         // B.cond label (conditional branch)
         // Encoding: 0101_0100 | imm19 << 5 | cond
@@ -1329,6 +1413,7 @@ impl Arm64CodeGen {
 
     /// Emit function prologue with placeholder for stack allocation
     /// This follows Beagle's pattern of deferred stack allocation
+    #[allow(dead_code)]
     fn emit_prologue_with_placeholder(&mut self, label: &Label) {
         // Save FP and LR
         self.emit_stp(29, 30, 31, -2);  // stp x29, x30, [sp, #-16]!
@@ -1348,6 +1433,7 @@ impl Arm64CodeGen {
     }
 
     /// Emit function epilogue with placeholder for stack deallocation
+    #[allow(dead_code)]
     fn emit_epilogue_with_placeholder(&mut self, label: &Label) {
         // Emit placeholder ADD instruction (will be patched later)
         let epilogue_idx = self.code.len();

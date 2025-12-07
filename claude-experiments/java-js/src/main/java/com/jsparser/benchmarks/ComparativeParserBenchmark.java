@@ -290,6 +290,70 @@ public class ComparativeParserBenchmark {
         }
     }
 
+    // === Rhino Parser Benchmarks ===
+    // Mozilla Rhino is a mature JavaScript parser written in Java
+    // Used for comparative benchmarking
+
+    @Benchmark
+    public org.mozilla.javascript.ast.AstRoot rhinoParser_SmallFunction() {
+        try {
+            org.mozilla.javascript.CompilerEnvirons compilerEnv = new org.mozilla.javascript.CompilerEnvirons();
+            compilerEnv.setRecordingComments(false);
+            compilerEnv.setRecordingLocalJsDocComments(false);
+            compilerEnv.setLanguageVersion(org.mozilla.javascript.Context.VERSION_ES6);
+
+            org.mozilla.javascript.Parser parser = new org.mozilla.javascript.Parser(compilerEnv);
+            return parser.parse(SMALL_FUNCTION, "test.js", 1);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Benchmark
+    public org.mozilla.javascript.ast.AstRoot rhinoParser_SmallClass() {
+        try {
+            org.mozilla.javascript.CompilerEnvirons compilerEnv = new org.mozilla.javascript.CompilerEnvirons();
+            compilerEnv.setRecordingComments(false);
+            compilerEnv.setRecordingLocalJsDocComments(false);
+            compilerEnv.setLanguageVersion(org.mozilla.javascript.Context.VERSION_ES6);
+
+            org.mozilla.javascript.Parser parser = new org.mozilla.javascript.Parser(compilerEnv);
+            return parser.parse(SMALL_CLASS, "test.js", 1);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Benchmark
+    public org.mozilla.javascript.ast.AstRoot rhinoParser_MediumAsyncModule() {
+        try {
+            org.mozilla.javascript.CompilerEnvirons compilerEnv = new org.mozilla.javascript.CompilerEnvirons();
+            compilerEnv.setRecordingComments(false);
+            compilerEnv.setRecordingLocalJsDocComments(false);
+            compilerEnv.setLanguageVersion(org.mozilla.javascript.Context.VERSION_ES6);
+
+            org.mozilla.javascript.Parser parser = new org.mozilla.javascript.Parser(compilerEnv);
+            return parser.parse(MEDIUM_ASYNC_MODULE, "test.js", 1);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Benchmark
+    public org.mozilla.javascript.ast.AstRoot rhinoParser_LargeModule() {
+        try {
+            org.mozilla.javascript.CompilerEnvirons compilerEnv = new org.mozilla.javascript.CompilerEnvirons();
+            compilerEnv.setRecordingComments(false);
+            compilerEnv.setRecordingLocalJsDocComments(false);
+            compilerEnv.setLanguageVersion(org.mozilla.javascript.Context.VERSION_ES6);
+
+            org.mozilla.javascript.Parser parser = new org.mozilla.javascript.Parser(compilerEnv);
+            return parser.parse(LARGE_MODULE, "test.js", 1);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     // === GraalJS Parser Benchmarks ===
     // Note: GraalJS parsing happens implicitly during Context.eval()
     // We measure the parsing overhead by evaluating but not executing

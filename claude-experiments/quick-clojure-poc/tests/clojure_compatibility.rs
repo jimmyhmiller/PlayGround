@@ -4,11 +4,34 @@
 /// then compare the outputs to ensure compatibility.
 
 use std::process::Command;
-use std::io::Write;
 use std::fs;
+use std::sync::OnceLock;
+use std::path::PathBuf;
+
+static BINARY_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+/// Ensure the release binary is built exactly once before any tests run
+fn get_binary_path() -> &'static PathBuf {
+    BINARY_PATH.get_or_init(|| {
+        // Build release binary once
+        let status = Command::new("cargo")
+            .args(&["build", "--release", "--quiet"])
+            .status()
+            .expect("Failed to build release binary");
+
+        assert!(status.success(), "Failed to build release binary");
+
+        // Get the path to the binary
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+            .unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(manifest_dir).join("target/release/quick-clojure-poc")
+    })
+}
 
 /// Helper to run an expression through our implementation
 fn run_our_impl(expr: &str) -> String {
+    let binary_path = get_binary_path();
+
     // Use tempfile to get a unique path, but persist the file
     // This ensures the file exists during the entire execution
     let temp_dir = tempfile::tempdir()
@@ -19,8 +42,8 @@ fn run_our_impl(expr: &str) -> String {
     fs::write(&temp_path, expr)
         .expect("Failed to write temp file");
 
-    let output = Command::new("cargo")
-        .args(&["run", "--release", "--quiet", temp_path.to_str().unwrap()])
+    let output = Command::new(&binary_path)
+        .arg(temp_path.to_str().unwrap())
         .output()
         .expect("Failed to execute our implementation");
 
@@ -259,3 +282,52 @@ fn test_let_shadowing() {
 // fn test_if_zero_is_truthy() {
 //     assert_matches_clojure("(if 0 1 2)");
 // }
+
+// ============================================================================
+// Function/Closure Tests
+// ============================================================================
+
+#[test]
+fn test_simple_fn_call() {
+    assert_matches_clojure("((fn [x] x) 5)");
+}
+
+#[test]
+fn test_fn_with_arithmetic() {
+    assert_matches_clojure("((fn [x] (+ x 1)) 5)");
+}
+
+#[test]
+fn test_fn_two_args() {
+    assert_matches_clojure("((fn [x y] (+ x y)) 3 4)");
+}
+
+#[test]
+fn test_fn_in_let() {
+    assert_matches_clojure("(let [f (fn [x] (+ x 1))] (f 5))");
+}
+
+#[test]
+fn test_multiple_fn_calls() {
+    assert_matches_clojure("(let [add1 (fn [x] (+ x 1)) mul2 (fn [x] (* x 2))] (+ (add1 5) (mul2 3)))");
+}
+
+#[test]
+fn test_closure_captures_variable() {
+    assert_matches_clojure("(let [x 10] ((fn [y] (+ x y)) 5))");
+}
+
+#[test]
+fn test_closure_captures_multiple() {
+    assert_matches_clojure("(let [a 1 b 2] ((fn [c] (+ a (+ b c))) 3))");
+}
+
+#[test]
+fn test_nested_fn_calls() {
+    assert_matches_clojure("((fn [x] ((fn [y] (+ x y)) 2)) 3)");
+}
+
+#[test]
+fn test_fn_returning_fn() {
+    assert_matches_clojure("(((fn [x] (fn [y] (+ x y))) 10) 5)");
+}

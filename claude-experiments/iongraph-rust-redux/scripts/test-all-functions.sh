@@ -3,7 +3,7 @@
 
 INPUT_FILE="/Users/jimmyhmiller/Documents/Code/open-source/iongraph2/examples/mega-complex.json"
 TS_SRC="/Users/jimmyhmiller/Documents/Code/open-source/iongraph2"
-RUST_BIN="./target/release/generate_svg"
+RUST_BIN="./target/release/iongraph"
 
 echo "Testing all functions from mega-complex.json..."
 echo ""
@@ -17,7 +17,7 @@ for func_idx in {0..14}; do
     echo "Testing function $func_idx (pass 0)..."
 
     # Generate TS version
-    (cd "$TS_SRC" && node generate-svg-function.mjs examples/mega-complex.json $func_idx 0 output.svg) > /dev/null 2>&1
+    (cd "$TS_SRC" && node bin/generate-svg.mjs examples/mega-complex.json $func_idx 0 output.svg) > /dev/null 2>&1
     ts_result=$?
 
     if [ $ts_result -ne 0 ]; then
@@ -29,7 +29,7 @@ for func_idx in {0..14}; do
     cp "$TS_SRC/output.svg" /tmp/ts-func${func_idx}-pass0.svg
 
     # Generate Rust version using our Rust binary
-    $RUST_BIN "$INPUT_FILE" $func_idx 0 /tmp/rust-func${func_idx}-pass0.svg > /dev/null 2>&1
+    $RUST_BIN --ion "$INPUT_FILE" $func_idx 0 /tmp/rust-func${func_idx}-pass0.svg > /dev/null 2>&1
     rust_result=$?
 
     if [ $rust_result -ne 0 ]; then

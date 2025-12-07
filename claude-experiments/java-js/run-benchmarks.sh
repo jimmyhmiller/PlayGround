@@ -1,26 +1,96 @@
 #!/bin/bash
-
-# JMH Benchmark Runner Script
-# This script builds and runs JMH benchmarks for the JavaScript parser
-
 set -e
 
-echo "Building benchmark JAR..."
-mvn clean package -DskipTests -q
-
-echo ""
-echo "Running benchmarks..."
-echo "Usage: ./run-benchmarks.sh [benchmark-pattern] [jmh-options]"
-echo "Example: ./run-benchmarks.sh ComparativeParserBenchmark -f 1 -wi 3 -i 5"
+echo "═══════════════════════════════════════════════════════════════"
+echo "  JavaScript Parser Benchmarks - Full Suite"
+echo "═══════════════════════════════════════════════════════════════"
 echo ""
 
-# Default to running all benchmarks with minimal iterations for quick testing
-BENCHMARK_PATTERN="${1:-.*}"
-JMH_ARGS="${@:2}"
+# Create results directory
+RESULTS_DIR="benchmark-results"
+mkdir -p "$RESULTS_DIR"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# If no JMH args provided, use quick test defaults
-if [ -z "$JMH_ARGS" ]; then
-    JMH_ARGS="-f 0 -wi 1 -i 1"
-fi
+echo "═══════════════════════════════════════════════════════════════"
+echo "  1. Building Java Project"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+echo "📦 Building project..."
+mvn clean package -q -DskipTests
+echo "✅ Build complete"
+echo ""
 
-java --enable-preview -jar target/benchmarks.jar "$BENCHMARK_PATTERN" $JMH_ARGS
+echo "═══════════════════════════════════════════════════════════════"
+echo "  2. Running Java Benchmarks"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+
+# Run small comparative benchmarks
+echo "🏃 Running ComparativeParserBenchmark (small synthetic tests)..."
+java --enable-preview -jar target/benchmarks.jar ComparativeParserBenchmark \
+    -f 3 -wi 3 -i 5 \
+    2>&1 | tee "$RESULTS_DIR/comparative_${TIMESTAMP}.txt"
+echo ""
+
+# Run real-world ES5 benchmarks with Rhino
+echo "🏃 Running RealWorldEs5JavaBenchmark (Lodash, React, React-DOM with Rhino)..."
+java --enable-preview -jar target/benchmarks.jar RealWorldEs5JavaBenchmark \
+    -f 3 -wi 3 -i 5 \
+    2>&1 | tee "$RESULTS_DIR/realworld_es5_${TIMESTAMP}.txt"
+echo ""
+
+echo "═══════════════════════════════════════════════════════════════"
+echo "  3. Running Cross-Language Real-World Benchmarks (Rust)"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+echo "🏃 Running Rust benchmarks (OXC, SWC)..."
+cd benchmarks/rust
+cargo build --release 2>&1 | grep -v "Compiling\|Finished" || true
+cargo run --release --bin benchmark-real-world 2>&1 | tee "../../$RESULTS_DIR/rust_realworld_${TIMESTAMP}.txt"
+cd ../..
+echo ""
+
+echo "═══════════════════════════════════════════════════════════════"
+echo "  4. Running Cross-Language Real-World Benchmarks (JavaScript)"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+echo "🏃 Running JavaScript benchmarks (Babel, Acorn)..."
+cd benchmarks/javascript
+node benchmark-real-world.js 2>&1 | tee "../../$RESULTS_DIR/js_realworld_${TIMESTAMP}.txt"
+cd ../..
+echo ""
+
+echo "═══════════════════════════════════════════════════════════════"
+echo "  Benchmark Results Summary"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+echo "Results saved to:"
+echo "  📄 $RESULTS_DIR/comparative_${TIMESTAMP}.txt"
+echo "  📄 $RESULTS_DIR/realworld_es5_${TIMESTAMP}.txt"
+echo "  📄 $RESULTS_DIR/rust_realworld_${TIMESTAMP}.txt"
+echo "  📄 $RESULTS_DIR/js_realworld_${TIMESTAMP}.txt"
+echo ""
+
+echo "Java Comparative Benchmark Results:"
+echo "───────────────────────────────────────────────────────────────"
+grep -A 20 "^Benchmark" "$RESULTS_DIR/comparative_${TIMESTAMP}.txt" | tail -20 || echo "Results not found"
+echo ""
+
+echo "Java Real-World ES5 Benchmark Results:"
+echo "───────────────────────────────────────────────────────────────"
+grep -A 20 "^Benchmark" "$RESULTS_DIR/realworld_es5_${TIMESTAMP}.txt" | tail -20 || echo "Results not found"
+echo ""
+
+echo "Rust Real-World Benchmark Summary:"
+echo "───────────────────────────────────────────────────────────────"
+tail -30 "$RESULTS_DIR/rust_realworld_${TIMESTAMP}.txt" || echo "Results not found"
+echo ""
+
+echo "JavaScript Real-World Benchmark Summary:"
+echo "───────────────────────────────────────────────────────────────"
+tail -30 "$RESULTS_DIR/js_realworld_${TIMESTAMP}.txt" || echo "Results not found"
+echo ""
+
+echo "✅ All benchmarks complete!"
+echo ""
+echo "Full results available in: $RESULTS_DIR/"

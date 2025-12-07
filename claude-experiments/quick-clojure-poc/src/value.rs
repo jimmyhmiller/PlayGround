@@ -43,6 +43,7 @@ pub enum Value {
 
     // Functions - first-class values implementing IFn interface
     // Supports multi-arity dispatch (0-20 arities + optional variadic)
+    #[allow(dead_code)]
     Function {
         name: Option<String>,                      // Optional name for self-recursion
         arity_map: StdHashMap<usize, FnArity>,     // Fixed arities: arity_num → implementation
@@ -52,6 +53,7 @@ pub enum Value {
     // Namespace object (for future heap allocation)
     // For now, used as documentation of structure
     // In Phase 2, this will be heap-allocated with GC
+    #[allow(dead_code)]
     Namespace {
         name: String,
         mappings: std::collections::HashMap<String, isize>, // symbol → tagged value

@@ -33,9 +33,11 @@ pub struct Compiler {
 
     /// Compiled function registry: function_id → code_pointer
     /// Used to track compiled nested functions
+    #[allow(dead_code)]
     function_registry: HashMap<usize, usize>,
 
     /// Next function ID for tracking nested functions
+    #[allow(dead_code)]
     next_function_id: usize,
 }
 

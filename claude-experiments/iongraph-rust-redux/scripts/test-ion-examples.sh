@@ -3,7 +3,7 @@
 
 ION_EXAMPLES_DIR="/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/iongraph-rust-redux/ion-examples"
 TS_SRC="/Users/jimmyhmiller/Documents/Code/open-source/iongraph2"
-RUST_BIN="/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/iongraph-rust-redux/target/release/generate_svg"
+RUST_BIN="/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/iongraph-rust-redux/target/release/iongraph"
 
 echo "Testing all examples in ion-examples/..."
 echo ""
@@ -18,7 +18,7 @@ for json_file in "$ION_EXAMPLES_DIR"/*.json; do
     echo "Testing $filename..."
 
     # Generate TS version
-    (cd "$TS_SRC" && node generate-svg-function.mjs "$json_file" 0 0 output.svg) > /dev/null 2>&1
+    (cd "$TS_SRC" && node bin/generate-svg.mjs "$json_file" 0 0 output.svg) > /dev/null 2>&1
     ts_result=$?
 
     if [ $ts_result -ne 0 ]; then
@@ -30,7 +30,7 @@ for json_file in "$ION_EXAMPLES_DIR"/*.json; do
     cp "$TS_SRC/output.svg" /tmp/ts-${filename}.svg
 
     # Generate Rust version
-    $RUST_BIN "$json_file" 0 0 /tmp/rust-${filename}.svg > /dev/null 2>&1
+    $RUST_BIN --ion "$json_file" 0 0 /tmp/rust-${filename}.svg > /dev/null 2>&1
     rust_result=$?
 
     if [ $rust_result -ne 0 ]; then
