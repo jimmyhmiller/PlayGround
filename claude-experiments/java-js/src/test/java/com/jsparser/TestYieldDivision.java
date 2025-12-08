@@ -12,13 +12,12 @@ public class TestYieldDivision {
         String input = "var yield = 12, a = 3;\nyield /a;";
         Lexer lexer = new Lexer(input);
         var tokens = lexer.tokenize();
-        char[] src = input.toCharArray();
-
+        
         // Find the slash token after yield
         int yieldIndex = -1;
         for (int i = 0; i < tokens.size(); i++) {
-            if (tokens.get(i).type() == TokenType.IDENTIFIER &&
-                tokens.get(i).lexeme(src).equals("yield") && i > 5) {
+            if (tokens.get(i).type() == TokenType.IDENTIFIER && 
+                tokens.get(i).lexeme().equals("yield") && i > 5) {
                 yieldIndex = i;
                 break;
             }

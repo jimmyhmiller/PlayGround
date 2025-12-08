@@ -206,7 +206,7 @@ public class Test262Runner {
 
                          String errorMsg = e.getMessage();
 
-                         Map<String, Object> errorJson = new HashMap<>(e.toJson(null));
+                         Map<String, Object> errorJson = new HashMap<>(e.toJson());
                          errorJson.put("file", path.toString());
                          allFailuresJson.add(errorJson);
 

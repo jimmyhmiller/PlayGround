@@ -59,7 +59,7 @@ public class RegexSyntaxException extends ParseException {
      * Creates a synthetic token for error reporting.
      */
     private static Token createToken(int position, int line, int column) {
-        return new Token(TokenType.REGEX, line, column, position, position);
+        return new Token(TokenType.REGEX, "", null, line, column, position, position);
     }
 
     public String getPattern() {

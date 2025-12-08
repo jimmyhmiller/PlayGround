@@ -11,7 +11,7 @@ public class DebugBigIntTokenTest {
 
         System.out.println("Tokens:");
         for (Token token : tokens) {
-            System.out.println(token.type() + " -> " + token.lexeme(source.toCharArray()) + " (literal: " + token.literal() + ")");
+            System.out.println(token.type() + " -> " + token.lexeme() + " (literal: " + token.literal() + ")");
         }
     }
 }

@@ -40,14 +40,14 @@ public class ParseException extends RuntimeException {
     /**
      * Convert exception to JSON-serializable map for analysis.
      */
-    public Map<String, Object> toJson(char[] source) {
+    public Map<String, Object> toJson() {
         Map<String, Object> json = new HashMap<>();
         json.put("errorType", errorType);
         json.put("message", getMessage());
 
         if (token != null) {
             json.put("tokenType", token.type().name());
-            json.put("tokenLexeme", source != null ? token.lexeme(source) : null);
+            json.put("tokenLexeme", token.lexeme());
             json.put("line", token.line());
             json.put("column", token.column());
             json.put("position", token.position());

@@ -10,12 +10,11 @@ public class TestTokenLexeme {
         String code = "var \\u0063onst = 42;";
         Lexer lexer = new Lexer(code);
         List<Token> tokens = lexer.tokenize();
-        char[] src = code.toCharArray();
-
+        
         System.out.println("Code: " + code);
         System.out.println("\nTokens:");
         for (Token token : tokens) {
-            System.out.println("  " + token.type() + ": '" + token.lexeme(src) + "'");
+            System.out.println("  " + token.type() + ": '" + token.lexeme() + "'");
         }
     }
 }

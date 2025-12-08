@@ -12,7 +12,7 @@ public class ClassASITest {
         System.out.println("Tokens:");
         for (int i = 0; i < tokens.size(); i++) {
             Token token = tokens.get(i);
-            System.out.println(i + ": " + token.type() + " -> '" + token.lexeme(source.toCharArray()) + "' (line " + token.line() + ", col " + token.column() + ")");
+            System.out.println(i + ": " + token.type() + " -> '" + token.lexeme() + "' (line " + token.line() + ", col " + token.column() + ")");
         }
     }
 }

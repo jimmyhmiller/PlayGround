@@ -66,30 +66,6 @@ public class ScanIdentifierTest {
             .toList();
     }
 
-    /**
-     * Helper to get lexeme string from a token.
-     */
-    private String lexeme(Token token, String source) {
-        return token.lexeme(source.toCharArray());
-    }
-
-    /**
-     * Helper to get first token and assert its lexeme matches source.
-     * For tests where source == expected lexeme.
-     */
-    private void assertIdentifier(String source) {
-        Token token = firstToken(source);
-        assertEquals(TokenType.IDENTIFIER, token.type(), "Expected IDENTIFIER for: " + source);
-        assertEquals(source, token.lexeme(source.toCharArray()), "Lexeme mismatch for: " + source);
-    }
-
-    /**
-     * Helper to get first token and return its lexeme.
-     */
-    private String firstLexeme(String source) {
-        return firstToken(source).lexeme(source.toCharArray());
-    }
-
     @BeforeEach
     void resetScanner() {
         // Ensure we're using the configured scanner
@@ -107,7 +83,9 @@ public class ScanIdentifierTest {
         @Test
         @DisplayName("Single letter identifier")
         void singleLetter() {
-            assertIdentifier("a");
+            Token token = firstToken("a");
+            assertEquals(TokenType.IDENTIFIER, token.type());
+            assertEquals("a", token.lexeme());
         }
 
         @ParameterizedTest
@@ -116,7 +94,7 @@ public class ScanIdentifierTest {
         void allSingleLetters(String letter) {
             Token token = firstToken(letter);
             assertEquals(TokenType.IDENTIFIER, token.type());
-            assertEquals(letter, token.lexeme(letter.toCharArray()));
+            assertEquals(letter, token.lexeme());
         }
 
         @Test
@@ -125,7 +103,7 @@ public class ScanIdentifierTest {
             for (String id : new String[]{"id", "fn", "cb", "el", "ev", "xs", "ys", "ok"}) {
                 Token token = firstToken(id);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + id);
-                assertEquals(id, token.lexeme(id.toCharArray()));
+                assertEquals(id, token.lexeme());
             }
         }
 
@@ -137,7 +115,7 @@ public class ScanIdentifierTest {
             for (String name : names) {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
 
@@ -149,7 +127,7 @@ public class ScanIdentifierTest {
             for (String name : names) {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
 
@@ -167,7 +145,7 @@ public class ScanIdentifierTest {
             for (String name : names) {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
 
@@ -179,7 +157,7 @@ public class ScanIdentifierTest {
             for (String name : names) {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
     }
@@ -199,7 +177,7 @@ public class ScanIdentifierTest {
             for (String name : names) {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
 
@@ -210,7 +188,7 @@ public class ScanIdentifierTest {
             for (String name : names) {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
 
@@ -221,7 +199,7 @@ public class ScanIdentifierTest {
             for (String name : names) {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
 
@@ -232,7 +210,7 @@ public class ScanIdentifierTest {
             for (String name : names) {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
 
@@ -243,7 +221,7 @@ public class ScanIdentifierTest {
             for (String name : names) {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
     }
@@ -262,7 +240,7 @@ public class ScanIdentifierTest {
         void allKeywords(String keyword, TokenType expectedType) {
             Token token = firstToken(keyword);
             assertEquals(expectedType, token.type(), "Failed for keyword: " + keyword);
-            assertEquals(keyword, token.lexeme(keyword.toCharArray()));
+            assertEquals(keyword, token.lexeme());
         }
 
         @Test
@@ -275,7 +253,7 @@ public class ScanIdentifierTest {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(),
                     "Should be identifier, not keyword: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
 
@@ -289,7 +267,7 @@ public class ScanIdentifierTest {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(),
                     "Should be identifier: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
 
@@ -301,7 +279,7 @@ public class ScanIdentifierTest {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(),
                     "Should be identifier: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
     }
@@ -361,7 +339,7 @@ public class ScanIdentifierTest {
             for (String name : names) {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
 
@@ -372,7 +350,7 @@ public class ScanIdentifierTest {
             for (String name : names) {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
 
@@ -383,7 +361,7 @@ public class ScanIdentifierTest {
             for (String name : names) {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
 
@@ -394,7 +372,7 @@ public class ScanIdentifierTest {
             for (String name : names) {
                 Token token = firstToken(name);
                 assertEquals(TokenType.IDENTIFIER, token.type(), "Failed for: " + name);
-                assertEquals(name, token.lexeme(name.toCharArray()));
+                assertEquals(name, token.lexeme());
             }
         }
 
@@ -437,60 +415,54 @@ public class ScanIdentifierTest {
         @DisplayName("Simple \\uXXXX escape at start")
         void simpleEscapeAtStart() {
             // \u0061 = 'a'
-            String src = ue("0061") + "bc";
-            Token token = firstToken(src);
+            Token token = firstToken(ue("0061") + "bc");
             assertEquals(TokenType.IDENTIFIER, token.type());
-            assertEquals("abc", token.identifierName(src.toCharArray()));
+            assertEquals("abc", token.lexeme());
         }
 
         @Test
         @DisplayName("Simple \\uXXXX escape in middle")
         void simpleEscapeInMiddle() {
             // \u0062 = 'b'
-            String src = "a" + ue("0062") + "c";
-            Token token = firstToken(src);
+            Token token = firstToken("a" + ue("0062") + "c");
             assertEquals(TokenType.IDENTIFIER, token.type());
-            assertEquals("abc", token.identifierName(src.toCharArray()));
+            assertEquals("abc", token.lexeme());
         }
 
         @Test
         @DisplayName("Simple \\uXXXX escape at end")
         void simpleEscapeAtEnd() {
             // \u0063 = 'c'
-            String src = "ab" + ue("0063");
-            Token token = firstToken(src);
+            Token token = firstToken("ab" + ue("0063"));
             assertEquals(TokenType.IDENTIFIER, token.type());
-            assertEquals("abc", token.identifierName(src.toCharArray()));
+            assertEquals("abc", token.lexeme());
         }
 
         @Test
         @DisplayName("Multiple escapes")
         void multipleEscapes() {
             // \u0061\u0062\u0063 = "abc"
-            String src = ue("0061") + ue("0062") + ue("0063");
-            Token token = firstToken(src);
+            Token token = firstToken(ue("0061") + ue("0062") + ue("0063"));
             assertEquals(TokenType.IDENTIFIER, token.type());
-            assertEquals("abc", token.identifierName(src.toCharArray()));
+            assertEquals("abc", token.lexeme());
         }
 
         @Test
         @DisplayName("Braced unicode escape \\u{XX}")
         void bracedEscape() {
             // backslash-u-{61} = 'a'
-            String src = ueb("61") + "bc";
-            Token token = firstToken(src);
+            Token token = firstToken(ueb("61") + "bc");
             assertEquals(TokenType.IDENTIFIER, token.type());
-            assertEquals("abc", token.identifierName(src.toCharArray()));
+            assertEquals("abc", token.lexeme());
         }
 
         @Test
         @DisplayName("Braced unicode escape with more digits")
         void bracedEscapeLong() {
             // backslash-u-{0061} = 'a'
-            String src = ueb("0061") + "bc";
-            Token token = firstToken(src);
+            Token token = firstToken(ueb("0061") + "bc");
             assertEquals(TokenType.IDENTIFIER, token.type());
-            assertEquals("abc", token.identifierName(src.toCharArray()));
+            assertEquals("abc", token.lexeme());
         }
 
         @Test
@@ -498,11 +470,10 @@ public class ScanIdentifierTest {
         void keywordWithEscapes() {
             // "var" spelled with unicode escapes should be IDENTIFIER, not VAR
             // \u0076 = 'v'
-            String src = ue("0076") + "ar";
-            Token token = firstToken(src);
+            Token token = firstToken(ue("0076") + "ar");
             assertEquals(TokenType.IDENTIFIER, token.type(),
                 "Keyword with escape should be identifier");
-            assertEquals("var", token.identifierName(src.toCharArray()));
+            assertEquals("var", token.lexeme());
         }
 
         @Test
@@ -521,11 +492,10 @@ public class ScanIdentifierTest {
                 {ue("006e") + "ull", "null"},
             };
             for (String[] test : tests) {
-                String src = test[0];
-                Token token = firstToken(src);
+                Token token = firstToken(test[0]);
                 assertEquals(TokenType.IDENTIFIER, token.type(),
                     "Escaped keyword should be identifier: " + test[1]);
-                assertEquals(test[1], token.identifierName(src.toCharArray()));
+                assertEquals(test[1], token.lexeme());
             }
         }
 
@@ -533,20 +503,18 @@ public class ScanIdentifierTest {
         @DisplayName("Underscore as unicode escape")
         void underscoreEscape() {
             // \u005f = '_'
-            String src = ue("005f") + "private";
-            Token token = firstToken(src);
+            Token token = firstToken(ue("005f") + "private");
             assertEquals(TokenType.IDENTIFIER, token.type());
-            assertEquals("_private", token.identifierName(src.toCharArray()));
+            assertEquals("_private", token.lexeme());
         }
 
         @Test
         @DisplayName("Dollar as unicode escape")
         void dollarEscape() {
             // \u0024 = '$'
-            String src = ue("0024") + "scope";
-            Token token = firstToken(src);
+            Token token = firstToken(ue("0024") + "scope");
             assertEquals(TokenType.IDENTIFIER, token.type());
-            assertEquals("$scope", token.identifierName(src.toCharArray()));
+            assertEquals("$scope", token.lexeme());
         }
 
         @Test
@@ -581,7 +549,7 @@ public class ScanIdentifierTest {
             try {
                 Token token = firstToken(mathX);
                 assertEquals(TokenType.IDENTIFIER, token.type());
-                assertEquals(mathX, token.lexeme(mathX.toCharArray()));
+                assertEquals(mathX, token.lexeme());
             } catch (RuntimeException e) {
                 // May not be supported
                 assertTrue(true);
@@ -619,29 +587,26 @@ public class ScanIdentifierTest {
         @Test
         @DisplayName("Multiple identifiers positions")
         void multipleIdentifiersPositions() {
-            String src = "foo bar baz";
-            List<Token> tokens = allTokens(src);
-            char[] srcChars = src.toCharArray();
+            List<Token> tokens = allTokens("foo bar baz");
             assertEquals(3, tokens.size());
 
             assertEquals(0, tokens.get(0).position());
-            assertEquals("foo", tokens.get(0).lexeme(srcChars));
+            assertEquals("foo", tokens.get(0).lexeme());
 
             assertEquals(4, tokens.get(1).position());
-            assertEquals("bar", tokens.get(1).lexeme(srcChars));
+            assertEquals("bar", tokens.get(1).lexeme());
 
             assertEquals(8, tokens.get(2).position());
-            assertEquals("baz", tokens.get(2).lexeme(srcChars));
+            assertEquals("baz", tokens.get(2).lexeme());
         }
 
         @Test
         @DisplayName("Position with unicode escapes")
         void positionWithEscapes() {
             // "abc" with escapes takes more source chars but lexeme is "abc"
-            String src = ue("0061") + "bc";
-            Token token = firstToken(src);
+            Token token = firstToken(ue("0061") + "bc");
             assertEquals(0, token.position());
-            assertEquals("abc", token.identifierName(src.toCharArray()));
+            assertEquals("abc", token.lexeme());
             // End position should reflect actual source consumption
             assertEquals(8, token.endPosition());
         }
@@ -669,29 +634,27 @@ public class ScanIdentifierTest {
         @Test
         @DisplayName("Identifier at end of input")
         void identifierAtEnd() {
-            assertIdentifier("foo");
+            Token token = firstToken("foo");
+            assertEquals(TokenType.IDENTIFIER, token.type());
+            assertEquals("foo", token.lexeme());
         }
 
         @Test
         @DisplayName("Identifier followed by operator")
         void followedByOperator() {
-            String src = "foo+bar";
-            List<Token> tokens = allTokens(src);
-            char[] srcChars = src.toCharArray();
+            List<Token> tokens = allTokens("foo+bar");
             assertEquals(3, tokens.size());
-            assertEquals("foo", tokens.get(0).lexeme(srcChars));
+            assertEquals("foo", tokens.get(0).lexeme());
             assertEquals(TokenType.PLUS, tokens.get(1).type());
-            assertEquals("bar", tokens.get(2).lexeme(srcChars));
+            assertEquals("bar", tokens.get(2).lexeme());
         }
 
         @Test
         @DisplayName("Identifier followed by parenthesis")
         void followedByParen() {
-            String src = "foo()";
-            List<Token> tokens = allTokens(src);
-            char[] srcChars = src.toCharArray();
+            List<Token> tokens = allTokens("foo()");
             assertEquals(3, tokens.size());
-            assertEquals("foo", tokens.get(0).lexeme(srcChars));
+            assertEquals("foo", tokens.get(0).lexeme());
             assertEquals(TokenType.LPAREN, tokens.get(1).type());
             assertEquals(TokenType.RPAREN, tokens.get(2).type());
         }
@@ -699,24 +662,20 @@ public class ScanIdentifierTest {
         @Test
         @DisplayName("Identifier followed by bracket")
         void followedByBracket() {
-            String src = "foo[0]";
-            List<Token> tokens = allTokens(src);
-            char[] srcChars = src.toCharArray();
+            List<Token> tokens = allTokens("foo[0]");
             assertEquals(4, tokens.size());
-            assertEquals("foo", tokens.get(0).lexeme(srcChars));
+            assertEquals("foo", tokens.get(0).lexeme());
             assertEquals(TokenType.LBRACKET, tokens.get(1).type());
         }
 
         @Test
         @DisplayName("Identifier followed by dot")
         void followedByDot() {
-            String src = "foo.bar";
-            List<Token> tokens = allTokens(src);
-            char[] srcChars = src.toCharArray();
+            List<Token> tokens = allTokens("foo.bar");
             assertEquals(3, tokens.size());
-            assertEquals("foo", tokens.get(0).lexeme(srcChars));
+            assertEquals("foo", tokens.get(0).lexeme());
             assertEquals(TokenType.DOT, tokens.get(1).type());
-            assertEquals("bar", tokens.get(2).lexeme(srcChars));
+            assertEquals("bar", tokens.get(2).lexeme());
         }
 
         @Test
@@ -725,7 +684,7 @@ public class ScanIdentifierTest {
             String longId = "a".repeat(10000);
             Token token = firstToken(longId);
             assertEquals(TokenType.IDENTIFIER, token.type());
-            assertEquals(longId, token.lexeme(longId.toCharArray()));
+            assertEquals(longId, token.lexeme());
         }
 
         @Test
@@ -734,7 +693,7 @@ public class ScanIdentifierTest {
             String id = "var" + "9".repeat(100);
             Token token = firstToken(id);
             assertEquals(TokenType.IDENTIFIER, token.type());
-            assertEquals(id, token.lexeme(id.toCharArray()));
+            assertEquals(id, token.lexeme());
         }
     }
 
@@ -798,55 +757,73 @@ public class ScanIdentifierTest {
         @Test
         @DisplayName("'of' is identifier (contextual keyword)")
         void ofIsIdentifier() {
-            assertIdentifier("of");
+            Token token = firstToken("of");
+            assertEquals(TokenType.IDENTIFIER, token.type());
+            assertEquals("of", token.lexeme());
         }
 
         @Test
         @DisplayName("'yield' is identifier (contextual keyword)")
         void yieldIsIdentifier() {
-            assertIdentifier("yield");
+            Token token = firstToken("yield");
+            assertEquals(TokenType.IDENTIFIER, token.type());
+            assertEquals("yield", token.lexeme());
         }
 
         @Test
         @DisplayName("'async' is identifier (contextual keyword)")
         void asyncIsIdentifier() {
-            assertIdentifier("async");
+            Token token = firstToken("async");
+            assertEquals(TokenType.IDENTIFIER, token.type());
+            assertEquals("async", token.lexeme());
         }
 
         @Test
         @DisplayName("'await' is identifier (contextual keyword)")
         void awaitIsIdentifier() {
-            assertIdentifier("await");
+            Token token = firstToken("await");
+            assertEquals(TokenType.IDENTIFIER, token.type());
+            assertEquals("await", token.lexeme());
         }
 
         @Test
         @DisplayName("'get' is identifier (contextual keyword)")
         void getIsIdentifier() {
-            assertIdentifier("get");
+            Token token = firstToken("get");
+            assertEquals(TokenType.IDENTIFIER, token.type());
+            assertEquals("get", token.lexeme());
         }
 
         @Test
         @DisplayName("'set' is identifier (contextual keyword)")
         void setIsIdentifier() {
-            assertIdentifier("set");
+            Token token = firstToken("set");
+            assertEquals(TokenType.IDENTIFIER, token.type());
+            assertEquals("set", token.lexeme());
         }
 
         @Test
         @DisplayName("'static' is identifier")
         void staticIsIdentifier() {
-            assertIdentifier("static");
+            Token token = firstToken("static");
+            assertEquals(TokenType.IDENTIFIER, token.type());
+            assertEquals("static", token.lexeme());
         }
 
         @Test
         @DisplayName("'from' is identifier")
         void fromIsIdentifier() {
-            assertIdentifier("from");
+            Token token = firstToken("from");
+            assertEquals(TokenType.IDENTIFIER, token.type());
+            assertEquals("from", token.lexeme());
         }
 
         @Test
         @DisplayName("'as' is identifier")
         void asIsIdentifier() {
-            assertIdentifier("as");
+            Token token = firstToken("as");
+            assertEquals(TokenType.IDENTIFIER, token.type());
+            assertEquals("as", token.lexeme());
         }
     }
 
@@ -900,15 +877,12 @@ public class ScanIdentifierTest {
             for (int i = 0; i < 1000; i++) {
                 sb.append(ue("0061")).append(i).append(" ");
             }
-            String src = sb.toString();
-            char[] srcChars = src.toCharArray();
-            List<Token> tokens = allTokens(src);
+            List<Token> tokens = allTokens(sb.toString());
             assertEquals(1000, tokens.size());
             // All should start with 'a'
             for (Token token : tokens) {
-                String name = token.identifierName(srcChars);
-                assertTrue(name.startsWith("a"),
-                    "Expected to start with 'a': " + name);
+                assertTrue(token.lexeme().startsWith("a"),
+                    "Expected to start with 'a': " + token.lexeme());
             }
         }
     }
@@ -924,7 +898,9 @@ public class ScanIdentifierTest {
         @Test
         @DisplayName("enum is identifier (future reserved)")
         void enumIdentifier() {
-            assertIdentifier("enum");
+            Token token = firstToken("enum");
+            assertEquals(TokenType.IDENTIFIER, token.type());
+            assertEquals("enum", token.lexeme());
         }
 
         @Test

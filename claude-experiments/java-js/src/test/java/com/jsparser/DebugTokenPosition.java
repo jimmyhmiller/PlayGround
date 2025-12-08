@@ -9,13 +9,12 @@ public class DebugTokenPosition {
         String code = "const value = true ?.30 : false;";
         Lexer lexer = new Lexer(code);
         List<Token> tokens = lexer.tokenize();
-        char[] src = code.toCharArray();
-
+        
         for (Token token : tokens) {
-            if (token.lexeme(src).equals(".30")) {
+            if (token.lexeme().equals(".30")) {
                 System.out.println("Found .30 token:");
                 System.out.println("  Type: " + token.type());
-                System.out.println("  Lexeme: '" + token.lexeme(src) + "'");
+                System.out.println("  Lexeme: '" + token.lexeme() + "'");
                 System.out.println("  Line: " + token.line());
                 System.out.println("  Column: " + token.column());
                 System.out.println("  Position: " + token.position());

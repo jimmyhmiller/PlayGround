@@ -16,8 +16,8 @@ public class TemplatePositionTest {
         System.out.println("\nTokens:");
         for (Token token : tokens) {
             System.out.printf("%s: pos=%d, len=%d, endPos=%d, lexeme='%s'%n",
-                token.type(), token.position(), token.lexeme(source.toCharArray()).length(),
-                token.position() + token.lexeme(source.toCharArray()).length(), token.lexeme(source.toCharArray()));
+                token.type(), token.position(), token.lexeme().length(),
+                token.position() + token.lexeme().length(), token.lexeme());
         }
 
         Program program = Parser.parse(source);

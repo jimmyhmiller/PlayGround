@@ -83,7 +83,7 @@ public class LexerScalarOptimized {
         TokenType type = lookupKeyword(name);
         Object literal = literalFor(type);
 
-        return new Token(type, literal, startLine, startColumn, startPos, identEnd);
+        return new Token(type, name, literal, startLine, startColumn, startPos);
     }
 
     /**
@@ -129,7 +129,7 @@ public class LexerScalarOptimized {
         }
 
         Object literal = literalFor(type);
-        return new Token(type, literal, startLine, startColumn, startPos, position);
+        return new Token(type, identifierName, literal, startLine, startColumn, startPos);
     }
 
     /**

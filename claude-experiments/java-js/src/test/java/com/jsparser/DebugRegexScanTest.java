@@ -20,7 +20,7 @@ public class DebugRegexScanTest {
             System.out.println("\nTokens found: " + tokens.size());
             for (int i = 0; i < tokens.size(); i++) {
                 Token token = tokens.get(i);
-                System.out.println("Token " + i + ": " + token.type() + " | lexeme: " + token.lexeme(source.toCharArray()) +
+                System.out.println("Token " + i + ": " + token.type() + " | lexeme: " + token.lexeme() +
                     " | line: " + token.line() + " | col: " + token.column() +
                     " | pos: " + token.position() + "-" + token.endPosition());
             }
