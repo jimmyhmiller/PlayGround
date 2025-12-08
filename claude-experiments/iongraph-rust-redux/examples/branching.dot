@@ -1,0 +1,23 @@
+digraph branching {
+    // Entry point
+    entry [label="entry"]
+
+    // Start is a loop header (0 loops back, 1 goes to middle)
+    start [label="start\n0 -> loop back\n1 -> middle" loopheader="true"]
+
+    // Latch node for the loop
+    loop_back [label="loop back" backedge="true"]
+
+    // Middle branches to finish
+    middle [label="middle\n0 -> finish\n1 -> finish"]
+
+    // Exit
+    finish [label="finish"]
+
+    // Control flow
+    entry -> start
+    start -> loop_back
+    start -> middle
+    loop_back -> start
+    middle -> finish
+}

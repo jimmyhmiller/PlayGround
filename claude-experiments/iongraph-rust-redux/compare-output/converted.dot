@@ -1,0 +1,41 @@
+// Converted from Ion JSON: self-hosted:163 - BuildSSA
+digraph self_hosted_163 {
+    0 [label="Parameter THIS_SLOT\nParameter 0\nConstant undefined\nStart\nCheckOverRecursed\nConstant function ToObject at 104289c6c740\nDebugCheckSelfHosted <- Constant#5\nConstant undefined\nConstant 0x1\nUnbox Parameter#0 to Object (fallible)\nConstant function ToLength at 104289c6c778\nDebugCheckSelfHosted <- Constant#10\nConstant undefined\nGuardShape <- Unbox#9\nElements <- GuardShape#13\nArrayLength <- Elements#14\nConstant 0x1\nConstant 0x0\nMinMax <- ArrayLength#15, Constant#17 (max)\nArgumentsLength\nConstant 0x0\nCompare <- ArgumentsLength#19, Constant#20 StrictEq\nTest <- Compare#21 -> block 1, block 2"]
+    1 [label="CallGetIntrinsicValue\nDebugCheckSelfHosted <- CallGetIntrinsicValue#23\nConstant undefined\nConstant 0x37\nConstant 0x0\nConstant string 104289c2e080\nBail\nUnreachableResult\nGoto -> block 2"]
+    2 [label="Constant function IsCallable at 104289c6c7b0\nDebugCheckSelfHosted <- Constant#32\nConstant undefined\nConstant 0x1\nIsCallable <- Parameter#1\nTest <- IsCallable#36 -> block 4, block 3"]
+    3 [label="CallGetIntrinsicValue\nDebugCheckSelfHosted <- CallGetIntrinsicValue#38\nConstant undefined\nConstant 0xc\nCallGetIntrinsicValue\nDebugCheckSelfHosted <- CallGetIntrinsicValue#42\nConstant undefined\nConstant 0x0\nBail\nUnreachableResult\nBail\nUnreachableResult\nGoto -> block 4"]
+    4 [label="ArgumentsLength\nConstant 0x1\nCompare <- ArgumentsLength#51, Constant#52 Gt\nTest <- Compare#53 -> block 5, block 6"]
+    5 [label="Constant 0x1\nGetFrameArgument <- Constant#55\nGoto -> block 7"]
+    6 [label="Constant undefined\nGoto -> block 7"]
+    7 [label="Phi <- Constant#58, GetFrameArgument#56\nConstant function CanOptimizeArraySpecies at 104289c6c7e8\nDebugCheckSelfHosted <- Constant#61\nConstant undefined\nConstant 0x1\nHasShape <- Unbox#9\nTest <- HasShape#65 -> block 8, block 9"]
+    8 [label="Constant function std_Array at 104289c6c820\nDebugCheckSelfHosted <- Constant#67\nConstant undefined\nConstant 0x1\nUnbox DebugCheckSelfHosted#68 to Object (fallible)\nConstant function std_Array at 104289c6c820\nGuardSpecificFunction <- Unbox#71, Constant#72\nNewArrayDynamicLength <- MinMax#18\nGoto -> block 10"]
+    9 [label="CallGetIntrinsicValue\nDebugCheckSelfHosted <- CallGetIntrinsicValue#76\nConstant undefined\nBail\nUnreachableResult\nGoto -> block 10"]
+    10 [label="Phi <- UnreachableResult#80, NewArrayDynamicLength#74\nConstant 0x0\nGoto -> block 11"]
+    11 [label="Phi <- Constant#2, Constant#2\nPhi <- Constant#2, Constant#2\nPhi <- Parameter#0, Parameter#0\nPhi <- Parameter#1, Parameter#1\nPhi <- Unbox#9, Unbox#9\nPhi <- MinMax#18, MinMax#18\nPhi <- Phi#60, Phi#60\nPhi <- Phi#82, Phi#82\nPhi <- Constant#83, Add#130\nPhi <- Constant#2, Phi#127\nPhi <- Parameter#0, Parameter#0\nInterruptCheck\nUnbox Phi#92 to Int32 (fallible)\nUnbox Phi#89 to Int32 (fallible)\nCompare <- Unbox#97, Unbox#98 Lt\nTest <- Compare#99 -> block 12, block 15" loopheader="true"]
+    12 [label="Unbox Phi#88 to Object (fallible)\nUnbox Phi#92 to Int32 (fallible)\nGuardShape <- Unbox#101\nElements <- GuardShape#103\nInitializedLength <- Elements#104\nBoundsCheck <- Unbox#102, InitializedLength#105\nSpectreMaskIndex <- BoundsCheck#106, InitializedLength#105\nGuardElementNotHole <- Elements#104, SpectreMaskIndex#107\nConstant true\nTest <- Constant#109 -> block 13, block 14"]
+    13 [label="Unbox Phi#88 to Object (fallible)\nUnbox Phi#92 to Int32 (fallible)\nGuardShape <- Unbox#111\nElements <- GuardShape#113\nInitializedLength <- Elements#114\nBoundsCheck <- Unbox#112, InitializedLength#115\nSpectreMaskIndex <- BoundsCheck#116, InitializedLength#115\nGuardElementsArePacked <- Elements#114\nLoadElement <- Elements#114, SpectreMaskIndex#117\nCall <- Phi#87, Phi#90, LoadElement#119, Phi#92, Phi#88\nUnbox Phi#91 to Object (fallible)\nUnbox Phi#92 to Int32 (fallible)\nGuardShape <- Unbox#121\nElements <- GuardShape#123\nStoreElementHole <- GuardShape#123, Elements#124, Unbox#122, Call#120\nGoto -> block 14"]
+    14 [label="Phi <- Call#120, Phi#93\nUnbox Phi#92 to Int32 (fallible)\nConstant 0x1\nAdd <- Unbox#128, Constant#129 [int32]\nGoto -> block 11" backedge="true"]
+    15 [label="Return <- Phi#91"]
+
+    0 -> 1
+    0 -> 2
+    1 -> 2
+    2 -> 4
+    2 -> 3
+    3 -> 4
+    4 -> 5
+    4 -> 6
+    5 -> 7
+    6 -> 7
+    7 -> 8
+    7 -> 9
+    8 -> 10
+    9 -> 10
+    10 -> 11
+    11 -> 12
+    11 -> 15
+    12 -> 13
+    12 -> 14
+    13 -> 14
+    14 -> 11
+}

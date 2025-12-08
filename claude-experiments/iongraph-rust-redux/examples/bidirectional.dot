@@ -1,0 +1,10 @@
+// Test bidirectional edges
+digraph bidirectional {
+    A [label="Node A"]
+    B [label="Node B"]
+    C [label="Node C"]
+
+    A -> B
+    B -> A
+    B -> C
+}

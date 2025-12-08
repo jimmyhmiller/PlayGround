@@ -8,7 +8,7 @@ use std::error::Error;
 use super::space::{Space, DEFAULT_PAGE_COUNT};
 use super::stack_walker::StackWalker;
 use super::types::{BuiltInTypes, Header, HeapObject};
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap};
+use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, HeapInspector, DetailedHeapStats, type_id_to_name};
 
 /// Compacting heap using Cheney's algorithm
 pub struct CompactingHeap {
@@ -285,5 +285,59 @@ impl Allocator for CompactingHeap {
 
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
+    }
+}
+
+// ========== Heap Inspection ==========
+
+use std::collections::HashMap;
+
+impl HeapInspector for CompactingHeap {
+    fn iter_objects(&self) -> Box<dyn Iterator<Item = HeapObject> + '_> {
+        // Objects are in from_space (contiguous allocation, no gaps)
+        Box::new(self.from_space.object_iter_from_position(0))
+    }
+
+    fn detailed_stats(&self) -> DetailedHeapStats {
+        let mut object_count = 0;
+        let mut used_bytes = 0;
+        let mut type_counts: HashMap<u8, (usize, usize)> = HashMap::new();
+
+        for obj in self.iter_objects() {
+            object_count += 1;
+            let size = obj.full_size();
+            used_bytes += size;
+
+            let type_id = obj.get_type_id() as u8;
+            let entry = type_counts.entry(type_id).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += size;
+        }
+
+        // Convert type_counts to vector with names
+        let mut objects_by_type: Vec<(u8, &'static str, usize, usize)> = type_counts
+            .into_iter()
+            .map(|(id, (count, bytes))| (id, type_id_to_name(id), count, bytes))
+            .collect();
+        objects_by_type.sort_by_key(|(id, _, _, _)| *id);
+
+        DetailedHeapStats {
+            gc_algorithm: "compacting",
+            total_bytes: self.from_space.byte_count() + self.to_space.byte_count(),
+            used_bytes,
+            object_count,
+            objects_by_type,
+            free_list_entries: None,
+            free_bytes: None,
+            largest_free_block: None,
+        }
+    }
+
+    fn contains_address(&self, addr: usize) -> bool {
+        self.from_space.contains(addr as *const u8) || self.to_space.contains(addr as *const u8)
+    }
+
+    fn get_roots(&self) -> &[(usize, usize)] {
+        &self.namespace_roots
     }
 }

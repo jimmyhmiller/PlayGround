@@ -7,7 +7,7 @@ use std::error::Error;
 use super::space::{Space, DEFAULT_PAGE_COUNT};
 use super::stack_walker::StackWalker;
 use super::types::{BuiltInTypes, HeapObject, Word};
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap};
+use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, HeapInspector, DetailedHeapStats, type_id_to_name};
 
 /// Free list entry
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -316,5 +316,110 @@ impl Allocator for MarkAndSweep {
 
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
+    }
+}
+
+// ========== Heap Inspection ==========
+
+use std::collections::HashMap;
+
+/// Iterator over live objects in mark-and-sweep heap (skips free list regions)
+pub struct LiveObjectIterator<'a> {
+    space: &'a Space,
+    free_list: &'a FreeList,
+    offset: usize,
+    highmark: usize,
+}
+
+impl<'a> LiveObjectIterator<'a> {
+    fn new(space: &'a Space, free_list: &'a FreeList, highmark: usize) -> Self {
+        Self {
+            space,
+            free_list,
+            offset: 0,
+            highmark,
+        }
+    }
+}
+
+impl<'a> Iterator for LiveObjectIterator<'a> {
+    type Item = HeapObject;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.offset > self.highmark {
+                return None;
+            }
+
+            // Skip free list regions
+            if let Some(entry) = self.free_list.find_entry_contains(self.offset) {
+                self.offset = entry.end();
+                continue;
+            }
+
+            let pointer = unsafe { self.space.start.add(self.offset) };
+            let object = HeapObject::from_untagged(pointer);
+            let size = object.full_size();
+
+            self.offset += size;
+            // Align to 8 bytes
+            self.offset = (self.offset + 7) & !7;
+
+            return Some(object);
+        }
+    }
+}
+
+impl HeapInspector for MarkAndSweep {
+    fn iter_objects(&self) -> Box<dyn Iterator<Item = HeapObject> + '_> {
+        Box::new(LiveObjectIterator::new(&self.space, &self.free_list, self.space.highmark))
+    }
+
+    fn detailed_stats(&self) -> DetailedHeapStats {
+        let mut object_count = 0;
+        let mut used_bytes = 0;
+        let mut type_counts: HashMap<u8, (usize, usize)> = HashMap::new();
+
+        for obj in self.iter_objects() {
+            object_count += 1;
+            let size = obj.full_size();
+            used_bytes += size;
+
+            let type_id = obj.get_type_id() as u8;
+            let entry = type_counts.entry(type_id).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += size;
+        }
+
+        // Convert type_counts to vector with names
+        let mut objects_by_type: Vec<(u8, &'static str, usize, usize)> = type_counts
+            .into_iter()
+            .map(|(id, (count, bytes))| (id, type_id_to_name(id), count, bytes))
+            .collect();
+        objects_by_type.sort_by_key(|(id, _, _, _)| *id);
+
+        // Free list stats
+        let free_list_entries = self.free_list.ranges.len();
+        let free_bytes: usize = self.free_list.ranges.iter().map(|e| e.size).sum();
+        let largest_free_block = self.free_list.ranges.iter().map(|e| e.size).max().unwrap_or(0);
+
+        DetailedHeapStats {
+            gc_algorithm: "mark-and-sweep",
+            total_bytes: self.space.byte_count(),
+            used_bytes,
+            object_count,
+            objects_by_type,
+            free_list_entries: Some(free_list_entries),
+            free_bytes: Some(free_bytes),
+            largest_free_block: Some(largest_free_block),
+        }
+    }
+
+    fn contains_address(&self, addr: usize) -> bool {
+        self.space.contains(addr as *const u8)
+    }
+
+    fn get_roots(&self) -> &[(usize, usize)] {
+        &self.namespace_roots
     }
 }

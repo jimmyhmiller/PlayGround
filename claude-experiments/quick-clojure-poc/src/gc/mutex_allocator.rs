@@ -5,8 +5,8 @@
 
 use std::{error::Error, sync::Mutex};
 
-use super::types::BuiltInTypes;
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap};
+use super::types::{BuiltInTypes, HeapObject};
+use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, HeapInspector, DetailedHeapStats};
 
 /// Thread-safe wrapper for any allocator
 pub struct MutexAllocator<Alloc: Allocator> {
@@ -127,5 +127,24 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
 
     fn remove_thread(&mut self, _thread_id: std::thread::ThreadId) {
         self.registered_threads -= 1;
+    }
+}
+
+// HeapInspector for MutexAllocator - delegates to inner allocator
+impl<Alloc: Allocator + HeapInspector> HeapInspector for MutexAllocator<Alloc> {
+    fn iter_objects(&self) -> Box<dyn Iterator<Item = HeapObject> + '_> {
+        self.alloc.iter_objects()
+    }
+
+    fn detailed_stats(&self) -> DetailedHeapStats {
+        self.alloc.detailed_stats()
+    }
+
+    fn contains_address(&self, addr: usize) -> bool {
+        self.alloc.contains_address(addr)
+    }
+
+    fn get_roots(&self) -> &[(usize, usize)] {
+        self.alloc.get_roots()
     }
 }

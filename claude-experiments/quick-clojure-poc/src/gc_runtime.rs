@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::gc::{
     Allocator, AllocateAction, AllocatorOptions, StackMap, StackMapDetails,
-    BuiltInTypes, HeapObject, Word,
+    BuiltInTypes, HeapObject, Word, HeapInspector, DetailedHeapStats, ObjectInfo,
+    ObjectReference, type_id_to_name,
 };
 
 // Re-export for compatibility
@@ -324,7 +325,13 @@ impl GCRuntime {
         new_heap_obj.write_field(current_size, symbol_ptr);
         new_heap_obj.write_field(current_size + 1, value);
 
-        Ok(self.tag_heap_object(new_ns_ptr))
+        let tagged_new_ptr = self.tag_heap_object(new_ns_ptr);
+
+        // Update GC root since namespace was reallocated
+        let name = self.namespace_name(tagged_new_ptr);
+        self.update_namespace_root(&name, tagged_new_ptr);
+
+        Ok(tagged_new_ptr)
     }
 
     /// Look up a binding in a namespace
@@ -748,6 +755,232 @@ impl GCRuntime {
             .ok_or_else(|| format!("Field '{}' not found in type '{}'", field_name, type_def.name))?;
 
         Ok(self.read_type_field(obj_ptr, field_index))
+    }
+
+    // ========== Heap Inspection Methods ==========
+
+    /// Get detailed heap statistics
+    pub fn detailed_heap_stats(&self) -> DetailedHeapStats {
+        self.allocator.detailed_stats()
+    }
+
+    /// List all live objects in the heap
+    pub fn list_objects(&self) -> Vec<ObjectInfo> {
+        self.allocator.iter_objects()
+            .map(|obj| self.object_to_info(&obj))
+            .collect()
+    }
+
+    /// List objects filtered by type name
+    pub fn list_objects_by_type(&self, type_name: &str) -> Vec<ObjectInfo> {
+        self.allocator.iter_objects()
+            .filter(|obj| {
+                let type_id = obj.get_type_id() as u8;
+                type_id_to_name(type_id) == type_name
+            })
+            .map(|obj| self.object_to_info(&obj))
+            .collect()
+    }
+
+    /// Convert HeapObject to ObjectInfo
+    fn object_to_info(&self, obj: &HeapObject) -> ObjectInfo {
+        let header = obj.get_header();
+        let type_id = header.type_id;
+        let address = obj.get_pointer() as usize;
+
+        // Compute tagged pointer based on type
+        let tagged_ptr = match type_id {
+            TYPE_ID_STRING => self.tag_string(address),
+            TYPE_ID_FUNCTION => self.tag_closure(address),
+            _ => self.tag_heap_object(address),
+        };
+
+        ObjectInfo {
+            address,
+            tagged_ptr,
+            type_id,
+            type_name: type_id_to_name(type_id),
+            type_data: header.type_data,
+            size_bytes: obj.full_size(),
+            field_count: header.size as usize,
+            is_opaque: header.opaque,
+        }
+    }
+
+    /// Inspect a specific object by its tagged pointer
+    pub fn inspect_object(&self, tagged_ptr: usize) -> Option<ObjectInfo> {
+        if !BuiltInTypes::is_heap_pointer(tagged_ptr) {
+            return None;
+        }
+
+        let untagged = BuiltInTypes::untag(tagged_ptr);
+        if !self.allocator.contains_address(untagged) {
+            return None;
+        }
+
+        let obj = HeapObject::from_untagged(untagged as *const u8);
+        Some(self.object_to_info(&obj))
+    }
+
+    /// Get all fields of an object as (index, tagged_value, description)
+    pub fn object_fields(&self, tagged_ptr: usize) -> Vec<(usize, usize, String)> {
+        if !BuiltInTypes::is_heap_pointer(tagged_ptr) {
+            return Vec::new();
+        }
+
+        let untagged = BuiltInTypes::untag(tagged_ptr);
+        let obj = HeapObject::from_untagged(untagged as *const u8);
+        let header = obj.get_header();
+
+        if header.opaque {
+            // Opaque objects (strings) don't have pointer fields
+            return Vec::new();
+        }
+
+        let mut fields = Vec::new();
+        for i in 0..header.size as usize {
+            let value = obj.get_field(i);
+            let desc = self.format_value(value);
+            fields.push((i, value, desc));
+        }
+        fields
+    }
+
+    /// Format a tagged value for display
+    pub fn format_value(&self, value: usize) -> String {
+        match BuiltInTypes::get_kind(value) {
+            BuiltInTypes::Int => format!("{}", (value as i64) >> 3),
+            BuiltInTypes::Bool => {
+                if value == 11 { "true".to_string() }
+                else if value == 3 { "false".to_string() }
+                else { format!("bool?{}", value) }
+            }
+            BuiltInTypes::Null => "nil".to_string(),
+            BuiltInTypes::String => {
+                let s = self.read_string(value);
+                if s.len() > 32 {
+                    format!("\"{}...\"", &s[..32])
+                } else {
+                    format!("\"{}\"", s)
+                }
+            }
+            BuiltInTypes::Closure => format!("#<closure@{:x}>", value >> 3),
+            BuiltInTypes::HeapObject => {
+                let untagged = value >> 3;
+                let obj = HeapObject::from_untagged(untagged as *const u8);
+                let type_id = obj.get_type_id() as u8;
+                match type_id {
+                    TYPE_ID_NAMESPACE => {
+                        let name = self.namespace_name(value);
+                        format!("#<ns:{}>", name)
+                    }
+                    TYPE_ID_VAR => {
+                        let (ns, sym) = self.var_info(value);
+                        format!("#'{}/{}", ns, sym)
+                    }
+                    TYPE_ID_DEFTYPE => {
+                        let type_data = obj.get_header().type_data as usize;
+                        if let Some(def) = self.get_type_def(type_data) {
+                            format!("#<{}@{:x}>", def.name, untagged)
+                        } else {
+                            format!("#<deftype@{:x}>", untagged)
+                        }
+                    }
+                    _ => format!("#<object@{:x}>", untagged),
+                }
+            }
+            BuiltInTypes::Function => format!("#<fn@{:x}>", value >> 3),
+            BuiltInTypes::Float => {
+                let bits = (value >> 3) as u64;
+                format!("{}", f64::from_bits(bits))
+            }
+        }
+    }
+
+    /// Find all objects that reference a given target object
+    pub fn find_references_to(&self, target_ptr: usize) -> Vec<ObjectReference> {
+        if !BuiltInTypes::is_heap_pointer(target_ptr) {
+            return Vec::new();
+        }
+
+        let target_untagged = BuiltInTypes::untag(target_ptr);
+        let mut refs = Vec::new();
+
+        for obj in self.allocator.iter_objects() {
+            let header = obj.get_header();
+            if header.opaque {
+                continue;
+            }
+
+            let from_address = obj.get_pointer() as usize;
+
+            for i in 0..header.size as usize {
+                let field_value = obj.get_field(i);
+                if BuiltInTypes::is_heap_pointer(field_value) {
+                    let field_untagged = BuiltInTypes::untag(field_value);
+                    if field_untagged == target_untagged {
+                        refs.push(ObjectReference {
+                            from_address,
+                            to_address: target_untagged,
+                            field_index: i,
+                            tagged_value: field_value,
+                        });
+                    }
+                }
+            }
+        }
+
+        refs
+    }
+
+    /// Find all objects that a given source object references
+    pub fn find_references_from(&self, source_ptr: usize) -> Vec<ObjectReference> {
+        if !BuiltInTypes::is_heap_pointer(source_ptr) {
+            return Vec::new();
+        }
+
+        let source_untagged = BuiltInTypes::untag(source_ptr);
+        let obj = HeapObject::from_untagged(source_untagged as *const u8);
+        let header = obj.get_header();
+
+        if header.opaque {
+            return Vec::new();
+        }
+
+        let mut refs = Vec::new();
+        for i in 0..header.size as usize {
+            let field_value = obj.get_field(i);
+            if BuiltInTypes::is_heap_pointer(field_value) {
+                refs.push(ObjectReference {
+                    from_address: source_untagged,
+                    to_address: BuiltInTypes::untag(field_value),
+                    field_index: i,
+                    tagged_value: field_value,
+                });
+            }
+        }
+
+        refs
+    }
+
+    /// List all GC roots (namespace bindings that are heap pointers)
+    pub fn list_gc_roots(&self) -> Vec<(String, String, usize)> {
+        let mut roots = Vec::new();
+
+        for (ns_name, &ns_ptr) in &self.namespace_roots {
+            // The namespace itself is a root
+            roots.push((ns_name.clone(), "<namespace>".to_string(), ns_ptr));
+
+            // Each binding in the namespace is also reachable
+            for (var_name, value) in self.namespace_bindings(ns_ptr) {
+                if BuiltInTypes::is_heap_pointer(value) {
+                    roots.push((ns_name.clone(), var_name, value));
+                }
+            }
+        }
+
+        roots.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        roots
     }
 }
 

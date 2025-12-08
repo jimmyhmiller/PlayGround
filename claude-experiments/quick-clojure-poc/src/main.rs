@@ -64,12 +64,25 @@ fn print_help() {
     println!("  :ast (+ 1 2)      - Show AST");
     println!("  :ir (+ 1 2)       - Show IR instructions");
     println!("  :asm (+ 1 2)      - Show ARM64 machine code");
+    println!();
+    println!("GC Commands:");
     println!("  :gc               - Run garbage collection");
     println!("  :gc-always        - Enable GC before every allocation (stress test)");
     println!("  :gc-always off    - Disable gc-always mode");
-    println!("  :heap             - Show heap statistics");
+    println!();
+    println!("Heap Inspection:");
+    println!("  :heap             - Show basic heap statistics");
+    println!("  :stats            - Show detailed heap stats (objects by type, free list)");
+    println!("  :objects          - List all live objects");
+    println!("  :objects <Type>   - List objects by type (String, Var, Namespace, etc.)");
+    println!("  :inspect-addr 0x..- Inspect object at address");
+    println!("  :refs 0x...       - Find references to an object");
+    println!("  :roots            - List all GC roots");
+    println!();
+    println!("Namespace:");
     println!("  :namespaces       - List all namespaces");
     println!("  :inspect <ns>     - Inspect namespace bindings");
+    println!();
     println!("  :help             - Show this help");
     println!("  :quit             - Exit REPL");
     println!();
@@ -760,6 +773,184 @@ fn main() {
                         } else {
                             eprintln!("Namespace '{}' not found", ns_name);
                         }
+                    }
+                    continue;
+                }
+
+                // ========== Heap Inspection Commands ==========
+
+                if input == ":stats" {
+                    // Detailed heap statistics
+                    let stats = unsafe {
+                        let rt = &*runtime.get();
+                        rt.detailed_heap_stats()
+                    };
+                    println!("\n╔════════════════════ Detailed Heap Stats ════════════════════╗");
+                    println!("  GC Algorithm:       {}", stats.gc_algorithm);
+                    println!("  Total Heap:         {} bytes ({:.2} KB)", stats.total_bytes, stats.total_bytes as f64 / 1024.0);
+                    println!("  Used:               {} bytes ({:.2} KB)", stats.used_bytes, stats.used_bytes as f64 / 1024.0);
+                    println!("  Live Objects:       {}", stats.object_count);
+                    println!();
+                    println!("  Objects by Type:");
+                    println!("  ─────────────────────────────────────────────────────────────");
+                    println!("  Type         Count       Bytes");
+                    for (_, type_name, count, bytes) in &stats.objects_by_type {
+                        println!("  {:12} {:>6}      {:>8}", type_name, count, bytes);
+                    }
+                    if let Some(free_entries) = stats.free_list_entries {
+                        println!();
+                        println!("  Free List (mark-and-sweep):");
+                        println!("  ─────────────────────────────────────────────────────────────");
+                        println!("  Free Entries:       {}", free_entries);
+                        if let Some(free_bytes) = stats.free_bytes {
+                            println!("  Free Bytes:         {}", free_bytes);
+                        }
+                        if let Some(largest) = stats.largest_free_block {
+                            println!("  Largest Block:      {} bytes", largest);
+                        }
+                    }
+                    println!("╚═════════════════════════════════════════════════════════════╝\n");
+                    continue;
+                }
+
+                if input == ":objects" || input.starts_with(":objects ") {
+                    // List objects (optionally filtered by type)
+                    let type_filter = if input.starts_with(":objects ") {
+                        Some(input.trim_start_matches(":objects ").trim())
+                    } else {
+                        None
+                    };
+
+                    let objects = unsafe {
+                        let rt = &*runtime.get();
+                        if let Some(filter) = type_filter {
+                            rt.list_objects_by_type(filter)
+                        } else {
+                            rt.list_objects()
+                        }
+                    };
+
+                    if objects.is_empty() {
+                        if let Some(filter) = type_filter {
+                            println!("No objects of type '{}' found", filter);
+                        } else {
+                            println!("No objects in heap");
+                        }
+                    } else {
+                        println!("\n╔═══════════════════════ Live Objects ═══════════════════════╗");
+                        println!("  Address          Type         Size    Fields  TypeData");
+                        println!("  ─────────────────────────────────────────────────────────────");
+                        for obj in &objects {
+                            println!("  0x{:012x}  {:12} {:>5}   {:>6}  {}",
+                                obj.address, obj.type_name, obj.size_bytes, obj.field_count, obj.type_data);
+                        }
+                        println!("  ─────────────────────────────────────────────────────────────");
+                        println!("  Total: {} objects", objects.len());
+                        println!("╚═════════════════════════════════════════════════════════════╝\n");
+                    }
+                    continue;
+                }
+
+                if input.starts_with(":inspect-addr ") {
+                    // Inspect object at address
+                    let addr_str = input.trim_start_matches(":inspect-addr ").trim();
+                    let addr = if addr_str.starts_with("0x") || addr_str.starts_with("0X") {
+                        usize::from_str_radix(&addr_str[2..], 16)
+                    } else {
+                        addr_str.parse::<usize>()
+                    };
+
+                    match addr {
+                        Ok(tagged_ptr) => {
+                            unsafe {
+                                let rt = &*runtime.get();
+                                if let Some(info) = rt.inspect_object(tagged_ptr) {
+                                    println!("\n╔═══════════════ Object @ 0x{:x} ═══════════════╗", info.address);
+                                    println!("  Type:       {} (id={})", info.type_name, info.type_id);
+                                    println!("  Size:       {} bytes", info.size_bytes);
+                                    println!("  Fields:     {}", info.field_count);
+                                    println!("  TypeData:   {}", info.type_data);
+                                    println!("  Opaque:     {}", info.is_opaque);
+
+                                    let fields = rt.object_fields(tagged_ptr);
+                                    if !fields.is_empty() {
+                                        println!();
+                                        println!("  Fields:");
+                                        println!("  ───────────────────────────────────────────────");
+                                        for (idx, value, desc) in &fields {
+                                            println!("  [{}] 0x{:x} = {}", idx, value, desc);
+                                        }
+                                    }
+                                    println!("╚═══════════════════════════════════════════════════╝\n");
+                                } else {
+                                    eprintln!("No object found at address 0x{:x}", tagged_ptr);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            eprintln!("Invalid address: {}", addr_str);
+                        }
+                    }
+                    continue;
+                }
+
+                if input.starts_with(":refs ") {
+                    // Find references to object
+                    let addr_str = input.trim_start_matches(":refs ").trim();
+                    let addr = if addr_str.starts_with("0x") || addr_str.starts_with("0X") {
+                        usize::from_str_radix(&addr_str[2..], 16)
+                    } else {
+                        addr_str.parse::<usize>()
+                    };
+
+                    match addr {
+                        Ok(tagged_ptr) => {
+                            let refs = unsafe {
+                                let rt = &*runtime.get();
+                                rt.find_references_to(tagged_ptr)
+                            };
+
+                            if refs.is_empty() {
+                                println!("No references found to 0x{:x}", tagged_ptr);
+                            } else {
+                                println!("\n╔═══════════ References to 0x{:x} ═══════════╗", tagged_ptr);
+                                println!("  From Address       Field    Tagged Value");
+                                println!("  ─────────────────────────────────────────────────");
+                                for r in &refs {
+                                    println!("  0x{:012x}   [{}]      0x{:x}",
+                                        r.from_address, r.field_index, r.tagged_value);
+                                }
+                                println!("  ─────────────────────────────────────────────────────");
+                                println!("  Total: {} references", refs.len());
+                                println!("╚═══════════════════════════════════════════════════════╝\n");
+                            }
+                        }
+                        Err(_) => {
+                            eprintln!("Invalid address: {}", addr_str);
+                        }
+                    }
+                    continue;
+                }
+
+                if input == ":roots" {
+                    // List all GC roots
+                    let roots = unsafe {
+                        let rt = &*runtime.get();
+                        rt.list_gc_roots()
+                    };
+
+                    if roots.is_empty() {
+                        println!("No GC roots");
+                    } else {
+                        println!("\n╔═══════════════════════ GC Roots ═══════════════════════╗");
+                        println!("  Namespace         Symbol           Tagged Pointer");
+                        println!("  ───────────────────────────────────────────────────────");
+                        for (ns, sym, ptr) in &roots {
+                            println!("  {:16} {:16} 0x{:x}", ns, sym, ptr);
+                        }
+                        println!("  ───────────────────────────────────────────────────────");
+                        println!("  Total: {} roots", roots.len());
+                        println!("╚═════════════════════════════════════════════════════════╝\n");
                     }
                     continue;
                 }

@@ -191,7 +191,8 @@ public class Parser {
         }
 
         // If followed by line terminator, ASI applies and 'let' is an identifier
-        if (current + 1 < tokens.size() && letToken.line() != tokens.get(current + 1).line()) {
+        Token nextToken = tokenStream.peekAhead(1);
+        if (nextToken != null && letToken.line() != nextToken.line()) {
             return parseExpressionStatement(token);
         }
 
@@ -206,8 +207,9 @@ public class Parser {
      * - import.meta                   → ExpressionStatement (import.meta)
      */
     private Statement parseImportStatementOrExpression(Token token) {
-        if (current + 1 < tokens.size()) {
-            TokenType nextType = tokens.get(current + 1).type();
+        Token nextToken = tokenStream.peekAhead(1);
+        if (nextToken != null) {
+            TokenType nextType = nextToken.type();
             if (nextType == TokenType.LPAREN || nextType == TokenType.DOT) {
                 // Dynamic import or import.meta - parse as expression statement
                 return parseExpressionStatement(token);
@@ -226,9 +228,10 @@ public class Parser {
     private Statement parseIdentifierStatement(Token token) {
         // Check for async function declaration
         // No line terminator is allowed between async and function
-        if (token.lexeme(sourceBuf).equals("async") && current + 1 < tokens.size() &&
-            tokens.get(current + 1).type() == TokenType.FUNCTION &&
-            tokens.get(current).line() == tokens.get(current + 1).line()) {
+        Token nextToken = tokenStream.peekAhead(1);
+        if (token.lexeme(sourceBuf).equals("async") && nextToken != null &&
+            nextToken.type() == TokenType.FUNCTION &&
+            peek().line() == nextToken.line()) {
             return parseFunctionDeclaration(true);
         }
 
@@ -333,10 +336,11 @@ public class Parser {
             // - ';' (expression): for (let; ; )
             // - '=' (assignment): for (let = 3; ; )
             // Note: 'let [' IS a declaration (destructuring), not an identifier
+            Token lookahead = tokenStream.peekAhead(1);
             boolean isDeclaration = check(TokenType.VAR) || check(TokenType.CONST) ||
                 (check(TokenType.LET) && !checkAhead(1, TokenType.IN) && !checkAhead(1, TokenType.SEMICOLON) &&
                  !checkAhead(1, TokenType.ASSIGN) &&
-                 !(checkAhead(1, TokenType.IDENTIFIER) && tokens.get(current + 1).lexeme(sourceBuf).equals("of")));
+                 !(checkAhead(1, TokenType.IDENTIFIER) && lookahead != null && lookahead.lexeme(sourceBuf).equals("of")));
 
             if (isDeclaration && match(TokenType.VAR, TokenType.LET, TokenType.CONST)) {
                 // Variable declaration - support destructuring patterns
@@ -836,7 +840,8 @@ public class Parser {
             if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("static")) {
                 // Look ahead to see if this is "static()" (method name), "static;" or "static =" (field name),
                 // or "static something" (modifier)
-                TokenType nextType = current + 1 < tokens.size() ? tokens.get(current + 1).type() : null;
+                Token nextTok = tokenStream.peekAhead(1);
+                TokenType nextType = nextTok != null ? nextTok.type() : null;
                 // static is a modifier unless followed by ( ; = or nothing
                 if (nextType != null && nextType != TokenType.LPAREN &&
                     nextType != TokenType.SEMICOLON && nextType != TokenType.ASSIGN) {
@@ -867,7 +872,8 @@ public class Parser {
             boolean isAsync = false;
             if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("async")) {
                 // Look ahead to see if this is "async()" (method name) or "async something" (modifier)
-                if (current + 1 < tokens.size() && tokens.get(current + 1).type() != TokenType.LPAREN) {
+                Token asyncNext = tokenStream.peekAhead(1);
+                if (asyncNext != null && asyncNext.type() != TokenType.LPAREN) {
                     advance();
                     isAsync = true;
                 }
@@ -877,9 +883,9 @@ public class Parser {
             String kind = "method";
             if (check(TokenType.IDENTIFIER) && (peek().lexeme(sourceBuf).equals("get") || peek().lexeme(sourceBuf).equals("set"))) {
                 // Look ahead to see if this is "get()" / "set()" (method names) or "get something" / "set something" (accessor)
-                if (current + 1 < tokens.size()) {
+                Token nextToken = tokenStream.peekAhead(1);
+                if (nextToken != null) {
                     Token currentToken = peek();
-                    Token nextToken = tokens.get(current + 1);
                     TokenType nextType = nextToken.type();
 
                     // If next token is LPAREN, this is a method named "get" or "set"
@@ -976,7 +982,7 @@ public class Parser {
                     }
                     key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), literalValue, keyLexeme);
                 }
-            } else if (check(TokenType.DOT) && current + 1 < tokens.size() && tokens.get(current + 1).type() == TokenType.NUMBER) {
+            } else if (check(TokenType.DOT) && checkAhead(1, TokenType.NUMBER)) {
                 // Handle .1 as a numeric literal (0.1)
                 Token dotToken = peek();
                 advance(); // consume DOT
@@ -1322,11 +1328,8 @@ public class Parser {
                 // Anonymous just has id: null
                 declaration = parseClassDeclaration(true);
             } else if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("async")) {
-                // Check for async function declaration
-                int savedCurrent = current;
-                advance(); // consume 'async'
-                boolean isFunction = check(TokenType.FUNCTION);
-                current = savedCurrent; // restore position
+                // Check for async function declaration - look ahead without consuming
+                boolean isFunction = checkAhead(1, TokenType.FUNCTION);
 
                 if (isFunction) {
                     // Both named and anonymous async functions are FunctionDeclarations
@@ -1818,28 +1821,31 @@ public class Parser {
             }
 
             // Quick check for arrow function: id => or async ...
-            if (left == null && current + 1 < tokens.size()) {
-                TokenType nextType = tokens.get(current + 1).type();
-                if (nextType == TokenType.ARROW) {
-                    // Simple arrow: id =>
-                    left = tryParseArrowFunction(startToken);
-                } else if (lexeme.equals("async") && startToken.line() == tokens.get(current + 1).line()) {
-                    // Potential async arrow
-                    left = tryParseArrowFunction(startToken);
+            if (left == null) {
+                Token nextToken = tokenStream.peekAhead(1);
+                if (nextToken != null) {
+                    TokenType nextType = nextToken.type();
+                    if (nextType == TokenType.ARROW) {
+                        // Simple arrow: id =>
+                        left = tryParseArrowFunction(startToken);
+                    } else if (lexeme.equals("async") && startToken.line() == nextToken.line()) {
+                        // Potential async arrow
+                        left = tryParseArrowFunction(startToken);
+                    }
                 }
             }
         } else if (startType == TokenType.OF || startType == TokenType.LET) {
             // of => or let => (rare but valid)
-            if (current + 1 < tokens.size() && tokens.get(current + 1).type() == TokenType.ARROW) {
+            if (checkAhead(1, TokenType.ARROW)) {
                 left = tryParseArrowFunction(startToken);
             }
         } else if (startType == TokenType.LPAREN) {
             // Check for arrow: (params) =>
             // Only call tryParseArrowFunction if it looks like it could be arrow params
-            int savedCurrent = current;
+            tokenStream.checkpoint();
             advance(); // consume (
             boolean isArrow = isArrowFunctionParameters();
-            current = savedCurrent;
+            tokenStream.restore();
 
             if (isArrow) {
                 left = tryParseArrowFunction(startToken);
@@ -2085,9 +2091,10 @@ public class Parser {
 
     private static Expression prefixIdentifier(Parser p, Token token) {
         // Check for async function expression
-        if (token.lexeme(p.sourceBuf).equals("async") && p.current < p.tokens.size() &&
-            p.tokens.get(p.current).type() == TokenType.FUNCTION &&
-            token.line() == p.tokens.get(p.current).line()) {
+        Token nextToken = p.peek();
+        if (token.lexeme(p.sourceBuf).equals("async") && nextToken != null &&
+            nextToken.type() == TokenType.FUNCTION &&
+            token.line() == nextToken.line()) {
             return p.parseAsyncFunctionExpressionFromIdentifier(token);
         }
 
@@ -2158,7 +2165,7 @@ public class Parser {
 
     private static Expression prefixTemplate(Parser p, Token token) {
         // Back up one token since parseTemplateLiteral expects to start at the template token
-        p.current--;
+        p.tokenStream.unskip();
         return p.parseTemplateLiteral();
     }
 
@@ -2385,7 +2392,7 @@ public class Parser {
         SourceLocation.Position savedStartLoc = p.exprStartLoc;
 
         // Back up one token since parseTemplateLiteral expects to start at the template token
-        p.current--;
+        p.tokenStream.unskip();
         Expression template = p.parseTemplateLiteral();
         Token endToken = p.previous();
         return new TaggedTemplateExpression(savedStartPos, template.end(), savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), tag, (TemplateLiteral) template);
@@ -2478,31 +2485,30 @@ public class Parser {
         // Check for async arrow function: async identifier => or async (params) =>
         boolean isAsync = false;
         if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("async")) {
-            if (current + 1 < tokens.size()) {
-                Token asyncToken = peek();
-                Token nextToken = tokens.get(current + 1);
+            Token asyncToken = peek();
+            Token nextToken = tokenStream.peekAhead(1);
 
-                if (asyncToken.line() != nextToken.line()) {
-                    // Line terminator - not async arrow
-                    return null;
-                }
+            if (nextToken != null && asyncToken.line() != nextToken.line()) {
+                // Line terminator - not async arrow
+                return null;
+            }
 
-                if (nextToken.type() == TokenType.IDENTIFIER) {
-                    if (current + 2 < tokens.size() && tokens.get(current + 2).type() == TokenType.ARROW) {
-                        advance(); // consume 'async'
-                        isAsync = true;
-                    }
-                } else if (nextToken.type() == TokenType.LPAREN) {
-                    int savedCurrent = current;
+            if (nextToken != null && nextToken.type() == TokenType.IDENTIFIER) {
+                if (checkAhead(2, TokenType.ARROW)) {
                     advance(); // consume 'async'
-                    advance(); // consume '('
-                    boolean isArrow = isArrowFunctionParameters();
-                    current = savedCurrent;
+                    isAsync = true;
+                }
+            } else if (nextToken != null && nextToken.type() == TokenType.LPAREN) {
+                tokenStream.checkpoint();
+                advance(); // consume 'async'
+                advance(); // consume '('
+                boolean isArrow = isArrowFunctionParameters();
+                tokenStream.restore();  // restore regardless, we'll re-advance if it's an arrow
 
-                    if (isArrow) {
-                        advance(); // consume 'async'
-                        isAsync = true;
-                    }
+                if (isArrow) {
+                    advance(); // consume 'async'
+                    isAsync = true;
+                    // Don't consume '(' here - the LPAREN check below will handle it
                 }
             }
         }
@@ -2510,7 +2516,7 @@ public class Parser {
         // Check for simple arrow: identifier => or (params) =>
         if ((check(TokenType.IDENTIFIER) || check(TokenType.OF) || check(TokenType.LET))) {
             Token idToken = peek();
-            if (current + 1 < tokens.size() && tokens.get(current + 1).type() == TokenType.ARROW) {
+            if (checkAhead(1, TokenType.ARROW)) {
                 advance(); // consume identifier
                 List<Pattern> params = new ArrayList<>();
                 params.add(createIdentifier(idToken));
@@ -2521,12 +2527,16 @@ public class Parser {
 
         // Check for parenthesized arrow: (params) =>
         if (check(TokenType.LPAREN)) {
-            int savedCurrent = current;
+            tokenStream.checkpoint();
             advance(); // consume (
 
             boolean isArrow = isArrowFunctionParameters();
 
             if (isArrow) {
+                // Restore to re-parse the parameters properly
+                tokenStream.restore();
+                advance(); // consume ( again
+
                 List<Pattern> params = new ArrayList<>();
                 if (!check(TokenType.RPAREN)) {
                     do {
@@ -2549,7 +2559,7 @@ public class Parser {
                 consume(TokenType.ARROW, "Expected '=>'");
                 return parseArrowFunctionBody(startToken, params, isAsync);
             } else {
-                current = savedCurrent;
+                tokenStream.restore();
             }
         }
 
@@ -2912,8 +2922,8 @@ public class Parser {
         String kind = "init";
 
         if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("async")) {
-            if (current + 1 < tokens.size()) {
-                Token nextToken = tokens.get(current + 1);
+            Token nextToken = tokenStream.peekAhead(1);
+            if (nextToken != null) {
                 // async without line terminator followed by property name is async method
                 if (peek().line() == nextToken.line() &&
                     nextToken.type() != TokenType.COLON &&
@@ -2933,8 +2943,8 @@ public class Parser {
         if (!isAsync && !isGenerator && check(TokenType.IDENTIFIER)) {
             String lexeme = peek().lexeme(sourceBuf);
             if (lexeme.equals("get") || lexeme.equals("set")) {
-                if (current + 1 < tokens.size()) {
-                    Token nextToken = tokens.get(current + 1);
+                Token nextToken = tokenStream.peekAhead(1);
+                if (nextToken != null) {
                     if (nextToken.type() != TokenType.COLON &&
                         nextToken.type() != TokenType.COMMA &&
                         nextToken.type() != TokenType.RBRACE &&
@@ -3122,13 +3132,13 @@ public class Parser {
 
     // Helper method to check if the current position (after opening paren) looks like arrow function parameters
     // This scans ahead to find the matching ) and checks if it's followed by =>
+    // NOTE: Caller must checkpoint before calling, and restore after if needed
     private boolean isArrowFunctionParameters() {
         int depth = 1; // We've already consumed the opening (
-        int checkCurrent = current;
 
         // Scan ahead to find the matching )
-        while (checkCurrent < tokens.size() && depth > 0) {
-            TokenType type = tokens.get(checkCurrent).type();
+        while (!isAtEnd() && depth > 0) {
+            TokenType type = peek().type();
 
             if (type == TokenType.LPAREN || type == TokenType.LBRACKET || type == TokenType.LBRACE) {
                 depth++;
@@ -3136,14 +3146,11 @@ public class Parser {
                 depth--;
                 if (depth == 0) {
                     // Found the matching ), check if followed by =>
-                    if (checkCurrent + 1 < tokens.size() &&
-                        tokens.get(checkCurrent + 1).type() == TokenType.ARROW) {
-                        return true;
-                    }
-                    return false;
+                    advance(); // consume the closing )
+                    return check(TokenType.ARROW);
                 }
             }
-            checkCurrent++;
+            advance();
         }
 
         return false;

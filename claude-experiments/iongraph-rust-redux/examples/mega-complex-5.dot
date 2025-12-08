@@ -1,0 +1,63 @@
+// Control Flow Graph for mega-complex.json function 5: "self-hosted:163"
+// This is a 16-block CFG with a single loop (blocks 11-14)
+
+digraph self_hosted_163 {
+    // Entry block - parameter setup
+    block0 [label="Start\nParameter\nCompare"]
+
+    // Conditional paths for intrinsic value
+    block1 [label="CallGetIntrinsicValue\nBail"]
+    block2 [label="IsCallable Test"]
+
+    // Guards and intrinsic calls
+    block3 [label="CallGetIntrinsicValue\nMultiple Guards"]
+    block4 [label="ArgumentsLength Test"]
+
+    // Argument handling branches
+    block5 [label="GetFrameArgument"]
+    block6 [label="Constant undefined"]
+
+    // Shape test and array creation
+    block7 [label="Phi\nHasShape Test"]
+    block8 [label="NewArrayDynamicLength"]
+    block9 [label="CallGetIntrinsicValue\nBail"]
+
+    // Pre-loop merge
+    block10 [label="Phi\nGoto Loop"]
+
+    // LOOP HEADER - main loop with 10 phi instructions
+    block11 [label="Loop Header\n10 Phi instructions\nInterruptCheck\nCompare Lt" loopheader="true"]
+
+    // Loop body blocks
+    block12 [label="BoundsCheck\nGuardElementNotHole\nTest"]
+    block13 [label="LoadElement\nCall\nStoreElementHole"]
+
+    // Loop latch with increment
+    block14 [label="Loop Latch\nPhi\nAdd (i++)" backedge="true"]
+
+    // Exit block
+    block15 [label="Return"]
+
+    // Control flow edges
+    block0 -> block1
+    block0 -> block2
+    block1 -> block2
+    block2 -> block3
+    block2 -> block4
+    block3 -> block4
+    block4 -> block5
+    block4 -> block6
+    block5 -> block7
+    block6 -> block7
+    block7 -> block8
+    block7 -> block9
+    block8 -> block10
+    block9 -> block10
+    block10 -> block11
+    block11 -> block12
+    block11 -> block15
+    block12 -> block13
+    block12 -> block14
+    block13 -> block14
+    block14 -> block11  // backedge
+}

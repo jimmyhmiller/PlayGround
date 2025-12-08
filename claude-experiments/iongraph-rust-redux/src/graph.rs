@@ -19,6 +19,9 @@ pub const NEARLY_STRAIGHT: f64 = 30.0;
 pub const NEARLY_STRAIGHT_ITERATIONS: i32 = 8;
 pub const STOP_AT_PASS: i32 = 30;
 
+/// Sentinel value for uninitialized dst_nodes entries (must match graph_layout.rs)
+const NO_DESTINATION: usize = usize::MAX;
+
 // Constants for future interactivity features
 #[allow(dead_code)]
 const ZOOM_SENSITIVITY: f64 = 1.50;
@@ -516,6 +519,11 @@ impl<P: LayoutProvider> Graph<P> {
 
                 // Iterate through destination nodes and draw arrows
                 for (i, &dst_global_idx) in dst_nodes.iter().enumerate() {
+                    // Skip uninitialized entries (padding from port assignment)
+                    if dst_global_idx == NO_DESTINATION {
+                        continue;
+                    }
+
                     let x1 = node_pos.x + PORT_START + PORT_SPACING * i as f64;
                     let y1 = node_pos.y + node_size.y;
 
@@ -677,27 +685,45 @@ impl<P: LayoutProvider> Graph<P> {
                                     .append_child(&mut arrows_container, arrow);
                             }
                         } else {
-                            // Regular downward arrow
                             let x2 = dst_pos.x + PORT_START;
                             let y2 = dst_pos.y;
-                            let ym = (y1 - node_size.y)
-                                + layer_heights[layer_idx]
-                                + TRACK_PADDING
-                                + track_heights[layer_idx] / 2.0
-                                + joint_offsets[i];
                             let do_arrowhead = matches!(dst, LayoutNode::BlockNode(_));
-                            let arrow = downward_arrow(
-                                &mut self.layout_provider,
-                                x1,
-                                y1,
-                                x2,
-                                y2,
-                                ym,
-                                do_arrowhead,
-                                1,
-                            );
-                            self.layout_provider
-                                .append_child(&mut arrows_container, arrow);
+
+                            // Check if this is a back edge (destination is above source)
+                            if y2 < y1 {
+                                // Back edge: draw curved upward arrow to the right side
+                                // The arrow goes out to the right, up, and curves back to the destination
+                                let arrow = back_edge_arrow(
+                                    &mut self.layout_provider,
+                                    x1,
+                                    y1,
+                                    x2,
+                                    y2 + 16.0, // Target the header area, not top edge
+                                    do_arrowhead,
+                                    1,
+                                );
+                                self.layout_provider
+                                    .append_child(&mut arrows_container, arrow);
+                            } else {
+                                // Regular downward arrow
+                                let ym = (y1 - node_size.y)
+                                    + layer_heights[layer_idx]
+                                    + TRACK_PADDING
+                                    + track_heights[layer_idx] / 2.0
+                                    + joint_offsets[i];
+                                let arrow = downward_arrow(
+                                    &mut self.layout_provider,
+                                    x1,
+                                    y1,
+                                    x2,
+                                    y2,
+                                    ym,
+                                    do_arrowhead,
+                                    1,
+                                );
+                                self.layout_provider
+                                    .append_child(&mut arrows_container, arrow);
+                            }
                         }
                     }
                 }
@@ -1003,6 +1029,82 @@ fn loop_header_arrow<P: LayoutProvider>(
 
     let v = arrowhead(layout_provider, x2, y2, 270, 5);
     layout_provider.append_child(&mut g, v);
+
+    g
+}
+
+/// Draw a back edge arrow that curves around to the right side
+/// Used for bidirectional edges where the destination is above the source
+#[allow(clippy::too_many_arguments)]
+fn back_edge_arrow<P: LayoutProvider>(
+    layout_provider: &mut P,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    do_arrowhead: bool,
+    stroke: i32,
+) -> Box<P::Element> {
+    let r = ARROW_RADIUS;
+
+    // Align stroke to pixels
+    let mut x1 = x1;
+    let mut x2 = x2;
+    if stroke % 2 == 1 {
+        x1 += 0.5;
+        x2 += 0.5;
+    }
+
+    // Calculate how far right to go (based on the vertical distance)
+    let vertical_distance = y1 - y2;
+    let horizontal_offset = (vertical_distance / 3.0).max(40.0).min(80.0);
+    let x_mid = x1.max(x2) + horizontal_offset;
+
+    let mut path = String::new();
+    path.push_str(&format!("M {} {} ", x1, y1)); // Start at source
+
+    // Curve out to the right
+    path.push_str(&format!("L {} {} ", x1, y1 + r)); // Small line down
+    path.push_str(&format!(
+        "A {} {} 0 0 0 {} {} ",
+        r, r, x1 + r, y1 + 2.0 * r
+    )); // Arc to go right
+
+    // Line to the right
+    path.push_str(&format!("L {} {} ", x_mid - r, y1 + 2.0 * r));
+
+    // Arc to go up
+    path.push_str(&format!(
+        "A {} {} 0 0 0 {} {} ",
+        r, r, x_mid, y1 + r
+    ));
+
+    // Line up
+    path.push_str(&format!("L {} {} ", x_mid, y2 + r));
+
+    // Arc to go left
+    path.push_str(&format!(
+        "A {} {} 0 0 0 {} {} ",
+        r, r, x_mid - r, y2
+    ));
+
+    // Line to destination
+    path.push_str(&format!("L {} {} ", x2, y2));
+
+    let mut g = layout_provider.create_svg_element("g");
+
+    let mut p = layout_provider.create_svg_element("path");
+    layout_provider.set_attribute(&mut p, "d", &path);
+    layout_provider.set_attribute(&mut p, "fill", "none");
+    layout_provider.set_attribute(&mut p, "stroke", "black");
+    layout_provider.set_attribute(&mut p, "stroke-width", &format!("{} ", stroke));
+    layout_provider.append_child(&mut g, p);
+
+    if do_arrowhead {
+        // Arrowhead pointing left (270 degrees)
+        let v = arrowhead(layout_provider, x2, y2, 270, 5);
+        layout_provider.append_child(&mut g, v);
+    }
 
     g
 }

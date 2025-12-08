@@ -148,3 +148,90 @@ pub trait Allocator {
     /// Get allocation options
     fn get_allocation_options(&self) -> AllocatorOptions;
 }
+
+// ========== Heap Inspection Types ==========
+
+/// Information about a heap object for inspection
+#[derive(Debug, Clone)]
+pub struct ObjectInfo {
+    /// Untagged address of the object
+    pub address: usize,
+    /// Tagged pointer (with type tag)
+    pub tagged_ptr: usize,
+    /// Type ID from header
+    pub type_id: u8,
+    /// Human-readable type name
+    pub type_name: &'static str,
+    /// Type-specific data (string length, deftype ID, etc.)
+    pub type_data: u32,
+    /// Total size in bytes including header
+    pub size_bytes: usize,
+    /// Number of pointer fields
+    pub field_count: usize,
+    /// Whether object contains raw bytes vs pointers
+    pub is_opaque: bool,
+}
+
+/// Detailed heap statistics
+#[derive(Debug, Clone)]
+pub struct DetailedHeapStats {
+    /// GC algorithm name
+    pub gc_algorithm: &'static str,
+    /// Total heap capacity in bytes
+    pub total_bytes: usize,
+    /// Bytes used by live objects
+    pub used_bytes: usize,
+    /// Total number of live objects
+    pub object_count: usize,
+    /// Per-type breakdown: (type_id, count, total_bytes)
+    pub objects_by_type: Vec<(u8, &'static str, usize, usize)>,
+    /// Number of free list entries (mark-and-sweep only)
+    pub free_list_entries: Option<usize>,
+    /// Total free bytes (mark-and-sweep only)
+    pub free_bytes: Option<usize>,
+    /// Largest contiguous free block (mark-and-sweep only)
+    pub largest_free_block: Option<usize>,
+}
+
+/// A reference from one object to another
+#[derive(Debug, Clone)]
+pub struct ObjectReference {
+    /// Source object address (untagged)
+    pub from_address: usize,
+    /// Target object address (untagged)
+    pub to_address: usize,
+    /// Which field holds the reference
+    pub field_index: usize,
+    /// The tagged pointer value
+    pub tagged_value: usize,
+}
+
+/// Convert type_id to human-readable name
+pub fn type_id_to_name(type_id: u8) -> &'static str {
+    match type_id {
+        2 => "String",
+        10 => "Namespace",
+        11 => "Var",
+        12 => "Function",
+        13 => "DefType",
+        _ => "Unknown",
+    }
+}
+
+/// Trait for heap inspection capabilities
+///
+/// This trait provides read-only access to heap state for debugging
+/// and introspection without modifying GC algorithms.
+pub trait HeapInspector {
+    /// Iterate over all live objects in the heap
+    fn iter_objects(&self) -> Box<dyn Iterator<Item = HeapObject> + '_>;
+
+    /// Get detailed statistics about heap state
+    fn detailed_stats(&self) -> DetailedHeapStats;
+
+    /// Check if an address is within the managed heap
+    fn contains_address(&self, addr: usize) -> bool;
+
+    /// Get the namespace roots for reference tracing
+    fn get_roots(&self) -> &[(usize, usize)];
+}

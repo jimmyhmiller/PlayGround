@@ -1,0 +1,13 @@
+// Converted from D2 diagram (forward edges only)
+digraph d2_example {
+    // Nodes
+    more_stuff [label="more-stuff"]
+    thing [label="thing"]
+    other_thing [label="other-thing"]
+    stuff [label="stuff"]
+
+    // Edges (forward flow as shown in D2 rendering)
+    more_stuff -> thing
+    thing -> other_thing
+    other_thing -> stuff
+}

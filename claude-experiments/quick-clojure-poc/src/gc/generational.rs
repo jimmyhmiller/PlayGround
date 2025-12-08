@@ -10,7 +10,7 @@ use super::mark_and_sweep::MarkAndSweep;
 use super::space::{Space, DEFAULT_PAGE_COUNT};
 use super::stack_walker::StackWalker;
 use super::types::{BuiltInTypes, HeapObject, Word};
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap};
+use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, HeapInspector, DetailedHeapStats, type_id_to_name};
 
 /// Generational garbage collector
 pub struct GenerationalGC {
@@ -345,5 +345,64 @@ impl GenerationalGC {
         });
 
         roots
+    }
+}
+
+// ========== Heap Inspection ==========
+
+use std::collections::HashMap;
+
+impl HeapInspector for GenerationalGC {
+    fn iter_objects(&self) -> Box<dyn Iterator<Item = HeapObject> + '_> {
+        // Chain young generation (contiguous) with old generation (mark-and-sweep)
+        let young_iter = self.young.object_iter_from_position(0);
+        let old_iter = self.old.iter_objects();
+        Box::new(young_iter.chain(old_iter))
+    }
+
+    fn detailed_stats(&self) -> DetailedHeapStats {
+        let mut object_count = 0;
+        let mut used_bytes = 0;
+        let mut type_counts: HashMap<u8, (usize, usize)> = HashMap::new();
+
+        for obj in self.iter_objects() {
+            object_count += 1;
+            let size = obj.full_size();
+            used_bytes += size;
+
+            let type_id = obj.get_type_id() as u8;
+            let entry = type_counts.entry(type_id).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += size;
+        }
+
+        // Convert type_counts to vector with names
+        let mut objects_by_type: Vec<(u8, &'static str, usize, usize)> = type_counts
+            .into_iter()
+            .map(|(id, (count, bytes))| (id, type_id_to_name(id), count, bytes))
+            .collect();
+        objects_by_type.sort_by_key(|(id, _, _, _)| *id);
+
+        // Get old gen stats for free list info
+        let old_stats = self.old.detailed_stats();
+
+        DetailedHeapStats {
+            gc_algorithm: "generational",
+            total_bytes: self.young.byte_count() + old_stats.total_bytes,
+            used_bytes,
+            object_count,
+            objects_by_type,
+            free_list_entries: old_stats.free_list_entries,
+            free_bytes: old_stats.free_bytes,
+            largest_free_block: old_stats.largest_free_block,
+        }
+    }
+
+    fn contains_address(&self, addr: usize) -> bool {
+        self.young.contains(addr as *const u8) || self.old.contains_address(addr)
+    }
+
+    fn get_roots(&self) -> &[(usize, usize)] {
+        &self.namespace_roots
     }
 }

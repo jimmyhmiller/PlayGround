@@ -3,6 +3,9 @@
 use crate::graph::*;
 use crate::layout_provider::{LayoutProvider, Vec2};
 
+/// Sentinel value for uninitialized dst_nodes entries
+const NO_DESTINATION: usize = usize::MAX;
+
 #[derive(Clone)]
 struct Joint {
     x1: f64,
@@ -212,13 +215,13 @@ impl<P: LayoutProvider> Graph<P> {
             match &mut layout_nodes[from_layer][from_idx] {
                 LayoutNode::BlockNode(node) => {
                     while node.dst_nodes.len() <= from_port {
-                        node.dst_nodes.push(0);
+                        node.dst_nodes.push(NO_DESTINATION);
                     }
                     node.dst_nodes[from_port] = global_to;
                 }
                 LayoutNode::DummyNode(node) => {
                     while node.dst_nodes.len() <= from_port {
-                        node.dst_nodes.push(0);
+                        node.dst_nodes.push(NO_DESTINATION);
                     }
                     node.dst_nodes[from_port] = global_to;
                 }
