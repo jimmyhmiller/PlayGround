@@ -227,6 +227,10 @@ impl LinearScan {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
                 if let IrValue::Register(r) = obj { regs.push(*r); }
             }
+
+            Instruction::CallGC(dst) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+            }
         }
 
         regs
@@ -466,6 +470,10 @@ impl LinearScan {
                 replace(dst);
                 replace(obj);
             }
+
+            Instruction::CallGC(dst) => {
+                replace(dst);
+            }
         }
     }
 
@@ -697,6 +705,10 @@ impl LinearScan {
             Instruction::LoadTypeField(dst, obj, _field_name) => {
                 replace(dst);
                 replace(obj);
+            }
+
+            Instruction::CallGC(dst) => {
+                replace(dst);
             }
         }
     }

@@ -65,6 +65,8 @@ fn print_help() {
     println!("  :ir (+ 1 2)       - Show IR instructions");
     println!("  :asm (+ 1 2)      - Show ARM64 machine code");
     println!("  :gc               - Run garbage collection");
+    println!("  :gc-always        - Enable GC before every allocation (stress test)");
+    println!("  :gc-always off    - Disable gc-always mode");
     println!("  :heap             - Show heap statistics");
     println!("  :namespaces       - List all namespaces");
     println!("  :inspect <ns>     - Inspect namespace bindings");
@@ -467,7 +469,7 @@ fn disassemble_arm64(inst: u32) -> String {
 
 /// Execute a Clojure script file (like `clojure script.clj`)
 /// Prints results of top-level expressions, but not def/ns/use
-fn run_script(filename: &str) {
+fn run_script(filename: &str, gc_always: bool) {
     use std::fs;
     use std::io::BufRead;
 
@@ -483,6 +485,14 @@ fn run_script(filename: &str) {
     // Create runtime with GC
     let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
+
+    // Enable gc-always mode if requested
+    if gc_always {
+        unsafe {
+            let rt = &mut *runtime.get();
+            rt.set_gc_always(true);
+        }
+    }
 
     // Create compiler
     let mut compiler = Compiler::new(runtime.clone());
@@ -596,8 +606,23 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() > 1 {
-        // Script mode: execute file without REPL interface
-        run_script(&args[1]);
+        // Parse arguments: [binary] [--gc-always] <file>
+        let mut gc_always = false;
+        let mut filename_idx = 1;
+
+        for (i, arg) in args.iter().enumerate().skip(1) {
+            if arg == "--gc-always" {
+                gc_always = true;
+            } else {
+                filename_idx = i;
+                break;
+            }
+        }
+
+        if filename_idx < args.len() {
+            // Script mode: execute file without REPL interface
+            run_script(&args[filename_idx], gc_always);
+        }
         return;
     }
 
@@ -657,6 +682,26 @@ fn main() {
                     continue;
                 }
 
+                if input == ":gc-always" || input == ":gc-always on" {
+                    // SAFETY: REPL command, not during compilation
+                    unsafe {
+                        let rt = &mut *runtime.get();
+                        rt.set_gc_always(true);
+                    }
+                    println!("✓ gc-always mode ENABLED (GC runs before every allocation)");
+                    continue;
+                }
+
+                if input == ":gc-always off" {
+                    // SAFETY: REPL command, not during compilation
+                    unsafe {
+                        let rt = &mut *runtime.get();
+                        rt.set_gc_always(false);
+                    }
+                    println!("✓ gc-always mode DISABLED");
+                    continue;
+                }
+
                 if input == ":heap" {
                     // SAFETY: REPL command, not during compilation
                     let stats = unsafe {
@@ -667,6 +712,7 @@ fn main() {
                     println!("║ GC Algorithm:    {:>20}                 ║", stats.gc_algorithm);
                     println!("║ Namespaces:      {:>8}                               ║", stats.namespace_count);
                     println!("║ Types:           {:>8}                               ║", stats.type_count);
+                    println!("║ Stack Map:       {:>8} entries                      ║", stats.stack_map_entries);
                     println!("╚═════════════════════════════════════════════════════════╝");
                     println!();
                     continue;

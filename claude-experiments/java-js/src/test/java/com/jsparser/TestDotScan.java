@@ -9,9 +9,10 @@ public class TestDotScan {
         String code = "true ?.30 : false";
         Lexer lexer = new Lexer(code);
         List<Token> tokens = lexer.tokenize();
-        
+        char[] src = code.toCharArray();
+
         for (Token token : tokens) {
-            System.out.println(token.type() + ": '" + token.lexeme() + "' at pos=" + token.position() + " col=" + token.column());
+            System.out.println(token.type() + ": '" + token.lexeme(src) + "' at pos=" + token.position() + " col=" + token.column());
         }
     }
 }

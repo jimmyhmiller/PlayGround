@@ -67,14 +67,14 @@ pub struct Arm64CodeGen {
 
     // === Stack Map for GC ===
 
-    /// Maps instruction offset → stack size at that point
+    /// Maps instruction offset → stack size (in words) at that point
     /// Used by GC to find roots on the stack after calls
     stack_map: HashMap<usize, usize>,
 
-    /// Current stack size in bytes (for stack map tracking)
+    /// Current stack size in words (for stack map tracking)
     current_stack_size: usize,
 
-    /// Maximum stack size seen (for stack map metadata)
+    /// Maximum stack size in words (for stack map metadata)
     max_stack_size: usize,
 
     /// Number of locals in current function
@@ -123,14 +123,15 @@ impl Arm64CodeGen {
     ///
     /// This is used for per-function compilation (Beagle's approach):
     /// - Each function is compiled separately with its own register allocation
-    /// - Returns an executable code pointer (allocated in executable memory)
+    /// - Returns a CompiledFunction with code pointer and stack map
     ///
     /// Stack frame layout:
     /// - FP, LR saved at [sp, #-16]!
     /// - Callee-saved registers (x19-x28) saved as needed
     /// - Spill slots at FP-relative offsets
-    pub fn compile_function(instructions: &[Instruction]) -> Result<usize, String> {
+    pub fn compile_function(instructions: &[Instruction], num_params: usize) -> Result<CompiledFunction, String> {
         let mut codegen = Arm64CodeGen::new();
+        codegen.num_locals = num_params;
 
         // Run register allocation for THIS function only
         let mut allocator = LinearScan::new(instructions.to_vec(), 0);
@@ -160,9 +161,6 @@ impl Arm64CodeGen {
             0
         };
 
-        // Calculate callee-saved register space (for reference)
-        let _callee_saved_pairs = (used_callee_saved.len() + 1) / 2;
-
         // Emit function prologue
         // Stack layout after prologue:
         //   [old SP + 8]:   saved x30 (LR)
@@ -180,6 +178,7 @@ impl Arm64CodeGen {
 
         // Step 1: Save FP and LR (don't set FP yet!)
         codegen.emit_stp(29, 30, 31, -2);  // stp x29, x30, [sp, #-16]!
+        codegen.increment_stack_size(2);  // Track: FP + LR (2 words = 16 bytes)
 
         // Step 2: Save used callee-saved registers
         for chunk in used_callee_saved.chunks(2) {
@@ -188,6 +187,7 @@ impl Arm64CodeGen {
             } else {
                 codegen.emit_stp(chunk[0], 31, 31, -2);  // Pair with xzr
             }
+            codegen.increment_stack_size(2);  // Track: each register pair (2 words)
         }
 
         // Step 3: NOW set FP to current SP (after all register saves)
@@ -197,6 +197,7 @@ impl Arm64CodeGen {
         // Step 4: Allocate stack space for spills
         if stack_space > 0 {
             codegen.emit_sub_sp_imm(stack_space as i64);
+            codegen.increment_stack_size(stack_space / 8);  // Track: spill slots (in words)
         }
 
         // Store info for Ret to emit correct epilogue
@@ -215,7 +216,16 @@ impl Arm64CodeGen {
 
         // Allocate and copy to executable memory
         let code_ptr = Trampoline::execute_code(&codegen.code);
-        Ok(code_ptr)
+
+        // Translate stack map to absolute addresses
+        let stack_map = codegen.translate_stack_map(code_ptr);
+
+        Ok(CompiledFunction {
+            code_ptr,
+            stack_map,
+            num_locals: num_params,
+            max_stack_size: codegen.max_stack_size,  // Total frame size in words
+        })
     }
 
     /// Compile IR instructions to ARM64 machine code
@@ -948,6 +958,27 @@ impl Arm64CodeGen {
 
                 self.store_spill(dst_reg, dest_spill);
                 // eprintln!("DEBUG: Call - done, dst_reg=x{}, spill={:?}", dst_reg, dest_spill);
+            }
+
+            Instruction::CallGC(dst) => {
+                // CallGC: Force garbage collection
+                // Pass current frame pointer (x29) as stack_pointer to trampoline_gc
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+
+                // Move frame pointer (x29) to x0 as argument
+                self.emit_mov(0, 29);
+
+                // Load trampoline_gc address and call it
+                let func_addr = crate::trampoline::trampoline_gc as usize;
+                self.emit_mov_imm(15, func_addr as i64);
+                self.emit_blr(15);
+
+                // Result is in x0 (returns nil = 7)
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
+                }
+                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::Ret(value) => {
@@ -1871,17 +1902,17 @@ impl Arm64CodeGen {
             .collect()
     }
 
-    /// Increment stack size tracking (call when allocating stack space)
-    pub fn increment_stack_size(&mut self, bytes: usize) {
-        self.current_stack_size += bytes;
+    /// Increment stack size tracking in words (call when allocating stack space)
+    pub fn increment_stack_size(&mut self, words: usize) {
+        self.current_stack_size += words;
         if self.current_stack_size > self.max_stack_size {
             self.max_stack_size = self.current_stack_size;
         }
     }
 
-    /// Decrement stack size tracking (call when deallocating stack space)
-    pub fn decrement_stack_size(&mut self, bytes: usize) {
-        self.current_stack_size = self.current_stack_size.saturating_sub(bytes);
+    /// Decrement stack size tracking in words (call when deallocating stack space)
+    pub fn decrement_stack_size(&mut self, words: usize) {
+        self.current_stack_size = self.current_stack_size.saturating_sub(words);
     }
 
     /// Get max stack size for stack map metadata

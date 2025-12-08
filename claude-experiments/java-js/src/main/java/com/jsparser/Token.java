@@ -2,7 +2,6 @@ package com.jsparser;
 
 public record Token(
     TokenType type,
-    String lexeme,
     Object literal,
     int line,
     int column,
@@ -12,22 +11,19 @@ public record Token(
     int endColumn,    // For multi-line tokens: the column where the token ends
     String raw        // For template literals: the raw string value (with escape sequences, line continuations)
 ) {
-    public Token(TokenType type, String lexeme, int line, int column, int position) {
-        this(type, lexeme, null, line, column, position, position + (lexeme != null ? lexeme.length() : 0), line, column + (lexeme != null ? lexeme.length() : 0), null);
+    // Simple constructor for single-line tokens without literal
+    public Token(TokenType type, int line, int column, int position, int endPosition) {
+        this(type, null, line, column, position, endPosition, line, column + (endPosition - position), null);
     }
 
-    public Token(TokenType type, String lexeme, Object literal, int line, int column, int position) {
-        this(type, lexeme, literal, line, column, position, position + (lexeme != null ? lexeme.length() : 0), line, column + (lexeme != null ? lexeme.length() : 0), null);
-    }
-
-    public Token(TokenType type, String lexeme, Object literal, int line, int column, int position, int endPosition) {
-        this(type, lexeme, literal, line, column, position, endPosition, line, column + (lexeme != null ? lexeme.length() : 0), null);
+    // Constructor with literal for single-line tokens
+    public Token(TokenType type, Object literal, int line, int column, int position, int endPosition) {
+        this(type, literal, line, column, position, endPosition, line, column + (endPosition - position), null);
     }
 
     // Constructor for multi-line tokens (like template literals)
-    public Token(TokenType type, String lexeme, Object literal, int line, int column, int position, int endPosition, int endLine, int endColumn, String raw) {
+    public Token(TokenType type, Object literal, int line, int column, int position, int endPosition, int endLine, int endColumn, String raw) {
         this.type = type;
-        this.lexeme = lexeme;
         this.literal = literal;
         this.line = line;
         this.column = column;
@@ -38,8 +34,20 @@ public record Token(
         this.raw = raw;
     }
 
-    // Old constructor (for backwards compatibility with existing code)
-    public Token(TokenType type, String lexeme, Object literal, int line, int column, int position, int endPosition, String raw) {
-        this(type, lexeme, literal, line, column, position, endPosition, line, column + (lexeme != null ? lexeme.length() : 0), raw);
+    // Lazy lexeme creation - only allocates when actually needed
+    public String lexeme(char[] source) {
+        return new String(source, position, endPosition - position);
+    }
+
+    /**
+     * Returns the identifier name for IDENTIFIER tokens.
+     * For identifiers with unicode escapes, the resolved name is stored in literal.
+     * For regular identifiers, the lexeme is the name.
+     */
+    public String identifierName(char[] source) {
+        if (literal instanceof String s) {
+            return s;
+        }
+        return new String(source, position, endPosition - position);
     }
 }

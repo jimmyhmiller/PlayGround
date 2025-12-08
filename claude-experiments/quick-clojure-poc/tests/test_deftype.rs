@@ -54,6 +54,29 @@ fn run_and_get_stderr(code: &str) -> String {
     run_code(code).1
 }
 
+/// Run code with gc-always mode enabled (GC before every allocation)
+fn run_code_gc_always(code: &str) -> (String, String) {
+    let binary_path = get_binary_path();
+
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let temp_path = temp_dir.path().join("test.clj");
+    fs::write(&temp_path, code).expect("Failed to write temp file");
+
+    let output = Command::new(&binary_path)
+        .arg("--gc-always")
+        .arg(temp_path.to_str().unwrap())
+        .output()
+        .expect("Failed to execute");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    (stdout, stderr)
+}
+
+fn run_gc_always_and_get_stdout(code: &str) -> String {
+    run_code_gc_always(code).0
+}
+
 // ============================================================================
 // Basic deftype and construction tests
 // ============================================================================
@@ -467,4 +490,73 @@ fn test_deftype_same_name_different_fields_different_ns() {
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "2", "Expected 2, got: {}", output);
+}
+
+// ============================================================================
+// GC stress tests (gc-always mode)
+// ============================================================================
+
+#[test]
+fn test_gc_always_binary_tree() {
+    // Test binary tree with gc-always mode (GC runs before every allocation)
+    // This verifies that GC can correctly scan the JIT stack and preserve live objects
+    let code = r#"
+(deftype* Node [value left right])
+(def sum-tree (fn [node] (if (= node nil) 0 (+ (.-value node) (+ (sum-tree (.-left node)) (sum-tree (.-right node)))))))
+(def leaf1 (Node. 1 nil nil))
+(def leaf2 (Node. 2 nil nil))
+(def leaf3 (Node. 3 nil nil))
+(def leaf4 (Node. 4 nil nil))
+(def branch1 (Node. 10 leaf1 leaf2))
+(def branch2 (Node. 20 leaf3 leaf4))
+(def root (Node. 100 branch1 branch2))
+(sum-tree root)
+"#;
+    let output = run_gc_always_and_get_stdout(code);
+    // 100 + 10 + 20 + 1 + 2 + 3 + 4 = 140
+    assert_eq!(output, "140", "Expected 140 with gc-always mode, got: {}", output);
+}
+
+#[test]
+fn test_gc_always_complete_binary_tree() {
+    // Complete binary tree with 31 nodes and gc-always mode
+    let code = r#"
+(deftype* Node [value left right])
+(def sum-tree (fn [node] (if (= node nil) 0 (+ (.-value node) (+ (sum-tree (.-left node)) (sum-tree (.-right node)))))))
+(def l1 (Node. 1 nil nil))
+(def l2 (Node. 1 nil nil))
+(def l3 (Node. 1 nil nil))
+(def l4 (Node. 1 nil nil))
+(def l5 (Node. 1 nil nil))
+(def l6 (Node. 1 nil nil))
+(def l7 (Node. 1 nil nil))
+(def l8 (Node. 1 nil nil))
+(def l9 (Node. 1 nil nil))
+(def l10 (Node. 1 nil nil))
+(def l11 (Node. 1 nil nil))
+(def l12 (Node. 1 nil nil))
+(def l13 (Node. 1 nil nil))
+(def l14 (Node. 1 nil nil))
+(def l15 (Node. 1 nil nil))
+(def l16 (Node. 1 nil nil))
+(def n1 (Node. 1 l1 l2))
+(def n2 (Node. 1 l3 l4))
+(def n3 (Node. 1 l5 l6))
+(def n4 (Node. 1 l7 l8))
+(def n5 (Node. 1 l9 l10))
+(def n6 (Node. 1 l11 l12))
+(def n7 (Node. 1 l13 l14))
+(def n8 (Node. 1 l15 l16))
+(def m1 (Node. 1 n1 n2))
+(def m2 (Node. 1 n3 n4))
+(def m3 (Node. 1 n5 n6))
+(def m4 (Node. 1 n7 n8))
+(def p1 (Node. 1 m1 m2))
+(def p2 (Node. 1 m3 m4))
+(def root (Node. 1 p1 p2))
+(sum-tree root)
+"#;
+    let output = run_gc_always_and_get_stdout(code);
+    // 31 nodes, each with value 1
+    assert_eq!(output, "31", "Expected 31 with gc-always mode, got: {}", output);
 }

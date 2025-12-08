@@ -190,7 +190,7 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
                     "use" => analyze_use(items),
                     "binding" => analyze_binding(items),
                     "var" => analyze_var_ref(items),
-                    "deftype*" => analyze_deftype(items),
+                    "deftype*" | "deftype" => analyze_deftype(items),
                     _ => analyze_call(items),
                 }
             } else {

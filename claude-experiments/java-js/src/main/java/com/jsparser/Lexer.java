@@ -39,6 +39,89 @@ public class Lexer {
         contextStack.push(LexerContext.B_STAT);
     }
 
+    // Get source buffer for lazy lexeme access
+    public char[] getSource() {
+        return buf;
+    }
+
+    // ========================================================================
+    // Public accessors for TokenStream
+    // ========================================================================
+
+    public int getPosition() { return position; }
+    public int getLine() { return line; }
+    public int getColumn() { return column; }
+
+    public char peekChar() {
+        return isAtEnd() ? '\0' : buf[position];
+    }
+
+    /**
+     * Get the template brace depth stack.
+     * Used by TokenStream to track when to call scanTemplateContinuation.
+     */
+    public Stack<Integer> getTemplateBraceDepthStack() {
+        return templateBraceDepthStack;
+    }
+
+    // ========================================================================
+    // State save/restore for TokenStream checkpointing
+    // ========================================================================
+
+    public record State(
+        int position, int line, int column,
+        Stack<Integer> templateBraceDepthStack,
+        Stack<LexerContext> contextStack,
+        boolean exprAllowed, TokenType lastTokenType, boolean atLineStart,
+        int generatorDepth, Stack<Boolean> functionIsGeneratorStack
+    ) {}
+
+    public State saveState() {
+        return new State(
+            position, line, column,
+            new Stack<>() {{ addAll(templateBraceDepthStack); }},
+            new Stack<>() {{ addAll(contextStack); }},
+            exprAllowed, lastTokenType, atLineStart,
+            generatorDepth,
+            new Stack<>() {{ addAll(functionIsGeneratorStack); }}
+        );
+    }
+
+    public void restoreState(State state) {
+        this.position = state.position();
+        this.line = state.line();
+        this.column = state.column();
+        this.templateBraceDepthStack = new Stack<>();
+        this.templateBraceDepthStack.addAll(state.templateBraceDepthStack());
+        this.contextStack = new Stack<>();
+        this.contextStack.addAll(state.contextStack());
+        this.exprAllowed = state.exprAllowed();
+        this.lastTokenType = state.lastTokenType();
+        this.atLineStart = state.atLineStart();
+        this.generatorDepth = state.generatorDepth();
+        this.functionIsGeneratorStack = new Stack<>();
+        this.functionIsGeneratorStack.addAll(state.functionIsGeneratorStack());
+    }
+
+    // ========================================================================
+    // Hashbang handling for TokenStream
+    // ========================================================================
+
+    public void skipHashbang() {
+        if (position == 0 && !isAtEnd() && peek() == '#' && peekNext() == '!') {
+            advance(); // consume #
+            advance(); // consume !
+            // Skip until line terminator (LF, CR, LS, PS)
+            while (!isAtEnd()) {
+                char c = peek();
+                if (c == '\n' || c == '\r' || c == '\u2028' || c == '\u2029') {
+                    break;
+                }
+                advance();
+            }
+        }
+    }
+
     public List<Token> tokenize() {
         List<Token> tokens = new ArrayList<>();
 
@@ -93,15 +176,16 @@ public class Lexer {
             }
         }
 
-        tokens.add(new Token(TokenType.EOF, "", line, column, position));
+        tokens.add(new Token(TokenType.EOF, line, column, position, position));
         return tokens;
     }
 
     /**
      * Updates the context stack and exprAllowed flag after reading a token.
      * Based on Acorn's updateContext approach.
+     * Public for TokenStream to call after each token.
      */
-    private void updateContext(TokenType prevType, Token currentToken) {
+    public void updateContext(TokenType prevType, Token currentToken) {
         TokenType currentType = currentToken.type();
         // Handle specific token types that need custom context updates
         switch (currentType) {
@@ -196,7 +280,7 @@ public class Lexer {
                 if (isKeyword(currentType) && prevType == TokenType.DOT) {
                     // Keywords after dot are property names, not keywords
                     exprAllowed = false;
-                } else if (currentType == TokenType.IDENTIFIER && "yield".equals(currentToken.lexeme())) {
+                } else if (currentType == TokenType.IDENTIFIER && "yield".equals(currentToken.lexeme(buf))) {
                     // Special handling for contextual keyword 'yield'
                     // In generator functions, yield allows expressions after it (like return/throw)
                     // Outside generator functions, yield is just an identifier (no expressions after)
@@ -270,7 +354,11 @@ public class Lexer {
         };
     }
 
-    private Token nextToken() {
+    /**
+     * Scan the next token from current position.
+     * Public for TokenStream to call on-demand.
+     */
+    public Token nextToken() {
         char c = peek();
         int startPos = position;
         int startLine = line;
@@ -279,31 +367,31 @@ public class Lexer {
         return switch (c) {
             case ';' -> {
                 advance();
-                yield new Token(TokenType.SEMICOLON, ";", startLine, startColumn, startPos);
+                yield new Token(TokenType.SEMICOLON, startLine, startColumn, startPos, position);
             }
             case ',' -> {
                 advance();
-                yield new Token(TokenType.COMMA, ",", startLine, startColumn, startPos);
+                yield new Token(TokenType.COMMA, startLine, startColumn, startPos, position);
             }
             case ':' -> {
                 advance();
-                yield new Token(TokenType.COLON, ":", startLine, startColumn, startPos);
+                yield new Token(TokenType.COLON, startLine, startColumn, startPos, position);
             }
             case '#' -> {
                 advance();
-                yield new Token(TokenType.HASH, "#", startLine, startColumn, startPos);
+                yield new Token(TokenType.HASH, startLine, startColumn, startPos, position);
             }
             case '@' -> {
                 advance();
-                yield new Token(TokenType.AT, "@", startLine, startColumn, startPos);
+                yield new Token(TokenType.AT, startLine, startColumn, startPos, position);
             }
             case '?' -> {
                 advance();
                 if (match('?')) {
                     if (match('=')) {
-                        yield new Token(TokenType.QUESTION_QUESTION_ASSIGN, "??=", startLine, startColumn, startPos);
+                        yield new Token(TokenType.QUESTION_QUESTION_ASSIGN, startLine, startColumn, startPos, position);
                     }
-                    yield new Token(TokenType.QUESTION_QUESTION, "??", startLine, startColumn, startPos);
+                    yield new Token(TokenType.QUESTION_QUESTION, startLine, startColumn, startPos, position);
                 } else if (match('.')) {
                     // Check if this is optional chaining ?. or not
                     // OptionalChainingPunctuator:: ?.[lookahead ∉ DecimalDigit]
@@ -314,37 +402,37 @@ public class Lexer {
                         // or ? followed by .. (spread/rest)
                         position--;
                         column--;
-                        yield new Token(TokenType.QUESTION, "?", startLine, startColumn, startPos);
+                        yield new Token(TokenType.QUESTION, startLine, startColumn, startPos, position);
                     } else {
-                        yield new Token(TokenType.QUESTION_DOT, "?.", startLine, startColumn, startPos);
+                        yield new Token(TokenType.QUESTION_DOT, startLine, startColumn, startPos, position);
                     }
                 } else {
-                    yield new Token(TokenType.QUESTION, "?", startLine, startColumn, startPos);
+                    yield new Token(TokenType.QUESTION, startLine, startColumn, startPos, position);
                 }
             }
             case '(' -> {
                 advance();
-                yield new Token(TokenType.LPAREN, "(", startLine, startColumn, startPos);
+                yield new Token(TokenType.LPAREN, startLine, startColumn, startPos, position);
             }
             case ')' -> {
                 advance();
-                yield new Token(TokenType.RPAREN, ")", startLine, startColumn, startPos);
+                yield new Token(TokenType.RPAREN, startLine, startColumn, startPos, position);
             }
             case '{' -> {
                 advance();
-                yield new Token(TokenType.LBRACE, "{", startLine, startColumn, startPos);
+                yield new Token(TokenType.LBRACE, startLine, startColumn, startPos, position);
             }
             case '}' -> {
                 advance();
-                yield new Token(TokenType.RBRACE, "}", startLine, startColumn, startPos);
+                yield new Token(TokenType.RBRACE, startLine, startColumn, startPos, position);
             }
             case '[' -> {
                 advance();
-                yield new Token(TokenType.LBRACKET, "[", startLine, startColumn, startPos);
+                yield new Token(TokenType.LBRACKET, startLine, startColumn, startPos, position);
             }
             case ']' -> {
                 advance();
-                yield new Token(TokenType.RBRACKET, "]", startLine, startColumn, startPos);
+                yield new Token(TokenType.RBRACKET, startLine, startColumn, startPos, position);
             }
             case '.' -> {
                 // Check if it's a number like .5 or just a dot
@@ -356,19 +444,19 @@ public class Lexer {
                 advance();
                 // Check for ... (spread/rest)
                 if (match('.') && match('.')) {
-                    yield new Token(TokenType.DOT_DOT_DOT, "...", startLine, startColumn, startPos);
+                    yield new Token(TokenType.DOT_DOT_DOT, startLine, startColumn, startPos, position);
                 }
-                yield new Token(TokenType.DOT, ".", startLine, startColumn, startPos);
+                yield new Token(TokenType.DOT, startLine, startColumn, startPos, position);
             }
             case '+' -> {
                 advance();
                 if (match('+')) {
-                    yield new Token(TokenType.INCREMENT, "++", startLine, startColumn, startPos);
+                    yield new Token(TokenType.INCREMENT, startLine, startColumn, startPos, position);
                 }
                 if (match('=')) {
-                    yield new Token(TokenType.PLUS_ASSIGN, "+=", startLine, startColumn, startPos);
+                    yield new Token(TokenType.PLUS_ASSIGN, startLine, startColumn, startPos, position);
                 }
-                yield new Token(TokenType.PLUS, "+", startLine, startColumn, startPos);
+                yield new Token(TokenType.PLUS, startLine, startColumn, startPos, position);
             }
             case '-' -> {
                 advance();
@@ -382,24 +470,24 @@ public class Lexer {
                         }
                         yield null; // Skip the comment
                     }
-                    yield new Token(TokenType.DECREMENT, "--", startLine, startColumn, startPos);
+                    yield new Token(TokenType.DECREMENT, startLine, startColumn, startPos, position);
                 }
                 if (match('=')) {
-                    yield new Token(TokenType.MINUS_ASSIGN, "-=", startLine, startColumn, startPos);
+                    yield new Token(TokenType.MINUS_ASSIGN, startLine, startColumn, startPos, position);
                 }
-                yield new Token(TokenType.MINUS, "-", startLine, startColumn, startPos);
+                yield new Token(TokenType.MINUS, startLine, startColumn, startPos, position);
             }
             case '*' -> {
                 advance();
                 if (match('*')) {
                     if (match('=')) {
-                        yield new Token(TokenType.STAR_STAR_ASSIGN, "**=", startLine, startColumn, startPos);
+                        yield new Token(TokenType.STAR_STAR_ASSIGN, startLine, startColumn, startPos, position);
                     }
-                    yield new Token(TokenType.STAR_STAR, "**", startLine, startColumn, startPos);
+                    yield new Token(TokenType.STAR_STAR, startLine, startColumn, startPos, position);
                 } else if (match('=')) {
-                    yield new Token(TokenType.STAR_ASSIGN, "*=", startLine, startColumn, startPos);
+                    yield new Token(TokenType.STAR_ASSIGN, startLine, startColumn, startPos, position);
                 }
-                yield new Token(TokenType.STAR, "*", startLine, startColumn, startPos);
+                yield new Token(TokenType.STAR, startLine, startColumn, startPos, position);
             }
             case '/' -> {
                 // Peek ahead to check if it's a comment or regex
@@ -461,44 +549,44 @@ public class Lexer {
                 } else {
                     advance();
                     if (match('=')) {
-                        yield new Token(TokenType.SLASH_ASSIGN, "/=", startLine, startColumn, startPos);
+                        yield new Token(TokenType.SLASH_ASSIGN, startLine, startColumn, startPos, position);
                     }
-                    yield new Token(TokenType.SLASH, "/", startLine, startColumn, startPos);
+                    yield new Token(TokenType.SLASH, startLine, startColumn, startPos, position);
                 }
             }
             case '%' -> {
                 advance();
                 if (match('=')) {
-                    yield new Token(TokenType.PERCENT_ASSIGN, "%=", startLine, startColumn, startPos);
+                    yield new Token(TokenType.PERCENT_ASSIGN, startLine, startColumn, startPos, position);
                 }
-                yield new Token(TokenType.PERCENT, "%", startLine, startColumn, startPos);
+                yield new Token(TokenType.PERCENT, startLine, startColumn, startPos, position);
             }
             case '=' -> {
                 advance();
                 if (match('>')) {
-                    yield new Token(TokenType.ARROW, "=>", startLine, startColumn, startPos);
+                    yield new Token(TokenType.ARROW, startLine, startColumn, startPos, position);
                 }
                 if (match('=')) {
                     if (match('=')) {
-                        yield new Token(TokenType.EQ_STRICT, "===", startLine, startColumn, startPos);
+                        yield new Token(TokenType.EQ_STRICT, startLine, startColumn, startPos, position);
                     }
-                    yield new Token(TokenType.EQ, "==", startLine, startColumn, startPos);
+                    yield new Token(TokenType.EQ, startLine, startColumn, startPos, position);
                 }
-                yield new Token(TokenType.ASSIGN, "=", startLine, startColumn, startPos);
+                yield new Token(TokenType.ASSIGN, startLine, startColumn, startPos, position);
             }
             case '!' -> {
                 advance();
                 if (match('=')) {
                     if (match('=')) {
-                        yield new Token(TokenType.NE_STRICT, "!==", startLine, startColumn, startPos);
+                        yield new Token(TokenType.NE_STRICT, startLine, startColumn, startPos, position);
                     }
-                    yield new Token(TokenType.NE, "!=", startLine, startColumn, startPos);
+                    yield new Token(TokenType.NE, startLine, startColumn, startPos, position);
                 }
-                yield new Token(TokenType.BANG, "!", startLine, startColumn, startPos);
+                yield new Token(TokenType.BANG, startLine, startColumn, startPos, position);
             }
             case '~' -> {
                 advance();
-                yield new Token(TokenType.TILDE, "~", startLine, startColumn, startPos);
+                yield new Token(TokenType.TILDE, startLine, startColumn, startPos, position);
             }
             case '<' -> {
                 advance();
@@ -518,66 +606,66 @@ public class Lexer {
                 }
                 if (match('<')) {
                     if (match('=')) {
-                        yield new Token(TokenType.LEFT_SHIFT_ASSIGN, "<<=", startLine, startColumn, startPos);
+                        yield new Token(TokenType.LEFT_SHIFT_ASSIGN, startLine, startColumn, startPos, position);
                     }
-                    yield new Token(TokenType.LEFT_SHIFT, "<<", startLine, startColumn, startPos);
+                    yield new Token(TokenType.LEFT_SHIFT, startLine, startColumn, startPos, position);
                 }
                 if (match('=')) {
-                    yield new Token(TokenType.LE, "<=", startLine, startColumn, startPos);
+                    yield new Token(TokenType.LE, startLine, startColumn, startPos, position);
                 }
-                yield new Token(TokenType.LT, "<", startLine, startColumn, startPos);
+                yield new Token(TokenType.LT, startLine, startColumn, startPos, position);
             }
             case '>' -> {
                 advance();
                 if (match('>')) {
                     if (match('>')) {
                         if (match('=')) {
-                            yield new Token(TokenType.UNSIGNED_RIGHT_SHIFT_ASSIGN, ">>>=", startLine, startColumn, startPos);
+                            yield new Token(TokenType.UNSIGNED_RIGHT_SHIFT_ASSIGN, startLine, startColumn, startPos, position);
                         }
-                        yield new Token(TokenType.UNSIGNED_RIGHT_SHIFT, ">>>", startLine, startColumn, startPos);
+                        yield new Token(TokenType.UNSIGNED_RIGHT_SHIFT, startLine, startColumn, startPos, position);
                     }
                     if (match('=')) {
-                        yield new Token(TokenType.RIGHT_SHIFT_ASSIGN, ">>=", startLine, startColumn, startPos);
+                        yield new Token(TokenType.RIGHT_SHIFT_ASSIGN, startLine, startColumn, startPos, position);
                     }
-                    yield new Token(TokenType.RIGHT_SHIFT, ">>", startLine, startColumn, startPos);
+                    yield new Token(TokenType.RIGHT_SHIFT, startLine, startColumn, startPos, position);
                 }
                 if (match('=')) {
-                    yield new Token(TokenType.GE, ">=", startLine, startColumn, startPos);
+                    yield new Token(TokenType.GE, startLine, startColumn, startPos, position);
                 }
-                yield new Token(TokenType.GT, ">", startLine, startColumn, startPos);
+                yield new Token(TokenType.GT, startLine, startColumn, startPos, position);
             }
             case '&' -> {
                 advance();
                 if (match('&')) {
                     if (match('=')) {
-                        yield new Token(TokenType.AND_ASSIGN, "&&=", startLine, startColumn, startPos);
+                        yield new Token(TokenType.AND_ASSIGN, startLine, startColumn, startPos, position);
                     }
-                    yield new Token(TokenType.AND, "&&", startLine, startColumn, startPos);
+                    yield new Token(TokenType.AND, startLine, startColumn, startPos, position);
                 }
                 if (match('=')) {
-                    yield new Token(TokenType.BIT_AND_ASSIGN, "&=", startLine, startColumn, startPos);
+                    yield new Token(TokenType.BIT_AND_ASSIGN, startLine, startColumn, startPos, position);
                 }
-                yield new Token(TokenType.BIT_AND, "&", startLine, startColumn, startPos);
+                yield new Token(TokenType.BIT_AND, startLine, startColumn, startPos, position);
             }
             case '|' -> {
                 advance();
                 if (match('|')) {
                     if (match('=')) {
-                        yield new Token(TokenType.OR_ASSIGN, "||=", startLine, startColumn, startPos);
+                        yield new Token(TokenType.OR_ASSIGN, startLine, startColumn, startPos, position);
                     }
-                    yield new Token(TokenType.OR, "||", startLine, startColumn, startPos);
+                    yield new Token(TokenType.OR, startLine, startColumn, startPos, position);
                 }
                 if (match('=')) {
-                    yield new Token(TokenType.BIT_OR_ASSIGN, "|=", startLine, startColumn, startPos);
+                    yield new Token(TokenType.BIT_OR_ASSIGN, startLine, startColumn, startPos, position);
                 }
-                yield new Token(TokenType.BIT_OR, "|", startLine, startColumn, startPos);
+                yield new Token(TokenType.BIT_OR, startLine, startColumn, startPos, position);
             }
             case '^' -> {
                 advance();
                 if (match('=')) {
-                    yield new Token(TokenType.BIT_XOR_ASSIGN, "^=", startLine, startColumn, startPos);
+                    yield new Token(TokenType.BIT_XOR_ASSIGN, startLine, startColumn, startPos, position);
                 }
-                yield new Token(TokenType.BIT_XOR, "^", startLine, startColumn, startPos);
+                yield new Token(TokenType.BIT_XOR, startLine, startColumn, startPos, position);
             }
             case '"', '\'' -> scanString(startLine, startColumn, startPos);
             case '`' -> scanTemplateLiteral(startLine, startColumn, startPos);
@@ -747,7 +835,7 @@ public class Lexer {
 
         advance(); // closing quote
         String lexeme = source.substring(startPos, position);
-        return new Token(TokenType.STRING, lexeme, value.toString(), startLine, startColumn, startPos);
+        return new Token(TokenType.STRING, value.toString(), startLine, startColumn, startPos, position);
     }
 
     private Token scanNumber(int startLine, int startColumn, int startPos) {
@@ -765,7 +853,7 @@ public class Lexer {
             if (peek() == 'n') {
                 advance();
                 String bigintLexeme = source.substring(startPos, position);
-                return new Token(TokenType.NUMBER, bigintLexeme, "0x" + hexPart + "n", startLine, startColumn, startPos);
+                return new Token(TokenType.NUMBER, "0x" + hexPart + "n", startLine, startColumn, startPos, position);
             }
 
             Object literal;
@@ -789,7 +877,7 @@ public class Lexer {
                     literal = bi.doubleValue();
                 }
             }
-            return new Token(TokenType.NUMBER, lexeme, literal, startLine, startColumn, startPos);
+            return new Token(TokenType.NUMBER, literal, startLine, startColumn, startPos, position);
         } else if (peek() == '0' && (peekNext() == 'o' || peekNext() == 'O')) {
             advance(); // consume 0
             advance(); // consume o
@@ -803,7 +891,7 @@ public class Lexer {
             if (peek() == 'n') {
                 advance();
                 String bigintLexeme = source.substring(startPos, position);
-                return new Token(TokenType.NUMBER, bigintLexeme, "0o" + octalPart + "n", startLine, startColumn, startPos);
+                return new Token(TokenType.NUMBER, "0o" + octalPart + "n", startLine, startColumn, startPos, position);
             }
 
             Object literal;
@@ -824,7 +912,7 @@ public class Lexer {
                     literal = bi.doubleValue();
                 }
             }
-            return new Token(TokenType.NUMBER, lexeme, literal, startLine, startColumn, startPos);
+            return new Token(TokenType.NUMBER, literal, startLine, startColumn, startPos, position);
         } else if (peek() == '0' && peekNext() >= '0' && peekNext() <= '9' && peekNext() != '.') {
             // Could be legacy octal (00-07) or NonOctalDecimalIntegerLiteral (08, 09, etc.)
             advance(); // consume initial 0
@@ -865,7 +953,7 @@ public class Lexer {
                     }
                 }
             }
-            return new Token(TokenType.NUMBER, lexeme, literal, startLine, startColumn, startPos);
+            return new Token(TokenType.NUMBER, literal, startLine, startColumn, startPos, position);
         } else if (peek() == '0' && (peekNext() == 'b' || peekNext() == 'B')) {
             advance(); // consume 0
             advance(); // consume b
@@ -879,7 +967,7 @@ public class Lexer {
             if (peek() == 'n') {
                 advance();
                 String bigintLexeme = source.substring(startPos, position);
-                return new Token(TokenType.NUMBER, bigintLexeme, "0b" + binaryPart + "n", startLine, startColumn, startPos);
+                return new Token(TokenType.NUMBER, "0b" + binaryPart + "n", startLine, startColumn, startPos, position);
             }
 
             Object literal;
@@ -900,7 +988,7 @@ public class Lexer {
                     literal = bi.doubleValue();
                 }
             }
-            return new Token(TokenType.NUMBER, lexeme, literal, startLine, startColumn, startPos);
+            return new Token(TokenType.NUMBER, literal, startLine, startColumn, startPos, position);
         }
 
         // Regular decimal number
@@ -998,10 +1086,10 @@ public class Lexer {
             String bigintLexeme = source.substring(startPos, position);
             // For BigInt, keep the value as a string (remove underscores but keep the number)
             // The AST can represent it as a string since Java doesn't have native BigInt
-            return new Token(TokenType.NUMBER, bigintLexeme, numberStr + "n", startLine, startColumn, startPos);
+            return new Token(TokenType.NUMBER, numberStr + "n", startLine, startColumn, startPos, position);
         }
 
-        return new Token(TokenType.NUMBER, lexeme, literal, startLine, startColumn, startPos);
+        return new Token(TokenType.NUMBER, literal, startLine, startColumn, startPos, position);
     }
 
     private Token scanIdentifier(int startLine, int startColumn, int startPos) {
@@ -1024,17 +1112,17 @@ public class Lexer {
                 }
 
                 // Pure ASCII identifier - fast path complete!
-                String identifierName = new String(buf, startPos, asciiEnd - startPos);
+                int len = asciiEnd - startPos;
                 int consumed = asciiEnd - position;
                 position = asciiEnd;
                 column += consumed;
 
-                // Keyword lookup
-                TokenType type = lookupKeyword(identifierName);
+                // Direct keyword lookup - no string allocation for keywords!
+                TokenType type = lookupKeywordDirect(buf, startPos, len);
                 Object literal = literalForKeyword(type);
 
                 int endColumn = startColumn + consumed;
-                return new Token(type, identifierName, literal, startLine, startColumn, startPos, position, startLine, endColumn, null);
+                return new Token(type, literal, startLine, startColumn, startPos, position, startLine, endColumn, null);
             }
         }
 
@@ -1110,6 +1198,136 @@ public class Lexer {
         };
     }
 
+    // Direct char[] keyword lookup - avoids String allocation
+    private TokenType lookupKeywordDirect(char[] buf, int start, int len) {
+        if (len < 2 || len > 10) return TokenType.IDENTIFIER;
+        char first = buf[start];
+        return switch (first) {
+            case 'b' -> len == 5 && match(buf, start, "break") ? TokenType.BREAK : TokenType.IDENTIFIER;
+            case 'c' -> lookupC(buf, start, len);
+            case 'd' -> lookupD(buf, start, len);
+            case 'e' -> lookupE(buf, start, len);
+            case 'f' -> lookupF(buf, start, len);
+            case 'i' -> lookupI(buf, start, len);
+            case 'l' -> len == 3 && match(buf, start, "let") ? TokenType.LET : TokenType.IDENTIFIER;
+            case 'n' -> lookupN(buf, start, len);
+            case 'r' -> len == 6 && match(buf, start, "return") ? TokenType.RETURN : TokenType.IDENTIFIER;
+            case 's' -> lookupS(buf, start, len);
+            case 't' -> lookupT(buf, start, len);
+            case 'v' -> lookupV(buf, start, len);
+            case 'w' -> lookupW(buf, start, len);
+            default -> TokenType.IDENTIFIER;
+        };
+    }
+
+    private static boolean match(char[] buf, int start, String keyword) {
+        for (int i = 0; i < keyword.length(); i++) {
+            if (buf[start + i] != keyword.charAt(i)) return false;
+        }
+        return true;
+    }
+
+    private TokenType lookupC(char[] buf, int start, int len) {
+        return switch (len) {
+            case 4 -> match(buf, start, "case") ? TokenType.CASE : TokenType.IDENTIFIER;
+            case 5 -> {
+                if (buf[start + 1] == 'a' && match(buf, start, "catch")) yield TokenType.CATCH;
+                if (buf[start + 1] == 'l' && match(buf, start, "class")) yield TokenType.CLASS;
+                if (buf[start + 1] == 'o' && match(buf, start, "const")) yield TokenType.CONST;
+                yield TokenType.IDENTIFIER;
+            }
+            case 8 -> match(buf, start, "continue") ? TokenType.CONTINUE : TokenType.IDENTIFIER;
+            default -> TokenType.IDENTIFIER;
+        };
+    }
+
+    private TokenType lookupD(char[] buf, int start, int len) {
+        return switch (len) {
+            case 2 -> match(buf, start, "do") ? TokenType.DO : TokenType.IDENTIFIER;
+            case 6 -> match(buf, start, "delete") ? TokenType.DELETE : TokenType.IDENTIFIER;
+            case 7 -> match(buf, start, "default") ? TokenType.DEFAULT : TokenType.IDENTIFIER;
+            case 8 -> match(buf, start, "debugger") ? TokenType.DEBUGGER : TokenType.IDENTIFIER;
+            default -> TokenType.IDENTIFIER;
+        };
+    }
+
+    private TokenType lookupE(char[] buf, int start, int len) {
+        return switch (len) {
+            case 4 -> match(buf, start, "else") ? TokenType.ELSE : TokenType.IDENTIFIER;
+            case 6 -> match(buf, start, "export") ? TokenType.EXPORT : TokenType.IDENTIFIER;
+            default -> TokenType.IDENTIFIER;
+        };
+    }
+
+    private TokenType lookupF(char[] buf, int start, int len) {
+        return switch (len) {
+            case 3 -> match(buf, start, "for") ? TokenType.FOR : TokenType.IDENTIFIER;
+            case 5 -> match(buf, start, "false") ? TokenType.FALSE : TokenType.IDENTIFIER;
+            case 7 -> match(buf, start, "finally") ? TokenType.FINALLY : TokenType.IDENTIFIER;
+            case 8 -> match(buf, start, "function") ? TokenType.FUNCTION : TokenType.IDENTIFIER;
+            default -> TokenType.IDENTIFIER;
+        };
+    }
+
+    private TokenType lookupI(char[] buf, int start, int len) {
+        return switch (len) {
+            case 2 -> {
+                if (buf[start + 1] == 'f') yield TokenType.IF;
+                if (buf[start + 1] == 'n') yield TokenType.IN;
+                yield TokenType.IDENTIFIER;
+            }
+            case 6 -> match(buf, start, "import") ? TokenType.IMPORT : TokenType.IDENTIFIER;
+            case 10 -> match(buf, start, "instanceof") ? TokenType.INSTANCEOF : TokenType.IDENTIFIER;
+            default -> TokenType.IDENTIFIER;
+        };
+    }
+
+    private TokenType lookupN(char[] buf, int start, int len) {
+        return switch (len) {
+            case 3 -> match(buf, start, "new") ? TokenType.NEW : TokenType.IDENTIFIER;
+            case 4 -> match(buf, start, "null") ? TokenType.NULL : TokenType.IDENTIFIER;
+            default -> TokenType.IDENTIFIER;
+        };
+    }
+
+    private TokenType lookupS(char[] buf, int start, int len) {
+        return switch (len) {
+            case 5 -> match(buf, start, "super") ? TokenType.SUPER : TokenType.IDENTIFIER;
+            case 6 -> match(buf, start, "switch") ? TokenType.SWITCH : TokenType.IDENTIFIER;
+            default -> TokenType.IDENTIFIER;
+        };
+    }
+
+    private TokenType lookupT(char[] buf, int start, int len) {
+        return switch (len) {
+            case 3 -> match(buf, start, "try") ? TokenType.TRY : TokenType.IDENTIFIER;
+            case 4 -> {
+                if (buf[start + 1] == 'r' && match(buf, start, "true")) yield TokenType.TRUE;
+                if (buf[start + 1] == 'h' && match(buf, start, "this")) yield TokenType.THIS;
+                yield TokenType.IDENTIFIER;
+            }
+            case 5 -> match(buf, start, "throw") ? TokenType.THROW : TokenType.IDENTIFIER;
+            case 6 -> match(buf, start, "typeof") ? TokenType.TYPEOF : TokenType.IDENTIFIER;
+            default -> TokenType.IDENTIFIER;
+        };
+    }
+
+    private TokenType lookupV(char[] buf, int start, int len) {
+        return switch (len) {
+            case 3 -> match(buf, start, "var") ? TokenType.VAR : TokenType.IDENTIFIER;
+            case 4 -> match(buf, start, "void") ? TokenType.VOID : TokenType.IDENTIFIER;
+            default -> TokenType.IDENTIFIER;
+        };
+    }
+
+    private TokenType lookupW(char[] buf, int start, int len) {
+        return switch (len) {
+            case 4 -> match(buf, start, "with") ? TokenType.WITH : TokenType.IDENTIFIER;
+            case 5 -> match(buf, start, "while") ? TokenType.WHILE : TokenType.IDENTIFIER;
+            default -> TokenType.IDENTIFIER;
+        };
+    }
+
     private Object literalForKeyword(TokenType type) {
         return switch (type) {
             case TRUE -> true;
@@ -1147,11 +1365,12 @@ public class Lexer {
 
         String identifierName = actualName.toString();
         TokenType type = hasEscapes ? TokenType.IDENTIFIER : lookupKeyword(identifierName);
-        Object literal = literalForKeyword(type);
+        // For identifiers with escapes, store the resolved name; for keywords, store the literal value
+        Object literal = (type == TokenType.IDENTIFIER && hasEscapes) ? identifierName : literalForKeyword(type);
 
         int rawLength = position - startPos;
         int endColumn = startColumn + rawLength;
-        return new Token(type, identifierName, literal, startLine, startColumn, startPos, position, startLine, endColumn, null);
+        return new Token(type, literal, startLine, startColumn, startPos, position, startLine, endColumn, null);
     }
 
     // Original full scanning for when first char is escape/unicode
@@ -1191,11 +1410,12 @@ public class Lexer {
 
         String identifierName = actualName.toString();
         TokenType type = hasEscapes ? TokenType.IDENTIFIER : lookupKeyword(identifierName);
-        Object literal = literalForKeyword(type);
+        // For identifiers with escapes, store the resolved name; for keywords, store the literal value
+        Object literal = (type == TokenType.IDENTIFIER && hasEscapes) ? identifierName : literalForKeyword(type);
 
         int rawLength = position - startPos;
         int endColumn = startColumn + rawLength;
-        return new Token(type, identifierName, literal, startLine, startColumn, startPos, position, startLine, endColumn, null);
+        return new Token(type, literal, startLine, startColumn, startPos, position, startLine, endColumn, null);
     }
 
     private String scanUnicodeEscape() {
@@ -1302,7 +1522,6 @@ public class Lexer {
             flags.append(advance());
         }
 
-        String lexeme = source.substring(startPos, position);
         String patternStr = pattern.toString();
         String flagsStr = flags.toString();
 
@@ -1313,7 +1532,7 @@ public class Lexer {
         );
 
         // Return token with regex info in literal
-        return new Token(TokenType.REGEX, lexeme,
+        return new Token(TokenType.REGEX,
             new Literal.RegexInfo(patternStr, flagsStr),
             startLine, startColumn, startPos, position);
     }
@@ -1352,7 +1571,11 @@ public class Lexer {
         return token;
     }
 
-    private void skipWhitespace() {
+    /**
+     * Skip whitespace and comments.
+     * Public for TokenStream to call before each token.
+     */
+    public void skipWhitespace() {
         while (!isAtEnd()) {
             char c = peek();
             // ECMAScript whitespace characters:
@@ -1416,7 +1639,11 @@ public class Lexer {
         return buf[position++];
     }
 
-    private boolean isAtEnd() {
+    /**
+     * Check if we've reached end of source.
+     * Public for TokenStream.
+     */
+    public boolean isAtEnd() {
         return position >= length;
     }
 
@@ -1475,7 +1702,11 @@ public class Lexer {
         return scanTemplateChars(startLine, startColumn, startPos, true);
     }
 
-    private Token scanTemplateContinuation() {
+    /**
+     * Scan template continuation after closing } of interpolation.
+     * Public for TokenStream.
+     */
+    public Token scanTemplateContinuation() {
         int startLine = line;
         int startColumn = column;
         int startPos = position;
@@ -1510,13 +1741,11 @@ public class Lexer {
 
                 // For tagged templates with invalid escapes, cooked should be null
                 String cookedValue = hasInvalidEscape ? null : cooked.toString();
-                // Lexeme should be the actual source text from startPos to current position
-                String lexeme = source.substring(startPos, position);
                 // Raw value is the processed string with normalized line continuations
                 String rawValue = raw.toString();
                 // endPosition should be current position (after the closing `)
                 // Use current line/column as endLine/endColumn since we've advanced past the `
-                return new Token(type, lexeme, cookedValue, startLine, startColumn, startPos, position, line, column, rawValue);
+                return new Token(type, cookedValue, startLine, startColumn, startPos, position, line, column, rawValue);
             } else if (c == '$' && peekNext() == '{') {
                 // Start of interpolation
                 advance(); // consume $
@@ -1532,13 +1761,11 @@ public class Lexer {
 
                 // For tagged templates with invalid escapes, cooked should be null
                 String cookedValue = hasInvalidEscape ? null : cooked.toString();
-                // Lexeme should be the actual source text from startPos to current position
-                String lexeme = source.substring(startPos, position);
                 // Raw value is the processed string with normalized line continuations
                 String rawValue = raw.toString();
                 // endPosition should be current position (after the ${)
                 // Use current line/column as endLine/endColumn since we've advanced past the ${
-                return new Token(type, lexeme, cookedValue, startLine, startColumn, startPos, position, line, column, rawValue);
+                return new Token(type, cookedValue, startLine, startColumn, startPos, position, line, column, rawValue);
             } else if (c == '\\') {
                 // Escape sequence
                 raw.append(c);

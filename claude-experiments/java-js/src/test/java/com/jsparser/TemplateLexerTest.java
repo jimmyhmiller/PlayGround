@@ -22,7 +22,7 @@ public class TemplateLexerTest {
             System.out.println(token.type() + " at " + token.position() +
                 "-" + token.endPosition() +
                 " (line=" + token.line() + ", col=" + token.column() + "): " +
-                "lexeme=" + token.lexeme() +
+                "lexeme=" + token.lexeme(source.toCharArray()) +
                 ", literal=" + token.literal());
         }
     }

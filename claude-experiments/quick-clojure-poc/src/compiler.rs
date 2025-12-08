@@ -259,7 +259,7 @@ impl Compiler {
 
     /// Check if a symbol is a built-in function
     fn is_builtin(&self, name: &str) -> bool {
-        matches!(name, "+" | "-" | "*" | "/" | "<" | ">" | "=")
+        matches!(name, "+" | "-" | "*" | "/" | "<" | ">" | "=" | "__gc")
     }
 
     /// Compile (var symbol) - returns the Var object itself, not its value
@@ -889,14 +889,29 @@ impl Compiler {
         // Store the function IR for display purposes (before compiling)
         self.compiled_function_irs.push((name.clone(), fn_instructions.clone()));
 
-        let code_ptr = Arm64CodeGen::compile_function(&fn_instructions)?;
+        let num_params = arity.params.len();
+        let compiled = Arm64CodeGen::compile_function(&fn_instructions, num_params)?;
 
-        // Step 5: Restore the outer IR builder
+        // Step 5: Register stack map with runtime for GC
+        // SAFETY: We have exclusive access during compilation
+        unsafe {
+            let rt = &mut *self.runtime.get();
+            for (pc, stack_size) in &compiled.stack_map {
+                rt.add_stack_map_entry(*pc, crate::gc::StackMapDetails {
+                    function_name: name.clone(),
+                    number_of_locals: compiled.num_locals,
+                    current_stack_size: *stack_size,
+                    max_stack_size: compiled.max_stack_size,
+                });
+            }
+        }
+
+        // Step 6: Restore the outer IR builder
         self.builder = outer_builder;
 
-        // Step 6: Create function object with closure values and the compiled code pointer
+        // Step 7: Create function object with closure values and the compiled code pointer
         let fn_obj_reg = self.builder.new_register();
-        self.builder.emit(Instruction::MakeFunctionPtr(fn_obj_reg, code_ptr, closure_values));
+        self.builder.emit(Instruction::MakeFunctionPtr(fn_obj_reg, compiled.code_ptr, closure_values));
 
         Ok(fn_obj_reg)
     }
@@ -1126,6 +1141,7 @@ impl Compiler {
                     "<" => self.compile_builtin_lt(args),
                     ">" => self.compile_builtin_gt(args),
                     "=" => self.compile_builtin_eq(args),
+                    "__gc" => self.compile_builtin_gc(args),
                     _ => unreachable!(),
                 };
             }
@@ -1297,6 +1313,14 @@ impl Compiler {
         self.builder.emit(Instruction::Compare(result, left, right, Condition::Equal));
 
         // Compare returns properly tagged boolean (3 or 11)
+        Ok(result)
+    }
+
+    fn compile_builtin_gc(&mut self, _args: &[Expr]) -> Result<IrValue, String> {
+        // __gc takes no arguments and returns nil
+        // The CallGC instruction will call trampoline_gc with the current frame pointer
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::CallGC(result));
         Ok(result)
     }
 

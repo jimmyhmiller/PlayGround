@@ -29,7 +29,7 @@ public class TestTemplateTokens {
             Token token = tokens.get(i);
             System.out.printf("%2d. %-20s line=%d col=%d pos=%d lexeme='%s'%n",
                     i, token.type(), token.line(), token.column(), token.position(),
-                    token.lexeme().replace("\n", "\\n"));
+                    token.lexeme(source.toCharArray()).replace("\n", "\\n"));
         }
     }
 }

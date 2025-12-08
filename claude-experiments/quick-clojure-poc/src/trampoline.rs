@@ -9,6 +9,7 @@
 /// Based on Beagle's trampoline implementation
 
 use std::alloc::{dealloc, Layout};
+use std::arch::asm;
 use crate::gc_runtime::GCRuntime;
 use std::cell::UnsafeCell;
 use std::sync::Arc;
@@ -16,6 +17,17 @@ use std::sync::Arc;
 // Global runtime reference (set during initialization)
 // SAFETY: Must be initialized before any JIT code runs
 static mut RUNTIME: Option<Arc<UnsafeCell<GCRuntime>>> = None;
+
+/// Get the current frame pointer (x29) for GC stack walking
+/// This is used by allocation trampolines when gc_always is enabled
+#[inline(always)]
+fn get_frame_pointer() -> usize {
+    let fp: usize;
+    unsafe {
+        asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
+    }
+    fp
+}
 
 /// Set the global runtime reference for trampolines
 ///
@@ -98,6 +110,21 @@ pub extern "C" fn trampoline_set_binding(var_ptr: usize, value: usize) -> usize 
     }
 }
 
+/// Trampoline: Force garbage collection
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = stack_pointer (current frame pointer / x29)
+/// - Returns: x0 = nil (0b111)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_gc(stack_pointer: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        rt.gc(stack_pointer);
+        7 // nil
+    }
+}
+
 /// Trampoline: Allocate function object
 ///
 /// ARM64 Calling Convention:
@@ -115,6 +142,9 @@ pub extern "C" fn trampoline_allocate_function(
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // GC before allocation if gc_always is enabled
+        rt.maybe_gc_before_alloc(get_frame_pointer());
 
         // Get function name if provided
         let name = if name_ptr != 0 {
@@ -199,6 +229,9 @@ pub extern "C" fn trampoline_allocate_type(
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // GC before allocation if gc_always is enabled
+        rt.maybe_gc_before_alloc(get_frame_pointer());
 
         // Read field values from the pointer
         let field_values = if field_count > 0 {
@@ -303,23 +336,24 @@ impl Trampoline {
 
         trampoline.allocate_code();
 
-        // Skip stack allocation for now - we're not using it
-        // trampoline.allocate_stack();
+        trampoline.allocate_stack();
 
         trampoline
     }
 
     fn generate_trampoline(&mut self) {
         // Trampoline: fn(stack_ptr: u64, jit_fn: u64) -> u64
-        // x0 = ignored, x1 = JIT function pointer
+        // x0 = JIT stack pointer (top of allocated region), x1 = JIT function pointer
         // Must save ALL callee-saved registers (x19-x28, x29, x30)
         // ARM64 ABI requires these to be preserved across function calls
+        //
+        // This trampoline switches to a dedicated JIT stack so GC can scan it.
 
-        // Save frame pointer and link register
+        // Save frame pointer and link register on ORIGINAL stack
         // stp x29, x30, [sp, #-16]!
         self.code.push(0xa9bf7bfd);
 
-        // Save callee-saved registers x19-x28 (5 pairs = 80 bytes)
+        // Save callee-saved registers x19-x28 on ORIGINAL stack (5 pairs = 80 bytes)
         // stp x27, x28, [sp, #-16]!
         self.code.push(0xa9bf77fc);
         // stp x25, x26, [sp, #-16]!
@@ -331,7 +365,15 @@ impl Trampoline {
         // stp x19, x20, [sp, #-16]!
         self.code.push(0xa9bf57f4);
 
-        // Set up frame pointer
+        // Save original SP to x20 (which is now safely saved to the stack)
+        // mov x20, sp  (alias for: add x20, sp, #0)
+        self.code.push(0x910003f4);
+
+        // Switch to JIT stack (x0 contains stack_ptr - top of JIT stack)
+        // mov sp, x0  (alias for: add sp, x0, #0)
+        self.code.push(0x9100001f);
+
+        // Set up frame pointer on JIT stack
         // mov x29, sp
         self.code.push(0x910003fd);
 
@@ -339,7 +381,11 @@ impl Trampoline {
         // blr x1
         self.code.push(0xd63f0020);
 
-        // Restore callee-saved registers x19-x28
+        // Switch back to original stack
+        // mov sp, x20  (alias for: add sp, x20, #0)
+        self.code.push(0x9100029f);
+
+        // Restore callee-saved registers x19-x28 from ORIGINAL stack
         // ldp x19, x20, [sp], #16
         self.code.push(0xa8c157f4);
         // ldp x21, x22, [sp], #16
@@ -408,6 +454,18 @@ impl Trampoline {
         }
     }
 
+    fn allocate_stack(&mut self) {
+        let layout = Layout::from_size_align(self.stack_size, 16).unwrap();
+        unsafe {
+            let stack_base = std::alloc::alloc(layout);
+            if stack_base.is_null() {
+                panic!("Failed to allocate JIT stack");
+            }
+            // Stack grows downward, so stack_ptr is at the TOP of the allocated region
+            self.stack_ptr = stack_base.add(self.stack_size);
+        }
+    }
+
     /// Allocate executable memory and copy code into it
     /// Returns the code pointer (executable memory address)
     pub fn execute_code(code: &[u32]) -> usize {
@@ -464,9 +522,19 @@ impl Trampoline {
     /// The jit_fn must be valid ARM64 code
     pub unsafe fn execute(&self, jit_fn: *const u8) -> i64 {
         unsafe {
+            // Set stack_base in runtime BEFORE executing JIT code
+            // This allows GC to scan the JIT stack for roots
+            let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+            if let Some(runtime) = &*runtime_ptr {
+                let rt = &mut *runtime.get();
+                // stack_ptr is the TOP of the allocated region (highest address)
+                // GC will scan from current frame pointer up to this address
+                rt.set_stack_base(self.stack_ptr as usize);
+            }
+
             let trampoline_fn: extern "C" fn(u64, u64) -> i64 =
                 std::mem::transmute(self.code_ptr);
-            trampoline_fn(0, jit_fn as u64)
+            trampoline_fn(self.stack_ptr as u64, jit_fn as u64)
         }
     }
 

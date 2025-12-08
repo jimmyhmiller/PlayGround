@@ -133,6 +133,9 @@ pub enum Instruction {
 
     // Return
     Ret(IrValue),
+
+    // GC
+    CallGC(IrValue),  // CallGC(dst) - force garbage collection, returns nil
 }
 
 /// IR builder - helps construct IR instructions

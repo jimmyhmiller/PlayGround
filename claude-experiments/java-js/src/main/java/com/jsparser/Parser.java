@@ -30,13 +30,11 @@ public class Parser {
     private static final int BP_UNARY = 16;         // Prefix unary (!, -, +, ~, typeof, void, delete, ++, --)
     private static final int BP_POSTFIX = 17;       // Postfix (x++, x--, call, member access, optional chaining)
 
-    private final List<Token> tokens;
+    private final TokenStream tokenStream;
     private final int sourceLength;
-    private final Lexer lexer;
     private final String source;
     private final char[] sourceBuf;
     private final int[] lineOffsets; // Starting byte offset of each line
-    private int current = 0;
     private boolean allowIn = true;
     private boolean inGenerator = false;
     private boolean inAsyncContext = false;
@@ -50,6 +48,12 @@ public class Parser {
     // Pratt parser context - tracks outer expression start for proper location
     private int exprStartPos = 0;
     private SourceLocation.Position exprStartLoc = null;
+
+    // Create an Identifier from a token
+    private Identifier createIdentifier(Token token) {
+        return new Identifier(getStart(token), getEnd(token), token.line(), token.column(),
+                token.endLine(), token.endColumn(), token.lexeme(sourceBuf));
+    }
 
     public Parser(String source) {
         this(source, false, false);
@@ -69,8 +73,8 @@ public class Parser {
         boolean initialStrictMode = forceModuleMode || forceStrictMode;
         this.strictMode = initialStrictMode;
 
-        this.lexer = new Lexer(source, initialStrictMode);
-        this.tokens = lexer.tokenize();
+        // Use lazy tokenization via TokenStream
+        this.tokenStream = new TokenStream(source, initialStrictMode);
         this.forceModuleMode = forceModuleMode;
         this.lineOffsets = buildLineOffsetIndex();
     }
@@ -222,7 +226,7 @@ public class Parser {
     private Statement parseIdentifierStatement(Token token) {
         // Check for async function declaration
         // No line terminator is allowed between async and function
-        if (token.lexeme().equals("async") && current + 1 < tokens.size() &&
+        if (token.lexeme(sourceBuf).equals("async") && current + 1 < tokens.size() &&
             tokens.get(current + 1).type() == TokenType.FUNCTION &&
             tokens.get(current).line() == tokens.get(current + 1).line()) {
             return parseFunctionDeclaration(true);
@@ -307,7 +311,7 @@ public class Parser {
 
         // Check for for-await-of: for await (...)
         boolean isAwait = false;
-        if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("await")) {
+        if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("await")) {
             advance(); // consume 'await'
             isAwait = true;
         }
@@ -332,12 +336,12 @@ public class Parser {
             boolean isDeclaration = check(TokenType.VAR) || check(TokenType.CONST) ||
                 (check(TokenType.LET) && !checkAhead(1, TokenType.IN) && !checkAhead(1, TokenType.SEMICOLON) &&
                  !checkAhead(1, TokenType.ASSIGN) &&
-                 !(checkAhead(1, TokenType.IDENTIFIER) && tokens.get(current + 1).lexeme().equals("of")));
+                 !(checkAhead(1, TokenType.IDENTIFIER) && tokens.get(current + 1).lexeme(sourceBuf).equals("of")));
 
             if (isDeclaration && match(TokenType.VAR, TokenType.LET, TokenType.CONST)) {
                 // Variable declaration - support destructuring patterns
                 kindToken = previous();
-                String kind = kindToken.lexeme();
+                String kind = kindToken.lexeme(sourceBuf);
                 List<VariableDeclarator> declarators = new ArrayList<>();
 
                 do {
@@ -373,7 +377,7 @@ public class Parser {
 
         // Check for for-in or for-of
         // Note: 'of' is a contextual keyword (IDENTIFIER token with lexeme "of")
-        boolean isOfKeyword = check(TokenType.IDENTIFIER) && peek().lexeme().equals("of");
+        boolean isOfKeyword = check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("of");
 
         if (check(TokenType.IN)) {
             advance(); // consume 'in'
@@ -517,7 +521,7 @@ public class Parser {
             breakToken.line() == peek().line()) {
             Token labelToken = peek();
             advance();
-            label = new Identifier(getStart(labelToken), getEnd(labelToken), labelToken.line(), labelToken.column(), labelToken.endLine(), labelToken.endColumn(), labelToken.lexeme());
+            label = createIdentifier(labelToken);
         }
 
         consumeSemicolon("Expected ';' after break statement");
@@ -537,7 +541,7 @@ public class Parser {
             continueToken.line() == peek().line()) {
             Token labelToken = peek();
             advance();
-            label = new Identifier(getStart(labelToken), getEnd(labelToken), labelToken.line(), labelToken.column(), labelToken.endLine(), labelToken.endColumn(), labelToken.lexeme());
+            label = createIdentifier(labelToken);
         }
 
         consumeSemicolon("Expected ';' after continue statement");
@@ -710,7 +714,7 @@ public class Parser {
         if (check(TokenType.IDENTIFIER) || check(TokenType.OF) || check(TokenType.LET)) {
             Token nameToken = peek();
             advance();
-            id = new Identifier(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
+            id = createIdentifier(nameToken);
         } else if (!allowAnonymous) {
             throw new ExpectedTokenException("function name", peek());
         }
@@ -789,17 +793,17 @@ public class Parser {
 
         // Parse class name (but not if it's 'extends' which starts the extends clause)
         Identifier id = null;
-        if (check(TokenType.IDENTIFIER) && !peek().lexeme().equals("extends")) {
+        if (check(TokenType.IDENTIFIER) && !peek().lexeme(sourceBuf).equals("extends")) {
             Token nameToken = peek();
             advance();
-            id = new Identifier(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
-        } else if (!allowAnonymous && !(check(TokenType.IDENTIFIER) && peek().lexeme().equals("extends"))) {
+            id = createIdentifier(nameToken);
+        } else if (!allowAnonymous && !(check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("extends"))) {
             throw new ExpectedTokenException("class name", peek());
         }
 
         // Check for extends
         Expression superClass = null;
-        if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("extends")) {
+        if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("extends")) {
             advance(); // consume 'extends'
             superClass = parseExpr(BP_TERNARY + 1); // Parse the superclass expression (can be any expression except assignment or ternary)
         }
@@ -829,7 +833,7 @@ public class Parser {
             boolean isStatic = false;
 
             // Check for 'static' keyword (but not if it's a method named "static" or field named "static")
-            if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("static")) {
+            if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("static")) {
                 // Look ahead to see if this is "static()" (method name), "static;" or "static =" (field name),
                 // or "static something" (modifier)
                 TokenType nextType = current + 1 < tokens.size() ? tokens.get(current + 1).type() : null;
@@ -861,7 +865,7 @@ public class Parser {
 
             // Check for 'async' keyword (but not if it's a method named "async")
             boolean isAsync = false;
-            if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("async")) {
+            if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("async")) {
                 // Look ahead to see if this is "async()" (method name) or "async something" (modifier)
                 if (current + 1 < tokens.size() && tokens.get(current + 1).type() != TokenType.LPAREN) {
                     advance();
@@ -871,7 +875,7 @@ public class Parser {
 
             // Check for getter/setter
             String kind = "method";
-            if (check(TokenType.IDENTIFIER) && (peek().lexeme().equals("get") || peek().lexeme().equals("set"))) {
+            if (check(TokenType.IDENTIFIER) && (peek().lexeme(sourceBuf).equals("get") || peek().lexeme(sourceBuf).equals("set"))) {
                 // Look ahead to see if this is "get()" / "set()" (method names) or "get something" / "set something" (accessor)
                 if (current + 1 < tokens.size()) {
                     Token currentToken = peek();
@@ -887,7 +891,7 @@ public class Parser {
                         boolean hasLineBreak = nextToken.line() > currentToken.line();
 
                         if (!hasLineBreak) {
-                            kind = peek().lexeme(); // "get" or "set"
+                            kind = peek().lexeme(sourceBuf); // "get" or "set"
                             advance(); // consume get/set keyword
                         }
                     }
@@ -921,7 +925,7 @@ public class Parser {
                 }
                 advance();
                 // PrivateIdentifier starts at #, but method/property start is memberStart (may include static)
-                key = new PrivateIdentifier(getStart(hashToken), getEnd(keyToken), hashToken.line(), hashToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.lexeme());
+                key = new PrivateIdentifier(getStart(hashToken), getEnd(keyToken), hashToken.line(), hashToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.lexeme(sourceBuf));
             } else if (match(TokenType.LBRACKET)) {
                 // Computed property name - allow 'in' operator inside
                 computed = true;
@@ -933,7 +937,7 @@ public class Parser {
             } else if (check(TokenType.STRING) || check(TokenType.NUMBER)) {
                 // Literal property name (string or number)
                 advance();
-                String keyLexeme = keyToken.lexeme();
+                String keyLexeme = keyToken.lexeme(sourceBuf);
 
                 // Check if this is a BigInt literal (ends with 'n')
                 if (keyLexeme.endsWith("n")) {
@@ -978,7 +982,7 @@ public class Parser {
                 advance(); // consume DOT
                 Token numToken = peek();
                 advance(); // consume NUMBER
-                String lexeme = "." + numToken.lexeme();
+                String lexeme = "." + numToken.lexeme(sourceBuf);
                 double value = Double.parseDouble(lexeme);
                 key = new Literal(getStart(dotToken), getEnd(numToken), dotToken.line(), dotToken.column(), numToken.endLine(), numToken.endColumn(), value, lexeme);
             } else if (check(TokenType.IDENTIFIER) || check(TokenType.GET) || check(TokenType.SET) ||
@@ -986,7 +990,7 @@ public class Parser {
                        isKeyword(peek())) {
                 // Regular identifier, get/set, keyword, or boolean/null literal as property name
                 advance();
-                key = new Identifier(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.lexeme());
+                key = createIdentifier(keyToken);
             } else {
                 throw new ExpectedTokenException("property name in class body", peek());
             }
@@ -1121,7 +1125,7 @@ public class Parser {
         // Check for import 'module' (side-effect import)
         if (check(TokenType.STRING)) {
             Token sourceToken = advance();
-            Literal source = new Literal(getStart(sourceToken), getEnd(sourceToken), sourceToken.line(), sourceToken.column(), sourceToken.endLine(), sourceToken.endColumn(), sourceToken.literal(), sourceToken.lexeme());
+            Literal source = new Literal(getStart(sourceToken), getEnd(sourceToken), sourceToken.line(), sourceToken.column(), sourceToken.endLine(), sourceToken.endColumn(), sourceToken.literal(), sourceToken.lexeme(sourceBuf));
             List<ImportAttribute> attributes = parseImportAttributes();
             consumeSemicolon("Expected ';' after import");
             Token endToken = previous();
@@ -1142,12 +1146,12 @@ public class Parser {
             Token localToken = peek();
             // Check if this is actually a default import binding or the 'from' keyword
             // If it's 'from' and the next token is STRING, then this 'from' is the keyword, not a binding
-            if (localToken.lexeme().equals("from") && checkAhead(1, TokenType.STRING)) {
+            if (localToken.lexeme(sourceBuf).equals("from") && checkAhead(1, TokenType.STRING)) {
                 // This is the 'from' keyword, not a binding - don't consume it
             } else {
                 // This is a binding name (could be 'from' if followed by 'from' keyword)
                 advance();
-                Identifier local = new Identifier(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), localToken.lexeme());
+                Identifier local = createIdentifier(localToken);
                 specifiers.add(new ImportDefaultSpecifier(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), local));
 
                 // Check for comma (means there are more specifiers)
@@ -1162,7 +1166,7 @@ public class Parser {
             Token starToken = previous();
             consume(TokenType.IDENTIFIER, "Expected 'as' after '*'");
             Token asToken = previous();
-            if (!asToken.lexeme().equals("as")) {
+            if (!asToken.lexeme(sourceBuf).equals("as")) {
                 throw new ExpectedTokenException("'as' after '*'", peek());
             }
             Token localToken = peek();
@@ -1170,7 +1174,7 @@ public class Parser {
                 throw new ExpectedTokenException("identifier after 'as'", peek());
             }
             advance();
-            Identifier local = new Identifier(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), localToken.lexeme());
+            Identifier local = createIdentifier(localToken);
             specifiers.add(new ImportNamespaceSpecifier(getStart(starToken), getEnd(localToken), starToken.line(), starToken.column(), localToken.endLine(), localToken.endColumn(), local));
         } else if (match(TokenType.LBRACE)) {
             // Named imports: { name1, name2 as alias }
@@ -1184,9 +1188,9 @@ public class Parser {
 
                     if (isStringImport) {
                         advance();
-                        imported = new Literal(getStart(importedToken), getEnd(importedToken), importedToken.line(), importedToken.column(), importedToken.endLine(), importedToken.endColumn(), importedToken.literal(), importedToken.lexeme());
+                        imported = new Literal(getStart(importedToken), getEnd(importedToken), importedToken.line(), importedToken.column(), importedToken.endLine(), importedToken.endColumn(), importedToken.literal(), importedToken.lexeme(sourceBuf));
                         // String imports MUST have 'as' with local binding
-                        if (!check(TokenType.IDENTIFIER) || !peek().lexeme().equals("as")) {
+                        if (!check(TokenType.IDENTIFIER) || !peek().lexeme(sourceBuf).equals("as")) {
                             throw new ExpectedTokenException("'as' after string import specifier", peek());
                         }
                         advance(); // consume 'as'
@@ -1195,21 +1199,21 @@ public class Parser {
                             throw new ExpectedTokenException("identifier after 'as'", peek());
                         }
                         advance();
-                        local = new Identifier(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), localToken.lexeme());
+                        local = createIdentifier(localToken);
                     } else if (check(TokenType.IDENTIFIER) || isKeyword(importedToken)) {
                         advance();
-                        Identifier importedId = new Identifier(getStart(importedToken), getEnd(importedToken), importedToken.line(), importedToken.column(), importedToken.endLine(), importedToken.endColumn(), importedToken.lexeme());
+                        Identifier importedId = createIdentifier(importedToken);
                         imported = importedId;
                         local = importedId;
                         // Check for 'as'
-                        if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("as")) {
+                        if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("as")) {
                             advance(); // consume 'as'
                             Token localToken = peek();
                             if (!check(TokenType.IDENTIFIER) && !isKeyword(localToken)) {
                                 throw new ExpectedTokenException("identifier after 'as'", peek());
                             }
                             advance();
-                            local = new Identifier(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), localToken.lexeme());
+                            local = createIdentifier(localToken);
                         }
                     } else {
                         throw new ExpectedTokenException("identifier or string in import specifier", peek());
@@ -1234,7 +1238,7 @@ public class Parser {
 
         // Parse 'from' clause
         Token fromToken = peek();
-        if (!check(TokenType.IDENTIFIER) || !fromToken.lexeme().equals("from")) {
+        if (!check(TokenType.IDENTIFIER) || !fromToken.lexeme(sourceBuf).equals("from")) {
             throw new ExpectedTokenException("'from' after import specifiers", peek());
         }
         advance(); // consume 'from'
@@ -1245,7 +1249,7 @@ public class Parser {
             throw new ExpectedTokenException("string literal after 'from'", peek());
         }
         advance();
-        Literal source = new Literal(getStart(sourceToken), getEnd(sourceToken), sourceToken.line(), sourceToken.column(), sourceToken.endLine(), sourceToken.endColumn(), sourceToken.literal(), sourceToken.lexeme());
+        Literal source = new Literal(getStart(sourceToken), getEnd(sourceToken), sourceToken.line(), sourceToken.column(), sourceToken.endLine(), sourceToken.endColumn(), sourceToken.literal(), sourceToken.lexeme(sourceBuf));
 
         // Parse import attributes: with { type: 'json' }
         List<ImportAttribute> attributes = parseImportAttributes();
@@ -1259,7 +1263,7 @@ public class Parser {
         List<ImportAttribute> attributes = new ArrayList<>();
 
         // Check for 'with' keyword (can be IDENTIFIER or WITH token type)
-        if ((check(TokenType.IDENTIFIER) && peek().lexeme().equals("with")) || check(TokenType.WITH)) {
+        if ((check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("with")) || check(TokenType.WITH)) {
             advance(); // consume 'with'
             consume(TokenType.LBRACE, "Expected '{' after 'with'");
 
@@ -1269,10 +1273,10 @@ public class Parser {
 
                 if (check(TokenType.STRING)) {
                     advance();
-                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.literal(), keyToken.lexeme());
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.literal(), keyToken.lexeme(sourceBuf));
                 } else if (check(TokenType.IDENTIFIER) || isKeyword(keyToken)) {
                     advance();
-                    key = new Identifier(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.lexeme());
+                    key = createIdentifier(keyToken);
                 } else {
                     throw new ExpectedTokenException("identifier or string in import attribute", peek());
                 }
@@ -1284,7 +1288,7 @@ public class Parser {
                     throw new ExpectedTokenException("string value in import attribute", peek());
                 }
                 advance();
-                Literal value = new Literal(getStart(valueToken), getEnd(valueToken), valueToken.line(), valueToken.column(), valueToken.endLine(), valueToken.endColumn(), valueToken.literal(), valueToken.lexeme());
+                Literal value = new Literal(getStart(valueToken), getEnd(valueToken), valueToken.line(), valueToken.column(), valueToken.endLine(), valueToken.endColumn(), valueToken.literal(), valueToken.lexeme(sourceBuf));
 
                 Token attrEnd = previous();
                 attributes.add(new ImportAttribute(getStart(keyToken), getEnd(attrEnd), keyToken.line(), keyToken.column(), attrEnd.endLine(), attrEnd.endColumn(), key, value));
@@ -1317,7 +1321,7 @@ public class Parser {
                 // Both named and anonymous export default classes are ClassDeclarations
                 // Anonymous just has id: null
                 declaration = parseClassDeclaration(true);
-            } else if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("async")) {
+            } else if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("async")) {
                 // Check for async function declaration
                 int savedCurrent = current;
                 advance(); // consume 'async'
@@ -1346,17 +1350,17 @@ public class Parser {
             Node exported = null;
 
             // Check for 'as'
-            if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("as")) {
+            if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("as")) {
                 advance(); // consume 'as'
                 Token nameToken = peek();
                 // Allow keywords as identifiers or strings after 'as'
                 if (check(TokenType.STRING)) {
                     advance();
-                    exported = new Literal(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.literal(), nameToken.lexeme());
+                    exported = new Literal(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.literal(), nameToken.lexeme(sourceBuf));
                 } else if (check(TokenType.IDENTIFIER) || isKeyword(nameToken) ||
                            check(TokenType.TRUE) || check(TokenType.FALSE) || check(TokenType.NULL)) {
                     advance();
-                    exported = new Identifier(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
+                    exported = createIdentifier(nameToken);
                 } else {
                     throw new ExpectedTokenException("identifier or string after 'as'", peek());
                 }
@@ -1364,7 +1368,7 @@ public class Parser {
 
             // Parse 'from'
             Token fromToken = peek();
-            if (!check(TokenType.IDENTIFIER) || !fromToken.lexeme().equals("from")) {
+            if (!check(TokenType.IDENTIFIER) || !fromToken.lexeme(sourceBuf).equals("from")) {
                 throw new ExpectedTokenException("'from' after export *", peek());
             }
             advance(); // consume 'from'
@@ -1375,7 +1379,7 @@ public class Parser {
                 throw new ExpectedTokenException("string literal after 'from'", peek());
             }
             advance();
-            Literal source = new Literal(getStart(sourceToken), getEnd(sourceToken), sourceToken.line(), sourceToken.column(), sourceToken.endLine(), sourceToken.endColumn(), sourceToken.literal(), sourceToken.lexeme());
+            Literal source = new Literal(getStart(sourceToken), getEnd(sourceToken), sourceToken.line(), sourceToken.column(), sourceToken.endLine(), sourceToken.endColumn(), sourceToken.literal(), sourceToken.lexeme(sourceBuf));
 
             List<ImportAttribute> attributes = parseImportAttributes();
             consumeSemicolon("Expected ';' after export");
@@ -1394,26 +1398,26 @@ public class Parser {
                     Node local;
                     if (check(TokenType.STRING)) {
                         advance();
-                        local = new Literal(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), localToken.literal(), localToken.lexeme());
+                        local = new Literal(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), localToken.literal(), localToken.lexeme(sourceBuf));
                     } else if (check(TokenType.IDENTIFIER) || isKeyword(localToken)) {
                         advance();
-                        local = new Identifier(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), localToken.lexeme());
+                        local = createIdentifier(localToken);
                     } else {
                         throw new ExpectedTokenException("identifier or string in export specifier", peek());
                     }
 
                     Node exported = local;
                     // Check for 'as'
-                    if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("as")) {
+                    if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("as")) {
                         advance(); // consume 'as'
                         Token exportedToken = peek();
                         if (check(TokenType.STRING)) {
                             advance();
-                            exported = new Literal(getStart(exportedToken), getEnd(exportedToken), exportedToken.line(), exportedToken.column(), exportedToken.endLine(), exportedToken.endColumn(), exportedToken.literal(), exportedToken.lexeme());
+                            exported = new Literal(getStart(exportedToken), getEnd(exportedToken), exportedToken.line(), exportedToken.column(), exportedToken.endLine(), exportedToken.endColumn(), exportedToken.literal(), exportedToken.lexeme(sourceBuf));
                         } else if (check(TokenType.IDENTIFIER) || isKeyword(exportedToken) ||
                                    check(TokenType.TRUE) || check(TokenType.FALSE) || check(TokenType.NULL)) {
                             advance();
-                            exported = new Identifier(getStart(exportedToken), getEnd(exportedToken), exportedToken.line(), exportedToken.column(), exportedToken.endLine(), exportedToken.endColumn(), exportedToken.lexeme());
+                            exported = createIdentifier(exportedToken);
                         } else {
                             throw new ExpectedTokenException("identifier or string after 'as'", peek());
                         }
@@ -1438,14 +1442,14 @@ public class Parser {
             // Check for 'from' (re-export)
             Literal source = null;
             List<ImportAttribute> attributes = new ArrayList<>();
-            if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("from")) {
+            if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("from")) {
                 advance(); // consume 'from'
                 Token sourceToken = peek();
                 if (!check(TokenType.STRING)) {
                     throw new ExpectedTokenException("string literal after 'from'", peek());
                 }
                 advance();
-                source = new Literal(getStart(sourceToken), getEnd(sourceToken), sourceToken.line(), sourceToken.column(), sourceToken.endLine(), sourceToken.endColumn(), sourceToken.literal(), sourceToken.lexeme());
+                source = new Literal(getStart(sourceToken), getEnd(sourceToken), sourceToken.line(), sourceToken.column(), sourceToken.endLine(), sourceToken.endColumn(), sourceToken.literal(), sourceToken.lexeme(sourceBuf));
                 attributes = parseImportAttributes();
             }
 
@@ -1462,7 +1466,7 @@ public class Parser {
             declaration = parseFunctionDeclaration(false);
         } else if (check(TokenType.CLASS)) {
             declaration = parseClassDeclaration();
-        } else if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("async")) {
+        } else if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("async")) {
             // export async function
             // Don't consume 'async' - let parseFunctionDeclaration handle it
             declaration = parseFunctionDeclaration(true); // pass true for async
@@ -1550,7 +1554,7 @@ public class Parser {
     private VariableDeclaration parseVariableDeclaration() {
         Token startToken = peek();
         Token kindToken = advance(); // var, let, or const
-        String kind = kindToken.lexeme();
+        String kind = kindToken.lexeme(sourceBuf);
 
         List<VariableDeclarator> declarators = new ArrayList<>();
 
@@ -1609,7 +1613,7 @@ public class Parser {
         } else if (check(TokenType.IDENTIFIER) || isKeyword(peek())) {
             // Simple identifier pattern (keywords allowed as identifiers in patterns)
             Token idToken = advance();
-            return new Identifier(getStart(idToken), getEnd(idToken), idToken.line(), idToken.column(), idToken.endLine(), idToken.endColumn(), idToken.lexeme());
+            return createIdentifier(idToken);
         } else {
             throw new ExpectedTokenException("identifier in variable declaration", peek());
         }
@@ -1647,7 +1651,7 @@ public class Parser {
             } else if (check(TokenType.STRING) || check(TokenType.NUMBER)) {
                 // Literal key (string or numeric)
                 Token keyToken = advance();
-                String keyLexeme = keyToken.lexeme();
+                String keyLexeme = keyToken.lexeme(sourceBuf);
 
                 // Check if this is a BigInt literal (ends with 'n')
                 if (keyLexeme.endsWith("n")) {
@@ -1693,7 +1697,7 @@ public class Parser {
                     throw new ExpectedTokenException("property name", peek());
                 }
                 Token keyToken = advance();
-                key = new Identifier(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.lexeme());
+                key = createIdentifier(keyToken);
             }
 
             // Parse the value (pattern)
@@ -1798,7 +1802,7 @@ public class Parser {
         // Handle contextual keywords: yield and await
         // These have assignment-level precedence and need special handling
         if (startType == TokenType.IDENTIFIER) {
-            String lexeme = startToken.lexeme();
+            String lexeme = startToken.lexeme(sourceBuf);
 
             // Yield expression
             if (inGenerator && lexeme.equals("yield") &&
@@ -1923,7 +1927,7 @@ public class Parser {
                     }
                     advance();
                     Token endToken = previous();
-                    left = new UpdateExpression(outerStartPos, getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), token.lexeme(), false, left);
+                    left = new UpdateExpression(outerStartPos, getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), token.lexeme(sourceBuf), false, left);
                     continue;
                 }
                 break;
@@ -2023,7 +2027,7 @@ public class Parser {
     // ========================================================================
 
     private static Expression prefixNumber(Parser p, Token token) {
-        String lexeme = token.lexeme();
+        String lexeme = token.lexeme(p.sourceBuf);
 
         // Check for BigInt literal (ends with 'n')
         if (lexeme.endsWith("n")) {
@@ -2053,11 +2057,11 @@ public class Parser {
         if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
             literalValue = null;
         }
-        return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), literalValue, token.lexeme());
+        return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), literalValue, token.lexeme(p.sourceBuf));
     }
 
     private static Expression prefixString(Parser p, Token token) {
-        return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), token.literal(), token.lexeme());
+        return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), token.literal(), token.lexeme(p.sourceBuf));
     }
 
     private static Expression prefixTrue(Parser p, Token token) {
@@ -2076,25 +2080,25 @@ public class Parser {
         // Value is {} (empty object), the actual regex info goes in the 'regex' field
         Literal.RegexInfo regexInfo = (Literal.RegexInfo) token.literal();
         return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(),
-            java.util.Collections.emptyMap(), token.lexeme(), regexInfo);
+            java.util.Collections.emptyMap(), token.lexeme(p.sourceBuf), regexInfo);
     }
 
     private static Expression prefixIdentifier(Parser p, Token token) {
         // Check for async function expression
-        if (token.lexeme().equals("async") && p.current < p.tokens.size() &&
+        if (token.lexeme(p.sourceBuf).equals("async") && p.current < p.tokens.size() &&
             p.tokens.get(p.current).type() == TokenType.FUNCTION &&
             token.line() == p.tokens.get(p.current).line()) {
             return p.parseAsyncFunctionExpressionFromIdentifier(token);
         }
 
         // In module/async mode, 'await' is a reserved keyword
-        if ((p.forceModuleMode || p.inAsyncContext) && !p.inClassFieldInitializer && token.lexeme().equals("await")) {
+        if ((p.forceModuleMode || p.inAsyncContext) && !p.inClassFieldInitializer && token.lexeme(p.sourceBuf).equals("await")) {
             String context = p.forceModuleMode ? "module code" : "async function";
             throw new ParseException("SyntaxError", token, null, null,
                 "Unexpected use of 'await' as identifier in " + context);
         }
 
-        return new Identifier(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), token.lexeme());
+        return p.createIdentifier(token);
     }
 
     private static Expression prefixThis(Parser p, Token token) {
@@ -2143,13 +2147,13 @@ public class Parser {
             throw new ExpectedTokenException("Delete of an unqualified identifier is not allowed in strict mode", token);
         }
 
-        return new UnaryExpression(p.getStart(token), p.getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), token.lexeme(), true, argument);
+        return new UnaryExpression(p.getStart(token), p.getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), token.lexeme(p.sourceBuf), true, argument);
     }
 
     private static Expression prefixUpdate(Parser p, Token token) {
         Expression argument = p.parseExpr(BP_UNARY);
         Token endToken = p.previous();
-        return new UpdateExpression(p.getStart(token), p.getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), token.lexeme(), true, argument);
+        return new UpdateExpression(p.getStart(token), p.getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), token.lexeme(p.sourceBuf), true, argument);
     }
 
     private static Expression prefixTemplate(Parser p, Token token) {
@@ -2168,7 +2172,7 @@ public class Parser {
             throw new ExpectedTokenException("identifier after '#'", p.peek());
         }
         p.advance();
-        return new PrivateIdentifier(p.getStart(token), p.getEnd(nameToken), token.line(), token.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
+        return new PrivateIdentifier(p.getStart(token), p.getEnd(nameToken), token.line(), token.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme(p.sourceBuf));
     }
 
     // ========================================================================
@@ -2208,7 +2212,7 @@ public class Parser {
         Node leftNode = p.convertToPatternIfNeeded(left);
 
         int endPos = p.getEnd(endToken);
-        return new AssignmentExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), op.lexeme(), leftNode, right);
+        return new AssignmentExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), op.lexeme(p.sourceBuf), leftNode, right);
     }
 
     private static Expression infixTernary(Parser p, Expression test, Token question) {
@@ -2243,7 +2247,7 @@ public class Parser {
         Expression right = p.parseExpr(rbp);
         Token endToken = p.previous();
         int endPos = p.getEnd(endToken);
-        return new LogicalExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), left, op.lexeme(), right);
+        return new LogicalExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), left, op.lexeme(p.sourceBuf), right);
     }
 
     private static Expression infixBinary(Parser p, Expression left, Token op) {
@@ -2268,7 +2272,7 @@ public class Parser {
         Expression right = p.parseExpr(rbp);
         Token endToken = p.previous();
         int endPos = p.getEnd(endToken);
-        return new BinaryExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), left, op.lexeme(), right);
+        return new BinaryExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), left, op.lexeme(p.sourceBuf), right);
     }
 
     private static Expression infixMember(Parser p, Expression object, Token dot) {
@@ -2281,7 +2285,7 @@ public class Parser {
             }
             p.advance();
             Expression property = new PrivateIdentifier(p.getStart(hashToken), p.getEnd(propertyToken),
-                hashToken.line(), hashToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme());
+                hashToken.line(), hashToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme(p.sourceBuf));
             Token endToken = p.previous();
             int endPos = p.getEnd(endToken);
             return new MemberExpression(p.exprStartPos, endPos, p.exprStartLoc.line(), p.exprStartLoc.column(), endToken.endLine(), endToken.endColumn(), object, property, false, false);
@@ -2294,8 +2298,7 @@ public class Parser {
                 throw new ExpectedTokenException("property name after '.'", p.peek());
             }
             p.advance();
-            Expression property = new Identifier(p.getStart(propertyToken), p.getEnd(propertyToken),
-                propertyToken.line(), propertyToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme());
+            Expression property = p.createIdentifier(propertyToken);
             Token endToken = p.previous();
             int endPos = p.getEnd(endToken);
             return new MemberExpression(p.exprStartPos, endPos, p.exprStartLoc.line(), p.exprStartLoc.column(), endToken.endLine(), endToken.endColumn(), object, property, false, false);
@@ -2332,7 +2335,7 @@ public class Parser {
             }
             p.advance();
             Expression property = new PrivateIdentifier(p.getStart(hashToken), p.getEnd(propertyToken),
-                hashToken.line(), hashToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme());
+                hashToken.line(), hashToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme(p.sourceBuf));
             Token endToken = p.previous();
             int endPos = p.getEnd(endToken);
             return new MemberExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), object, property, false, true);
@@ -2345,8 +2348,7 @@ public class Parser {
                 throw new ExpectedTokenException("property name after '?.'", p.peek());
             }
             p.advance();
-            Expression property = new Identifier(p.getStart(propertyToken), p.getEnd(propertyToken),
-                propertyToken.line(), propertyToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme());
+            Expression property = p.createIdentifier(propertyToken);
             Token endToken = p.previous();
             int endPos = p.getEnd(endToken);
             return new MemberExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), object, property, false, true);
@@ -2394,7 +2396,7 @@ public class Parser {
     // ========================================================================
 
     private boolean shouldParseAwait() {
-        if (!check(TokenType.IDENTIFIER) || !peek().lexeme().equals("await")) {
+        if (!check(TokenType.IDENTIFIER) || !peek().lexeme(sourceBuf).equals("await")) {
             return false;
         }
 
@@ -2475,7 +2477,7 @@ public class Parser {
     private Expression tryParseArrowFunction(Token startToken) {
         // Check for async arrow function: async identifier => or async (params) =>
         boolean isAsync = false;
-        if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("async")) {
+        if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("async")) {
             if (current + 1 < tokens.size()) {
                 Token asyncToken = peek();
                 Token nextToken = tokens.get(current + 1);
@@ -2511,7 +2513,7 @@ public class Parser {
             if (current + 1 < tokens.size() && tokens.get(current + 1).type() == TokenType.ARROW) {
                 advance(); // consume identifier
                 List<Pattern> params = new ArrayList<>();
-                params.add(new Identifier(getStart(idToken), getEnd(idToken), idToken.line(), idToken.column(), idToken.endLine(), idToken.endColumn(), idToken.lexeme()));
+                params.add(createIdentifier(idToken));
                 consume(TokenType.ARROW, "Expected '=>'");
                 return parseArrowFunctionBody(startToken, params, isAsync);
             }
@@ -2587,7 +2589,7 @@ public class Parser {
         if (check(TokenType.IDENTIFIER)) {
             Token nameToken = peek();
             advance();
-            id = new Identifier(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
+            id = createIdentifier(nameToken);
         }
 
         consume(TokenType.LPAREN, "Expected '(' after function");
@@ -2640,7 +2642,7 @@ public class Parser {
     private Expression parseImportExpression(Token importToken) {
         if (match(TokenType.DOT)) {
             Token propertyToken = peek();
-            if (check(TokenType.IDENTIFIER) && propertyToken.lexeme().equals("meta")) {
+            if (check(TokenType.IDENTIFIER) && propertyToken.lexeme(sourceBuf).equals("meta")) {
                 advance();
                 Identifier meta = new Identifier(getStart(importToken), getEnd(importToken), importToken.line(), importToken.column(), importToken.endLine(), importToken.endColumn(), "import");
                 Identifier property = new Identifier(getStart(propertyToken), getEnd(propertyToken), propertyToken.line(), propertyToken.column(), propertyToken.endLine(), propertyToken.endColumn(), "meta");
@@ -2671,7 +2673,7 @@ public class Parser {
         // Handle new.target
         if (match(TokenType.DOT)) {
             Token targetToken = peek();
-            if (check(TokenType.IDENTIFIER) && targetToken.lexeme().equals("target")) {
+            if (check(TokenType.IDENTIFIER) && targetToken.lexeme(sourceBuf).equals("target")) {
                 advance();
                 Identifier meta = new Identifier(getStart(newToken), getEnd(newToken), newToken.line(), newToken.column(), newToken.endLine(), newToken.endColumn(), "new");
                 Identifier property = new Identifier(getStart(targetToken), getEnd(targetToken), targetToken.line(), targetToken.column(), targetToken.endLine(), targetToken.endColumn(), "target");
@@ -2740,7 +2742,7 @@ public class Parser {
                     }
                     advance();
                     Expression property = new PrivateIdentifier(getStart(hashToken), getEnd(propertyToken),
-                        hashToken.line(), hashToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme());
+                        hashToken.line(), hashToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme(sourceBuf));
                     Token endToken = previous();
                     callee = new MemberExpression(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), callee, property, false, false);
                 } else {
@@ -2749,8 +2751,7 @@ public class Parser {
                         throw new ExpectedTokenException("property name after '.'", peek());
                     }
                     advance();
-                    Expression property = new Identifier(getStart(propertyToken), getEnd(propertyToken),
-                        propertyToken.line(), propertyToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme());
+                    Expression property = createIdentifier(propertyToken);
                     Token endToken = previous();
                     callee = new MemberExpression(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), callee, property, false, false);
                 }
@@ -2776,7 +2777,7 @@ public class Parser {
         if (check(TokenType.IDENTIFIER)) {
             Token nameToken = peek();
             advance();
-            id = new Identifier(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
+            id = createIdentifier(nameToken);
         }
 
         consume(TokenType.LPAREN, "Expected '(' after function");
@@ -2829,15 +2830,15 @@ public class Parser {
     private Expression parseClassExpression(Token classToken) {
         // Optional class name - but NOT if the next token is 'extends' (contextual keyword)
         Identifier id = null;
-        if (check(TokenType.IDENTIFIER) && !peek().lexeme().equals("extends")) {
+        if (check(TokenType.IDENTIFIER) && !peek().lexeme(sourceBuf).equals("extends")) {
             Token nameToken = peek();
             advance();
-            id = new Identifier(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
+            id = createIdentifier(nameToken);
         }
 
         // Optional extends
         Expression superClass = null;
-        if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("extends")) {
+        if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("extends")) {
             advance(); // consume 'extends'
             superClass = parseExpr(BP_POSTFIX + 1); // Parse the superclass expression
         }
@@ -2910,7 +2911,7 @@ public class Parser {
         boolean isGenerator = false;
         String kind = "init";
 
-        if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("async")) {
+        if (check(TokenType.IDENTIFIER) && peek().lexeme(sourceBuf).equals("async")) {
             if (current + 1 < tokens.size()) {
                 Token nextToken = tokens.get(current + 1);
                 // async without line terminator followed by property name is async method
@@ -2930,7 +2931,7 @@ public class Parser {
         }
 
         if (!isAsync && !isGenerator && check(TokenType.IDENTIFIER)) {
-            String lexeme = peek().lexeme();
+            String lexeme = peek().lexeme(sourceBuf);
             if (lexeme.equals("get") || lexeme.equals("set")) {
                 if (current + 1 < tokens.size()) {
                     Token nextToken = tokens.get(current + 1);
@@ -2955,14 +2956,14 @@ public class Parser {
             consume(TokenType.RBRACKET, "Expected ']' after computed property name");
         } else if (check(TokenType.STRING) || check(TokenType.NUMBER)) {
             Token keyToken = advance();
-            key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.literal(), keyToken.lexeme());
+            key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.literal(), keyToken.lexeme(sourceBuf));
         } else {
             Token keyToken = peek();
             if (!check(TokenType.IDENTIFIER) && !isKeyword(keyToken)) {
                 throw new ExpectedTokenException("property name", keyToken);
             }
             advance();
-            key = new Identifier(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.lexeme());
+            key = createIdentifier(keyToken);
         }
 
         // Check for method or shorthand
@@ -3398,9 +3399,8 @@ public class Parser {
     }
 
     private boolean checkAhead(int offset, TokenType type) {
-        int pos = current + offset;
-        if (pos >= tokens.size()) return false;
-        return tokens.get(pos).type() == type;
+        Token token = tokenStream.peekAhead(offset);
+        return token != null && token.type() == type;
     }
 
     private boolean isKeyword(Token token) {
@@ -3422,21 +3422,19 @@ public class Parser {
     }
 
     private Token advance() {
-        if (!isAtEnd()) current++;
-        return previous();
+        return tokenStream.advance();
     }
 
     private boolean isAtEnd() {
-        // Fast path: direct position check instead of peek() + type() + enum comparison
-        return current >= tokens.size() - 1;
+        return tokenStream.isAtEnd();
     }
 
     private Token peek() {
-        return tokens.get(current);
+        return tokenStream.peek();
     }
 
     private Token previous() {
-        return tokens.get(current - 1);
+        return tokenStream.previous();
     }
 
     private void consume(TokenType type, String message) {

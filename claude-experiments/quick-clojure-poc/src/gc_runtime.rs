@@ -83,6 +83,9 @@ pub struct GCRuntime {
     /// Stack map for precise GC root scanning
     stack_map: StackMap,
 
+    /// Stack base (top of JIT stack) for GC root scanning
+    stack_base: usize,
+
     /// Namespace roots: namespace_name -> tagged pointer
     namespace_roots: HashMap<String, usize>,
 
@@ -121,6 +124,7 @@ impl GCRuntime {
         GCRuntime {
             allocator: Alloc::new(options),
             stack_map: StackMap::new(),
+            stack_base: 0,  // Set by set_stack_base() before running JIT code
             namespace_roots: HashMap::new(),
             namespace_name_to_id: HashMap::new(),
             next_namespace_id: 0,
@@ -129,6 +133,55 @@ impl GCRuntime {
             type_registry: Vec::new(),
             type_name_to_id: HashMap::new(),
             options,
+        }
+    }
+
+    /// Set the stack base (top of JIT stack) for GC root scanning
+    pub fn set_stack_base(&mut self, stack_base: usize) {
+        self.stack_base = stack_base;
+    }
+
+    /// Get the stack base
+    pub fn get_stack_base(&self) -> usize {
+        self.stack_base
+    }
+
+    /// Enable or disable gc_always mode (GC before every allocation)
+    pub fn set_gc_always(&mut self, enabled: bool) {
+        self.options.gc_always = enabled;
+    }
+
+    /// Check if gc_always mode is enabled
+    pub fn gc_always(&self) -> bool {
+        self.options.gc_always
+    }
+
+    /// Run GC if gc_always is enabled (called before allocations)
+    pub fn maybe_gc_before_alloc(&mut self, stack_pointer: usize) {
+        if self.options.gc_always && self.stack_base != 0 {
+            self.gc(stack_pointer);
+        }
+    }
+
+    /// Run GC with just the current stack pointer
+    /// Uses the stored stack_base
+    pub fn gc(&mut self, stack_pointer: usize) {
+        if self.stack_base == 0 {
+            // Stack base not set, can't run GC
+            return;
+        }
+        self.allocator.gc(&self.stack_map, &[(self.stack_base, stack_pointer)]);
+
+        // Handle relocations
+        let relocations = self.allocator.get_namespace_relocations();
+        for (_ns_id, updates) in relocations {
+            for (old_ptr, new_ptr) in updates {
+                for (_name, ptr) in self.namespace_roots.iter_mut() {
+                    if *ptr == old_ptr {
+                        *ptr = new_ptr;
+                    }
+                }
+            }
         }
     }
 
@@ -383,6 +436,7 @@ impl GCRuntime {
             }.to_string(),
             namespace_count: self.namespace_roots.len(),
             type_count: self.type_registry.len(),
+            stack_map_entries: self.stack_map.entry_count(),
         }
     }
 
@@ -702,6 +756,7 @@ pub struct HeapStats {
     pub gc_algorithm: String,
     pub namespace_count: usize,
     pub type_count: usize,
+    pub stack_map_entries: usize,
 }
 
 #[cfg(test)]
