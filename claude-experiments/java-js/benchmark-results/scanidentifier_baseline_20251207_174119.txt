@@ -1,0 +1,28 @@
+ScanIdentifier Baseline Results
+===============================
+Date: $(date)
+
+Benchmark                                  Mode  Cnt   Score    Error  Units
+ScanIdentifierBenchmark.keywordsOnly       avgt    5  61.353 ±  1.395  us/op
+ScanIdentifierBenchmark.longIdentifiers    avgt    5  62.894 ±  0.583  us/op
+ScanIdentifierBenchmark.mediumIdentifiers  avgt    5  50.655 ±  0.545  us/op
+ScanIdentifierBenchmark.mixedRealistic     avgt    5  64.165 ± 26.043  us/op
+ScanIdentifierBenchmark.shortIdentifiers   avgt    5  27.818 ±  1.216  us/op
+ScanIdentifierBenchmark.underscoreDollar   avgt    5  50.209 ±  0.535  us/op
+ScanIdentifierBenchmark.unicodeEscapes     avgt    5  14.579 ±  0.402  us/op
+
+Test Data Sizes (tokens):
+- shortIdentifiers: 1000 tokens
+- mediumIdentifiers: 1000 tokens
+- longIdentifiers: 500 tokens
+- keywordsOnly: 1000 tokens
+- mixedRealistic: 1000 tokens
+- underscoreDollar: 1000 tokens
+- unicodeEscapes: 200 tokens
+
+Analysis:
+- Short identifiers (1-2 chars): ~28 ns/token
+- Medium identifiers: ~51 ns/token
+- Long identifiers: ~126 ns/token (2x input data)
+- Keywords: ~61 ns/token (switch statement overhead)
+- Unicode escapes: ~73 ns/token (most expensive per token)
