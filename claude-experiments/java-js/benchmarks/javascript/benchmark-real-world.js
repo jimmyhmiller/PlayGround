@@ -23,8 +23,10 @@ const __dirname = dirname(__filename);
 
 const LIBS_DIR = join(__dirname, '..', 'real-world-libs');
 
-const WARMUP_ITERATIONS = 5;
-const MEASUREMENT_ITERATIONS = 10;
+// Parse command line arguments: node benchmark-real-world.js [warmup] [measurement]
+const args = process.argv.slice(2);
+const WARMUP_ITERATIONS = args[0] ? parseInt(args[0], 10) : 5;
+const MEASUREMENT_ITERATIONS = args[1] ? parseInt(args[1], 10) : 10;
 
 /**
  * Load a library file

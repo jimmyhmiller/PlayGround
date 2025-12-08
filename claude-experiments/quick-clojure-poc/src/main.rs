@@ -22,14 +22,37 @@ use crate::gc_runtime::GCRuntime;
 /// Print a tagged value, matching Clojure's behavior
 /// nil prints nothing, other values print their untagged representation
 fn print_tagged_value(tagged_value: i64) {
+    let tag = tagged_value & 0b111;
+
     match tagged_value {
         7 => {}, // nil - print nothing, matching Clojure
         11 => println!("true"),
         3 => println!("false"),
         _ => {
-            // Integer - untag and print
-            let untagged = tagged_value >> 3;
-            println!("{}", untagged);
+            match tag {
+                0b000 => {
+                    // Integer - untag and print
+                    let untagged = tagged_value >> 3;
+                    println!("{}", untagged);
+                }
+                0b100 => {
+                    // Function pointer
+                    println!("#<fn@{:x}>", tagged_value as u64 >> 3);
+                }
+                0b101 => {
+                    // Closure
+                    println!("#<closure@{:x}>", tagged_value as u64 >> 3);
+                }
+                0b110 => {
+                    // HeapObject (deftype instance, etc.)
+                    // TODO: Look up type name from registry
+                    println!("#<object@{:x}>", tagged_value as u64 >> 3);
+                }
+                _ => {
+                    // Unknown tag - print raw value
+                    println!("#{:x} (tag={})", tagged_value, tag);
+                }
+            }
         }
     }
 }
@@ -167,6 +190,31 @@ fn print_ast(ast: &Expr, indent: usize) {
                 println!("{}    [{}]:", prefix, i);
                 print_ast(arg, indent + 3);
             }
+        }
+        Expr::VarRef { namespace, name } => {
+            if let Some(ns) = namespace {
+                println!("{}VarRef(#'{}/{})", prefix, ns, name)
+            } else {
+                println!("{}VarRef(#'{})", prefix, name)
+            }
+        }
+        Expr::DefType { name, fields } => {
+            println!("{}DefType", prefix);
+            println!("{}  name: {}", prefix, name);
+            println!("{}  fields: {:?}", prefix, fields);
+        }
+        Expr::TypeConstruct { type_name, args } => {
+            println!("{}TypeConstruct({})", prefix, type_name);
+            println!("{}  args:", prefix);
+            for (i, arg) in args.iter().enumerate() {
+                println!("{}    [{}]:", prefix, i);
+                print_ast(arg, indent + 3);
+            }
+        }
+        Expr::FieldAccess { field, object } => {
+            println!("{}FieldAccess(.-{})", prefix, field);
+            println!("{}  object:", prefix);
+            print_ast(object, indent + 2);
         }
     }
 }

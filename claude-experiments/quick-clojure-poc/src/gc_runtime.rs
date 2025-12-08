@@ -12,6 +12,24 @@ const TYPE_ID_STRING: u8 = 2;
 const TYPE_ID_NAMESPACE: u8 = 10;
 const TYPE_ID_VAR: u8 = 11;
 const TYPE_ID_FUNCTION: u8 = 12;
+const TYPE_ID_DEFTYPE: u8 = 13;
+
+/// Definition of a deftype (name and field names)
+#[derive(Debug, Clone)]
+pub struct TypeDef {
+    pub name: String,
+    pub fields: Vec<String>,
+}
+
+impl TypeDef {
+    pub fn field_count(&self) -> usize {
+        self.fields.len()
+    }
+
+    pub fn field_index(&self, field_name: &str) -> Option<usize> {
+        self.fields.iter().position(|f| f == field_name)
+    }
+}
 
 /// Closure heap object layout constants
 ///
@@ -160,6 +178,18 @@ impl HeapObject {
         let header = self.read_header();
         8 + (header.size as usize * 8)
     }
+
+    /// Get the type_data field from the header (used for deftype type_id)
+    pub fn get_type_data(&self) -> u32 {
+        self.read_header().type_data
+    }
+
+    /// Set the type_data field in the header (used for deftype type_id)
+    pub fn set_type_data(&mut self, type_data: u32) {
+        let mut header = self.read_header();
+        header.type_data = type_data;
+        self.write_header_direct(header);
+    }
 }
 
 /// Built-in type tagging
@@ -226,6 +256,12 @@ pub struct GCRuntime {
     /// Set of vars that are marked as dynamic
     /// Only vars in this set can have thread-local bindings
     dynamic_vars: std::collections::HashSet<usize>,
+
+    /// Type registry for deftype: type_id → TypeDef
+    type_registry: Vec<TypeDef>,
+
+    /// Type name to ID mapping: "namespace/TypeName" → type_id
+    type_name_to_id: HashMap<String, usize>,
 }
 
 impl Default for GCRuntime {
@@ -252,6 +288,8 @@ impl GCRuntime {
             objects: Vec::new(),
             dynamic_bindings: HashMap::new(),
             dynamic_vars: HashSet::new(),
+            type_registry: Vec::new(),
+            type_name_to_id: HashMap::new(),
         }
     }
 
@@ -770,6 +808,110 @@ impl GCRuntime {
         } else {
             self.read_string(name_ptr)
         }
+    }
+
+    // ========== DefType Registry Methods ==========
+
+    /// Register a new deftype and return its type_id
+    pub fn register_type(&mut self, name: String, fields: Vec<String>) -> usize {
+        // Check if type already exists
+        if let Some(&type_id) = self.type_name_to_id.get(&name) {
+            return type_id;
+        }
+
+        let type_id = self.type_registry.len();
+        self.type_registry.push(TypeDef {
+            name: name.clone(),
+            fields,
+        });
+        self.type_name_to_id.insert(name, type_id);
+        type_id
+    }
+
+    /// Get type definition by ID
+    pub fn get_type_def(&self, type_id: usize) -> Option<&TypeDef> {
+        self.type_registry.get(type_id)
+    }
+
+    /// Get type ID by name
+    pub fn get_type_id(&self, name: &str) -> Option<usize> {
+        self.type_name_to_id.get(name).copied()
+    }
+
+    /// Get field index for a type by field name
+    pub fn get_type_field_index(&self, type_id: usize, field_name: &str) -> Option<usize> {
+        self.type_registry.get(type_id)?.field_index(field_name)
+    }
+
+    /// Allocate a deftype instance on the heap
+    /// Layout: Header (with type_id in type_data) | field0 | field1 | ...
+    ///
+    /// Returns a tagged HeapObject pointer
+    pub fn allocate_type_instance(
+        &mut self,
+        type_id: usize,
+        field_values: Vec<usize>,
+    ) -> Result<usize, String> {
+        // Validate type_id
+        let type_def = self.type_registry.get(type_id)
+            .ok_or_else(|| format!("Unknown type_id: {}", type_id))?;
+
+        // Validate field count
+        if field_values.len() != type_def.fields.len() {
+            return Err(format!(
+                "Type {} expects {} fields, got {}",
+                type_def.name, type_def.fields.len(), field_values.len()
+            ));
+        }
+
+        // Allocate: header + N fields
+        let size_words = field_values.len();
+        let obj_ptr = self.allocate_raw(size_words, TYPE_ID_DEFTYPE)?;
+        let mut heap_obj = HeapObject::from_untagged(obj_ptr);
+
+        // Store type_id in the header's type_data field
+        heap_obj.set_type_data(type_id as u32);
+
+        // Write field values
+        for (i, value) in field_values.iter().enumerate() {
+            heap_obj.write_field(i, *value);
+        }
+
+        // Return tagged with HeapObject tag (0b110)
+        Ok(BuiltInTypes::HeapObject.tagged(obj_ptr))
+    }
+
+    /// Read a field from a deftype instance
+    pub fn read_type_field(&self, obj_ptr: usize, field_index: usize) -> usize {
+        let untagged = BuiltInTypes::HeapObject.untag(obj_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged);
+        heap_obj.get_field(field_index)
+    }
+
+    /// Get the type_id from a deftype instance
+    pub fn get_instance_type_id(&self, obj_ptr: usize) -> usize {
+        let untagged = BuiltInTypes::HeapObject.untag(obj_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged);
+        heap_obj.get_type_data() as usize
+    }
+
+    /// Load a field from a deftype instance by field name (runtime lookup)
+    /// Returns the field value or panics if field not found
+    pub fn load_type_field_by_name(&self, obj_ptr: usize, field_name: &str) -> Result<usize, String> {
+        // Get type_id from object header
+        let type_id = self.get_instance_type_id(obj_ptr);
+
+        // Look up the type definition
+        let type_def = self.type_registry.get(type_id)
+            .ok_or_else(|| format!("Unknown type_id {} in object", type_id))?;
+
+        // Find field index by name
+        let field_index = type_def.fields.iter()
+            .position(|f| f == field_name)
+            .ok_or_else(|| format!("Field '{}' not found in type '{}'", field_name, type_def.name))?;
+
+        // Read and return the field value
+        Ok(self.read_type_field(obj_ptr, field_index))
     }
 }
 

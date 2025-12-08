@@ -13,11 +13,16 @@
 # This ensures we measure parsing performance consistently across all
 # implementations without including JIT compilation or process startup costs.
 #
-# Configuration (consistent across all implementations):
-#   - Warmup iterations: 5
-#   - Measurement iterations: 10
+# Usage:
+#   ./run-unified-comparison.sh [warmup] [measurement]
+#   ./run-unified-comparison.sh           # 5 warmup, 10 measurement (default)
+#   ./run-unified-comparison.sh 10 50     # 10 warmup, 50 measurement
 
 set -e
+
+# Parse command line arguments
+WARMUP_ITERATIONS=${1:-5}
+MEASUREMENT_ITERATIONS=${2:-10}
 
 RESULTS_DIR="benchmark-results"
 mkdir -p "$RESULTS_DIR"
@@ -28,8 +33,8 @@ echo "  Unified Cross-Language Parser Benchmark"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
 echo "Methodology: Each process performs internal warmup then measurement"
-echo "  • Warmup: 5 iterations (excludes from timing)"
-echo "  • Measurement: 10 iterations (averaged)"
+echo "  • Warmup: $WARMUP_ITERATIONS iterations (excludes from timing)"
+echo "  • Measurement: $MEASUREMENT_ITERATIONS iterations (averaged)"
 echo "  • Only parsing time measured (no startup/I/O)"
 echo ""
 echo "Parsers:"
@@ -54,6 +59,7 @@ echo "  Building..."
 mvn compile -q -DskipTests
 echo "  Running benchmark..."
 mvn exec:java -q -Dexec.mainClass="com.jsparser.benchmarks.SimpleBenchmark" \
+    -Dexec.args="$WARMUP_ITERATIONS $MEASUREMENT_ITERATIONS" \
     2>&1 | tee "$RESULTS_DIR/java_our_${TIMESTAMP}.txt"
 echo "  ✓ Java benchmarks complete"
 echo ""
@@ -62,7 +68,7 @@ echo ""
 echo "[2/3] Running Rust Parsers (OXC, SWC)..."
 cd benchmarks/rust
 cargo build --release 2>&1 | grep -v "Compiling\|Finished\|warning" || true
-cargo run --release --bin benchmark-real-world --quiet \
+cargo run --release --bin benchmark-real-world --quiet -- "$WARMUP_ITERATIONS" "$MEASUREMENT_ITERATIONS" \
     2>&1 | tee "../../$RESULTS_DIR/rust_${TIMESTAMP}.txt" | grep -E "(Library:|Parser|OXC|SWC)" || true
 cd ../..
 echo "  ✓ Rust benchmarks complete"
@@ -71,7 +77,7 @@ echo ""
 # 3. Run JavaScript benchmarks
 echo "[3/3] Running JavaScript Parsers..."
 cd benchmarks/javascript
-node benchmark-real-world.js \
+node benchmark-real-world.js "$WARMUP_ITERATIONS" "$MEASUREMENT_ITERATIONS" \
     2>&1 | tee "../../$RESULTS_DIR/js_${TIMESTAMP}.txt" | grep -E "(Library:|Parser|Babel|Acorn|Esprima|Meriyah)" || true
 cd ../..
 echo "  ✓ JavaScript benchmarks complete"

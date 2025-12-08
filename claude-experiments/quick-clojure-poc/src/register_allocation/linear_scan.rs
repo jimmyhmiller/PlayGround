@@ -215,6 +215,18 @@ impl LinearScan {
                     if let IrValue::Register(r) = save { regs.push(*r); }
                 }
             }
+
+            Instruction::MakeType(dst, _type_id, field_values) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                for val in field_values {
+                    if let IrValue::Register(r) = val { regs.push(*r); }
+                }
+            }
+
+            Instruction::LoadTypeField(dst, obj, _field_name) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = obj { regs.push(*r); }
+            }
         }
 
         regs
@@ -442,6 +454,18 @@ impl LinearScan {
                     replace(save);
                 }
             }
+
+            Instruction::MakeType(dst, _type_id, field_values) => {
+                replace(dst);
+                for val in field_values {
+                    replace(val);
+                }
+            }
+
+            Instruction::LoadTypeField(dst, obj, _field_name) => {
+                replace(dst);
+                replace(obj);
+            }
         }
     }
 
@@ -661,6 +685,18 @@ impl LinearScan {
                 for save in saves {
                     replace(save);
                 }
+            }
+
+            Instruction::MakeType(dst, _type_id, field_values) => {
+                replace(dst);
+                for val in field_values {
+                    replace(val);
+                }
+            }
+
+            Instruction::LoadTypeField(dst, obj, _field_name) => {
+                replace(dst);
+                replace(obj);
             }
         }
     }

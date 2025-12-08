@@ -54,6 +54,9 @@ pub struct Compiler {
     /// Compiled function IRs for display (name, instructions)
     /// Cleared after each top-level compile
     compiled_function_irs: Vec<(Option<String>, Vec<Instruction>)>,
+
+    /// Type registry for deftype: type_name → (type_id, field_names)
+    type_registry: HashMap<String, (usize, Vec<String>)>,
 }
 
 impl Compiler {
@@ -103,6 +106,7 @@ impl Compiler {
             function_registry: HashMap::new(),
             next_function_id: 0,
             compiled_function_irs: Vec::new(),
+            type_registry: HashMap::new(),
         }
     }
 
@@ -124,6 +128,10 @@ impl Compiler {
             Expr::Binding { bindings, body } => self.compile_binding(bindings, body),
             Expr::Call { func, args } => self.compile_call(func, args),
             Expr::Quote(value) => self.compile_literal(value),
+            Expr::VarRef { namespace, name } => self.compile_var_ref(namespace, name),
+            Expr::DefType { name, fields } => self.compile_deftype(name, fields),
+            Expr::TypeConstruct { type_name, args } => self.compile_type_construct(type_name, args),
+            Expr::FieldAccess { field, object } => self.compile_field_access(field, object),
         }
     }
 
@@ -252,6 +260,88 @@ impl Compiler {
     /// Check if a symbol is a built-in function
     fn is_builtin(&self, name: &str) -> bool {
         matches!(name, "+" | "-" | "*" | "/" | "<" | ">" | "=")
+    }
+
+    /// Compile (var symbol) - returns the Var object itself, not its value
+    fn compile_var_ref(&mut self, namespace: &Option<String>, name: &str) -> Result<IrValue, String> {
+        // Look up the var pointer (same logic as compile_var, but don't dereference)
+        let var_ptr = self.lookup_var_pointer(namespace, name)?;
+
+        // Return the var pointer tagged as a pointer (tag 010 = shifted left 3 + 2)
+        // Actually, vars are already tagged when stored, so we return them as-is
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(
+            result,
+            IrValue::TaggedConstant(var_ptr as isize),
+        ));
+
+        Ok(result)
+    }
+
+    /// Compile (deftype* TypeName [field1 field2 ...])
+    /// Registers the type and returns nil
+    fn compile_deftype(&mut self, name: &str, fields: &[String]) -> Result<IrValue, String> {
+        // Register the type with the runtime
+        let current_ns = self.get_current_namespace();
+        let qualified_name = format!("{}/{}", current_ns, name);
+
+        // Get mutable access to runtime to register type
+        let type_id = {
+            let rt = unsafe { &mut *self.runtime.get() };
+            rt.register_type(qualified_name.clone(), fields.to_vec())
+        };
+
+        // Store in compiler's type registry for compile-time lookup
+        self.type_registry.insert(name.to_string(), (type_id, fields.to_vec()));
+
+        // deftype* returns nil
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(result, IrValue::Null));
+        Ok(result)
+    }
+
+    /// Compile (TypeName. arg1 arg2 ...) - constructor call
+    fn compile_type_construct(&mut self, type_name: &str, args: &[Expr]) -> Result<IrValue, String> {
+        // Look up the type
+        let (type_id, fields) = self.type_registry.get(type_name)
+            .cloned()
+            .ok_or_else(|| format!("Unknown type: {}", type_name))?;
+
+        // Check arg count matches field count
+        if args.len() != fields.len() {
+            return Err(format!(
+                "Type {} requires {} arguments, got {}",
+                type_name, fields.len(), args.len()
+            ));
+        }
+
+        // Compile all arguments
+        let mut arg_values = Vec::new();
+        for arg in args {
+            arg_values.push(self.compile(arg)?);
+        }
+
+        // Emit MakeType instruction
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::MakeType(result, type_id, arg_values));
+
+        Ok(result)
+    }
+
+    /// Compile (.-field obj) - field access
+    fn compile_field_access(&mut self, field: &str, object: &Expr) -> Result<IrValue, String> {
+        // Compile the object
+        let obj_value = self.compile(object)?;
+
+        // We need runtime type lookup to find the field index
+        // For now, emit a LoadTypeField with field name (runtime will resolve)
+        // This is a simplification - a real implementation would use inline caching
+
+        // Get field index at runtime via trampoline
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::LoadTypeField(result, obj_value, field.to_string()));
+
+        Ok(result)
     }
 
     fn compile_def(&mut self, name: &str, value_expr: &Expr, metadata: &Option<im::HashMap<String, Value>>) -> Result<IrValue, String> {
@@ -985,6 +1075,24 @@ impl Compiler {
 
             // Qualified vars are not free (they're global)
             Expr::Var { namespace: Some(_), .. } => {}
+
+            // VarRef always refers to a global var, not free
+            Expr::VarRef { .. } => {}
+
+            // DefType is a declaration, no free vars
+            Expr::DefType { .. } => {}
+
+            // TypeConstruct: check args for free vars
+            Expr::TypeConstruct { args, .. } => {
+                for arg in args {
+                    self.collect_free_vars_from_expr(arg, bound, free);
+                }
+            }
+
+            // FieldAccess: check object for free vars
+            Expr::FieldAccess { object, .. } => {
+                self.collect_free_vars_from_expr(object, bound, free);
+            }
         }
     }
 

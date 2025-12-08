@@ -183,6 +183,99 @@ pub extern "C" fn trampoline_function_closure_count(fn_ptr: usize) -> usize {
     }
 }
 
+/// Trampoline: Allocate deftype instance
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = type_id, x1 = field_count, x2 = values_ptr
+/// - Returns: x0 = instance pointer (tagged HeapObject)
+///
+/// Note: values_ptr points to an array of field_count tagged values on the stack
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_allocate_type(
+    type_id: usize,
+    field_count: usize,
+    values_ptr: *const usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // Read field values from the pointer
+        let field_values = if field_count > 0 {
+            let values_slice = std::slice::from_raw_parts(values_ptr, field_count);
+            values_slice.to_vec()
+        } else {
+            vec![]
+        };
+
+        match rt.allocate_type_instance(type_id, field_values) {
+            Ok(obj_ptr) => obj_ptr,
+            Err(msg) => {
+                eprintln!("Error allocating type instance: {}", msg);
+                7 // Return nil on error
+            }
+        }
+    }
+}
+
+/// Trampoline: Load field from deftype instance by field index
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = instance pointer (tagged), x1 = field_index
+/// - Returns: x0 = field value (tagged)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_load_type_field(
+    obj_ptr: usize,
+    field_index: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+        rt.read_type_field(obj_ptr, field_index)
+    }
+}
+
+/// Trampoline: Load field from deftype instance by field name (runtime lookup)
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = instance pointer (tagged), x1 = field_name_ptr, x2 = field_name_len
+/// - Returns: x0 = field value (tagged), or nil (7) on error
+///
+/// This performs runtime field lookup:
+/// 1. Extracts type_id from object header
+/// 2. Looks up type definition in registry
+/// 3. Finds field index by name
+/// 4. Returns field value
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_load_type_field_by_name(
+    obj_ptr: usize,
+    field_name_ptr: *const u8,
+    field_name_len: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        // Convert field name pointer to string slice
+        let field_name_bytes = std::slice::from_raw_parts(field_name_ptr, field_name_len);
+        let field_name = match std::str::from_utf8(field_name_bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("Error: Invalid UTF-8 in field name");
+                return 7; // nil
+            }
+        };
+
+        match rt.load_type_field_by_name(obj_ptr, field_name) {
+            Ok(value) => value,
+            Err(msg) => {
+                eprintln!("Error loading field: {}", msg);
+                7 // nil
+            }
+        }
+    }
+}
+
 /// Trampoline that sets up a safe environment for JIT code execution
 ///
 /// The trampoline:

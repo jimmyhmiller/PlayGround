@@ -1005,20 +1005,169 @@ public class Lexer {
     }
 
     private Token scanIdentifier(int startLine, int startColumn, int startPos) {
+        // OPTIMIZED: Use fast ASCII scanning first
+        // Check if first char is ASCII identifier start (not escape or unicode)
+        char firstChar = peek();
+        if (firstChar != '\\' && firstChar < 128 && isAsciiIdentifierStart(firstChar)) {
+            // Fast path: scan ASCII identifier chars
+            int asciiEnd = scanAsciiIdentifierChars(position);
+
+            // Check what stopped us
+            if (asciiEnd > position) {
+                // Check if we hit something that needs unicode handling
+                if (asciiEnd < length) {
+                    char stopChar = buf[asciiEnd];
+                    if (stopChar == '\\' || stopChar >= 128) {
+                        // Need to continue with unicode handling
+                        return scanIdentifierWithUnicodeContinuation(startLine, startColumn, startPos, asciiEnd);
+                    }
+                }
+
+                // Pure ASCII identifier - fast path complete!
+                String identifierName = new String(buf, startPos, asciiEnd - startPos);
+                int consumed = asciiEnd - position;
+                position = asciiEnd;
+                column += consumed;
+
+                // Keyword lookup
+                TokenType type = lookupKeyword(identifierName);
+                Object literal = literalForKeyword(type);
+
+                int endColumn = startColumn + consumed;
+                return new Token(type, identifierName, literal, startLine, startColumn, startPos, position, startLine, endColumn, null);
+            }
+        }
+
+        // Slow path: first char is escape or unicode, use full handling
+        return scanIdentifierFull(startLine, startColumn, startPos);
+    }
+
+    // Fast ASCII identifier character scanning
+    private int scanAsciiIdentifierChars(int start) {
+        int pos = start;
+        while (pos < length) {
+            char c = buf[pos];
+            if (c >= 128 || c == '\\') {
+                // Non-ASCII or escape - stop here
+                return pos;
+            }
+            if ((c >= 'a' && c <= 'z') ||
+                (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') ||
+                c == '_' || c == '$') {
+                pos++;
+            } else {
+                return pos;
+            }
+        }
+        return pos;
+    }
+
+    private static boolean isAsciiIdentifierStart(char c) {
+        return (c >= 'a' && c <= 'z') ||
+               (c >= 'A' && c <= 'Z') ||
+               c == '_' || c == '$';
+    }
+
+    private TokenType lookupKeyword(String name) {
+        return switch (name) {
+            case "true" -> TokenType.TRUE;
+            case "false" -> TokenType.FALSE;
+            case "null" -> TokenType.NULL;
+            case "var" -> TokenType.VAR;
+            case "let" -> TokenType.LET;
+            case "const" -> TokenType.CONST;
+            case "function" -> TokenType.FUNCTION;
+            case "class" -> TokenType.CLASS;
+            case "return" -> TokenType.RETURN;
+            case "if" -> TokenType.IF;
+            case "else" -> TokenType.ELSE;
+            case "for" -> TokenType.FOR;
+            case "while" -> TokenType.WHILE;
+            case "do" -> TokenType.DO;
+            case "break" -> TokenType.BREAK;
+            case "continue" -> TokenType.CONTINUE;
+            case "switch" -> TokenType.SWITCH;
+            case "case" -> TokenType.CASE;
+            case "default" -> TokenType.DEFAULT;
+            case "try" -> TokenType.TRY;
+            case "catch" -> TokenType.CATCH;
+            case "finally" -> TokenType.FINALLY;
+            case "throw" -> TokenType.THROW;
+            case "new" -> TokenType.NEW;
+            case "typeof" -> TokenType.TYPEOF;
+            case "void" -> TokenType.VOID;
+            case "delete" -> TokenType.DELETE;
+            case "this" -> TokenType.THIS;
+            case "super" -> TokenType.SUPER;
+            case "in" -> TokenType.IN;
+            case "instanceof" -> TokenType.INSTANCEOF;
+            case "import" -> TokenType.IMPORT;
+            case "export" -> TokenType.EXPORT;
+            case "with" -> TokenType.WITH;
+            case "debugger" -> TokenType.DEBUGGER;
+            default -> TokenType.IDENTIFIER;
+        };
+    }
+
+    private Object literalForKeyword(TokenType type) {
+        return switch (type) {
+            case TRUE -> true;
+            case FALSE -> false;
+            case NULL -> null;
+            default -> null;
+        };
+    }
+
+    // Continue scanning after ASCII portion hit unicode/escape
+    private Token scanIdentifierWithUnicodeContinuation(int startLine, int startColumn, int startPos, int asciiEnd) {
         StringBuilder actualName = new StringBuilder();
-        boolean hasEscapes = false;  // Track escapes during scanning - zero allocations
+        boolean hasEscapes = false;
+
+        // Append the ASCII portion we already scanned
+        actualName.append(buf, startPos, asciiEnd - startPos);
+        position = asciiEnd;
+        column += (asciiEnd - startPos);
+
+        // Continue with unicode handling
+        while (!isAtEnd() && (isAlphaNumeric(peek()) || (peek() == '\\' && peekNext() == 'u'))) {
+            if (peek() == '\\') {
+                hasEscapes = true;
+                advance(); // consume \
+                advance(); // consume u
+                actualName.append(scanUnicodeEscape());
+            } else {
+                char c = advance();
+                actualName.append(c);
+                if (Character.isHighSurrogate(c) && !isAtEnd() && Character.isLowSurrogate(peek())) {
+                    actualName.append(advance());
+                }
+            }
+        }
+
+        String identifierName = actualName.toString();
+        TokenType type = hasEscapes ? TokenType.IDENTIFIER : lookupKeyword(identifierName);
+        Object literal = literalForKeyword(type);
+
+        int rawLength = position - startPos;
+        int endColumn = startColumn + rawLength;
+        return new Token(type, identifierName, literal, startLine, startColumn, startPos, position, startLine, endColumn, null);
+    }
+
+    // Original full scanning for when first char is escape/unicode
+    private Token scanIdentifierFull(int startLine, int startColumn, int startPos) {
+        StringBuilder actualName = new StringBuilder();
+        boolean hasEscapes = false;
 
         // Handle first character (could be unicode escape or regular)
         if (peek() == '\\' && peekNext() == 'u') {
             hasEscapes = true;
             advance(); // consume \
             advance(); // consume u
-            // scanUnicodeEscape now returns String (may be 1 or 2 chars for surrogate pairs)
             actualName.append(scanUnicodeEscape());
         } else {
             char c = advance();
             actualName.append(c);
-            // Handle surrogate pairs
             if (Character.isHighSurrogate(c) && !isAtEnd() && Character.isLowSurrogate(peek())) {
                 actualName.append(advance());
             }
@@ -1030,84 +1179,23 @@ public class Lexer {
                 hasEscapes = true;
                 advance(); // consume \
                 advance(); // consume u
-                // scanUnicodeEscape now returns String (may be 1 or 2 chars for surrogate pairs)
                 actualName.append(scanUnicodeEscape());
             } else {
                 char c = advance();
                 actualName.append(c);
-                // Handle surrogate pairs
                 if (Character.isHighSurrogate(c) && !isAtEnd() && Character.isLowSurrogate(peek())) {
                     actualName.append(advance());
                 }
             }
         }
 
-        // OPTIMIZED: No substring() or contains() calls - use tracked boolean flag
         String identifierName = actualName.toString();
+        TokenType type = hasEscapes ? TokenType.IDENTIFIER : lookupKeyword(identifierName);
+        Object literal = literalForKeyword(type);
 
-        // Keywords with escape sequences should be treated as identifiers
-        TokenType type = TokenType.IDENTIFIER;
-        if (!hasEscapes) {
-            type = switch (identifierName) {
-                case "true" -> TokenType.TRUE;
-                case "false" -> TokenType.FALSE;
-                case "null" -> TokenType.NULL;
-                case "var" -> TokenType.VAR;
-                case "let" -> TokenType.LET;
-                case "const" -> TokenType.CONST;
-                case "function" -> TokenType.FUNCTION;
-                case "class" -> TokenType.CLASS;
-                case "return" -> TokenType.RETURN;
-                case "if" -> TokenType.IF;
-                case "else" -> TokenType.ELSE;
-                case "for" -> TokenType.FOR;
-                case "while" -> TokenType.WHILE;
-                case "do" -> TokenType.DO;
-                case "break" -> TokenType.BREAK;
-                case "continue" -> TokenType.CONTINUE;
-                case "switch" -> TokenType.SWITCH;
-                case "case" -> TokenType.CASE;
-                case "default" -> TokenType.DEFAULT;
-                case "try" -> TokenType.TRY;
-                case "catch" -> TokenType.CATCH;
-                case "finally" -> TokenType.FINALLY;
-                case "throw" -> TokenType.THROW;
-                case "new" -> TokenType.NEW;
-                case "typeof" -> TokenType.TYPEOF;
-                case "void" -> TokenType.VOID;
-                case "delete" -> TokenType.DELETE;
-                case "this" -> TokenType.THIS;
-                case "super" -> TokenType.SUPER;
-                case "in" -> TokenType.IN;
-                // Note: 'of' is a contextual keyword, treated as identifier by lexer
-                // Parser will check for peek().lexeme().equals("of") where needed
-                case "instanceof" -> TokenType.INSTANCEOF;
-                // Note: 'yield' is a contextual keyword, treated as identifier by lexer
-                // In strict mode or generators, it's reserved; otherwise it's a valid identifier
-                case "import" -> TokenType.IMPORT;
-                case "export" -> TokenType.EXPORT;
-                case "with" -> TokenType.WITH;
-                case "debugger" -> TokenType.DEBUGGER;
-                default -> TokenType.IDENTIFIER;
-            };
-        }
-
-        Object literal = switch (type) {
-            case TRUE -> true;
-            case FALSE -> false;
-            case NULL -> null;
-            default -> null;
-        };
-
-        // For AST purposes, use the decoded name as the lexeme (identifierName).
-        // But for position tracking, we need the raw source length.
-        // Token's endColumn should reflect the actual source position.
-        String tokenLexeme = identifierName;
-        // endPosition is current position (after consuming all chars including escapes)
-        // Use raw source length for end column calculation
         int rawLength = position - startPos;
         int endColumn = startColumn + rawLength;
-        return new Token(type, tokenLexeme, literal, startLine, startColumn, startPos, position, startLine, endColumn, null);
+        return new Token(type, identifierName, literal, startLine, startColumn, startPos, position, startLine, endColumn, null);
     }
 
     private String scanUnicodeEscape() {

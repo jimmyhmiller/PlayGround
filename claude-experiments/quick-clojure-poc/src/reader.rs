@@ -76,9 +76,40 @@ pub fn edn_to_value(edn: &Edn) -> Result<Value, String> {
     }
 }
 
+/// Pre-process input to handle reader macros not supported by clojure-reader
+/// Converts #'symbol to (var symbol)
+fn preprocess(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() * 2);
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '#' && chars.peek() == Some(&'\'') {
+            chars.next(); // consume the '
+            result.push_str("(var ");
+
+            // Read the symbol (including namespace-qualified symbols)
+            while let Some(&next) = chars.peek() {
+                if next.is_alphanumeric() || next == '/' || next == '-' || next == '_'
+                    || next == '.' || next == '*' || next == '+' || next == '!' || next == '?'
+                {
+                    result.push(chars.next().unwrap());
+                } else {
+                    break;
+                }
+            }
+            result.push(')');
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
 /// Read a Clojure expression from a string
 pub fn read(input: &str) -> Result<Value, String> {
-    match read_string(input) {
+    let preprocessed = preprocess(input);
+    match read_string(&preprocessed) {
         Ok(edn) => edn_to_value(&edn),
         Err(e) => Err(format!("Parse error: {:?}", e)),
     }
@@ -160,6 +191,29 @@ mod tests {
                 assert!(matches!(&items[2], Value::Map(_)));
             }
             _ => panic!("Expected vector"),
+        }
+    }
+
+    #[test]
+    fn test_var_reader_macro() {
+        // #'foo should become (var foo)
+        match read("#'foo").unwrap() {
+            Value::List(items) => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(&items[0], Value::Symbol(s) if s == "var"));
+                assert!(matches!(&items[1], Value::Symbol(s) if s == "foo"));
+            }
+            _ => panic!("Expected list (var foo)"),
+        }
+
+        // #'ns/name should become (var ns/name)
+        match read("#'clojure.core/*ns*").unwrap() {
+            Value::List(items) => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(&items[0], Value::Symbol(s) if s == "var"));
+                assert!(matches!(&items[1], Value::Symbol(s) if s == "clojure.core/*ns*"));
+            }
+            _ => panic!("Expected list (var clojure.core/*ns*)"),
         }
     }
 }

@@ -14,6 +14,8 @@
           <target>25</target>
           <compilerArgs>
             <arg>--enable-preview</arg>
+            <arg>--add-modules</arg>
+            <arg>jdk.incubator.vector</arg>
             <arg>-parameters</arg>
           </compilerArgs>
           <annotationProcessorPaths>
@@ -29,7 +31,7 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.2.3</version>
         <configuration>
-          <argLine>--enable-preview</argLine>
+          <argLine>--enable-preview --add-modules jdk.incubator.vector</argLine>
         </configuration>
       </plugin>
       <plugin>
@@ -78,6 +80,8 @@
               <executable>java</executable>
               <arguments>
                 <argument>--enable-preview</argument>
+                <argument>--add-modules</argument>
+                <argument>jdk.incubator.vector</argument>
                 <argument>-classpath</argument>
                 <classpath />
                 <argument>org.openjdk.jmh.Main</argument>

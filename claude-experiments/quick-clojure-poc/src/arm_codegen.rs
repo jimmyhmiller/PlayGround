@@ -1072,6 +1072,148 @@ impl Arm64CodeGen {
                 // Decrement stack counter (deallocate what we allocated)
                 self.current_function_stack_bytes -= save_bytes;
             }
+
+            Instruction::MakeType(dst, type_id, field_values) => {
+                // MakeType: Create a deftype instance
+                // Similar to MakeFunctionPtr but for type instances
+                //
+                // ARM64 Calling Convention for trampoline_allocate_type:
+                // - x0 = type_id
+                // - x1 = field_count
+                // - x2 = values_ptr (pointer to field values on stack)
+                // - Returns: x0 = tagged HeapObject pointer
+
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+
+                // Step 1: Allocate stack space for field values (16-byte aligned)
+                let total_stack_space = field_values.len() * 8;
+                let aligned_stack_space = ((total_stack_space + 15) / 16) * 16;
+                if aligned_stack_space > 0 {
+                    self.emit_sub_sp_imm(aligned_stack_space as i64);
+                }
+
+                // Step 2: Store field values to stack
+                for (i, value) in field_values.iter().enumerate() {
+                    let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
+                    let offset = i * 8;
+                    self.emit_str_offset(src_reg, 31, offset as i32);
+                }
+
+                // Step 3: Save stack pointer for values_ptr argument
+                let values_ptr_reg = 10;
+                self.emit_mov(values_ptr_reg, 31);
+
+                // Step 4: Set up arguments for trampoline call
+                self.emit_mov_imm(0, *type_id as i64);           // x0 = type_id
+                self.emit_mov_imm(1, field_values.len() as i64); // x1 = field_count
+                self.emit_mov(2, values_ptr_reg);                // x2 = values_ptr
+
+                // Step 5: Call trampoline to allocate type instance
+                let func_addr = crate::trampoline::trampoline_allocate_type as usize;
+                self.emit_external_call(func_addr, "trampoline_allocate_type");
+
+                // Step 6: Clean up stack
+                if aligned_stack_space > 0 {
+                    self.emit_add_sp_imm(aligned_stack_space as i64);
+                }
+
+                // Step 7: Result is in x0 (tagged HeapObject pointer)
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
+                }
+
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::LoadTypeField(dst, obj, field_name) => {
+                // LoadTypeField: Load a field from a deftype instance by field name
+                //
+                // Runtime field lookup via trampoline:
+                // 1. Embed field name string on stack
+                // 2. Call trampoline_load_type_field_by_name(obj_ptr, field_name_ptr, field_name_len)
+                // 3. Trampoline extracts type_id from object header
+                // 4. Looks up field index by name in type registry
+                // 5. Returns field value
+                //
+                // ARM64 Calling Convention for trampoline_load_type_field_by_name:
+                // - x0 = obj_ptr (tagged HeapObject)
+                // - x1 = field_name_ptr (pointer to string bytes on stack)
+                // - x2 = field_name_len
+                // - Returns: x0 = field value (tagged)
+
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let obj_reg = self.get_physical_reg_for_irvalue(obj, false)?;
+
+                let field_bytes = field_name.as_bytes();
+                let field_len = field_bytes.len();
+
+                // Save registers that might be in use (x0-x3 for args, plus obj_reg if it's in that range)
+                self.emit_stp(0, 1, 31, -2);
+                self.emit_stp(2, 3, 31, -2);
+
+                // Allocate stack space for field name string (16-byte aligned)
+                let string_stack_space = ((field_len + 15) / 16) * 16;
+                if string_stack_space > 0 {
+                    self.emit_sub_sp_imm(string_stack_space as i64);
+                }
+
+                // Store field name bytes to stack using STRB
+                // First, we need to load each byte into a register and store it
+                let temp_byte_reg = 10;  // Use x10 as temp for byte values
+                for (i, &byte) in field_bytes.iter().enumerate() {
+                    // Load byte value into temp register
+                    self.emit_mov_imm(temp_byte_reg, byte as i64);
+                    // Store byte to stack at offset i
+                    self.emit_strb_offset(temp_byte_reg, 31, i as i32);
+                }
+
+                // Save pointer to field name string (current SP)
+                let field_name_ptr_reg = 12;  // x12 = field_name_ptr
+                self.emit_mov(field_name_ptr_reg, 31);
+
+                // Set up trampoline arguments:
+                // x0 = obj_ptr (need to reload if obj_reg was x0-x3 which we saved)
+                if obj_reg <= 3 {
+                    // obj_reg was saved, reload from stack
+                    // Stack layout: [saved x2,x3] [saved x0,x1] [field_name_bytes]
+                    // saved x0,x1 are at SP + string_stack_space + 16
+                    // saved x2,x3 are at SP + string_stack_space
+                    let saved_offset = string_stack_space as i32 + if obj_reg <= 1 { 16 } else { 0 };
+                    let slot_offset = (obj_reg % 2) as i32 * 8;
+                    self.emit_ldr_offset(0, 31, saved_offset + slot_offset);
+                } else {
+                    self.emit_mov(0, obj_reg);
+                }
+                self.emit_mov(1, field_name_ptr_reg);           // x1 = field_name_ptr
+                self.emit_mov_imm(2, field_len as i64);         // x2 = field_name_len
+
+                // Call trampoline_load_type_field_by_name
+                let func_addr = crate::trampoline::trampoline_load_type_field_by_name as usize;
+                self.emit_mov_imm(15, func_addr as i64);
+                self.emit_blr(15);
+
+                // Save result to temp register before restoring saved registers
+                let temp_result = 9;
+                self.emit_mov(temp_result, 0);
+
+                // Clean up stack space for field name
+                if string_stack_space > 0 {
+                    self.emit_add_sp_imm(string_stack_space as i64);
+                }
+
+                // Restore saved registers
+                self.emit_ldp(2, 3, 31, 2);
+                self.emit_ldp(0, 1, 31, 2);
+
+                // Move result to destination register
+                if dst_reg != temp_result {
+                    self.emit_mov(dst_reg, temp_result);
+                }
+
+                self.store_spill(dst_reg, dest_spill);
+            }
         }
 
         // Clear temporary registers after each instruction (like Beagle does)
@@ -1469,6 +1611,16 @@ impl Arm64CodeGen {
         // Offset is in bytes, needs to be divided by 8 for encoding (unsigned 12-bit)
         let offset_scaled = (offset / 8) as u32;
         let instruction = 0xF9000000 | (offset_scaled << 10) | ((base as u32) << 5) | (src as u32);
+        self.code.push(instruction);
+    }
+
+    /// Store a single byte to memory
+    /// STRB Wt, [Xn, #offset] - offset is in bytes (unsigned 12-bit)
+    fn emit_strb_offset(&mut self, src: usize, base: usize, offset: i32) {
+        // STRB Wt, [Xn, #offset]
+        // Encoding: 0x39000000 | (imm12 << 10) | (Rn << 5) | Rt
+        let offset_u = (offset as u32) & 0xFFF;  // 12-bit unsigned offset
+        let instruction = 0x39000000 | (offset_u << 10) | ((base as u32) << 5) | (src as u32);
         self.code.push(instruction);
     }
 

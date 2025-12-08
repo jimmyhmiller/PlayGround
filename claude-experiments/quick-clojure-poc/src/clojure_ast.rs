@@ -94,6 +94,34 @@ pub enum Expr {
 
     // Quote - return value unevaluated
     Quote(Value),
+
+    /// (var symbol) or #'symbol
+    /// Returns the Var object itself, not its value
+    VarRef {
+        namespace: Option<String>,
+        name: String,
+    },
+
+    /// (deftype* TypeName [field1 field2 ...])
+    /// Defines a new type with named fields
+    DefType {
+        name: String,
+        fields: Vec<String>,
+    },
+
+    /// (TypeName. arg1 arg2 ...) - constructor call
+    /// Creates an instance of a deftype
+    TypeConstruct {
+        type_name: String,
+        args: Vec<Expr>,
+    },
+
+    /// (.-field obj) - field access
+    /// Reads a field from a deftype instance
+    FieldAccess {
+        field: String,
+        object: Box<Expr>,
+    },
 }
 
 /// Convert parsed Value to AST
@@ -161,6 +189,8 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
                     "ns" => analyze_ns(items),
                     "use" => analyze_use(items),
                     "binding" => analyze_binding(items),
+                    "var" => analyze_var_ref(items),
+                    "deftype*" => analyze_deftype(items),
                     _ => analyze_call(items),
                 }
             } else {
@@ -261,6 +291,68 @@ fn analyze_quote(items: &im::Vector<Value>) -> Result<Expr, String> {
     }
 
     Ok(Expr::Quote(items[1].clone()))
+}
+
+fn analyze_var_ref(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // (var symbol) - returns the Var object itself
+    if items.len() != 2 {
+        return Err(format!("var requires 1 argument, got {}", items.len() - 1));
+    }
+
+    // Parse the symbol (may be qualified: ns/name or unqualified: name)
+    match &items[1] {
+        Value::Symbol(s) => {
+            if s == "/" {
+                Ok(Expr::VarRef {
+                    namespace: None,
+                    name: s.clone(),
+                })
+            } else if let Some(idx) = s.find('/') {
+                let namespace = s[..idx].to_string();
+                let name = s[idx+1..].to_string();
+                Ok(Expr::VarRef {
+                    namespace: Some(namespace),
+                    name,
+                })
+            } else {
+                Ok(Expr::VarRef {
+                    namespace: None,
+                    name: s.clone(),
+                })
+            }
+        }
+        _ => Err("var requires a symbol".to_string()),
+    }
+}
+
+fn analyze_deftype(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // (deftype* TypeName [field1 field2 ...])
+    if items.len() != 3 {
+        return Err(format!("deftype* requires 2 arguments (name and fields), got {}", items.len() - 1));
+    }
+
+    // Get type name
+    let name = match &items[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Err("deftype* requires a symbol as type name".to_string()),
+    };
+
+    // Get field names from vector
+    let fields = match &items[2] {
+        Value::Vector(v) => {
+            let mut field_names = Vec::new();
+            for field in v.iter() {
+                match field {
+                    Value::Symbol(s) => field_names.push(s.clone()),
+                    _ => return Err(format!("deftype* field must be a symbol, got {:?}", field)),
+                }
+            }
+            field_names
+        }
+        _ => return Err("deftype* requires a vector of field names".to_string()),
+    };
+
+    Ok(Expr::DefType { name, fields })
 }
 
 fn analyze_ns(items: &im::Vector<Value>) -> Result<Expr, String> {
@@ -658,6 +750,33 @@ fn validate_fn_arities(arities: &[crate::value::FnArity]) -> Result<(), String> 
 }
 
 fn analyze_call(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // Check for special call patterns based on the first symbol
+    if let Some(Value::Symbol(sym)) = items.get(0) {
+        // Check for constructor call: (TypeName. arg1 arg2 ...)
+        if sym.ends_with('.') && sym.len() > 1 && !sym.starts_with('.') {
+            let type_name = sym[..sym.len()-1].to_string();
+            let mut args = Vec::new();
+            for i in 1..items.len() {
+                args.push(analyze(&items[i])?);
+            }
+            return Ok(Expr::TypeConstruct { type_name, args });
+        }
+
+        // Check for field access: (.-field obj)
+        if sym.starts_with(".-") && sym.len() > 2 {
+            if items.len() != 2 {
+                return Err(format!("Field access {} requires exactly 1 argument", sym));
+            }
+            let field = sym[2..].to_string();
+            let object = analyze(&items[1])?;
+            return Ok(Expr::FieldAccess {
+                field,
+                object: Box::new(object),
+            });
+        }
+    }
+
+    // Regular function call
     let func = analyze(&items[0])?;
     let mut args = Vec::new();
 

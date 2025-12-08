@@ -124,6 +124,13 @@ pub enum Instruction {
     Call(IrValue, IrValue, Vec<IrValue>),   // Call(dst, fn, args) - invoke function
     CallWithSaves(IrValue, IrValue, Vec<IrValue>, Vec<IrValue>),  // CallWithSaves(dst, fn, args, saves) - call with register preservation
 
+    // DefType operations
+    /// MakeType(dst, type_id, field_values) - create deftype instance
+    MakeType(IrValue, usize, Vec<IrValue>),
+    /// LoadTypeField(dst, obj, field_name) - load field from deftype instance
+    /// Field name is used for runtime lookup (future: inline caching)
+    LoadTypeField(IrValue, IrValue, String),
+
     // Return
     Ret(IrValue),
 }
