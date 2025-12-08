@@ -281,7 +281,7 @@ impl Compiler {
     /// Compile (deftype* TypeName [field1 field2 ...])
     /// Registers the type and returns nil
     fn compile_deftype(&mut self, name: &str, fields: &[String]) -> Result<IrValue, String> {
-        // Register the type with the runtime
+        // Register the type with the runtime using fully qualified name
         let current_ns = self.get_current_namespace();
         let qualified_name = format!("{}/{}", current_ns, name);
 
@@ -291,8 +291,9 @@ impl Compiler {
             rt.register_type(qualified_name.clone(), fields.to_vec())
         };
 
-        // Store in compiler's type registry for compile-time lookup
-        self.type_registry.insert(name.to_string(), (type_id, fields.to_vec()));
+        // Store in compiler's type registry with FULLY QUALIFIED name
+        // This prevents namespace collisions and enables qualified constructor calls
+        self.type_registry.insert(qualified_name, (type_id, fields.to_vec()));
 
         // deftype* returns nil
         let result = self.builder.new_register();
@@ -302,10 +303,19 @@ impl Compiler {
 
     /// Compile (TypeName. arg1 arg2 ...) - constructor call
     fn compile_type_construct(&mut self, type_name: &str, args: &[Expr]) -> Result<IrValue, String> {
-        // Look up the type
-        let (type_id, fields) = self.type_registry.get(type_name)
+        // Resolve type name to fully qualified name
+        let qualified_name = if type_name.contains('/') {
+            // Already qualified (e.g., "foo/Point")
+            type_name.to_string()
+        } else {
+            // Unqualified - use current namespace
+            format!("{}/{}", self.get_current_namespace(), type_name)
+        };
+
+        // Look up the type by fully qualified name
+        let (type_id, fields) = self.type_registry.get(&qualified_name)
             .cloned()
-            .ok_or_else(|| format!("Unknown type: {}", type_name))?;
+            .ok_or_else(|| format!("Unknown type: {}", qualified_name))?;
 
         // Check arg count matches field count
         if args.len() != fields.len() {

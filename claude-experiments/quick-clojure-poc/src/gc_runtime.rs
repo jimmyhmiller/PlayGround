@@ -1,12 +1,35 @@
-// Simplified GC Runtime for Namespaces
+// GC Runtime - High-level runtime using pluggable GC allocators
 //
-// This is a minimal GC implementation that manages heap-allocated namespaces.
-// For now, we use a simple bump allocator with mark-and-sweep GC.
-//
-// Namespace heap layout:
-// Header (8 bytes) | name_ptr (8 bytes) | [symbol_name_ptr, value] pairs...
+// This module provides the high-level runtime interface for managing
+// heap-allocated objects (namespaces, vars, functions, deftypes) using
+// the pluggable GC system from the gc module.
 
 use std::collections::{HashMap, HashSet};
+
+use crate::gc::{
+    Allocator, AllocateAction, AllocatorOptions, StackMap, StackMapDetails,
+    BuiltInTypes, HeapObject, Word,
+};
+
+// Re-export for compatibility
+pub use crate::gc::{BuiltInTypes as GcBuiltInTypes, HeapObject as GcHeapObject};
+
+// Select allocator based on feature flags
+cfg_if::cfg_if! {
+    if #[cfg(feature = "compacting")] {
+        use crate::gc::compacting::CompactingHeap as AllocImpl;
+    } else if #[cfg(feature = "generational")] {
+        use crate::gc::generational::GenerationalGC as AllocImpl;
+    } else {
+        use crate::gc::mark_and_sweep::MarkAndSweep as AllocImpl;
+    }
+}
+
+#[cfg(feature = "thread-safe")]
+type Alloc = crate::gc::mutex_allocator::MutexAllocator<AllocImpl>;
+
+#[cfg(not(feature = "thread-safe"))]
+type Alloc = AllocImpl;
 
 const TYPE_ID_STRING: u8 = 2;
 const TYPE_ID_NAMESPACE: u8 = 10;
@@ -32,236 +55,55 @@ impl TypeDef {
 }
 
 /// Closure heap object layout constants
-///
-/// Layout: Header | name_ptr | code_ptr | closure_count | [closure_values...]
 #[allow(dead_code)]
 pub mod closure_layout {
-    /// Size of header in bytes (always 8 bytes for all heap objects)
     pub const HEADER_SIZE: usize = 8;
-
-    /// Field offsets (in bytes from start of object, including header)
-    pub const FIELD_0_NAME_PTR: usize = 8;      // Offset 8: name pointer (0 for anonymous)
-    pub const FIELD_1_CODE_PTR: usize = 16;     // Offset 16: code pointer (untagged)
-    pub const FIELD_2_CLOSURE_COUNT: usize = 24; // Offset 24: number of captured values
-    pub const FIELD_3_FIRST_VALUE: usize = 32;  // Offset 32: first captured value
-
-    /// Offset where closure values start
+    pub const FIELD_0_NAME_PTR: usize = 8;
+    pub const FIELD_1_CODE_PTR: usize = 16;
+    pub const FIELD_2_CLOSURE_COUNT: usize = 24;
+    pub const FIELD_3_FIRST_VALUE: usize = 32;
     pub const VALUES_OFFSET: usize = FIELD_3_FIRST_VALUE;
-
-    /// Size of each value in bytes
     pub const VALUE_SIZE: usize = 8;
 
-    /// Calculate byte offset for closure value at given index
     pub const fn value_offset(index: usize) -> usize {
         VALUES_OFFSET + (index * VALUE_SIZE)
     }
 
-    /// Field indices (for HeapObject::get_field / write_field methods)
     pub const FIELD_NAME_PTR: usize = 0;
     pub const FIELD_CODE_PTR: usize = 1;
     pub const FIELD_CLOSURE_COUNT: usize = 2;
     pub const FIELD_FIRST_VALUE: usize = 3;
 }
 
-/// Header for heap-allocated objects
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct Header {
-    pub type_id: u8,
-    pub type_data: u32,  // For strings: byte length
-    pub size: u8,        // Size in 8-byte words (excluding header)
-    pub opaque: bool,    // True if object contains no pointers
-    pub marked: bool,    // GC mark bit
-}
-
-impl Header {
-    fn to_usize(self) -> usize {
-        let mut data: usize = 0;
-        data |= (self.type_id as usize) << 56;
-        data |= (self.type_data as usize) << 24;
-        data |= (self.size as usize) << 16;
-        if self.opaque {
-            data |= 1 << 1;
-        }
-        if self.marked {
-            data |= 1 << 0;
-        }
-        data
-    }
-
-    fn from_usize(data: usize) -> Self {
-        Header {
-            type_id: (data >> 56) as u8,
-            type_data: (data >> 24) as u32,
-            size: (data >> 16) as u8,
-            opaque: (data & 0b10) != 0,
-            marked: (data & 0b01) != 0,
-        }
-    }
-}
-
-/// Wrapper for heap objects
-pub struct HeapObject {
-    pointer: usize,
-}
-
-impl HeapObject {
-    pub fn from_untagged(pointer: usize) -> Self {
-        assert!(pointer % 8 == 0, "Heap objects must be 8-byte aligned");
-        HeapObject { pointer }
-    }
-
-    pub fn read_header(&self) -> Header {
-        unsafe {
-            let header_ptr = self.pointer as *const usize;
-            let header_value = *header_ptr;
-            Header::from_usize(header_value)
-        }
-    }
-
-    pub fn write_header_direct(&mut self, header: Header) {
-        unsafe {
-            let header_ptr = self.pointer as *mut usize;
-            *header_ptr = header.to_usize();
-        }
-    }
-
-    pub fn get_field(&self, index: usize) -> usize {
-        unsafe {
-            let ptr = self.pointer as *const usize;
-            let field_ptr = ptr.add(1 + index);  // Skip header
-            *field_ptr
-        }
-    }
-
-    pub fn write_field(&mut self, index: usize, value: usize) {
-        unsafe {
-            let ptr = self.pointer as *mut usize;
-            let field_ptr = ptr.add(1 + index);  // Skip header
-            *field_ptr = value;
-        }
-    }
-
-    pub fn write_bytes(&mut self, bytes: &[u8]) {
-        unsafe {
-            let ptr = self.pointer as *mut u8;
-            let data_ptr = ptr.add(8);  // Skip header
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, bytes.len());
-        }
-    }
-
-    pub fn read_string(&self, byte_len: usize) -> String {
-        unsafe {
-            let ptr = self.pointer as *const u8;
-            let data_ptr = ptr.add(8);  // Skip header
-            let bytes = std::slice::from_raw_parts(data_ptr, byte_len);
-            String::from_utf8_unchecked(bytes.to_vec())
-        }
-    }
-
-    pub fn mark(&mut self) {
-        let mut header = self.read_header();
-        header.marked = true;
-        self.write_header_direct(header);
-    }
-
-    pub fn is_marked(&self) -> bool {
-        self.read_header().marked
-    }
-
-    pub fn unmark(&mut self) {
-        let mut header = self.read_header();
-        header.marked = false;
-        self.write_header_direct(header);
-    }
-
-    pub fn full_size(&self) -> usize {
-        let header = self.read_header();
-        8 + (header.size as usize * 8)
-    }
-
-    /// Get the type_data field from the header (used for deftype type_id)
-    pub fn get_type_data(&self) -> u32 {
-        self.read_header().type_data
-    }
-
-    /// Set the type_data field in the header (used for deftype type_id)
-    pub fn set_type_data(&mut self, type_data: u32) {
-        let mut header = self.read_header();
-        header.type_data = type_data;
-        self.write_header_direct(header);
-    }
-}
-
-/// Built-in type tagging
-#[derive(Debug, Copy, Clone)]
-#[allow(dead_code)]
-pub enum BuiltInTypes {
-    Int,
-    String,
-    Function,    // Regular functions (no closures) - just tagged code pointers
-    Closure,     // Closures - heap objects with code pointer + closure values
-    HeapObject,
-}
-
-impl BuiltInTypes {
-    pub fn tag(&self) -> usize {
-        match self {
-            BuiltInTypes::Int => 0b000,
-            BuiltInTypes::String => 0b010,
-            BuiltInTypes::Function => 0b100,
-            BuiltInTypes::Closure => 0b101,
-            BuiltInTypes::HeapObject => 0b110,
-        }
-    }
-
-    /// Get the type from a tagged value
-    #[allow(dead_code)]
-    pub fn get_kind(value: usize) -> Self {
-        match value & 0b111 {
-            0b000 => BuiltInTypes::Int,
-            0b010 => BuiltInTypes::String,
-            0b100 => BuiltInTypes::Function,
-            0b101 => BuiltInTypes::Closure,
-            0b110 => BuiltInTypes::HeapObject,
-            _ => panic!("Unknown tag: {}", value & 0b111),
-        }
-    }
-
-    pub fn tagged(&self, value: usize) -> usize {
-        (value << 3) | self.tag()
-    }
-
-    pub fn untag(&self, value: usize) -> usize {
-        value >> 3
-    }
-}
-
-/// Simple bump allocator with mark-and-sweep GC
+/// GC Runtime with pluggable allocator
 pub struct GCRuntime {
-    heap: Vec<u8>,
-    next_alloc: usize,
-    heap_size: usize,
+    /// The underlying allocator
+    allocator: Alloc,
+
+    /// Stack map for precise GC root scanning
+    stack_map: StackMap,
 
     /// Namespace roots: namespace_name -> tagged pointer
     namespace_roots: HashMap<String, usize>,
 
-    /// All allocated objects (for GC marking)
-    objects: Vec<usize>,
+    /// Namespace name to numeric ID (for allocator)
+    namespace_name_to_id: HashMap<String, usize>,
+    next_namespace_id: usize,
 
     /// Thread-local binding stacks for dynamic vars
-    /// Map from var_ptr to stack of values
-    /// When a var is accessed, we check this stack first before reading the root value
     dynamic_bindings: HashMap<usize, Vec<usize>>,
 
     /// Set of vars that are marked as dynamic
-    /// Only vars in this set can have thread-local bindings
-    dynamic_vars: std::collections::HashSet<usize>,
+    dynamic_vars: HashSet<usize>,
 
-    /// Type registry for deftype: type_id → TypeDef
+    /// Type registry for deftype
     type_registry: Vec<TypeDef>,
 
-    /// Type name to ID mapping: "namespace/TypeName" → type_id
+    /// Type name to ID mapping
     type_name_to_id: HashMap<String, usize>,
+
+    /// GC options
+    options: AllocatorOptions,
 }
 
 impl Default for GCRuntime {
@@ -272,96 +114,118 @@ impl Default for GCRuntime {
 
 impl GCRuntime {
     pub fn new() -> Self {
-        let heap_size = 1024 * 1024;  // 1MB heap
-        let mut heap = vec![0u8; heap_size];
-        let heap_ptr = heap.as_mut_ptr() as usize;
+        Self::with_options(AllocatorOptions::default())
+    }
 
-        // Align to 8 bytes
-        let aligned_start = (heap_ptr + 7) & !7;
-        let offset = aligned_start - heap_ptr;
-
+    pub fn with_options(options: AllocatorOptions) -> Self {
         GCRuntime {
-            heap,
-            next_alloc: offset,
-            heap_size,
+            allocator: Alloc::new(options),
+            stack_map: StackMap::new(),
             namespace_roots: HashMap::new(),
-            objects: Vec::new(),
+            namespace_name_to_id: HashMap::new(),
+            next_namespace_id: 0,
             dynamic_bindings: HashMap::new(),
             dynamic_vars: HashSet::new(),
             type_registry: Vec::new(),
             type_name_to_id: HashMap::new(),
+            options,
         }
     }
 
-    /// Allocate a raw heap object
+    /// Add stack map entry
+    pub fn add_stack_map_entry(&mut self, code_addr: usize, details: StackMapDetails) {
+        self.stack_map.extend(vec![(code_addr, details)]);
+    }
+
+    /// Get the stack map (for external use)
+    pub fn stack_map(&self) -> &StackMap {
+        &self.stack_map
+    }
+
+    /// Allocate raw memory from the heap
     fn allocate_raw(&mut self, size_words: usize, type_id: u8) -> Result<usize, String> {
-        let total_size = 8 + (size_words * 8);  // Header + fields
-
-        if self.next_alloc + total_size > self.heap_size {
-            // Try GC first
-            self.gc()?;
-
-            // Check again after GC
-            if self.next_alloc + total_size > self.heap_size {
-                return Err("Out of memory".to_string());
+        // Try to allocate
+        match self.allocator.try_allocate(size_words, BuiltInTypes::HeapObject) {
+            Ok(AllocateAction::Allocated(ptr)) => {
+                let mut heap_obj = HeapObject::from_untagged(ptr);
+                heap_obj.write_header(Word::from_word(size_words));
+                heap_obj.write_type_id(type_id as usize);
+                Ok(ptr as usize)
             }
+            Ok(AllocateAction::Gc) => {
+                // Need GC - for now just grow and retry
+                // TODO: Actually run GC with stack map when we have stack pointers
+                self.allocator.grow();
+                self.allocate_raw(size_words, type_id)
+            }
+            Err(e) => Err(e.to_string()),
         }
-
-        let heap_ptr = self.heap.as_ptr() as usize;
-        let object_ptr = heap_ptr + self.next_alloc;
-
-        // Initialize header
-        let mut heap_obj = HeapObject::from_untagged(object_ptr);
-        heap_obj.write_header_direct(Header {
-            type_id,
-            type_data: 0,
-            size: size_words as u8,
-            opaque: false,
-            marked: false,
-        });
-
-        self.next_alloc += total_size;
-        self.objects.push(object_ptr);
-
-        Ok(object_ptr)
     }
 
     /// Allocate a string on the heap
     pub fn allocate_string(&mut self, s: &str) -> Result<usize, String> {
         let bytes = s.as_bytes();
-        let words = bytes.len().div_ceil(8);  // Round up to 8-byte words
+        let words = bytes.len().div_ceil(8);
 
         let ptr = self.allocate_raw(words, TYPE_ID_STRING)?;
 
-        let mut heap_obj = HeapObject::from_untagged(ptr);
+        let mut heap_obj = HeapObject::from_untagged(ptr as *const u8);
 
-        // Update header with actual byte length
-        let mut header = heap_obj.read_header();
+        // Update header with byte length and mark as opaque
+        let mut header = heap_obj.get_header();
         header.type_data = bytes.len() as u32;
-        header.opaque = true;  // Strings have no pointers
+        header.opaque = true;
         heap_obj.write_header_direct(header);
 
         // Write string data
-        heap_obj.write_bytes(bytes);
+        unsafe {
+            let data_ptr = (ptr + 8) as *mut u8;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, bytes.len());
+        }
 
-        Ok(BuiltInTypes::String.tagged(ptr))
+        Ok(self.tag_string(ptr))
+    }
+
+    /// Tag a pointer as a string
+    fn tag_string(&self, ptr: usize) -> usize {
+        (ptr << 3) | 0b010
+    }
+
+    /// Tag a pointer as a heap object
+    fn tag_heap_object(&self, ptr: usize) -> usize {
+        (ptr << 3) | 0b110
+    }
+
+    /// Tag a pointer as a closure
+    fn tag_closure(&self, ptr: usize) -> usize {
+        (ptr << 3) | 0b101
+    }
+
+    /// Untag a string pointer
+    fn untag_string(&self, tagged: usize) -> usize {
+        tagged >> 3
+    }
+
+    /// Untag a heap object pointer
+    fn untag_heap_object(&self, tagged: usize) -> usize {
+        tagged >> 3
+    }
+
+    /// Untag a closure pointer
+    fn untag_closure(&self, tagged: usize) -> usize {
+        tagged >> 3
     }
 
     /// Allocate a namespace object on the heap
     pub fn allocate_namespace(&mut self, name: &str) -> Result<usize, String> {
-        // 1. Allocate name string
         let name_ptr = self.allocate_string(name)?;
-
-        // 2. Allocate namespace: 1 word for name, start with 0 bindings
         let size_words = 1;
         let ns_ptr = self.allocate_raw(size_words, TYPE_ID_NAMESPACE)?;
 
-        // 3. Write namespace data
-        let mut heap_obj = HeapObject::from_untagged(ns_ptr);
-        heap_obj.write_field(0, name_ptr);  // Store name pointer
+        let heap_obj = HeapObject::from_untagged(ns_ptr as *const u8);
+        heap_obj.write_field(0, name_ptr as usize);
 
-        // 4. Tag and return
-        Ok(BuiltInTypes::HeapObject.tagged(ns_ptr))
+        Ok(self.tag_heap_object(ns_ptr))
     }
 
     /// Add or update a binding in a namespace (may reallocate!)
@@ -371,36 +235,33 @@ impl GCRuntime {
         symbol_name: &str,
         value: usize,
     ) -> Result<usize, String> {
-        let ns_untagged = BuiltInTypes::HeapObject.untag(ns_ptr);
-        let heap_obj = HeapObject::from_untagged(ns_untagged);
-        let header = heap_obj.read_header();
+        let ns_untagged = self.untag_heap_object(ns_ptr);
+        let heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
+        let header = heap_obj.get_header();
         let current_size = header.size as usize;
 
-        // Check if binding already exists - if so, update it in place
+        // Check if binding already exists
         if current_size > 0 {
             let num_bindings = (current_size - 1) / 2;
             for i in 0..num_bindings {
                 let name_ptr = heap_obj.get_field(1 + i * 2);
                 let stored_name = self.read_string(name_ptr);
                 if stored_name == symbol_name {
-                    // Found existing binding - update value in place
-                    let mut mutable_obj = HeapObject::from_untagged(ns_untagged);
-                    mutable_obj.write_field(1 + i * 2 + 1, value);
-                    return Ok(ns_ptr);  // Return same pointer, no reallocation needed
+                    heap_obj.write_field(1 + i * 2 + 1, value as usize);
+                    return Ok(ns_ptr);
                 }
             }
         }
 
-        // Binding doesn't exist - add new one
         // Allocate symbol name string
         let symbol_ptr = self.allocate_string(symbol_name)?;
 
-        // Reallocate with +2 words (name + value)
+        // Reallocate with +2 words
         let new_size = current_size + 2;
         let new_ns_ptr = self.allocate_raw(new_size, TYPE_ID_NAMESPACE)?;
 
         // Copy existing fields
-        let mut new_heap_obj = HeapObject::from_untagged(new_ns_ptr);
+        let new_heap_obj = HeapObject::from_untagged(new_ns_ptr as *const u8);
         for i in 0..current_size {
             let field = heap_obj.get_field(i);
             new_heap_obj.write_field(i, field);
@@ -410,14 +271,14 @@ impl GCRuntime {
         new_heap_obj.write_field(current_size, symbol_ptr);
         new_heap_obj.write_field(current_size + 1, value);
 
-        Ok(BuiltInTypes::HeapObject.tagged(new_ns_ptr))
+        Ok(self.tag_heap_object(new_ns_ptr))
     }
 
     /// Look up a binding in a namespace
     pub fn namespace_lookup(&self, ns_ptr: usize, symbol_name: &str) -> Option<usize> {
-        let ns_untagged = BuiltInTypes::HeapObject.untag(ns_ptr);
-        let heap_obj = HeapObject::from_untagged(ns_untagged);
-        let header = heap_obj.read_header();
+        let ns_untagged = self.untag_heap_object(ns_ptr);
+        let heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
+        let header = heap_obj.get_header();
         let size = header.size as usize;
 
         if size == 0 {
@@ -426,7 +287,6 @@ impl GCRuntime {
 
         let num_bindings = (size - 1) / 2;
 
-        // Linear search through bindings
         for i in 0..num_bindings {
             let name_ptr = heap_obj.get_field(1 + i * 2);
             let stored_name = self.read_string(name_ptr);
@@ -437,153 +297,102 @@ impl GCRuntime {
         None
     }
 
-    /// Get namespace name (for display)
+    /// Get namespace name
     pub fn namespace_name(&self, ns_ptr: usize) -> String {
-        let ns_untagged = BuiltInTypes::HeapObject.untag(ns_ptr);
-        let heap_obj = HeapObject::from_untagged(ns_untagged);
+        let ns_untagged = self.untag_heap_object(ns_ptr);
+        let heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
         let name_ptr = heap_obj.get_field(0);
         self.read_string(name_ptr)
     }
 
     /// Register namespace as GC root
     pub fn add_namespace_root(&mut self, name: String, ns_ptr: usize) {
+        let ns_id = self.next_namespace_id;
+        self.next_namespace_id += 1;
+
+        self.namespace_name_to_id.insert(name.clone(), ns_id);
         self.namespace_roots.insert(name, ns_ptr);
+        self.allocator.add_namespace_root(ns_id, ns_ptr);
+    }
+
+    /// Update namespace root (after reallocation)
+    pub fn update_namespace_root(&mut self, name: &str, new_ptr: usize) {
+        if let Some(&ns_id) = self.namespace_name_to_id.get(name) {
+            if let Some(old_ptr) = self.namespace_roots.get(name).copied() {
+                self.allocator.remove_namespace_root(ns_id, old_ptr);
+                self.allocator.add_namespace_root(ns_id, new_ptr);
+            }
+        }
+        self.namespace_roots.insert(name.to_string(), new_ptr);
     }
 
     /// Read a string from a tagged pointer
     pub fn read_string(&self, tagged_ptr: usize) -> String {
-        let ptr = BuiltInTypes::String.untag(tagged_ptr);
-        let heap_obj = HeapObject::from_untagged(ptr);
-        let header = heap_obj.read_header();
+        let ptr = self.untag_string(tagged_ptr);
+        let heap_obj = HeapObject::from_untagged(ptr as *const u8);
+        let header = heap_obj.get_header();
         let byte_len = header.type_data as usize;
-        heap_obj.read_string(byte_len)
-    }
 
-    /// Mark phase of GC
-    fn mark(&mut self) {
-        // Mark all namespace roots - collect them first to avoid borrow checker issues
-        let root_ptrs: Vec<usize> = self.namespace_roots.values().copied().collect();
-        for ns_ptr in root_ptrs {
-            self.mark_object(ns_ptr);
-        }
-    }
-
-    /// Mark a single object and its references
-    fn mark_object(&mut self, tagged_ptr: usize) {
-        let tag = tagged_ptr & 0b111;
-
-        // Only mark heap objects (strings and namespaces)
-        if tag != BuiltInTypes::String.tag() && tag != BuiltInTypes::HeapObject.tag() {
-            return;
-        }
-
-        let ptr = tagged_ptr >> 3;
-        let mut heap_obj = HeapObject::from_untagged(ptr);
-
-        // Already marked?
-        if heap_obj.is_marked() {
-            return;
-        }
-
-        heap_obj.mark();
-
-        let header = heap_obj.read_header();
-
-        // If opaque (like strings), no pointers to follow
-        if header.opaque {
-            return;
-        }
-
-        // Mark all fields (they might be pointers)
-        let size = header.size as usize;
-        for i in 0..size {
-            let field = heap_obj.get_field(i);
-            if field != 0 {
-                self.mark_object(field);
-            }
-        }
-    }
-
-    /// Sweep phase of GC
-    fn sweep(&mut self) {
-        // Unmark all objects (for now, we don't actually free memory)
-        // In a real implementation, we'd compact or free unmarked objects
-        for &obj_ptr in &self.objects {
-            let mut heap_obj = HeapObject::from_untagged(obj_ptr);
-            heap_obj.unmark();
+        unsafe {
+            let data_ptr = (ptr + 8) as *const u8;
+            let bytes = std::slice::from_raw_parts(data_ptr, byte_len);
+            String::from_utf8_unchecked(bytes.to_vec())
         }
     }
 
     /// Run garbage collection
-    fn gc(&mut self) -> Result<(), String> {
-        self.mark();
-        self.sweep();
+    pub fn run_gc(&mut self) -> Result<(), String> {
+        // For now, just return - full GC requires stack pointers
+        // TODO: Implement proper GC trigger with stack walking
         Ok(())
     }
 
-    /// Public API to trigger GC manually
-    pub fn run_gc(&mut self) -> Result<(), String> {
-        self.gc()
+    /// Run GC with stack pointers
+    pub fn run_gc_with_stack(&mut self, stack_base: usize, stack_pointer: usize) {
+        self.allocator.gc(&self.stack_map, &[(stack_base, stack_pointer)]);
+
+        // Handle relocations
+        let relocations = self.allocator.get_namespace_relocations();
+        for (ns_id, updates) in relocations {
+            for (old_ptr, new_ptr) in updates {
+                // Find and update namespace_roots
+                for (name, ptr) in self.namespace_roots.iter_mut() {
+                    if *ptr == old_ptr {
+                        *ptr = new_ptr;
+                        // Also need to find ns_id by name for update
+                        if let Some(&id) = self.namespace_name_to_id.get(name) {
+                            if id == ns_id {
+                                // Already updated the root
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Get heap statistics
     pub fn heap_stats(&self) -> HeapStats {
-        let mut stats = HeapStats {
-            heap_size: self.heap_size,
-            used_bytes: self.next_alloc,
-            free_bytes: self.heap_size - self.next_alloc,
-            object_count: self.objects.len(),
-            namespace_count: self.namespace_roots.len(),
-            objects: Vec::new(),
-        };
-
-        // Collect info about each object
-        for &obj_ptr in &self.objects {
-            let heap_obj = HeapObject::from_untagged(obj_ptr);
-            let header = heap_obj.read_header();
-
-            let obj_type = match header.type_id {
-                TYPE_ID_STRING => "String",
-                TYPE_ID_NAMESPACE => "Namespace",
-                TYPE_ID_VAR => "Var",
-                _ => "Unknown",
-            };
-
-            let size = heap_obj.full_size();
-
-            let name = if header.type_id == TYPE_ID_NAMESPACE {
-                let name_ptr = heap_obj.get_field(0);
-                Some(self.read_string(name_ptr))
-            } else if header.type_id == TYPE_ID_STRING {
-                let byte_len = header.type_data as usize;
-                Some(heap_obj.read_string(byte_len))
-            } else if header.type_id == TYPE_ID_VAR {
-                // Show var as #'ns/name
-                let (ns_name, symbol_name) = self.var_info(BuiltInTypes::HeapObject.tagged(obj_ptr));
-                Some(format!("#'{}/{}", ns_name, symbol_name))
+        HeapStats {
+            gc_algorithm: if cfg!(feature = "compacting") {
+                "compacting"
+            } else if cfg!(feature = "generational") {
+                "generational"
             } else {
-                None
-            };
-
-            stats.objects.push(ObjectInfo {
-                address: obj_ptr,
-                obj_type: obj_type.to_string(),
-                size_bytes: size,
-                marked: header.marked,
-                name,
-            });
+                "mark-and-sweep"
+            }.to_string(),
+            namespace_count: self.namespace_roots.len(),
+            type_count: self.type_registry.len(),
         }
-
-        stats
     }
 
     /// List all namespaces
     pub fn list_namespaces(&self) -> Vec<(String, usize, usize)> {
         let mut namespaces = Vec::new();
         for (name, &ptr) in &self.namespace_roots {
-            let ns_untagged = BuiltInTypes::HeapObject.untag(ptr);
-            let heap_obj = HeapObject::from_untagged(ns_untagged);
-            let header = heap_obj.read_header();
+            let ns_untagged = self.untag_heap_object(ptr);
+            let heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
+            let header = heap_obj.get_header();
             let num_bindings = if header.size > 0 {
                 (header.size as usize - 1) / 2
             } else {
@@ -597,9 +406,9 @@ impl GCRuntime {
 
     /// Get bindings in a namespace
     pub fn namespace_bindings(&self, ns_ptr: usize) -> Vec<(String, usize)> {
-        let ns_untagged = BuiltInTypes::HeapObject.untag(ns_ptr);
-        let heap_obj = HeapObject::from_untagged(ns_untagged);
-        let header = heap_obj.read_header();
+        let ns_untagged = self.untag_heap_object(ns_ptr);
+        let heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
+        let header = heap_obj.get_header();
         let size = header.size as usize;
 
         if size == 0 {
@@ -619,6 +428,8 @@ impl GCRuntime {
         bindings
     }
 
+    // ========== Var Methods ==========
+
     /// Allocate a var object
     pub fn allocate_var(
         &mut self,
@@ -629,22 +440,22 @@ impl GCRuntime {
         let symbol_ptr = self.allocate_string(symbol_name)?;
 
         let var_ptr = self.allocate_raw(3, TYPE_ID_VAR)?;
-        let mut heap_obj = HeapObject::from_untagged(var_ptr);
-        heap_obj.write_field(0, ns_ptr);        // namespace
-        heap_obj.write_field(1, symbol_ptr);    // symbol name
-        heap_obj.write_field(2, initial_value); // current value
+        let heap_obj = HeapObject::from_untagged(var_ptr as *const u8);
+        heap_obj.write_field(0, ns_ptr);
+        heap_obj.write_field(1, symbol_ptr);
+        heap_obj.write_field(2, initial_value);
 
-        Ok(BuiltInTypes::HeapObject.tagged(var_ptr))
+        Ok(self.tag_heap_object(var_ptr))
     }
 
     /// Get the current value from a var
     pub fn var_get_value(&self, var_ptr: usize) -> usize {
-        let untagged = BuiltInTypes::HeapObject.untag(var_ptr);
-        let heap_obj = HeapObject::from_untagged(untagged);
+        let untagged = self.untag_heap_object(var_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
         heap_obj.get_field(2)
     }
 
-    /// Mark a var as dynamic (allows thread-local bindings)
+    /// Mark a var as dynamic
     pub fn mark_var_dynamic(&mut self, var_ptr: usize) {
         self.dynamic_vars.insert(var_ptr);
     }
@@ -686,15 +497,14 @@ impl GCRuntime {
     }
 
     /// Set the value of a thread-local binding (for set!)
-    /// Errors if no binding exists (can't set root with set!)
     pub fn set_binding(&mut self, var_ptr: usize, value: usize) -> Result<(), String> {
-        if let Some(stack) = self.dynamic_bindings.get_mut(&var_ptr)
-            && let Some(last) = stack.last_mut() {
+        if let Some(stack) = self.dynamic_bindings.get_mut(&var_ptr) {
+            if let Some(last) = stack.last_mut() {
                 *last = value;
                 return Ok(());
             }
+        }
 
-        // No thread-local binding exists
         let (ns_name, symbol_name) = self.var_info(var_ptr);
         Err(format!(
             "Can't change/establish root binding of: {}/{} with set",
@@ -704,20 +514,18 @@ impl GCRuntime {
 
     /// Get the current value of a var, checking dynamic bindings first
     pub fn var_get_value_dynamic(&self, var_ptr: usize) -> usize {
-        // Check dynamic bindings first
-        if let Some(stack) = self.dynamic_bindings.get(&var_ptr)
-            && let Some(&value) = stack.last() {
+        if let Some(stack) = self.dynamic_bindings.get(&var_ptr) {
+            if let Some(&value) = stack.last() {
                 return value;
             }
-
-        // Fall back to root value
+        }
         self.var_get_value(var_ptr)
     }
 
-    /// Get var namespace and symbol name (for printing)
+    /// Get var namespace and symbol name
     pub fn var_info(&self, var_ptr: usize) -> (String, String) {
-        let untagged = BuiltInTypes::HeapObject.untag(var_ptr);
-        let heap_obj = HeapObject::from_untagged(untagged);
+        let untagged = self.untag_heap_object(var_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
 
         let ns_ptr = heap_obj.get_field(0);
         let ns_name = self.namespace_name(ns_ptr);
@@ -728,68 +536,54 @@ impl GCRuntime {
         (ns_name, symbol_name)
     }
 
+    // ========== Function Methods ==========
+
     /// Allocate a function object on the heap
-    /// Layout: Header | name_ptr | code_ptr | closure_count | [closure_value...]
-    ///
-    /// For Phase 1: Simple implementation without multi-arity dispatch
-    /// code_ptr points to the compiled ARM64 code entry point
-    /// closure values are captured variables from the enclosing scope
     pub fn allocate_function(
         &mut self,
         name: Option<String>,
         code_ptr: usize,
         closure_values: Vec<usize>,
     ) -> Result<usize, String> {
-        // Allocate name string if present
         let name_ptr = if let Some(n) = name {
             self.allocate_string(&n)?
         } else {
-            0 // null pointer for anonymous functions
+            0
         };
 
-        // Calculate size: name + code_ptr + closure_count + closure_values
         let size_words = 3 + closure_values.len();
-
         let fn_ptr = self.allocate_raw(size_words, TYPE_ID_FUNCTION)?;
-        let mut heap_obj = HeapObject::from_untagged(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(fn_ptr as *const u8);
 
         heap_obj.write_field(closure_layout::FIELD_NAME_PTR, name_ptr);
         heap_obj.write_field(closure_layout::FIELD_CODE_PTR, code_ptr);
         heap_obj.write_field(closure_layout::FIELD_CLOSURE_COUNT, closure_values.len());
 
-        // Write closure values
         for (i, value) in closure_values.iter().enumerate() {
             heap_obj.write_field(closure_layout::FIELD_FIRST_VALUE + i, *value);
         }
 
-        // Tag with Closure tag (0b101) - closures are heap objects with captured values
-        Ok(BuiltInTypes::Closure.tagged(fn_ptr))
+        Ok(self.tag_closure(fn_ptr))
     }
 
     /// Get function code pointer from closure
-    /// NOTE: This should only be called on Closure-tagged values (0b101)
     pub fn function_code_ptr(&self, fn_ptr: usize) -> usize {
-        let untagged = BuiltInTypes::Closure.untag(fn_ptr);
-        eprintln!("DEBUG function_code_ptr: fn_ptr={:x}, untagged={:x}", fn_ptr, untagged);
-        let heap_obj = HeapObject::from_untagged(untagged);
-        let code_ptr = heap_obj.get_field(closure_layout::FIELD_CODE_PTR);
-        eprintln!("DEBUG function_code_ptr: returning code_ptr={:x}", code_ptr);
-        code_ptr
+        let untagged = self.untag_closure(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(closure_layout::FIELD_CODE_PTR)
     }
 
     /// Get closure count from closure
-    /// NOTE: This should only be called on Closure-tagged values (0b101)
     pub fn function_closure_count(&self, fn_ptr: usize) -> usize {
-        let untagged = BuiltInTypes::Closure.untag(fn_ptr);
-        let heap_obj = HeapObject::from_untagged(untagged);
+        let untagged = self.untag_closure(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
         heap_obj.get_field(closure_layout::FIELD_CLOSURE_COUNT)
     }
 
     /// Get closure value by index from closure
-    /// NOTE: This should only be called on Closure-tagged values (0b101)
     pub fn function_get_closure(&self, fn_ptr: usize, index: usize) -> usize {
-        let untagged = BuiltInTypes::Closure.untag(fn_ptr);
-        let heap_obj = HeapObject::from_untagged(untagged);
+        let untagged = self.untag_closure(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
         let closure_count = heap_obj.get_field(closure_layout::FIELD_CLOSURE_COUNT);
         if index >= closure_count {
             panic!("Closure index out of bounds: {} >= {}", index, closure_count);
@@ -797,11 +591,11 @@ impl GCRuntime {
         heap_obj.get_field(closure_layout::FIELD_FIRST_VALUE + index)
     }
 
-    /// Get function name (for debugging/printing)
+    /// Get function name
     #[allow(dead_code)]
     pub fn function_name(&self, fn_ptr: usize) -> String {
-        let untagged = BuiltInTypes::HeapObject.untag(fn_ptr);
-        let heap_obj = HeapObject::from_untagged(untagged);
+        let untagged = self.untag_heap_object(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
         let name_ptr = heap_obj.get_field(0);
         if name_ptr == 0 {
             "anonymous".to_string()
@@ -810,11 +604,10 @@ impl GCRuntime {
         }
     }
 
-    // ========== DefType Registry Methods ==========
+    // ========== DefType Methods ==========
 
     /// Register a new deftype and return its type_id
     pub fn register_type(&mut self, name: String, fields: Vec<String>) -> usize {
-        // Check if type already exists
         if let Some(&type_id) = self.type_name_to_id.get(&name) {
             return type_id;
         }
@@ -844,19 +637,14 @@ impl GCRuntime {
     }
 
     /// Allocate a deftype instance on the heap
-    /// Layout: Header (with type_id in type_data) | field0 | field1 | ...
-    ///
-    /// Returns a tagged HeapObject pointer
     pub fn allocate_type_instance(
         &mut self,
         type_id: usize,
         field_values: Vec<usize>,
     ) -> Result<usize, String> {
-        // Validate type_id
         let type_def = self.type_registry.get(type_id)
             .ok_or_else(|| format!("Unknown type_id: {}", type_id))?;
 
-        // Validate field count
         if field_values.len() != type_def.fields.len() {
             return Err(format!(
                 "Type {} expects {} fields, got {}",
@@ -864,76 +652,57 @@ impl GCRuntime {
             ));
         }
 
-        // Allocate: header + N fields
         let size_words = field_values.len();
         let obj_ptr = self.allocate_raw(size_words, TYPE_ID_DEFTYPE)?;
-        let mut heap_obj = HeapObject::from_untagged(obj_ptr);
+        let mut heap_obj = HeapObject::from_untagged(obj_ptr as *const u8);
 
-        // Store type_id in the header's type_data field
-        heap_obj.set_type_data(type_id as u32);
+        // Store type_id in header's type_data field
+        let mut header = heap_obj.get_header();
+        header.type_data = type_id as u32;
+        heap_obj.write_header_direct(header);
 
-        // Write field values
         for (i, value) in field_values.iter().enumerate() {
             heap_obj.write_field(i, *value);
         }
 
-        // Return tagged with HeapObject tag (0b110)
-        Ok(BuiltInTypes::HeapObject.tagged(obj_ptr))
+        Ok(self.tag_heap_object(obj_ptr))
     }
 
     /// Read a field from a deftype instance
     pub fn read_type_field(&self, obj_ptr: usize, field_index: usize) -> usize {
-        let untagged = BuiltInTypes::HeapObject.untag(obj_ptr);
-        let heap_obj = HeapObject::from_untagged(untagged);
+        let untagged = self.untag_heap_object(obj_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
         heap_obj.get_field(field_index)
     }
 
     /// Get the type_id from a deftype instance
     pub fn get_instance_type_id(&self, obj_ptr: usize) -> usize {
-        let untagged = BuiltInTypes::HeapObject.untag(obj_ptr);
-        let heap_obj = HeapObject::from_untagged(untagged);
-        heap_obj.get_type_data() as usize
+        let untagged = self.untag_heap_object(obj_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_header().type_data as usize
     }
 
-    /// Load a field from a deftype instance by field name (runtime lookup)
-    /// Returns the field value or panics if field not found
+    /// Load a field from a deftype instance by field name
     pub fn load_type_field_by_name(&self, obj_ptr: usize, field_name: &str) -> Result<usize, String> {
-        // Get type_id from object header
         let type_id = self.get_instance_type_id(obj_ptr);
 
-        // Look up the type definition
         let type_def = self.type_registry.get(type_id)
             .ok_or_else(|| format!("Unknown type_id {} in object", type_id))?;
 
-        // Find field index by name
         let field_index = type_def.fields.iter()
             .position(|f| f == field_name)
             .ok_or_else(|| format!("Field '{}' not found in type '{}'", field_name, type_def.name))?;
 
-        // Read and return the field value
         Ok(self.read_type_field(obj_ptr, field_index))
     }
 }
 
 #[derive(Debug)]
 pub struct HeapStats {
-    pub heap_size: usize,
-    pub used_bytes: usize,
-    pub free_bytes: usize,
-    pub object_count: usize,
+    pub gc_algorithm: String,
     pub namespace_count: usize,
-    pub objects: Vec<ObjectInfo>,
+    pub type_count: usize,
 }
-
-#[derive(Debug)]
-pub struct ObjectInfo {
-    pub address: usize,
-    pub obj_type: String,
-    pub size_bytes: usize,
-    pub marked: bool,
-    pub name: Option<String>,
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -960,8 +729,8 @@ mod tests {
         let mut runtime = GCRuntime::new();
         let ns_ptr = runtime.allocate_namespace("user").unwrap();
 
-        // Add a binding
-        let value = BuiltInTypes::Int.tagged(42);
+        // Add a binding (42 tagged as int)
+        let value = 42 << 3;
         let new_ns_ptr = runtime.namespace_add_binding(ns_ptr, "x", value).unwrap();
 
         // Look it up

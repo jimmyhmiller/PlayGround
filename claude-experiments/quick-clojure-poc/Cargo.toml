@@ -7,10 +7,19 @@ edition = "2024"
 name = "quick_clojure_poc"
 path = "src/lib.rs"
 
+[features]
+default = ["mark-and-sweep"]
+# GC algorithm selection (mutually exclusive)
+compacting = []
+mark-and-sweep = []
+generational = []
+thread-safe = []
+
 [dependencies]
 clojure-reader = { path = "../clojure-reader-fork" }
 im = "15.1.0"
 libc = "0.2.178"
+cfg-if = "1.0"
 
 [dev-dependencies]
 tempfile = "3"

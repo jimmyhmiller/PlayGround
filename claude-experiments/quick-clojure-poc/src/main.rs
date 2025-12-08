@@ -6,6 +6,7 @@ mod clojure_ast;
 mod ir;
 mod compiler;
 mod arm_codegen;
+mod gc;
 mod gc_runtime;
 mod register_allocation;
 mod trampoline;
@@ -663,24 +664,10 @@ fn main() {
                         rt.heap_stats()
                     };
                     println!("\n╔════════════════════ Heap Statistics ════════════════════╗");
-                    println!("║ Heap Size:       {:>8} bytes ({:.1} KB)              ║",
-                        stats.heap_size, stats.heap_size as f64 / 1024.0);
-                    println!("║ Used:            {:>8} bytes ({:.1} KB)              ║",
-                        stats.used_bytes, stats.used_bytes as f64 / 1024.0);
-                    println!("║ Free:            {:>8} bytes ({:.1} KB)              ║",
-                        stats.free_bytes, stats.free_bytes as f64 / 1024.0);
-                    println!("║ Objects:         {:>8}                               ║", stats.object_count);
+                    println!("║ GC Algorithm:    {:>20}                 ║", stats.gc_algorithm);
                     println!("║ Namespaces:      {:>8}                               ║", stats.namespace_count);
+                    println!("║ Types:           {:>8}                               ║", stats.type_count);
                     println!("╚═════════════════════════════════════════════════════════╝");
-
-                    println!("\n  Address      Type         Size  Marked  Name");
-                    println!("  ──────────────────────────────────────────────────────");
-                    for obj in &stats.objects {
-                        let marked = if obj.marked { "✓" } else { " " };
-                        let name = obj.name.as_deref().unwrap_or("-");
-                        println!("  0x{:08x}  {:10}  {:5}b    {}     {}",
-                            obj.address, obj.obj_type, obj.size_bytes, marked, name);
-                    }
                     println!();
                     continue;
                 }

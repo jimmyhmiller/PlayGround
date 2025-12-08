@@ -3,6 +3,18 @@ use crate::register_allocation::linear_scan::LinearScan;
 use crate::trampoline::Trampoline;
 use std::collections::{HashMap, BTreeMap};
 
+/// Result of compiling a function, includes code pointer and stack map
+pub struct CompiledFunction {
+    /// Pointer to executable code
+    pub code_ptr: usize,
+    /// Stack map entries: (absolute_pc, stack_size)
+    pub stack_map: Vec<(usize, usize)>,
+    /// Number of locals/parameters
+    pub num_locals: usize,
+    /// Maximum stack size
+    pub max_stack_size: usize,
+}
+
 /// ARM64 code generator - compiles IR to ARM64 machine code
 ///
 /// This is based on Beagle's ARM64 backend but simplified for our needs.
@@ -52,6 +64,21 @@ pub struct Arm64CodeGen {
     /// Flag indicating we're in per-function compilation mode
     /// When true, Ret emits its own epilogue; when false, Ret jumps to __epilogue
     is_per_function_compilation: bool,
+
+    // === Stack Map for GC ===
+
+    /// Maps instruction offset → stack size at that point
+    /// Used by GC to find roots on the stack after calls
+    stack_map: HashMap<usize, usize>,
+
+    /// Current stack size in bytes (for stack map tracking)
+    current_stack_size: usize,
+
+    /// Maximum stack size seen (for stack map metadata)
+    max_stack_size: usize,
+
+    /// Number of locals in current function
+    num_locals: usize,
 }
 
 impl Default for Arm64CodeGen {
@@ -77,6 +104,11 @@ impl Arm64CodeGen {
             saved_callee_registers: Vec::new(),
             function_stack_space: 0,
             is_per_function_compilation: false,
+            // Stack map for GC
+            stack_map: HashMap::new(),
+            current_stack_size: 0,
+            max_stack_size: 0,
+            num_locals: 0,
         }
     }
 
@@ -1811,6 +1843,60 @@ impl Arm64CodeGen {
         // Calls function at address in Xn, stores return address in X30
         let instruction = 0xD63F0000 | ((rn as u32) << 5);
         self.code.push(instruction);
+        // Record stack map entry after call for GC root scanning
+        self.update_stack_map();
+    }
+
+    // === Stack Map Methods for GC ===
+
+    /// Record current stack state after a call instruction
+    /// The GC uses this to find roots on the stack
+    fn update_stack_map(&mut self) {
+        // Record instruction offset (index in code array, not byte offset)
+        // The -1 is because we want the instruction we just emitted (the BLR)
+        let offset = self.code.len() - 1;
+        self.stack_map.insert(offset, self.current_stack_size);
+    }
+
+    /// Translate stack map from instruction offsets to absolute addresses
+    /// Called after code is placed in memory to get actual PC values
+    pub fn translate_stack_map(&self, base_pointer: usize) -> Vec<(usize, usize)> {
+        self.stack_map
+            .iter()
+            .map(|(offset, stack_size)| {
+                // Each instruction is 4 bytes, offset is index
+                let pc = (*offset * 4) + base_pointer;
+                (pc, *stack_size)
+            })
+            .collect()
+    }
+
+    /// Increment stack size tracking (call when allocating stack space)
+    pub fn increment_stack_size(&mut self, bytes: usize) {
+        self.current_stack_size += bytes;
+        if self.current_stack_size > self.max_stack_size {
+            self.max_stack_size = self.current_stack_size;
+        }
+    }
+
+    /// Decrement stack size tracking (call when deallocating stack space)
+    pub fn decrement_stack_size(&mut self, bytes: usize) {
+        self.current_stack_size = self.current_stack_size.saturating_sub(bytes);
+    }
+
+    /// Get max stack size for stack map metadata
+    pub fn max_stack_size(&self) -> usize {
+        self.max_stack_size
+    }
+
+    /// Get number of locals for stack map metadata
+    pub fn num_locals(&self) -> usize {
+        self.num_locals
+    }
+
+    /// Set number of locals (called during function compilation)
+    pub fn set_num_locals(&mut self, count: usize) {
+        self.num_locals = count;
     }
 
     /// Emit an external function call with automatic X30 (link register) preservation

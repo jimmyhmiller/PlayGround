@@ -1,18 +1,52 @@
 package com.jsparser.ast;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
-@JsonIgnoreProperties(ignoreUnknown = true)
+@JsonIgnoreProperties(value = {"startLine", "startCol", "endLine", "endCol"}, ignoreUnknown = true)
 public record BinaryExpression(
     int start,
     int end,
-    SourceLocation loc,
+    int startLine,
+    int startCol,
+    int endLine,
+    int endCol,
     Expression left,
     String operator,
     Expression right
 ) implements Expression {
     public BinaryExpression(String operator, Expression left, Expression right) {
-        this(0, 0, null, left, operator, right);
+        this(0, 0, 0, 0, 0, 0, left, operator, right);
+    }
+
+    @JsonCreator
+    public BinaryExpression(
+        @JsonProperty("start") int start,
+        @JsonProperty("end") int end,
+        @JsonProperty("loc") SourceLocation loc,
+        @JsonProperty("left") Expression left,
+        @JsonProperty("operator") String operator,
+        @JsonProperty("right") Expression right
+    ) {
+        this(start,
+             end,
+             loc != null ? loc.start().line() : 0,
+             loc != null ? loc.start().column() : 0,
+             loc != null ? loc.end().line() : 0,
+             loc != null ? loc.end().column() : 0,
+             left,
+             operator,
+             right);
+    }
+
+    @Override
+    @JsonProperty("loc")
+    public SourceLocation loc() {
+        return new SourceLocation(
+            new SourceLocation.Position(startLine, startCol),
+            new SourceLocation.Position(endLine, endCol)
+        );
     }
 
     @Override

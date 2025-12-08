@@ -109,11 +109,7 @@ public class Parser {
         // Program loc should span entire file (line 1 to last position)
         // Calculate the end position from the actual source length
         SourceLocation.Position endPos = getPositionFromOffset(sourceLength);
-        SourceLocation loc = new SourceLocation(
-            new SourceLocation.Position(1, 0),
-            endPos
-        );
-        return new Program(0, sourceLength, loc, statements, sourceType);
+        return new Program(0, sourceLength, 1, 0, endPos.line(), endPos.column(), statements, sourceType);
     }
 
     /**
@@ -240,13 +236,13 @@ public class Parser {
             advance(); // consume ':'
             Statement labeledBody = parseStatement();
             Token endToken = previous();
-            return new LabeledStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), id, labeledBody);
+            return new LabeledStatement(getStart(token), getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), id, labeledBody);
         }
 
         // Regular expression statement
         consumeSemicolon("Expected ';' after expression");
         Token endToken = previous();
-        return new ExpressionStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), expr);
+        return new ExpressionStatement(getStart(token), getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), expr);
     }
 
     /**
@@ -261,12 +257,12 @@ public class Parser {
             advance(); // consume ':'
             Statement labeledBody = parseStatement();
             Token endToken = previous();
-            return new LabeledStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), id, labeledBody);
+            return new LabeledStatement(getStart(token), getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), id, labeledBody);
         }
 
         consumeSemicolon("Expected ';' after expression");
         Token endToken = previous();
-        return new ExpressionStatement(getStart(token), getEnd(endToken), createLocation(token, endToken), expr);
+        return new ExpressionStatement(getStart(token), getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), expr);
     }
 
     private WhileStatement parseWhileStatement() {
@@ -280,8 +276,7 @@ public class Parser {
         Statement body = parseStatement();
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new WhileStatement(getStart(startToken), getEnd(endToken), loc, test, body);
+        return new WhileStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), test, body);
     }
 
     private DoWhileStatement parseDoWhileStatement() {
@@ -303,8 +298,7 @@ public class Parser {
         // Otherwise ASI applies (line break, }, EOF, or offending token)
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new DoWhileStatement(getStart(startToken), getEnd(endToken), loc, body, test);
+        return new DoWhileStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), body, test);
     }
 
     private Statement parseForStatement() {
@@ -359,22 +353,16 @@ public class Parser {
                     Token declaratorEnd = previous();
 
                     int declaratorStart = getStart(patternStart);
-                    int declaratorEndPos;
-                    SourceLocation declaratorLoc;
+                    int declaratorEndPos = getEnd(declaratorEnd);
 
-                    // Use the end of the last token (which includes closing parens)
-                    declaratorEndPos = getEnd(declaratorEnd);
-                    declaratorLoc = createLocation(patternStart, declaratorEnd);
-
-                    declarators.add(new VariableDeclarator(declaratorStart, declaratorEndPos, declaratorLoc, pattern, initExpr));
+                    declarators.add(new VariableDeclarator(declaratorStart, declaratorEndPos, patternStart.line(), patternStart.column(), declaratorEnd.endLine(), declaratorEnd.endColumn(), pattern, initExpr));
 
                 } while (match(TokenType.COMMA));
 
                 Token endToken = previous();
-                SourceLocation declLoc = createLocation(kindToken, endToken);
                 int declStart = getStart(kindToken);
                 int declEnd = getEnd(endToken);
-                initOrLeft = new VariableDeclaration(declStart, declEnd, declLoc, declarators, kind);
+                initOrLeft = new VariableDeclaration(declStart, declEnd, kindToken.line(), kindToken.column(), endToken.endLine(), endToken.endColumn(), declarators, kind);
             } else {
                 initOrLeft = parseExpression();
             }
@@ -439,8 +427,7 @@ public class Parser {
             consume(TokenType.RPAREN, "Expected ')' after for-in");
             Statement body = parseStatement();
             Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            return new ForInStatement(getStart(startToken), getEnd(endToken), loc, initOrLeft, right, body);
+            return new ForInStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), initOrLeft, right, body);
         } else if (isOfKeyword) {
             advance(); // consume 'of'
             // Convert left to pattern if it's an expression (for destructuring)
@@ -451,8 +438,7 @@ public class Parser {
             consume(TokenType.RPAREN, "Expected ')' after for-of");
             Statement body = parseStatement();
             Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            return new ForOfStatement(getStart(startToken), getEnd(endToken), loc, isAwait, initOrLeft, right, body);
+            return new ForOfStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), isAwait, initOrLeft, right, body);
         }
 
         // Regular for loop
@@ -475,8 +461,7 @@ public class Parser {
         Statement body = parseStatement();
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new ForStatement(getStart(startToken), getEnd(endToken), loc, initOrLeft, test, update, body);
+        return new ForStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), initOrLeft, test, update, body);
     }
 
     private IfStatement parseIfStatement() {
@@ -495,8 +480,7 @@ public class Parser {
         }
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new IfStatement(getStart(startToken), getEnd(endToken), loc, test, consequent, alternate);
+        return new IfStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), test, consequent, alternate);
     }
 
     private ReturnStatement parseReturnStatement() {
@@ -518,8 +502,7 @@ public class Parser {
 
         consumeSemicolon("Expected ';' after return statement");
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new ReturnStatement(getStart(startToken), getEnd(endToken), loc, argument);
+        return new ReturnStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), argument);
     }
 
     private BreakStatement parseBreakStatement() {
@@ -534,13 +517,12 @@ public class Parser {
             breakToken.line() == peek().line()) {
             Token labelToken = peek();
             advance();
-            label = new Identifier(getStart(labelToken), getEnd(labelToken), createLocation(labelToken, labelToken), labelToken.lexeme());
+            label = new Identifier(getStart(labelToken), getEnd(labelToken), labelToken.line(), labelToken.column(), labelToken.endLine(), labelToken.endColumn(), labelToken.lexeme());
         }
 
         consumeSemicolon("Expected ';' after break statement");
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new BreakStatement(getStart(startToken), getEnd(endToken), loc, label);
+        return new BreakStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), label);
     }
 
     private ContinueStatement parseContinueStatement() {
@@ -555,13 +537,12 @@ public class Parser {
             continueToken.line() == peek().line()) {
             Token labelToken = peek();
             advance();
-            label = new Identifier(getStart(labelToken), getEnd(labelToken), createLocation(labelToken, labelToken), labelToken.lexeme());
+            label = new Identifier(getStart(labelToken), getEnd(labelToken), labelToken.line(), labelToken.column(), labelToken.endLine(), labelToken.endColumn(), labelToken.lexeme());
         }
 
         consumeSemicolon("Expected ';' after continue statement");
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new ContinueStatement(getStart(startToken), getEnd(endToken), loc, label);
+        return new ContinueStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), label);
     }
 
     private SwitchStatement parseSwitchStatement() {
@@ -591,8 +572,7 @@ public class Parser {
                 }
 
                 Token caseEnd = previous();
-                SourceLocation caseLoc = createLocation(caseStart, caseEnd);
-                cases.add(new SwitchCase(getStart(caseStart), getEnd(caseEnd), caseLoc, test, consequent));
+                cases.add(new SwitchCase(getStart(caseStart), getEnd(caseEnd), caseStart.line(), caseStart.column(), caseEnd.endLine(), caseEnd.endColumn(), test, consequent));
 
             } else if (match(TokenType.DEFAULT)) {
                 // default: consequent
@@ -605,8 +585,7 @@ public class Parser {
                 }
 
                 Token caseEnd = previous();
-                SourceLocation caseLoc = createLocation(caseStart, caseEnd);
-                cases.add(new SwitchCase(getStart(caseStart), getEnd(caseEnd), caseLoc, null, consequent));
+                cases.add(new SwitchCase(getStart(caseStart), getEnd(caseEnd), caseStart.line(), caseStart.column(), caseEnd.endLine(), caseEnd.endColumn(), null, consequent));
 
             } else {
                 throw new ExpectedTokenException("'case' or 'default' in switch body", peek());
@@ -615,8 +594,7 @@ public class Parser {
 
         consume(TokenType.RBRACE, "Expected '}' after switch body");
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new SwitchStatement(getStart(startToken), getEnd(endToken), loc, discriminant, cases);
+        return new SwitchStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), discriminant, cases);
     }
 
     private ThrowStatement parseThrowStatement() {
@@ -634,8 +612,7 @@ public class Parser {
         Expression argument = parseExpression();
         consumeSemicolon("Expected ';' after throw statement");
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new ThrowStatement(getStart(startToken), getEnd(endToken), loc, argument);
+        return new ThrowStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), argument);
     }
 
     private TryStatement parseTryStatement() {
@@ -661,8 +638,7 @@ public class Parser {
             // Parse catch body
             BlockStatement body = parseBlockStatement();
             Token catchEnd = previous();
-            SourceLocation catchLoc = createLocation(catchStart, catchEnd);
-            handler = new CatchClause(getStart(catchStart), getEnd(catchEnd), catchLoc, param, body);
+            handler = new CatchClause(getStart(catchStart), getEnd(catchEnd), catchStart.line(), catchStart.column(), catchEnd.endLine(), catchEnd.endColumn(), param, body);
         }
 
         // Parse optional finally clause
@@ -677,8 +653,7 @@ public class Parser {
         }
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new TryStatement(getStart(startToken), getEnd(endToken), loc, block, handler, finalizer);
+        return new TryStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), block, handler, finalizer);
     }
 
     private WithStatement parseWithStatement() {
@@ -697,8 +672,7 @@ public class Parser {
         Statement body = parseStatement();
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new WithStatement(getStart(startToken), getEnd(endToken), loc, object, body);
+        return new WithStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), object, body);
     }
 
     private DebuggerStatement parseDebuggerStatement() {
@@ -706,15 +680,13 @@ public class Parser {
         advance(); // consume 'debugger'
         consumeSemicolon("Expected ';' after debugger statement");
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new DebuggerStatement(getStart(startToken), getEnd(endToken), loc);
+        return new DebuggerStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn());
     }
 
     private EmptyStatement parseEmptyStatement() {
         Token startToken = peek();
         advance(); // consume ';'
-        SourceLocation loc = createLocation(startToken, startToken);
-        return new EmptyStatement(getStart(startToken), getEnd(startToken), loc);
+        return new EmptyStatement(getStart(startToken), getEnd(startToken), startToken.line(), startToken.column(), startToken.endLine(), startToken.endColumn());
     }
 
     private FunctionDeclaration parseFunctionDeclaration(boolean isAsync) {
@@ -738,7 +710,7 @@ public class Parser {
         if (check(TokenType.IDENTIFIER) || check(TokenType.OF) || check(TokenType.LET)) {
             Token nameToken = peek();
             advance();
-            id = new Identifier(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.lexeme());
+            id = new Identifier(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
         } else if (!allowAnonymous) {
             throw new ExpectedTokenException("function name", peek());
         }
@@ -768,8 +740,7 @@ public class Parser {
                     Token restStart = previous();
                     Pattern argument = parsePatternBase();
                     Token restEnd = previous();
-                    SourceLocation restLoc = createLocation(restStart, restEnd);
-                    params.add(new RestElement(getStart(restStart), getEnd(restEnd), restLoc, argument));
+                    params.add(new RestElement(getStart(restStart), getEnd(restEnd), restStart.line(), restStart.column(), restEnd.endLine(), restEnd.endColumn(), argument));
                     // Rest parameter must be last
                     if (match(TokenType.COMMA)) {
                         throw new ParseException("ValidationError", peek(), null, "parameter list", "Rest parameter must be last");
@@ -805,8 +776,7 @@ public class Parser {
         inClassFieldInitializer = savedInClassFieldInitializer;
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new FunctionDeclaration(getStart(startToken), getEnd(endToken), loc, id, false, isGenerator, isAsync, params, body);
+        return new FunctionDeclaration(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), id, false, isGenerator, isAsync, params, body);
     }
 
     private ClassDeclaration parseClassDeclaration() {
@@ -822,7 +792,7 @@ public class Parser {
         if (check(TokenType.IDENTIFIER) && !peek().lexeme().equals("extends")) {
             Token nameToken = peek();
             advance();
-            id = new Identifier(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.lexeme());
+            id = new Identifier(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
         } else if (!allowAnonymous && !(check(TokenType.IDENTIFIER) && peek().lexeme().equals("extends"))) {
             throw new ExpectedTokenException("class name", peek());
         }
@@ -838,8 +808,7 @@ public class Parser {
         ClassBody body = parseClassBody();
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new ClassDeclaration(getStart(startToken), getEnd(endToken), loc, id, superClass, body);
+        return new ClassDeclaration(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), id, superClass, body);
     }
 
     private ClassBody parseClassBody() {
@@ -884,8 +853,7 @@ public class Parser {
                         Token blockEnd = peek();
                         consume(TokenType.RBRACE, "Expected '}' after static block body");
 
-                        SourceLocation blockLoc = createLocation(blockStart, blockEnd);
-                        bodyElements.add(new StaticBlock(getStart(blockStart), getEnd(blockEnd), blockLoc, blockBody));
+                        bodyElements.add(new StaticBlock(getStart(blockStart), getEnd(blockEnd), blockStart.line(), blockStart.column(), blockEnd.endLine(), blockEnd.endColumn(), blockBody));
                         continue;
                     }
                 }
@@ -953,7 +921,7 @@ public class Parser {
                 }
                 advance();
                 // PrivateIdentifier starts at #, but method/property start is memberStart (may include static)
-                key = new PrivateIdentifier(getStart(hashToken), getEnd(keyToken), createLocation(hashToken, keyToken), keyToken.lexeme());
+                key = new PrivateIdentifier(getStart(hashToken), getEnd(keyToken), hashToken.line(), hashToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.lexeme());
             } else if (match(TokenType.LBRACKET)) {
                 // Computed property name - allow 'in' operator inside
                 computed = true;
@@ -965,7 +933,6 @@ public class Parser {
             } else if (check(TokenType.STRING) || check(TokenType.NUMBER)) {
                 // Literal property name (string or number)
                 advance();
-                SourceLocation keyLoc = createLocation(keyToken, keyToken);
                 String keyLexeme = keyToken.lexeme();
 
                 // Check if this is a BigInt literal (ends with 'n')
@@ -997,13 +964,13 @@ public class Parser {
                         }
                     }
 
-                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyLoc, null, keyLexeme, null, bigintValue);
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), null, keyLexeme, null, bigintValue);
                 } else {
                     Object literalValue = keyToken.literal();
                     if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
                         literalValue = null;
                     }
-                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyLoc, literalValue, keyLexeme);
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), literalValue, keyLexeme);
                 }
             } else if (check(TokenType.DOT) && current + 1 < tokens.size() && tokens.get(current + 1).type() == TokenType.NUMBER) {
                 // Handle .1 as a numeric literal (0.1)
@@ -1013,15 +980,13 @@ public class Parser {
                 advance(); // consume NUMBER
                 String lexeme = "." + numToken.lexeme();
                 double value = Double.parseDouble(lexeme);
-                SourceLocation keyLoc = createLocation(dotToken, numToken);
-                key = new Literal(getStart(dotToken), getEnd(numToken), keyLoc, value, lexeme);
+                key = new Literal(getStart(dotToken), getEnd(numToken), dotToken.line(), dotToken.column(), numToken.endLine(), numToken.endColumn(), value, lexeme);
             } else if (check(TokenType.IDENTIFIER) || check(TokenType.GET) || check(TokenType.SET) ||
                        check(TokenType.TRUE) || check(TokenType.FALSE) || check(TokenType.NULL) ||
                        isKeyword(peek())) {
                 // Regular identifier, get/set, keyword, or boolean/null literal as property name
                 advance();
-                SourceLocation keyLoc = createLocation(keyToken, keyToken);
-                key = new Identifier(getStart(keyToken), getEnd(keyToken), keyLoc, keyToken.lexeme());
+                key = new Identifier(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.lexeme());
             } else {
                 throw new ExpectedTokenException("property name in class body", peek());
             }
@@ -1037,8 +1002,7 @@ public class Parser {
                         Token restStart = previous();
                         Pattern argument = parsePatternBase();
                         Token restEnd = previous();
-                        SourceLocation restLoc = createLocation(restStart, restEnd);
-                        params.add(new RestElement(getStart(restStart), getEnd(restEnd), restLoc, argument));
+                        params.add(new RestElement(getStart(restStart), getEnd(restEnd), restStart.line(), restStart.column(), restEnd.endLine(), restEnd.endColumn(), argument));
                         if (match(TokenType.COMMA)) {
                             throw new ParseException("ValidationError", peek(), null, "parameter list", "Rest parameter must be last");
                         }
@@ -1076,12 +1040,10 @@ public class Parser {
                 strictMode = savedStrictMode;
 
                 Token methodEnd = previous();
-                SourceLocation methodLoc = createLocation(memberStart, methodEnd);
-                SourceLocation fnLoc = createLocation(fnStart, methodEnd);
                 FunctionExpression fnExpr = new FunctionExpression(
                     getStart(fnStart),
                     getEnd(methodEnd),
-                    fnLoc,
+                    fnStart.line(), fnStart.column(), methodEnd.endLine(), methodEnd.endColumn(),
                     null,  // No id for method
                     false, // expression (methods are not expression context)
                     isGenerator, // generator
@@ -1103,7 +1065,7 @@ public class Parser {
                 MethodDefinition method = new MethodDefinition(
                     getStart(memberStart),
                     getEnd(methodEnd),
-                    methodLoc,
+                    memberStart.line(), memberStart.column(), methodEnd.endLine(), methodEnd.endColumn(),
                     key,
                     fnExpr,
                     kind,
@@ -1132,11 +1094,10 @@ public class Parser {
                 match(TokenType.SEMICOLON);
 
                 Token propertyEnd = previous();
-                SourceLocation propertyLoc = createLocation(memberStart, propertyEnd);
                 PropertyDefinition property = new PropertyDefinition(
                     getStart(memberStart),
                     getEnd(propertyEnd),
-                    propertyLoc,
+                    memberStart.line(), memberStart.column(), propertyEnd.endLine(), propertyEnd.endColumn(),
                     key,
                     value,
                     computed,
@@ -1148,8 +1109,7 @@ public class Parser {
 
         consume(TokenType.RBRACE, "Expected '}' after class body");
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new ClassBody(getStart(startToken), getEnd(endToken), loc, bodyElements);
+        return new ClassBody(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), bodyElements);
     }
 
     private ImportDeclaration parseImportDeclaration() {
@@ -1161,11 +1121,11 @@ public class Parser {
         // Check for import 'module' (side-effect import)
         if (check(TokenType.STRING)) {
             Token sourceToken = advance();
-            Literal source = new Literal(getStart(sourceToken), getEnd(sourceToken), createLocation(sourceToken, sourceToken), sourceToken.literal(), sourceToken.lexeme());
+            Literal source = new Literal(getStart(sourceToken), getEnd(sourceToken), sourceToken.line(), sourceToken.column(), sourceToken.endLine(), sourceToken.endColumn(), sourceToken.literal(), sourceToken.lexeme());
             List<ImportAttribute> attributes = parseImportAttributes();
             consumeSemicolon("Expected ';' after import");
             Token endToken = previous();
-            return new ImportDeclaration(getStart(startToken), getEnd(endToken), createLocation(startToken, endToken), specifiers, source, attributes);
+            return new ImportDeclaration(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), specifiers, source, attributes);
         }
 
         // Parse import specifiers
@@ -1187,8 +1147,8 @@ public class Parser {
             } else {
                 // This is a binding name (could be 'from' if followed by 'from' keyword)
                 advance();
-                Identifier local = new Identifier(getStart(localToken), getEnd(localToken), createLocation(localToken, localToken), localToken.lexeme());
-                specifiers.add(new ImportDefaultSpecifier(getStart(localToken), getEnd(localToken), createLocation(localToken, localToken), local));
+                Identifier local = new Identifier(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), localToken.lexeme());
+                specifiers.add(new ImportDefaultSpecifier(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), local));
 
                 // Check for comma (means there are more specifiers)
                 if (match(TokenType.COMMA)) {
@@ -1210,8 +1170,8 @@ public class Parser {
                 throw new ExpectedTokenException("identifier after 'as'", peek());
             }
             advance();
-            Identifier local = new Identifier(getStart(localToken), getEnd(localToken), createLocation(localToken, localToken), localToken.lexeme());
-            specifiers.add(new ImportNamespaceSpecifier(getStart(starToken), getEnd(localToken), createLocation(starToken, localToken), local));
+            Identifier local = new Identifier(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), localToken.lexeme());
+            specifiers.add(new ImportNamespaceSpecifier(getStart(starToken), getEnd(localToken), starToken.line(), starToken.column(), localToken.endLine(), localToken.endColumn(), local));
         } else if (match(TokenType.LBRACE)) {
             // Named imports: { name1, name2 as alias }
             // Handle empty specifiers: { }
@@ -1224,7 +1184,7 @@ public class Parser {
 
                     if (isStringImport) {
                         advance();
-                        imported = new Literal(getStart(importedToken), getEnd(importedToken), createLocation(importedToken, importedToken), importedToken.literal(), importedToken.lexeme());
+                        imported = new Literal(getStart(importedToken), getEnd(importedToken), importedToken.line(), importedToken.column(), importedToken.endLine(), importedToken.endColumn(), importedToken.literal(), importedToken.lexeme());
                         // String imports MUST have 'as' with local binding
                         if (!check(TokenType.IDENTIFIER) || !peek().lexeme().equals("as")) {
                             throw new ExpectedTokenException("'as' after string import specifier", peek());
@@ -1235,10 +1195,10 @@ public class Parser {
                             throw new ExpectedTokenException("identifier after 'as'", peek());
                         }
                         advance();
-                        local = new Identifier(getStart(localToken), getEnd(localToken), createLocation(localToken, localToken), localToken.lexeme());
+                        local = new Identifier(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), localToken.lexeme());
                     } else if (check(TokenType.IDENTIFIER) || isKeyword(importedToken)) {
                         advance();
-                        Identifier importedId = new Identifier(getStart(importedToken), getEnd(importedToken), createLocation(importedToken, importedToken), importedToken.lexeme());
+                        Identifier importedId = new Identifier(getStart(importedToken), getEnd(importedToken), importedToken.line(), importedToken.column(), importedToken.endLine(), importedToken.endColumn(), importedToken.lexeme());
                         imported = importedId;
                         local = importedId;
                         // Check for 'as'
@@ -1249,13 +1209,14 @@ public class Parser {
                                 throw new ExpectedTokenException("identifier after 'as'", peek());
                             }
                             advance();
-                            local = new Identifier(getStart(localToken), getEnd(localToken), createLocation(localToken, localToken), localToken.lexeme());
+                            local = new Identifier(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), localToken.lexeme());
                         }
                     } else {
                         throw new ExpectedTokenException("identifier or string in import specifier", peek());
                     }
 
-                    specifiers.add(new ImportSpecifier(getStart(importedToken), getEnd(previous()), createLocation(importedToken, previous()), imported, local));
+                    Token prevToken = previous();
+                    specifiers.add(new ImportSpecifier(getStart(importedToken), getEnd(prevToken), importedToken.line(), importedToken.column(), prevToken.endLine(), prevToken.endColumn(), imported, local));
 
                     // Handle trailing comma: { a, }
                     if (match(TokenType.COMMA)) {
@@ -1284,14 +1245,14 @@ public class Parser {
             throw new ExpectedTokenException("string literal after 'from'", peek());
         }
         advance();
-        Literal source = new Literal(getStart(sourceToken), getEnd(sourceToken), createLocation(sourceToken, sourceToken), sourceToken.literal(), sourceToken.lexeme());
+        Literal source = new Literal(getStart(sourceToken), getEnd(sourceToken), sourceToken.line(), sourceToken.column(), sourceToken.endLine(), sourceToken.endColumn(), sourceToken.literal(), sourceToken.lexeme());
 
         // Parse import attributes: with { type: 'json' }
         List<ImportAttribute> attributes = parseImportAttributes();
 
         consumeSemicolon("Expected ';' after import");
         Token endToken = previous();
-        return new ImportDeclaration(getStart(startToken), getEnd(endToken), createLocation(startToken, endToken), specifiers, source, attributes);
+        return new ImportDeclaration(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), specifiers, source, attributes);
     }
 
     private List<ImportAttribute> parseImportAttributes() {
@@ -1308,10 +1269,10 @@ public class Parser {
 
                 if (check(TokenType.STRING)) {
                     advance();
-                    key = new Literal(getStart(keyToken), getEnd(keyToken), createLocation(keyToken, keyToken), keyToken.literal(), keyToken.lexeme());
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.literal(), keyToken.lexeme());
                 } else if (check(TokenType.IDENTIFIER) || isKeyword(keyToken)) {
                     advance();
-                    key = new Identifier(getStart(keyToken), getEnd(keyToken), createLocation(keyToken, keyToken), keyToken.lexeme());
+                    key = new Identifier(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.lexeme());
                 } else {
                     throw new ExpectedTokenException("identifier or string in import attribute", peek());
                 }
@@ -1323,10 +1284,10 @@ public class Parser {
                     throw new ExpectedTokenException("string value in import attribute", peek());
                 }
                 advance();
-                Literal value = new Literal(getStart(valueToken), getEnd(valueToken), createLocation(valueToken, valueToken), valueToken.literal(), valueToken.lexeme());
+                Literal value = new Literal(getStart(valueToken), getEnd(valueToken), valueToken.line(), valueToken.column(), valueToken.endLine(), valueToken.endColumn(), valueToken.literal(), valueToken.lexeme());
 
                 Token attrEnd = previous();
-                attributes.add(new ImportAttribute(getStart(keyToken), getEnd(attrEnd), createLocation(keyToken, attrEnd), key, value));
+                attributes.add(new ImportAttribute(getStart(keyToken), getEnd(attrEnd), keyToken.line(), keyToken.column(), attrEnd.endLine(), attrEnd.endColumn(), key, value));
 
                 if (!match(TokenType.COMMA)) {
                     break;
@@ -1377,7 +1338,7 @@ public class Parser {
             }
 
             Token endToken = previous();
-            return new ExportDefaultDeclaration(getStart(startToken), getEnd(endToken), createLocation(startToken, endToken), declaration);
+            return new ExportDefaultDeclaration(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), declaration);
         }
 
         // export * from 'module' or export * as name from 'module'
@@ -1391,11 +1352,11 @@ public class Parser {
                 // Allow keywords as identifiers or strings after 'as'
                 if (check(TokenType.STRING)) {
                     advance();
-                    exported = new Literal(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.literal(), nameToken.lexeme());
+                    exported = new Literal(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.literal(), nameToken.lexeme());
                 } else if (check(TokenType.IDENTIFIER) || isKeyword(nameToken) ||
                            check(TokenType.TRUE) || check(TokenType.FALSE) || check(TokenType.NULL)) {
                     advance();
-                    exported = new Identifier(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.lexeme());
+                    exported = new Identifier(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
                 } else {
                     throw new ExpectedTokenException("identifier or string after 'as'", peek());
                 }
@@ -1414,12 +1375,12 @@ public class Parser {
                 throw new ExpectedTokenException("string literal after 'from'", peek());
             }
             advance();
-            Literal source = new Literal(getStart(sourceToken), getEnd(sourceToken), createLocation(sourceToken, sourceToken), sourceToken.literal(), sourceToken.lexeme());
+            Literal source = new Literal(getStart(sourceToken), getEnd(sourceToken), sourceToken.line(), sourceToken.column(), sourceToken.endLine(), sourceToken.endColumn(), sourceToken.literal(), sourceToken.lexeme());
 
             List<ImportAttribute> attributes = parseImportAttributes();
             consumeSemicolon("Expected ';' after export");
             Token endToken = previous();
-            return new ExportAllDeclaration(getStart(startToken), getEnd(endToken), createLocation(startToken, endToken), source, exported, attributes);
+            return new ExportAllDeclaration(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), source, exported, attributes);
         }
 
         // export { name1, name2 } or export { name1 as alias } from 'module'
@@ -1433,10 +1394,10 @@ public class Parser {
                     Node local;
                     if (check(TokenType.STRING)) {
                         advance();
-                        local = new Literal(getStart(localToken), getEnd(localToken), createLocation(localToken, localToken), localToken.literal(), localToken.lexeme());
+                        local = new Literal(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), localToken.literal(), localToken.lexeme());
                     } else if (check(TokenType.IDENTIFIER) || isKeyword(localToken)) {
                         advance();
-                        local = new Identifier(getStart(localToken), getEnd(localToken), createLocation(localToken, localToken), localToken.lexeme());
+                        local = new Identifier(getStart(localToken), getEnd(localToken), localToken.line(), localToken.column(), localToken.endLine(), localToken.endColumn(), localToken.lexeme());
                     } else {
                         throw new ExpectedTokenException("identifier or string in export specifier", peek());
                     }
@@ -1448,17 +1409,18 @@ public class Parser {
                         Token exportedToken = peek();
                         if (check(TokenType.STRING)) {
                             advance();
-                            exported = new Literal(getStart(exportedToken), getEnd(exportedToken), createLocation(exportedToken, exportedToken), exportedToken.literal(), exportedToken.lexeme());
+                            exported = new Literal(getStart(exportedToken), getEnd(exportedToken), exportedToken.line(), exportedToken.column(), exportedToken.endLine(), exportedToken.endColumn(), exportedToken.literal(), exportedToken.lexeme());
                         } else if (check(TokenType.IDENTIFIER) || isKeyword(exportedToken) ||
                                    check(TokenType.TRUE) || check(TokenType.FALSE) || check(TokenType.NULL)) {
                             advance();
-                            exported = new Identifier(getStart(exportedToken), getEnd(exportedToken), createLocation(exportedToken, exportedToken), exportedToken.lexeme());
+                            exported = new Identifier(getStart(exportedToken), getEnd(exportedToken), exportedToken.line(), exportedToken.column(), exportedToken.endLine(), exportedToken.endColumn(), exportedToken.lexeme());
                         } else {
                             throw new ExpectedTokenException("identifier or string after 'as'", peek());
                         }
                     }
 
-                    specifiers.add(new ExportSpecifier(getStart(localToken), getEnd(previous()), createLocation(localToken, previous()), local, exported));
+                    Token prevToken = previous();
+                    specifiers.add(new ExportSpecifier(getStart(localToken), getEnd(prevToken), localToken.line(), localToken.column(), prevToken.endLine(), prevToken.endColumn(), local, exported));
 
                     // Handle trailing comma: { a, }
                     if (match(TokenType.COMMA)) {
@@ -1483,13 +1445,13 @@ public class Parser {
                     throw new ExpectedTokenException("string literal after 'from'", peek());
                 }
                 advance();
-                source = new Literal(getStart(sourceToken), getEnd(sourceToken), createLocation(sourceToken, sourceToken), sourceToken.literal(), sourceToken.lexeme());
+                source = new Literal(getStart(sourceToken), getEnd(sourceToken), sourceToken.line(), sourceToken.column(), sourceToken.endLine(), sourceToken.endColumn(), sourceToken.literal(), sourceToken.lexeme());
                 attributes = parseImportAttributes();
             }
 
             consumeSemicolon("Expected ';' after export");
             Token endToken = previous();
-            return new ExportNamedDeclaration(getStart(startToken), getEnd(endToken), createLocation(startToken, endToken), null, specifiers, source, attributes);
+            return new ExportNamedDeclaration(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), null, specifiers, source, attributes);
         }
 
         // export var/let/const/function/class declaration
@@ -1509,7 +1471,7 @@ public class Parser {
         }
 
         Token endToken = previous();
-        return new ExportNamedDeclaration(getStart(startToken), getEnd(endToken), createLocation(startToken, endToken), declaration, new ArrayList<>(), null, new ArrayList<>());
+        return new ExportNamedDeclaration(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), declaration, new ArrayList<>(), null, new ArrayList<>());
     }
 
     private BlockStatement parseBlockStatement() {
@@ -1536,12 +1498,11 @@ public class Parser {
 
         consume(TokenType.RBRACE, "Expected '}'");
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
 
         // Restore allowIn
         allowIn = oldAllowIn;
 
-        return new BlockStatement(getStart(startToken), getEnd(endToken), loc, statements);
+        return new BlockStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), statements);
     }
 
     // Process directive prologue: add directive property to string literal expression statements at the start
@@ -1564,7 +1525,10 @@ public class Parser {
                     processed.add(new ExpressionStatement(
                         exprStmt.start(),
                         exprStmt.end(),
-                        exprStmt.loc(),
+                        exprStmt.startLine(),
+                        exprStmt.startCol(),
+                        exprStmt.endLine(),
+                        exprStmt.endCol(),
                         exprStmt.expression(),
                         directiveValue
                     ));
@@ -1603,22 +1567,16 @@ public class Parser {
             Token declaratorEnd = previous();
 
             int declaratorStart = getStart(patternStart);
-            int declaratorEndPos;
-            SourceLocation declaratorLoc;
+            int declaratorEndPos = getEnd(declaratorEnd);
 
-            // Use the end of the last token (which includes closing parens)
-            declaratorEndPos = getEnd(declaratorEnd);
-            declaratorLoc = createLocation(patternStart, declaratorEnd);
-
-            declarators.add(new VariableDeclarator(declaratorStart, declaratorEndPos, declaratorLoc, pattern, init));
+            declarators.add(new VariableDeclarator(declaratorStart, declaratorEndPos, patternStart.line(), patternStart.column(), declaratorEnd.endLine(), declaratorEnd.endColumn(), pattern, init));
 
         } while (match(TokenType.COMMA));
 
         consumeSemicolon("Expected ';' after variable declaration");
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new VariableDeclaration(getStart(startToken), getEnd(endToken), loc, declarators, kind);
+        return new VariableDeclaration(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), declarators, kind);
     }
 
     private Pattern parsePattern() {
@@ -1633,8 +1591,7 @@ public class Parser {
         if (match(TokenType.ASSIGN)) {
             Expression defaultValue = parseExpr(BP_ASSIGNMENT);
             Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            return new AssignmentPattern(getStart(startToken), getEnd(endToken), loc, pattern, defaultValue);
+            return new AssignmentPattern(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), pattern, defaultValue);
         }
 
         return pattern;
@@ -1652,7 +1609,7 @@ public class Parser {
         } else if (check(TokenType.IDENTIFIER) || isKeyword(peek())) {
             // Simple identifier pattern (keywords allowed as identifiers in patterns)
             Token idToken = advance();
-            return new Identifier(getStart(idToken), getEnd(idToken), createLocation(idToken, idToken), idToken.lexeme());
+            return new Identifier(getStart(idToken), getEnd(idToken), idToken.line(), idToken.column(), idToken.endLine(), idToken.endColumn(), idToken.lexeme());
         } else {
             throw new ExpectedTokenException("identifier in variable declaration", peek());
         }
@@ -1667,8 +1624,7 @@ public class Parser {
                 Token restStart = previous();
                 Pattern argument = parsePatternBase();
                 Token restEnd = previous();
-                SourceLocation restLoc = createLocation(restStart, restEnd);
-                properties.add(new RestElement(getStart(restStart), getEnd(restEnd), restLoc, argument));
+                properties.add(new RestElement(getStart(restStart), getEnd(restEnd), restStart.line(), restStart.column(), restEnd.endLine(), restEnd.endColumn(), argument));
                 // Rest element must be last
                 if (match(TokenType.COMMA)) {
                     throw new ParseException("ValidationError", peek(), null, "object pattern", "Rest element must be last in object pattern");
@@ -1691,7 +1647,6 @@ public class Parser {
             } else if (check(TokenType.STRING) || check(TokenType.NUMBER)) {
                 // Literal key (string or numeric)
                 Token keyToken = advance();
-                SourceLocation keyLoc = createLocation(keyToken, keyToken);
                 String keyLexeme = keyToken.lexeme();
 
                 // Check if this is a BigInt literal (ends with 'n')
@@ -1723,13 +1678,13 @@ public class Parser {
                         }
                     }
 
-                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyLoc, null, keyLexeme, null, bigintValue);
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), null, keyLexeme, null, bigintValue);
                 } else {
                     Object literalValue = keyToken.literal();
                     if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
                         literalValue = null;
                     }
-                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyLoc, literalValue, keyLexeme);
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), literalValue, keyLexeme);
                 }
             } else {
                 // Allow identifiers, keywords, and boolean/null literals as property names
@@ -1738,7 +1693,7 @@ public class Parser {
                     throw new ExpectedTokenException("property name", peek());
                 }
                 Token keyToken = advance();
-                key = new Identifier(getStart(keyToken), getEnd(keyToken), createLocation(keyToken, keyToken), keyToken.lexeme());
+                key = new Identifier(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.lexeme());
             }
 
             // Parse the value (pattern)
@@ -1756,8 +1711,7 @@ public class Parser {
                         Token assignStart = previous();
                         Expression defaultValue = parseExpr(BP_ASSIGNMENT);
                         Token assignEnd = previous();
-                        SourceLocation assignLoc = createLocation(propStart, assignEnd);
-                        value = new AssignmentPattern(getStart(propStart), getEnd(assignEnd), assignLoc, id, defaultValue);
+                        value = new AssignmentPattern(getStart(propStart), getEnd(assignEnd), propStart.line(), propStart.column(), assignEnd.endLine(), assignEnd.endColumn(), id, defaultValue);
                     }
                 } else {
                     throw new ParseException("ValidationError", peek(), null, "object pattern property", "Shorthand property must have identifier key");
@@ -1765,9 +1719,8 @@ public class Parser {
             }
 
             Token propEnd = previous();
-            SourceLocation propLoc = createLocation(propStart, propEnd);
             properties.add(new Property(
-                getStart(propStart), getEnd(propEnd), propLoc,
+                getStart(propStart), getEnd(propEnd), propStart.line(), propStart.column(), propEnd.endLine(), propEnd.endColumn(),
                 false, shorthand, computed, key, value, "init"
             ));
 
@@ -1778,8 +1731,7 @@ public class Parser {
 
         consume(TokenType.RBRACE, "Expected '}' after object pattern");
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new ObjectPattern(getStart(startToken), getEnd(endToken), loc, properties);
+        return new ObjectPattern(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), properties);
     }
 
     private ArrayPattern parseArrayPattern(Token startToken) {
@@ -1791,8 +1743,7 @@ public class Parser {
                 Token restStart = previous();
                 Pattern argument = parsePatternBase();
                 Token restEnd = previous();
-                SourceLocation restLoc = createLocation(restStart, restEnd);
-                elements.add(new RestElement(getStart(restStart), getEnd(restEnd), restLoc, argument));
+                elements.add(new RestElement(getStart(restStart), getEnd(restEnd), restStart.line(), restStart.column(), restEnd.endLine(), restEnd.endColumn(), argument));
                 // Rest element must be last
                 if (match(TokenType.COMMA)) {
                     throw new ParseException("ValidationError", peek(), null, "array pattern", "Rest element must be last in array pattern");
@@ -1813,8 +1764,7 @@ public class Parser {
 
         consume(TokenType.RBRACKET, "Expected ']' after array pattern");
         Token endToken = previous();
-        SourceLocation loc = createLocation(startToken, endToken);
-        return new ArrayPattern(getStart(startToken), getEnd(endToken), loc, elements);
+        return new ArrayPattern(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), elements);
     }
 
     // Expression parsing with precedence climbing
@@ -1965,8 +1915,7 @@ public class Parser {
                     // If we have optional chaining and this is a non-chain operator, wrap first
                     if (hasOptionalChaining) {
                         chainEndToken = previous();
-                        SourceLocation loc = createLocation(startToken, chainEndToken);
-                        left = new ChainExpression(outerStartPos, getEnd(chainEndToken), loc, left);
+                        left = new ChainExpression(outerStartPos, getEnd(chainEndToken), startToken.line(), startToken.column(), chainEndToken.endLine(), chainEndToken.endColumn(), left);
                         hasOptionalChaining = false;
                         // Update start positions for the outer expression
                         outerStartPos = getStart(startToken);
@@ -1974,8 +1923,7 @@ public class Parser {
                     }
                     advance();
                     Token endToken = previous();
-                    SourceLocation loc = createLocation(startToken, endToken);
-                    left = new UpdateExpression(outerStartPos, getEnd(endToken), loc, token.lexeme(), false, left);
+                    left = new UpdateExpression(outerStartPos, getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), token.lexeme(), false, left);
                     continue;
                 }
                 break;
@@ -2029,8 +1977,7 @@ public class Parser {
             } else if (hasOptionalChaining && !isChainOperator) {
                 // We're leaving the chain portion - wrap in ChainExpression first
                 chainEndToken = previous();
-                SourceLocation loc = createLocation(startToken, chainEndToken);
-                left = new ChainExpression(outerStartPos, getEnd(chainEndToken), loc, left);
+                left = new ChainExpression(outerStartPos, getEnd(chainEndToken), startToken.line(), startToken.column(), chainEndToken.endLine(), chainEndToken.endColumn(), left);
                 hasOptionalChaining = false;
                 // Don't update start positions - the ChainExpression is now part of the larger expression
             }
@@ -2065,8 +2012,7 @@ public class Parser {
         // Wrap in ChainExpression if we still have optional chaining at the end
         if (hasOptionalChaining) {
             Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
-            left = new ChainExpression(outerStartPos, getEnd(endToken), loc, left);
+            left = new ChainExpression(outerStartPos, getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), left);
         }
 
         return left;
@@ -2077,7 +2023,6 @@ public class Parser {
     // ========================================================================
 
     private static Expression prefixNumber(Parser p, Token token) {
-        SourceLocation loc = p.createLocation(token, token);
         String lexeme = token.lexeme();
 
         // Check for BigInt literal (ends with 'n')
@@ -2100,7 +2045,7 @@ public class Parser {
                     bigintValue = bi.toString();
                 } catch (NumberFormatException e) { /* keep original */ }
             }
-            return new Literal(p.getStart(token), p.getEnd(token), loc, null, lexeme, null, bigintValue);
+            return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), null, lexeme, null, bigintValue);
         }
 
         // Handle Infinity/-Infinity/NaN - value should be null per ESTree spec
@@ -2108,34 +2053,29 @@ public class Parser {
         if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
             literalValue = null;
         }
-        return new Literal(p.getStart(token), p.getEnd(token), loc, literalValue, token.lexeme());
+        return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), literalValue, token.lexeme());
     }
 
     private static Expression prefixString(Parser p, Token token) {
-        SourceLocation loc = p.createLocation(token, token);
-        return new Literal(p.getStart(token), p.getEnd(token), loc, token.literal(), token.lexeme());
+        return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), token.literal(), token.lexeme());
     }
 
     private static Expression prefixTrue(Parser p, Token token) {
-        SourceLocation loc = p.createLocation(token, token);
-        return new Literal(p.getStart(token), p.getEnd(token), loc, true, "true");
+        return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), true, "true");
     }
 
     private static Expression prefixFalse(Parser p, Token token) {
-        SourceLocation loc = p.createLocation(token, token);
-        return new Literal(p.getStart(token), p.getEnd(token), loc, false, "false");
+        return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), false, "false");
     }
 
     private static Expression prefixNull(Parser p, Token token) {
-        SourceLocation loc = p.createLocation(token, token);
-        return new Literal(p.getStart(token), p.getEnd(token), loc, null, "null");
+        return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), null, "null");
     }
 
     private static Expression prefixRegex(Parser p, Token token) {
-        SourceLocation loc = p.createLocation(token, token);
         // Value is {} (empty object), the actual regex info goes in the 'regex' field
         Literal.RegexInfo regexInfo = (Literal.RegexInfo) token.literal();
-        return new Literal(p.getStart(token), p.getEnd(token), loc,
+        return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(),
             java.util.Collections.emptyMap(), token.lexeme(), regexInfo);
     }
 
@@ -2154,18 +2094,15 @@ public class Parser {
                 "Unexpected use of 'await' as identifier in " + context);
         }
 
-        SourceLocation loc = p.createLocation(token, token);
-        return new Identifier(p.getStart(token), p.getEnd(token), loc, token.lexeme());
+        return new Identifier(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), token.lexeme());
     }
 
     private static Expression prefixThis(Parser p, Token token) {
-        SourceLocation loc = p.createLocation(token, token);
-        return new ThisExpression(p.getStart(token), p.getEnd(token), loc);
+        return new ThisExpression(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn());
     }
 
     private static Expression prefixSuper(Parser p, Token token) {
-        SourceLocation loc = p.createLocation(token, token);
-        return new Super(p.getStart(token), p.getEnd(token), loc);
+        return new Super(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn());
     }
 
     private static Expression prefixGroupedOrArrow(Parser p, Token token) {
@@ -2206,15 +2143,13 @@ public class Parser {
             throw new ExpectedTokenException("Delete of an unqualified identifier is not allowed in strict mode", token);
         }
 
-        SourceLocation loc = p.createLocation(token, endToken);
-        return new UnaryExpression(p.getStart(token), p.getEnd(endToken), loc, token.lexeme(), true, argument);
+        return new UnaryExpression(p.getStart(token), p.getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), token.lexeme(), true, argument);
     }
 
     private static Expression prefixUpdate(Parser p, Token token) {
         Expression argument = p.parseExpr(BP_UNARY);
         Token endToken = p.previous();
-        SourceLocation loc = p.createLocation(token, endToken);
-        return new UpdateExpression(p.getStart(token), p.getEnd(endToken), loc, token.lexeme(), true, argument);
+        return new UpdateExpression(p.getStart(token), p.getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), token.lexeme(), true, argument);
     }
 
     private static Expression prefixTemplate(Parser p, Token token) {
@@ -2233,8 +2168,7 @@ public class Parser {
             throw new ExpectedTokenException("identifier after '#'", p.peek());
         }
         p.advance();
-        SourceLocation loc = p.createLocation(token, nameToken);
-        return new PrivateIdentifier(p.getStart(token), p.getEnd(nameToken), loc, nameToken.lexeme());
+        return new PrivateIdentifier(p.getStart(token), p.getEnd(nameToken), token.line(), token.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
     }
 
     // ========================================================================
@@ -2259,8 +2193,7 @@ public class Parser {
 
         Token endToken = p.previous();
         int endPos = p.getEnd(endToken);
-        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
-        return new SequenceExpression(savedStartPos, endPos, loc, expressions);
+        return new SequenceExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), expressions);
     }
 
     private static Expression infixAssignment(Parser p, Expression left, Token op) {
@@ -2275,8 +2208,7 @@ public class Parser {
         Node leftNode = p.convertToPatternIfNeeded(left);
 
         int endPos = p.getEnd(endToken);
-        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
-        return new AssignmentExpression(savedStartPos, endPos, loc, op.lexeme(), leftNode, right);
+        return new AssignmentExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), op.lexeme(), leftNode, right);
     }
 
     private static Expression infixTernary(Parser p, Expression test, Token question) {
@@ -2293,8 +2225,7 @@ public class Parser {
 
         Token endToken = p.previous();
         int endPos = p.getEnd(endToken);
-        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
-        return new ConditionalExpression(savedStartPos, endPos, loc, test, consequent, alternate);
+        return new ConditionalExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), test, consequent, alternate);
     }
 
     private static Expression infixLogical(Parser p, Expression left, Token op) {
@@ -2312,8 +2243,7 @@ public class Parser {
         Expression right = p.parseExpr(rbp);
         Token endToken = p.previous();
         int endPos = p.getEnd(endToken);
-        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
-        return new LogicalExpression(savedStartPos, endPos, loc, left, op.lexeme(), right);
+        return new LogicalExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), left, op.lexeme(), right);
     }
 
     private static Expression infixBinary(Parser p, Expression left, Token op) {
@@ -2338,8 +2268,7 @@ public class Parser {
         Expression right = p.parseExpr(rbp);
         Token endToken = p.previous();
         int endPos = p.getEnd(endToken);
-        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
-        return new BinaryExpression(savedStartPos, endPos, loc, left, op.lexeme(), right);
+        return new BinaryExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), left, op.lexeme(), right);
     }
 
     private static Expression infixMember(Parser p, Expression object, Token dot) {
@@ -2352,11 +2281,10 @@ public class Parser {
             }
             p.advance();
             Expression property = new PrivateIdentifier(p.getStart(hashToken), p.getEnd(propertyToken),
-                p.createLocation(hashToken, propertyToken), propertyToken.lexeme());
+                hashToken.line(), hashToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme());
             Token endToken = p.previous();
             int endPos = p.getEnd(endToken);
-            SourceLocation loc = p.createLocationFromPositions(p.exprStartPos, endPos, p.exprStartLoc, endToken);
-            return new MemberExpression(p.exprStartPos, endPos, loc, object, property, false, false);
+            return new MemberExpression(p.exprStartPos, endPos, p.exprStartLoc.line(), p.exprStartLoc.column(), endToken.endLine(), endToken.endColumn(), object, property, false, false);
         } else {
             // Regular property: obj.x
             Token propertyToken = p.peek();
@@ -2367,11 +2295,10 @@ public class Parser {
             }
             p.advance();
             Expression property = new Identifier(p.getStart(propertyToken), p.getEnd(propertyToken),
-                p.createLocation(propertyToken, propertyToken), propertyToken.lexeme());
+                propertyToken.line(), propertyToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme());
             Token endToken = p.previous();
             int endPos = p.getEnd(endToken);
-            SourceLocation loc = p.createLocationFromPositions(p.exprStartPos, endPos, p.exprStartLoc, endToken);
-            return new MemberExpression(p.exprStartPos, endPos, loc, object, property, false, false);
+            return new MemberExpression(p.exprStartPos, endPos, p.exprStartLoc.line(), p.exprStartLoc.column(), endToken.endLine(), endToken.endColumn(), object, property, false, false);
         }
     }
 
@@ -2387,8 +2314,7 @@ public class Parser {
             p.consume(TokenType.RPAREN, "Expected ')' after arguments");
             Token endToken = p.previous();
             int endPos = p.getEnd(endToken);
-            SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
-            return new CallExpression(savedStartPos, endPos, loc, object, args, true);
+            return new CallExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), object, args, true);
         } else if (p.check(TokenType.LBRACKET)) {
             // Optional computed: obj?.[expr]
             p.advance(); // consume [
@@ -2396,8 +2322,7 @@ public class Parser {
             p.consume(TokenType.RBRACKET, "Expected ']' after computed property");
             Token endToken = p.previous();
             int endPos = p.getEnd(endToken);
-            SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
-            return new MemberExpression(savedStartPos, endPos, loc, object, property, true, true);
+            return new MemberExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), object, property, true, true);
         } else if (p.match(TokenType.HASH)) {
             // Optional private: obj?.#x
             Token hashToken = p.previous();
@@ -2407,11 +2332,10 @@ public class Parser {
             }
             p.advance();
             Expression property = new PrivateIdentifier(p.getStart(hashToken), p.getEnd(propertyToken),
-                p.createLocation(hashToken, propertyToken), propertyToken.lexeme());
+                hashToken.line(), hashToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme());
             Token endToken = p.previous();
             int endPos = p.getEnd(endToken);
-            SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
-            return new MemberExpression(savedStartPos, endPos, loc, object, property, false, true);
+            return new MemberExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), object, property, false, true);
         } else {
             // Optional property: obj?.x
             Token propertyToken = p.peek();
@@ -2422,11 +2346,10 @@ public class Parser {
             }
             p.advance();
             Expression property = new Identifier(p.getStart(propertyToken), p.getEnd(propertyToken),
-                p.createLocation(propertyToken, propertyToken), propertyToken.lexeme());
+                propertyToken.line(), propertyToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme());
             Token endToken = p.previous();
             int endPos = p.getEnd(endToken);
-            SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
-            return new MemberExpression(savedStartPos, endPos, loc, object, property, false, true);
+            return new MemberExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), object, property, false, true);
         }
     }
 
@@ -2439,8 +2362,7 @@ public class Parser {
         p.consume(TokenType.RBRACKET, "Expected ']' after computed property");
         Token endToken = p.previous();
         int endPos = p.getEnd(endToken);
-        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
-        return new MemberExpression(savedStartPos, endPos, loc, object, property, true, false);
+        return new MemberExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), object, property, true, false);
     }
 
     private static Expression infixCall(Parser p, Expression callee, Token lparen) {
@@ -2452,8 +2374,7 @@ public class Parser {
         p.consume(TokenType.RPAREN, "Expected ')' after arguments");
         Token endToken = p.previous();
         int endPos = p.getEnd(endToken);
-        SourceLocation loc = p.createLocationFromPositions(savedStartPos, endPos, savedStartLoc, endToken);
-        return new CallExpression(savedStartPos, endPos, loc, callee, args, false);
+        return new CallExpression(savedStartPos, endPos, savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), callee, args, false);
     }
 
     private static Expression infixTaggedTemplate(Parser p, Expression tag, Token templateStart) {
@@ -2464,8 +2385,8 @@ public class Parser {
         // Back up one token since parseTemplateLiteral expects to start at the template token
         p.current--;
         Expression template = p.parseTemplateLiteral();
-        SourceLocation loc = p.createLocationFromPositions(savedStartPos, template.end(), savedStartLoc, p.previous());
-        return new TaggedTemplateExpression(savedStartPos, template.end(), loc, tag, (TemplateLiteral) template);
+        Token endToken = p.previous();
+        return new TaggedTemplateExpression(savedStartPos, template.end(), savedStartLoc.line(), savedStartLoc.column(), endToken.endLine(), endToken.endColumn(), tag, (TemplateLiteral) template);
     }
 
     // ========================================================================
@@ -2533,8 +2454,7 @@ public class Parser {
         }
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(yieldToken, endToken);
-        return new YieldExpression(getStart(yieldToken), getEnd(endToken), loc, delegate, argument);
+        return new YieldExpression(getStart(yieldToken), getEnd(endToken), yieldToken.line(), yieldToken.column(), endToken.endLine(), endToken.endColumn(), delegate, argument);
     }
 
     private Expression parseAwaitExpr() {
@@ -2549,8 +2469,7 @@ public class Parser {
         }
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(awaitToken, endToken);
-        return new AwaitExpression(getStart(awaitToken), getEnd(endToken), loc, argument);
+        return new AwaitExpression(getStart(awaitToken), getEnd(endToken), awaitToken.line(), awaitToken.column(), endToken.endLine(), endToken.endColumn(), argument);
     }
 
     private Expression tryParseArrowFunction(Token startToken) {
@@ -2592,7 +2511,7 @@ public class Parser {
             if (current + 1 < tokens.size() && tokens.get(current + 1).type() == TokenType.ARROW) {
                 advance(); // consume identifier
                 List<Pattern> params = new ArrayList<>();
-                params.add(new Identifier(getStart(idToken), getEnd(idToken), createLocation(idToken, idToken), idToken.lexeme()));
+                params.add(new Identifier(getStart(idToken), getEnd(idToken), idToken.line(), idToken.column(), idToken.endLine(), idToken.endColumn(), idToken.lexeme()));
                 consume(TokenType.ARROW, "Expected '=>'");
                 return parseArrowFunctionBody(startToken, params, isAsync);
             }
@@ -2614,8 +2533,7 @@ public class Parser {
                             Token restStart = previous();
                             Pattern argument = parsePatternBase();
                             Token restEnd = previous();
-                            SourceLocation restLoc = createLocation(restStart, restEnd);
-                            params.add(new RestElement(getStart(restStart), getEnd(restEnd), restLoc, argument));
+                            params.add(new RestElement(getStart(restStart), getEnd(restEnd), restStart.line(), restStart.column(), restEnd.endLine(), restEnd.endColumn(), argument));
                             if (match(TokenType.COMMA)) {
                                 throw new ParseException("ValidationError", peek(), null, "parameter list", "Rest parameter must be last");
                             }
@@ -2645,8 +2563,7 @@ public class Parser {
                     Token spreadStart = previous();
                     Expression argument = parseExpr(BP_ASSIGNMENT);
                     Token spreadEnd = previous();
-                    SourceLocation spreadLoc = createLocation(spreadStart, spreadEnd);
-                    args.add(new SpreadElement(getStart(spreadStart), getEnd(spreadEnd), spreadLoc, argument));
+                    args.add(new SpreadElement(getStart(spreadStart), getEnd(spreadEnd), spreadStart.line(), spreadStart.column(), spreadEnd.endLine(), spreadEnd.endColumn(), argument));
                 } else {
                     args.add(parseExpr(BP_ASSIGNMENT));
                 }
@@ -2670,7 +2587,7 @@ public class Parser {
         if (check(TokenType.IDENTIFIER)) {
             Token nameToken = peek();
             advance();
-            id = new Identifier(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.lexeme());
+            id = new Identifier(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
         }
 
         consume(TokenType.LPAREN, "Expected '(' after function");
@@ -2683,8 +2600,7 @@ public class Parser {
                     Token restStart = previous();
                     Pattern argument = parsePatternBase();
                     Token restEnd = previous();
-                    SourceLocation restLoc = createLocation(restStart, restEnd);
-                    params.add(new RestElement(getStart(restStart), getEnd(restEnd), restLoc, argument));
+                    params.add(new RestElement(getStart(restStart), getEnd(restEnd), restStart.line(), restStart.column(), restEnd.endLine(), restEnd.endColumn(), argument));
                     if (match(TokenType.COMMA)) {
                         throw new ParseException("ValidationError", peek(), null, "parameter list", "Rest parameter must be last");
                     }
@@ -2718,8 +2634,7 @@ public class Parser {
         inClassFieldInitializer = savedInClassFieldInitializer;
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(asyncToken, endToken);
-        return new FunctionExpression(getStart(asyncToken), getEnd(endToken), loc, id, false, isGenerator, true, params, body);
+        return new FunctionExpression(getStart(asyncToken), getEnd(endToken), asyncToken.line(), asyncToken.column(), endToken.endLine(), endToken.endColumn(), id, false, isGenerator, true, params, body);
     }
 
     private Expression parseImportExpression(Token importToken) {
@@ -2727,13 +2642,10 @@ public class Parser {
             Token propertyToken = peek();
             if (check(TokenType.IDENTIFIER) && propertyToken.lexeme().equals("meta")) {
                 advance();
-                SourceLocation metaLoc = createLocation(importToken, importToken);
-                SourceLocation propLoc = createLocation(propertyToken, propertyToken);
-                Identifier meta = new Identifier(getStart(importToken), getEnd(importToken), metaLoc, "import");
-                Identifier property = new Identifier(getStart(propertyToken), getEnd(propertyToken), propLoc, "meta");
+                Identifier meta = new Identifier(getStart(importToken), getEnd(importToken), importToken.line(), importToken.column(), importToken.endLine(), importToken.endColumn(), "import");
+                Identifier property = new Identifier(getStart(propertyToken), getEnd(propertyToken), propertyToken.line(), propertyToken.column(), propertyToken.endLine(), propertyToken.endColumn(), "meta");
                 Token endToken = previous();
-                SourceLocation loc = createLocation(importToken, endToken);
-                return new MetaProperty(getStart(importToken), getEnd(endToken), loc, meta, property);
+                return new MetaProperty(getStart(importToken), getEnd(endToken), importToken.line(), importToken.column(), endToken.endLine(), endToken.endColumn(), meta, property);
             }
             throw new ExpectedTokenException("meta", peek());
         }
@@ -2752,8 +2664,7 @@ public class Parser {
 
         consume(TokenType.RPAREN, "Expected ')' after import source");
         Token endToken = previous();
-        SourceLocation loc = createLocation(importToken, endToken);
-        return new ImportExpression(getStart(importToken), getEnd(endToken), loc, source, options);
+        return new ImportExpression(getStart(importToken), getEnd(endToken), importToken.line(), importToken.column(), endToken.endLine(), endToken.endColumn(), source, options);
     }
 
     private Expression parseNewExpression(Token newToken) {
@@ -2762,12 +2673,9 @@ public class Parser {
             Token targetToken = peek();
             if (check(TokenType.IDENTIFIER) && targetToken.lexeme().equals("target")) {
                 advance();
-                SourceLocation metaLoc = createLocation(newToken, newToken);
-                SourceLocation propLoc = createLocation(targetToken, targetToken);
-                Identifier meta = new Identifier(getStart(newToken), getEnd(newToken), metaLoc, "new");
-                Identifier property = new Identifier(getStart(targetToken), getEnd(targetToken), propLoc, "target");
-                SourceLocation loc = createLocation(newToken, targetToken);
-                return new MetaProperty(getStart(newToken), getEnd(targetToken), loc, meta, property);
+                Identifier meta = new Identifier(getStart(newToken), getEnd(newToken), newToken.line(), newToken.column(), newToken.endLine(), newToken.endColumn(), "new");
+                Identifier property = new Identifier(getStart(targetToken), getEnd(targetToken), targetToken.line(), targetToken.column(), targetToken.endLine(), targetToken.endColumn(), "target");
+                return new MetaProperty(getStart(newToken), getEnd(targetToken), newToken.line(), newToken.column(), targetToken.endLine(), targetToken.endColumn(), meta, property);
             }
             throw new ExpectedTokenException("target", peek());
         }
@@ -2783,8 +2691,7 @@ public class Parser {
         }
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(newToken, endToken);
-        return new NewExpression(getStart(newToken), getEnd(endToken), loc, callee, args);
+        return new NewExpression(getStart(newToken), getEnd(endToken), newToken.line(), newToken.column(), endToken.endLine(), endToken.endColumn(), callee, args);
     }
 
     private Expression parseNewCallee() {
@@ -2833,10 +2740,9 @@ public class Parser {
                     }
                     advance();
                     Expression property = new PrivateIdentifier(getStart(hashToken), getEnd(propertyToken),
-                        createLocation(hashToken, propertyToken), propertyToken.lexeme());
+                        hashToken.line(), hashToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme());
                     Token endToken = previous();
-                    SourceLocation loc = createLocation(startToken, endToken);
-                    callee = new MemberExpression(getStart(startToken), getEnd(endToken), loc, callee, property, false, false);
+                    callee = new MemberExpression(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), callee, property, false, false);
                 } else {
                     Token propertyToken = peek();
                     if (!check(TokenType.IDENTIFIER) && !isKeyword(propertyToken)) {
@@ -2844,17 +2750,15 @@ public class Parser {
                     }
                     advance();
                     Expression property = new Identifier(getStart(propertyToken), getEnd(propertyToken),
-                        createLocation(propertyToken, propertyToken), propertyToken.lexeme());
+                        propertyToken.line(), propertyToken.column(), propertyToken.endLine(), propertyToken.endColumn(), propertyToken.lexeme());
                     Token endToken = previous();
-                    SourceLocation loc = createLocation(startToken, endToken);
-                    callee = new MemberExpression(getStart(startToken), getEnd(endToken), loc, callee, property, false, false);
+                    callee = new MemberExpression(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), callee, property, false, false);
                 }
             } else if (match(TokenType.LBRACKET)) {
                 Expression property = parseExpr(BP_COMMA);
                 consume(TokenType.RBRACKET, "Expected ']' after computed property");
                 Token endToken = previous();
-                SourceLocation loc = createLocation(startToken, endToken);
-                callee = new MemberExpression(getStart(startToken), getEnd(endToken), loc, callee, property, true, false);
+                callee = new MemberExpression(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), callee, property, true, false);
             } else {
                 break;
             }
@@ -2872,7 +2776,7 @@ public class Parser {
         if (check(TokenType.IDENTIFIER)) {
             Token nameToken = peek();
             advance();
-            id = new Identifier(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.lexeme());
+            id = new Identifier(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
         }
 
         consume(TokenType.LPAREN, "Expected '(' after function");
@@ -2885,8 +2789,7 @@ public class Parser {
                     Token restStart = previous();
                     Pattern argument = parsePatternBase();
                     Token restEnd = previous();
-                    SourceLocation restLoc = createLocation(restStart, restEnd);
-                    params.add(new RestElement(getStart(restStart), getEnd(restEnd), restLoc, argument));
+                    params.add(new RestElement(getStart(restStart), getEnd(restEnd), restStart.line(), restStart.column(), restEnd.endLine(), restEnd.endColumn(), argument));
                     if (match(TokenType.COMMA)) {
                         throw new ParseException("ValidationError", peek(), null, "parameter list", "Rest parameter must be last");
                     }
@@ -2920,8 +2823,7 @@ public class Parser {
         inClassFieldInitializer = savedInClassFieldInitializer;
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(functionToken, endToken);
-        return new FunctionExpression(getStart(functionToken), getEnd(endToken), loc, id, false, isGenerator, false, params, body);
+        return new FunctionExpression(getStart(functionToken), getEnd(endToken), functionToken.line(), functionToken.column(), endToken.endLine(), endToken.endColumn(), id, false, isGenerator, false, params, body);
     }
 
     private Expression parseClassExpression(Token classToken) {
@@ -2930,7 +2832,7 @@ public class Parser {
         if (check(TokenType.IDENTIFIER) && !peek().lexeme().equals("extends")) {
             Token nameToken = peek();
             advance();
-            id = new Identifier(getStart(nameToken), getEnd(nameToken), createLocation(nameToken, nameToken), nameToken.lexeme());
+            id = new Identifier(getStart(nameToken), getEnd(nameToken), nameToken.line(), nameToken.column(), nameToken.endLine(), nameToken.endColumn(), nameToken.lexeme());
         }
 
         // Optional extends
@@ -2944,8 +2846,7 @@ public class Parser {
         ClassBody body = parseClassBody();
 
         Token endToken = previous();
-        SourceLocation loc = createLocation(classToken, endToken);
-        return new ClassExpression(getStart(classToken), getEnd(endToken), loc, id, superClass, body);
+        return new ClassExpression(getStart(classToken), getEnd(endToken), classToken.line(), classToken.column(), endToken.endLine(), endToken.endColumn(), id, superClass, body);
     }
 
     private Expression parseArrayLiteral(Token lbracket) {
@@ -2961,8 +2862,7 @@ public class Parser {
                 Token spreadStart = previous();
                 Expression argument = parseExpr(BP_ASSIGNMENT);
                 Token spreadEnd = previous();
-                SourceLocation spreadLoc = createLocation(spreadStart, spreadEnd);
-                elements.add(new SpreadElement(getStart(spreadStart), getEnd(spreadEnd), spreadLoc, argument));
+                elements.add(new SpreadElement(getStart(spreadStart), getEnd(spreadEnd), spreadStart.line(), spreadStart.column(), spreadEnd.endLine(), spreadEnd.endColumn(), argument));
                 if (!check(TokenType.RBRACKET)) {
                     consume(TokenType.COMMA, "Expected ',' after spread element");
                 }
@@ -2976,8 +2876,7 @@ public class Parser {
 
         consume(TokenType.RBRACKET, "Expected ']' after array elements");
         Token endToken = previous();
-        SourceLocation loc = createLocation(lbracket, endToken);
-        return new ArrayExpression(getStart(lbracket), getEnd(endToken), loc, elements);
+        return new ArrayExpression(getStart(lbracket), getEnd(endToken), lbracket.line(), lbracket.column(), endToken.endLine(), endToken.endColumn(), elements);
     }
 
     private Expression parseObjectLiteral(Token lbrace) {
@@ -2992,8 +2891,7 @@ public class Parser {
 
         consume(TokenType.RBRACE, "Expected '}' after object properties");
         Token endToken = previous();
-        SourceLocation loc = createLocation(lbrace, endToken);
-        return new ObjectExpression(getStart(lbrace), getEnd(endToken), loc, properties);
+        return new ObjectExpression(getStart(lbrace), getEnd(endToken), lbrace.line(), lbrace.column(), endToken.endLine(), endToken.endColumn(), properties);
     }
 
     private Node parseObjectPropertyNode() {
@@ -3004,8 +2902,7 @@ public class Parser {
             Token spreadStart = previous();
             Expression argument = parseExpr(BP_ASSIGNMENT);
             Token spreadEnd = previous();
-            SourceLocation spreadLoc = createLocation(spreadStart, spreadEnd);
-            return new SpreadElement(getStart(spreadStart), getEnd(spreadEnd), spreadLoc, argument);
+            return new SpreadElement(getStart(spreadStart), getEnd(spreadEnd), spreadStart.line(), spreadStart.column(), spreadEnd.endLine(), spreadEnd.endColumn(), argument);
         }
 
         // Check for method shorthand: get/set/async/generator
@@ -3058,14 +2955,14 @@ public class Parser {
             consume(TokenType.RBRACKET, "Expected ']' after computed property name");
         } else if (check(TokenType.STRING) || check(TokenType.NUMBER)) {
             Token keyToken = advance();
-            key = new Literal(getStart(keyToken), getEnd(keyToken), createLocation(keyToken, keyToken), keyToken.literal(), keyToken.lexeme());
+            key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.literal(), keyToken.lexeme());
         } else {
             Token keyToken = peek();
             if (!check(TokenType.IDENTIFIER) && !isKeyword(keyToken)) {
                 throw new ExpectedTokenException("property name", keyToken);
             }
             advance();
-            key = new Identifier(getStart(keyToken), getEnd(keyToken), createLocation(keyToken, keyToken), keyToken.lexeme());
+            key = new Identifier(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.lexeme());
         }
 
         // Check for method or shorthand
@@ -3082,8 +2979,7 @@ public class Parser {
                         Token restStart = previous();
                         Pattern argument = parsePatternBase();
                         Token restEnd = previous();
-                        SourceLocation restLoc = createLocation(restStart, restEnd);
-                        params.add(new RestElement(getStart(restStart), getEnd(restEnd), restLoc, argument));
+                        params.add(new RestElement(getStart(restStart), getEnd(restEnd), restStart.line(), restStart.column(), restEnd.endLine(), restEnd.endColumn(), argument));
                         if (match(TokenType.COMMA)) {
                             throw new ParseException("ValidationError", peek(), null, "parameter list", "Rest parameter must be last");
                         }
@@ -3113,30 +3009,26 @@ public class Parser {
 
             Token endToken = previous();
             // FunctionExpression starts at '(' per ESTree spec for method definitions
-            SourceLocation funcLoc = createLocation(funcStartToken, endToken);
-            FunctionExpression value = new FunctionExpression(getStart(funcStartToken), getEnd(endToken), funcLoc, null, false, isGenerator, isAsync, params, body);
+            FunctionExpression value = new FunctionExpression(getStart(funcStartToken), getEnd(endToken), funcStartToken.line(), funcStartToken.column(), endToken.endLine(), endToken.endColumn(), null, false, isGenerator, isAsync, params, body);
 
-            SourceLocation propLoc = createLocation(startToken, endToken);
             // Getters and setters have method=false, only actual methods have method=true
             boolean isMethod = kind.equals("init");
             // Property: start, end, loc, method, shorthand, computed, key, value, kind
-            return new Property(getStart(startToken), getEnd(endToken), propLoc, isMethod, false, computed, key, value, kind);
+            return new Property(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), isMethod, false, computed, key, value, kind);
         } else if (match(TokenType.COLON)) {
             // Regular property
             Expression value = parseExpr(BP_ASSIGNMENT);
             Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
             // Property: start, end, loc, method, shorthand, computed, key, value, kind
-            return new Property(getStart(startToken), getEnd(endToken), loc, false, false, computed, key, value, "init");
+            return new Property(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), false, false, computed, key, value, "init");
         } else {
             // Shorthand property: { x } means { x: x }
             if (!(key instanceof Identifier)) {
                 throw new ExpectedTokenException("':' after property name", peek());
             }
             Token endToken = previous();
-            SourceLocation loc = createLocation(startToken, endToken);
             // Property: start, end, loc, method, shorthand, computed, key, value, kind
-            return new Property(getStart(startToken), getEnd(endToken), loc, false, true, computed, key, key, "init");
+            return new Property(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), false, true, computed, key, key, "init");
         }
     }
 
@@ -3163,18 +3055,18 @@ public class Parser {
                     // Convert AssignmentExpression to AssignmentPattern (for default values)
                     Node leftNode = convertToPatternIfNeeded(assignExpr.left());
                     Pattern left = (Pattern) leftNode;
-                    patternElements.add(new AssignmentPattern(assignExpr.start(), assignExpr.end(), assignExpr.loc(), left, assignExpr.right()));
+                    patternElements.add(new AssignmentPattern(assignExpr.start(), assignExpr.end(), assignExpr.startLine(), assignExpr.startCol(), assignExpr.endLine(), assignExpr.endCol(), left, assignExpr.right()));
                 } else if (element instanceof SpreadElement spreadElem) {
                     // Convert SpreadElement to RestElement
                     Node argNode = convertToPatternIfNeeded(spreadElem.argument());
                     Pattern argument = (Pattern) argNode;
-                    patternElements.add(new RestElement(spreadElem.start(), spreadElem.end(), spreadElem.loc(), argument));
+                    patternElements.add(new RestElement(spreadElem.start(), spreadElem.end(), spreadElem.startLine(), spreadElem.startCol(), spreadElem.endLine(), spreadElem.endCol(), argument));
                 } else {
                     // For other expressions, keep as is (this might be an error in real code)
                     patternElements.add((Pattern) element);
                 }
             }
-            return new ArrayPattern(arrayExpr.start(), arrayExpr.end(), arrayExpr.loc(), patternElements);
+            return new ArrayPattern(arrayExpr.start(), arrayExpr.end(), arrayExpr.startLine(), arrayExpr.startCol(), arrayExpr.endLine(), arrayExpr.endCol(), patternElements);
         } else if (expr instanceof ObjectExpression objExpr) {
             // Convert ObjectExpression to ObjectPattern
             // Need to convert properties: AssignmentExpression -> AssignmentPattern, SpreadElement -> RestElement
@@ -3187,14 +3079,14 @@ public class Parser {
                         // Convert AssignmentExpression to AssignmentPattern
                         Node leftNode = convertToPatternIfNeeded(assignExpr.left());
                         Pattern left = (Pattern) leftNode;
-                        AssignmentPattern pattern = new AssignmentPattern(assignExpr.start(), assignExpr.end(), assignExpr.loc(), left, assignExpr.right());
-                        convertedProperties.add(new Property(property.start(), property.end(), property.loc(),
+                        AssignmentPattern pattern = new AssignmentPattern(assignExpr.start(), assignExpr.end(), assignExpr.startLine(), assignExpr.startCol(), assignExpr.endLine(), assignExpr.endCol(), left, assignExpr.right());
+                        convertedProperties.add(new Property(property.start(), property.end(), property.startLine(), property.startCol(), property.endLine(), property.endCol(),
                             property.method(), property.shorthand(), property.computed(),
                             property.key(), pattern, property.kind()));
                     } else if (value instanceof ObjectExpression || value instanceof ArrayExpression) {
                         // Recursively convert nested destructuring
                         Node convertedValue = convertToPatternIfNeeded(value);
-                        convertedProperties.add(new Property(property.start(), property.end(), property.loc(),
+                        convertedProperties.add(new Property(property.start(), property.end(), property.startLine(), property.startCol(), property.endLine(), property.endCol(),
                             property.method(), property.shorthand(), property.computed(),
                             property.key(), convertedValue, property.kind()));
                     } else {
@@ -3204,17 +3096,17 @@ public class Parser {
                     // Convert SpreadElement to RestElement in object patterns
                     Node argNode = convertToPatternIfNeeded(spreadElem.argument());
                     Pattern argument = (Pattern) argNode;
-                    convertedProperties.add(new RestElement(spreadElem.start(), spreadElem.end(), spreadElem.loc(), argument));
+                    convertedProperties.add(new RestElement(spreadElem.start(), spreadElem.end(), spreadElem.startLine(), spreadElem.startCol(), spreadElem.endLine(), spreadElem.endCol(), argument));
                 } else {
                     convertedProperties.add(prop);
                 }
             }
-            return new ObjectPattern(objExpr.start(), objExpr.end(), objExpr.loc(), convertedProperties);
+            return new ObjectPattern(objExpr.start(), objExpr.end(), objExpr.startLine(), objExpr.startCol(), objExpr.endLine(), objExpr.endCol(), convertedProperties);
         } else if (expr instanceof AssignmentExpression assignExpr) {
             // Convert AssignmentExpression to AssignmentPattern (for default values)
             Node leftNode = convertToPatternIfNeeded(assignExpr.left());
             Pattern left = (Pattern) leftNode;
-            return new AssignmentPattern(assignExpr.start(), assignExpr.end(), assignExpr.loc(), left, assignExpr.right());
+            return new AssignmentPattern(assignExpr.start(), assignExpr.end(), assignExpr.startLine(), assignExpr.startCol(), assignExpr.endLine(), assignExpr.endCol(), left, assignExpr.right());
         } else if (expr instanceof Identifier) {
             // Identifier is both Expression and Pattern, return as-is
             return expr;
@@ -3269,8 +3161,7 @@ public class Parser {
                 // Block body: () => { statements }
                 BlockStatement body = parseBlockStatement(true); // Arrow function body
                 Token endToken = previous();
-                SourceLocation loc = createLocation(startToken, endToken);
-                return new ArrowFunctionExpression(getStart(startToken), getEnd(endToken), loc, null, false, false, isAsync, params, body);
+                return new ArrowFunctionExpression(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), null, false, false, isAsync, params, body);
             } else {
                 // Expression body: () => expr
                 Expression body = parseExpr(BP_ASSIGNMENT);
@@ -3278,19 +3169,21 @@ public class Parser {
 
             // Use body.end() and accurate location for template literals and complex expressions
             int arrowEnd;
-            SourceLocation loc;
+            int endLine;
+            int endCol;
             if (body instanceof TemplateLiteral) {
                 arrowEnd = body.end();
                 // Create location using getPositionFromOffset for accurate line/column
-                SourceLocation.Position startPos = new SourceLocation.Position(startToken.line(), startToken.column());
                 SourceLocation.Position endPos = getPositionFromOffset(arrowEnd);
-                loc = new SourceLocation(startPos, endPos);
+                endLine = endPos.line();
+                endCol = endPos.column();
             } else {
                 arrowEnd = getEnd(endToken);
-                loc = createLocation(startToken, endToken);
+                endLine = endToken.endLine();
+                endCol = endToken.endColumn();
             }
 
-            return new ArrowFunctionExpression(getStart(startToken), arrowEnd, loc, null, true, false, isAsync, params, body);
+            return new ArrowFunctionExpression(getStart(startToken), arrowEnd, startToken.line(), startToken.column(), endLine, endCol, null, true, false, isAsync, params, body);
             }
         } finally {
             inAsyncContext = savedInAsyncContext;
@@ -3316,19 +3209,17 @@ public class Parser {
             int elemEnd = getEnd(startToken) - 1; // -1 to exclude closing `
             SourceLocation.Position elemStartPos = getPositionFromOffset(elemStart);
             SourceLocation.Position elemEndPos = getPositionFromOffset(elemEnd);
-            SourceLocation elemLoc = new SourceLocation(elemStartPos, elemEndPos);
             quasis.add(new TemplateElement(
                 elemStart,
                 elemEnd,
-                elemLoc,
+                elemStartPos.line(), elemStartPos.column(), elemEndPos.line(), elemEndPos.column(),
                 new TemplateElement.TemplateElementValue(raw, cooked),
                 true // tail
             ));
 
             SourceLocation.Position templateStartPos = getPositionFromOffset(getStart(startToken));
             SourceLocation.Position templateEndPos = getPositionFromOffset(getEnd(startToken));
-            SourceLocation loc = new SourceLocation(templateStartPos, templateEndPos);
-            return new TemplateLiteral(getStart(startToken), getEnd(startToken), loc, expressions, quasis);
+            return new TemplateLiteral(getStart(startToken), getEnd(startToken), templateStartPos.line(), templateStartPos.column(), templateEndPos.line(), templateEndPos.column(), expressions, quasis);
         } else if (startType == TokenType.TEMPLATE_HEAD) {
             // Template with interpolations
             int templateStart = getStart(startToken);
@@ -3347,11 +3238,10 @@ public class Parser {
             int elemEnd = getEnd(startToken) - 2;
             SourceLocation.Position elemStartPos = getPositionFromOffset(elemStart);
             SourceLocation.Position elemEndPos = getPositionFromOffset(elemEnd);
-            SourceLocation elemLoc = new SourceLocation(elemStartPos, elemEndPos);
             quasis.add(new TemplateElement(
                 elemStart,
                 elemEnd,
-                elemLoc,
+                elemStartPos.line(), elemStartPos.column(), elemEndPos.line(), elemEndPos.column(),
                 new TemplateElement.TemplateElementValue(raw, cooked),
                 false // not tail
             ));
@@ -3377,11 +3267,10 @@ public class Parser {
                     int quasiEnd = getEnd(quasiToken) - 2;
                     SourceLocation.Position quasiStartPos = getPositionFromOffset(quasiStart);
                     SourceLocation.Position quasiEndPos = getPositionFromOffset(quasiEnd);
-                    SourceLocation quasiLoc = new SourceLocation(quasiStartPos, quasiEndPos);
                     quasis.add(new TemplateElement(
                         quasiStart,
                         quasiEnd,
-                        quasiLoc,
+                        quasiStartPos.line(), quasiStartPos.column(), quasiEndPos.line(), quasiEndPos.column(),
                         new TemplateElement.TemplateElementValue(quasiRaw, quasiCooked),
                         false // not tail
                     ));
@@ -3397,11 +3286,10 @@ public class Parser {
                     int quasiEnd = getEnd(quasiToken) - 1;
                     SourceLocation.Position quasiStartPos = getPositionFromOffset(quasiStart);
                     SourceLocation.Position quasiEndPos = getPositionFromOffset(quasiEnd);
-                    SourceLocation quasiLoc = new SourceLocation(quasiStartPos, quasiEndPos);
                     quasis.add(new TemplateElement(
                         quasiStart,
                         quasiEnd,
-                        quasiLoc,
+                        quasiStartPos.line(), quasiStartPos.column(), quasiEndPos.line(), quasiEndPos.column(),
                         new TemplateElement.TemplateElementValue(quasiRaw, quasiCooked),
                         true // tail
                     ));
@@ -3410,8 +3298,7 @@ public class Parser {
                     int templateEnd = getEnd(endToken);
                     SourceLocation.Position templateStartPos = getPositionFromOffset(templateStart);
                     SourceLocation.Position templateEndPos = getPositionFromOffset(templateEnd);
-                    SourceLocation loc = new SourceLocation(templateStartPos, templateEndPos);
-                    return new TemplateLiteral(templateStart, templateEnd, loc, expressions, quasis);
+                    return new TemplateLiteral(templateStart, templateEnd, templateStartPos.line(), templateStartPos.column(), templateEndPos.line(), templateEndPos.column(), expressions, quasis);
                 } else {
                     throw new ExpectedTokenException("TEMPLATE_MIDDLE or TEMPLATE_TAIL after expression in template literal", peek());
                 }

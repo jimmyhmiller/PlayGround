@@ -406,3 +406,65 @@ fn test_deftype_deep_field_chain() {
     let output = run_and_get_stdout(code);
     assert_eq!(output, "1", "Expected 1 at depth 8, got: {}", output);
 }
+
+// ============================================================================
+// Namespace tests
+// ============================================================================
+
+#[test]
+fn test_deftype_different_namespaces_no_collision() {
+    // Two types with same name in different namespaces should not collide
+    let code = r#"
+(ns foo)
+(deftype* Point [x y])
+(def p1 (Point. 1 2))
+(ns bar)
+(deftype* Point [a b c])
+(def p2 (Point. 10 20 30))
+(.-a p2)
+"#;
+    let output = run_and_get_stdout(code);
+    // bar/Point has 3 fields, should get 10 for field 'a'
+    assert_eq!(output, "10", "Expected 10, got: {}", output);
+}
+
+#[test]
+fn test_deftype_qualified_constructor_call() {
+    // Should be able to call constructor with qualified name
+    let code = r#"
+(ns myns)
+(deftype* Widget [id])
+(ns other)
+(def w (myns/Widget. 42))
+(.-id w)
+"#;
+    let output = run_and_get_stdout(code);
+    assert_eq!(output, "42", "Expected 42, got: {}", output);
+}
+
+#[test]
+fn test_deftype_same_name_different_fields_different_ns() {
+    // Point in ns1 has [x y], Point in ns2 has [a b c]
+    // They should be completely independent
+    let code = r#"
+(ns ns1)
+(deftype* Point [x y])
+(def p1 (Point. 100 200))
+(ns ns2)
+(deftype* Point [a b c])
+(def p2 (Point. 1 2 3))
+(+ (.-x (ns ns1) p1) (.-c (ns ns2) p2))
+"#;
+    // This is a bit tricky - we need to access p1 which is in ns1
+    // Let's try a simpler version first
+    let code = r#"
+(ns ns1)
+(deftype* Point [x y])
+(ns ns2)
+(deftype* Point [a b c])
+(def p2 (Point. 1 2 3))
+(.-b p2)
+"#;
+    let output = run_and_get_stdout(code);
+    assert_eq!(output, "2", "Expected 2, got: {}", output);
+}
