@@ -1115,11 +1115,12 @@ impl Compiler {
         // which arity will be selected.
         let is_multi_arity = arities.len() > 1 || arities.iter().any(|a| a.rest_param.is_some());
 
+        let arity_count = arities.len();
         for arity in arities {
             let is_variadic = arity.rest_param.is_some();
             let param_count = arity.params.len();
 
-            let code_ptr = self.compile_single_arity(name, arity, &free_vars, is_multi_arity)?;
+            let code_ptr = self.compile_single_arity(name, arity, &free_vars, is_multi_arity, arity_count)?;
 
             compiled_arities.push((param_count, code_ptr, is_variadic));
         }
@@ -1158,12 +1159,14 @@ impl Compiler {
 
     /// Compile a single arity of a function
     /// `is_multi_arity`: true if this arity is part of a multi-arity definition
+    /// `arity_count`: total number of arities (needed for multi-arity closure layout)
     fn compile_single_arity(
         &mut self,
         name: &Option<String>,
         arity: &crate::value::FnArity,
         free_vars: &[String],
         is_multi_arity: bool,
+        arity_count: usize,
     ) -> Result<usize, String> {
         // Save the current IR builder and create a new one for this arity
         let outer_builder = std::mem::replace(&mut self.builder, IrBuilder::new());
@@ -1215,14 +1218,19 @@ impl Compiler {
 
         // Bind closure variables
         // Load them from the function object (self_reg = x0 for closures)
-        // For multi-arity functions, we need to know the arity count to compute offsets
+        // For multi-arity functions, closure values are at a different offset (after arity table)
         if let Some(self_reg) = &self_reg {
             for (i, var_name) in free_vars.iter().enumerate() {
                 let closure_reg = self.builder.new_register();
-                // Use standard LoadClosure - the generated code will handle both
-                // single-arity and multi-arity layouts since both use the same
-                // calling convention (closure object in x0)
-                self.builder.emit(Instruction::LoadClosure(closure_reg, self_reg.clone(), i));
+                if is_multi_arity {
+                    // Multi-arity: closures are stored after the arity table
+                    self.builder.emit(Instruction::LoadClosureMultiArity(
+                        closure_reg, self_reg.clone(), arity_count, i
+                    ));
+                } else {
+                    // Single-arity: use standard closure layout
+                    self.builder.emit(Instruction::LoadClosure(closure_reg, self_reg.clone(), i));
+                }
                 self.bind_local(var_name.clone(), closure_reg);
             }
         }
@@ -1359,6 +1367,17 @@ impl Compiler {
         }
 
         let mut free_vars = std::collections::HashSet::new();
+
+        // Analyze pre-condition expressions
+        for expr in &arity.pre_conditions {
+            self.collect_free_vars_from_expr(expr, &bound_vars, &mut free_vars);
+        }
+
+        // Analyze post-condition expressions
+        // Note: % is a special binding for the return value, but it's not a free variable
+        for expr in &arity.post_conditions {
+            self.collect_free_vars_from_expr(expr, &bound_vars, &mut free_vars);
+        }
 
         // Analyze body expressions
         for expr in &arity.body {

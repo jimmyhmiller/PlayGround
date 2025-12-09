@@ -1723,10 +1723,14 @@ impl Arm64CodeGen {
                 // - For closures/multi-arity: x0 = closure obj, x1-x7 = user args
                 // - For raw functions: x0-x7 = args directly
                 //
+                // IMPORTANT: This instruction calls a trampoline which clobbers x0-x18.
+                // We must save fixed parameter registers (x1-x7 that hold the fixed params)
+                // so they can be used by subsequent code.
+                //
                 // We need to:
                 // 1. Calculate excess_count = x9 - fixed_count
                 // 2. If excess_count <= 0, return nil
-                // 3. Otherwise, collect args from x(param_offset + fixed_count) onwards into a list
+                // 3. Otherwise, save fixed params, collect args, restore fixed params
 
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
@@ -1760,20 +1764,32 @@ impl Arm64CodeGen {
                 // Has excess args - push them to stack and call trampoline
                 self.emit_label(has_excess_label);
 
-                // We need to push the excess args to stack for the trampoline
-                // The trampoline expects (args_ptr, count) where args_ptr points to
-                // an array of tagged values
+                // IMPORTANT: Save the fixed parameter registers BEFORE we call the trampoline
+                // The trampoline will clobber x0-x18 (caller-saved registers).
+                // We need to preserve x(offset)..x(offset+fixed-1) which hold the fixed params.
+                // Also save x0 (closure object) if we're using closure convention.
                 //
-                // For now, support up to 7 excess args (x1-x7 for closures, x0-x6 for raw)
-                // More complex scenarios with stack-passed args would need more work
+                // Stack layout:
+                //   [fixed params saved area: 8 * (offset + fixed) bytes]
+                //   [excess args area: 64 bytes]
 
-                // Allocate stack space for up to 7 args (56 bytes, aligned to 16 = 64)
+                let num_regs_to_save = offset + fixed;  // x0..x(offset+fixed-1)
+                let save_area_size = num_regs_to_save * 8;
+                let save_area_aligned = (save_area_size + 15) & !15;  // Align to 16
+
+                // Stack layout will be:
+                //   [sp + save_area_aligned]: excess args (64 bytes)
+                //   [sp]: saved registers
+                let total_stack = save_area_aligned + 64;
+                self.emit_sub_sp_imm(total_stack as i64);
+
+                // Save fixed parameter registers and closure object
+                for i in 0..num_regs_to_save {
+                    self.emit_str_offset(i, 31, (i * 8) as i32);
+                }
+
+                // Store excess args to stack (after save area)
                 let max_excess = 7;
-                let stack_space = 64;
-                self.emit_sub_sp_imm(stack_space);
-
-                // Store args conditionally based on excess_count
-                // We'll store from first_excess_reg to first_excess_reg + excess_count - 1
                 for i in 0..max_excess {
                     let arg_reg = first_excess_reg + i;
                     if arg_reg <= 7 {  // Only x0-x7 are argument registers
@@ -1782,28 +1798,38 @@ impl Arm64CodeGen {
                         let skip_store_label = self.new_label();
                         // B.LT = 11 (branch if excess_count < i+1, meaning skip storing this arg)
                         self.emit_branch_cond(skip_store_label.clone(), 11);
-                        // Store arg to stack
-                        self.emit_str_offset(arg_reg, 31, (i * 8) as i32);
+                        // Store arg to stack (in the excess args area)
+                        self.emit_str_offset(arg_reg, 31, (save_area_aligned + i * 8) as i32);
                         self.emit_label(skip_store_label);
                     }
                 }
 
                 // Call trampoline_collect_rest_args(args_ptr, excess_count)
-                // x0 = SP (pointer to args on stack)
+                // x0 = pointer to excess args on stack
                 // x1 = excess_count
-                self.emit_mov(0, 31);  // x0 = SP
+                // ADD x0, SP, #save_area_aligned
+                self.emit_add_sp_offset_to_reg(0, save_area_aligned as i64);
                 self.emit_mov(1, excess_count_reg);  // x1 = excess_count
 
                 let trampoline_addr = crate::trampoline::trampoline_collect_rest_args as usize;
                 self.emit_external_call(trampoline_addr, "trampoline_collect_rest_args");
 
-                // Result is in x0, move to dst_reg if needed
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
+                // Result is in x0, save it temporarily (we'll move it to dst_reg after restoring)
+                let result_temp_reg = 11;  // Use x11 to hold result temporarily
+                self.emit_mov(result_temp_reg, 0);
+
+                // Restore saved registers (x0..x(offset+fixed-1))
+                for i in 0..num_regs_to_save {
+                    self.emit_ldr_offset(i, 31, (i * 8) as i32);
+                }
+
+                // Move result to dst_reg
+                if dst_reg != result_temp_reg {
+                    self.emit_mov(dst_reg, result_temp_reg);
                 }
 
                 // Restore stack
-                self.emit_add_sp_imm(stack_space);
+                self.emit_add_sp_imm(total_stack as i64);
 
                 self.emit_label(done_label);
                 self.store_spill(dst_reg, dest_spill);
@@ -2183,6 +2209,13 @@ impl Arm64CodeGen {
     fn emit_add_sp_imm(&mut self, imm: i64) {
         // ADD sp, sp, #imm
         let instruction = 0x910003FF | ((imm as u32 & 0xFFF) << 10);
+        self.code.push(instruction);
+    }
+
+    fn emit_add_sp_offset_to_reg(&mut self, dst: usize, imm: i64) {
+        // ADD Xd, SP, #imm - compute address relative to stack pointer
+        // Using register 31 as src means SP in this context
+        let instruction = 0x910003E0 | ((imm as u32 & 0xFFF) << 10) | (dst as u32);
         self.code.push(instruction);
     }
 

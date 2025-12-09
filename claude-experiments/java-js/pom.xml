@@ -114,7 +114,7 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.3</version>
                 <configuration>
-                    <argLine>--enable-preview --add-modules jdk.incubator.vector</argLine>
+                    <argLine>-Xmx8g --enable-preview --add-modules jdk.incubator.vector</argLine>
                 </configuration>
             </plugin>
             <plugin>

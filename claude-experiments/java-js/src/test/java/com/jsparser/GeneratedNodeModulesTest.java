@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * Auto-generated tests from cached JS source files.
  * Category: NodeModules
- * Generated: 2025-12-09T05:12:56.270440Z
+ * Generated: 2025-12-09T05:16:43.026658Z
  * 
  * Tests parse with both Acorn (real-time) and our parser, streaming ASTs to temp files
  * for memory-efficient byte-for-byte comparison.
@@ -146,29 +146,50 @@ public class GeneratedNodeModulesTest {
     }
 
     private String hashJsonContent(Path input) throws Exception {
+        // Parse JSON tree and hash with sorted keys using Jackson
+        ObjectMapper localMapper = new ObjectMapper();
+        com.fasterxml.jackson.databind.JsonNode tree = localMapper.readTree(input.toFile());
         java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
-        try (BufferedReader reader = Files.newBufferedReader(input)) {
-            boolean inString = false;
-            boolean escape = false;
-            int ch;
-            while ((ch = reader.read()) != -1) {
-                if (escape) {
-                    digest.update((byte) ch);
-                    escape = false;
-                } else if (ch == '\\' && inString) {
-                    digest.update((byte) ch);
-                    escape = true;
-                } else if (ch == '"') {
-                    digest.update((byte) ch);
-                    inString = !inString;
-                } else if (inString) {
-                    digest.update((byte) ch);
-                } else if (!Character.isWhitespace(ch)) {
-                    digest.update((byte) ch);
-                }
-            }
-        }
+        hashNode(tree, digest);
         return java.util.HexFormat.of().formatHex(digest.digest());
+    }
+
+    private void hashNode(com.fasterxml.jackson.databind.JsonNode node, java.security.MessageDigest digest) {
+        if (node.isNull()) { digest.update("null".getBytes()); return; }
+        if (node.isBoolean()) { digest.update(node.asText().getBytes()); return; }
+        if (node.isNumber()) { digest.update(node.asText().getBytes()); return; }
+        if (node.isTextual()) {
+            try { digest.update(mapper.writeValueAsBytes(node.asText())); }
+            catch (Exception e) { throw new RuntimeException(e); }
+            return;
+        }
+        if (node.isArray()) {
+            digest.update((byte)'[');
+            boolean first = true;
+            for (var elem : node) {
+                if (!first) digest.update((byte)',');
+                first = false;
+                hashNode(elem, digest);
+            }
+            digest.update((byte)']');
+            return;
+        }
+        if (node.isObject()) {
+            digest.update((byte)'{');
+            var fields = new java.util.ArrayList<String>();
+            node.fieldNames().forEachRemaining(fields::add);
+            java.util.Collections.sort(fields);
+            boolean first = true;
+            for (String field : fields) {
+                if (!first) digest.update((byte)',');
+                first = false;
+                try { digest.update(mapper.writeValueAsBytes(field)); }
+                catch (Exception e) { throw new RuntimeException(e); }
+                digest.update((byte)':');
+                hashNode(node.get(field), digest);
+            }
+            digest.update((byte)'}');
+        }
     }
 
     private void showFirstDifference(Path acornFile, Path ourFile, String jsPath) throws Exception {
