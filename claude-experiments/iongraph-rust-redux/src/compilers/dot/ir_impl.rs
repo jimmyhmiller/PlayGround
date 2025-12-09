@@ -105,34 +105,55 @@ pub fn dot_to_universal(graph: &DotGraph) -> UniversalIR {
         }
     }
 
-    // Second pass: build successor/predecessor lists
+    // Second pass: build successor/predecessor/back_edge lists
     // Rules:
-    // - Self-loops are always skipped
-    // - Back edges: ALWAYS keep in successors (for rendering), but NEVER in predecessors (so target can be root)
+    // - Self-loops: tracked for rendering but not added to successors/predecessors
+    // - Explicit backedge blocks: Keep their back edges in successors (layout algorithm needs this)
+    // - Other back edges: stored in back_edges_list (for rendering), not in successors
     // - Forward edges: add to both successors and predecessors
     let mut successors: Vec<Vec<String>> = vec![Vec::new(); graph.nodes.len()];
     let mut predecessors: Vec<Vec<String>> = vec![Vec::new(); graph.nodes.len()];
+    let mut back_edges_list: Vec<Vec<String>> = vec![Vec::new(); graph.nodes.len()];
+    let mut has_self_loop: Vec<bool> = vec![false; graph.nodes.len()];
 
     for edge in &graph.edges {
         if let (Some(&from_idx), Some(&to_idx)) = (id_to_index.get(&edge.from), id_to_index.get(&edge.to)) {
             let to_id = graph.nodes[to_idx].id.clone();
             let from_id = graph.nodes[from_idx].id.clone();
 
-            // Skip self-loops entirely
+            // Track self-loops for rendering
             if from_idx == to_idx {
+                has_self_loop[from_idx] = true;
                 continue;
             }
 
             let is_back_edge = back_edges.contains(&(from_idx, to_idx));
+            // Check if source is a backedge block (either explicit attribute or auto-detected)
+            let source_is_backedge_block = graph.nodes[from_idx].is_backedge || is_backedge_block[from_idx];
 
-            // Always add to successors (back edges will be rendered as curved upward arrows)
-            if !successors[from_idx].contains(&to_id) {
-                successors[from_idx].push(to_id);
-            }
-
-            // Only add to predecessors for forward edges (so back edge targets can be roots)
-            if !is_back_edge && !predecessors[to_idx].contains(&from_id) {
-                predecessors[to_idx].push(from_id);
+            if is_back_edge {
+                if source_is_backedge_block {
+                    // Backedge block (explicit or auto-detected): Keep the edge in successors (layout needs it)
+                    // This is a proper loop structure where the layout algorithm handles rendering
+                    if !successors[from_idx].contains(&to_id) {
+                        successors[from_idx].push(to_id);
+                    }
+                    // Note: We don't add to predecessors so the loop header can still be a root
+                } else {
+                    // Auto-detected back edge from a non-backedge block (e.g., bidirectional):
+                    // add to back_edges_list for separate rendering
+                    if !back_edges_list[from_idx].contains(&to_id) {
+                        back_edges_list[from_idx].push(to_id);
+                    }
+                }
+            } else {
+                // Forward edge: add to successors and predecessors
+                if !successors[from_idx].contains(&to_id) {
+                    successors[from_idx].push(to_id);
+                }
+                if !predecessors[to_idx].contains(&from_id) {
+                    predecessors[to_idx].push(from_id);
+                }
             }
         }
     }
@@ -162,6 +183,8 @@ pub fn dot_to_universal(graph: &DotGraph) -> UniversalIR {
                 node,
                 &successors[idx],
                 &predecessors[idx],
+                &back_edges_list[idx],
+                has_self_loop[idx],
                 should_be_loopheader[idx],
                 is_backedge_block[idx],
             )
@@ -186,6 +209,8 @@ fn node_to_block(
     node: &DotNode,
     successors: &[String],
     predecessors: &[String],
+    back_edges: &[String],
+    has_self_loop: bool,
     auto_loop_header: bool,
     auto_backedge: bool,
 ) -> UniversalBlock {
@@ -231,6 +256,8 @@ fn node_to_block(
         loop_depth: 0, // Will be computed by layout algorithm
         predecessors: predecessors.to_vec(),
         successors: successors.to_vec(),
+        back_edges: back_edges.to_vec(),
+        has_self_loop,
         instructions,
         metadata: HashMap::new(),
     }

@@ -37,6 +37,31 @@ const TYPE_ID_NAMESPACE: u8 = 10;
 const TYPE_ID_VAR: u8 = 11;
 const TYPE_ID_FUNCTION: u8 = 12;
 const TYPE_ID_DEFTYPE: u8 = 13;
+const TYPE_ID_MULTI_ARITY_FN: u8 = 14;
+const TYPE_ID_CONS: u8 = 15;
+
+// ========== Built-in Type IDs for Protocol Dispatch ==========
+// These are used by the protocol vtable to dispatch on type.
+// Tagged primitives use their tag-derived ID, heap objects use these.
+
+pub const BUILTIN_TYPE_NIL: usize = 0;
+pub const BUILTIN_TYPE_BOOL: usize = 1;
+pub const BUILTIN_TYPE_INT: usize = 2;
+pub const BUILTIN_TYPE_FLOAT: usize = 3;
+pub const BUILTIN_TYPE_STRING: usize = 4;
+pub const BUILTIN_TYPE_KEYWORD: usize = 5;
+pub const BUILTIN_TYPE_SYMBOL: usize = 6;
+pub const BUILTIN_TYPE_LIST: usize = 7;
+pub const BUILTIN_TYPE_VECTOR: usize = 8;
+pub const BUILTIN_TYPE_MAP: usize = 9;
+pub const BUILTIN_TYPE_SET: usize = 10;
+pub const BUILTIN_TYPE_FUNCTION: usize = 11;
+pub const BUILTIN_TYPE_CLOSURE: usize = 12;
+pub const BUILTIN_TYPE_NAMESPACE: usize = 13;
+pub const BUILTIN_TYPE_VAR: usize = 14;
+
+/// Offset added to deftype IDs to avoid collision with built-in types
+pub const DEFTYPE_ID_OFFSET: usize = 100;
 
 /// Definition of a deftype (name and field names)
 #[derive(Debug, Clone)]
@@ -55,7 +80,46 @@ impl TypeDef {
     }
 }
 
-/// Closure heap object layout constants
+// ========== Protocol Definitions ==========
+
+/// Definition of a protocol (name and method signatures)
+#[derive(Debug, Clone)]
+pub struct ProtocolDef {
+    pub name: String,
+    pub methods: Vec<ProtocolMethod>,
+}
+
+/// Method signature in a protocol
+#[derive(Debug, Clone)]
+pub struct ProtocolMethod {
+    pub name: String,
+    /// Supported arities (number of args including 'this')
+    pub arities: Vec<usize>,
+}
+
+impl ProtocolDef {
+    pub fn method_count(&self) -> usize {
+        self.methods.len()
+    }
+
+    pub fn method_index(&self, method_name: &str) -> Option<usize> {
+        self.methods.iter().position(|m| m.name == method_name)
+    }
+}
+
+/// Exception handler saved state
+/// When a try block is entered, we save the current SP/FP/LR so throw can restore them
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct ExceptionHandler {
+    pub handler_address: usize,   // Label address to jump to (catch block)
+    pub stack_pointer: usize,     // Saved SP
+    pub frame_pointer: usize,     // Saved FP (x29)
+    pub link_register: usize,     // Saved LR (x30)
+    pub result_local: isize,      // Where to store exception (FP-relative offset, negative)
+}
+
+/// Closure heap object layout constants (single-arity functions)
 #[allow(dead_code)]
 pub mod closure_layout {
     pub const HEADER_SIZE: usize = 8;
@@ -74,6 +138,70 @@ pub mod closure_layout {
     pub const FIELD_CODE_PTR: usize = 1;
     pub const FIELD_CLOSURE_COUNT: usize = 2;
     pub const FIELD_FIRST_VALUE: usize = 3;
+}
+
+/// Multi-arity function heap object layout constants
+/// Layout:
+///   [header(8)]
+///   [name_ptr(8)]           - field 0: Optional function name (0 if anonymous)
+///   [arity_count(8)]        - field 1: Number of arities
+///   [variadic_min(8)]       - field 2: Min args for variadic arity (i64::MAX if none)
+///   [closure_count(8)]      - field 3: Number of closure values
+///   [arity_table...]        - fields 4+: Array of (param_count, code_ptr) pairs
+///   [closure_values...]     - After arity table: captured closure values
+#[allow(dead_code)]
+pub mod multi_arity_layout {
+    pub const HEADER_SIZE: usize = 8;
+
+    // Field indices (word offsets from start of object data, after header)
+    pub const FIELD_NAME_PTR: usize = 0;
+    pub const FIELD_ARITY_COUNT: usize = 1;
+    pub const FIELD_VARIADIC_MIN: usize = 2;
+    pub const FIELD_CLOSURE_COUNT: usize = 3;
+    pub const ARITY_TABLE_START: usize = 4;
+
+    // Each arity entry is 2 words: (param_count, code_ptr)
+    pub const ARITY_ENTRY_SIZE: usize = 2;
+
+    /// Get the field index of an arity entry's param_count
+    pub const fn arity_param_count_field(arity_index: usize) -> usize {
+        ARITY_TABLE_START + arity_index * ARITY_ENTRY_SIZE
+    }
+
+    /// Get the field index of an arity entry's code_ptr
+    pub const fn arity_code_ptr_field(arity_index: usize) -> usize {
+        ARITY_TABLE_START + arity_index * ARITY_ENTRY_SIZE + 1
+    }
+
+    /// Get the field index of the first closure value
+    pub const fn closure_values_start(arity_count: usize) -> usize {
+        ARITY_TABLE_START + arity_count * ARITY_ENTRY_SIZE
+    }
+
+    /// Get the field index of a specific closure value
+    pub const fn closure_value_field(arity_count: usize, closure_index: usize) -> usize {
+        closure_values_start(arity_count) + closure_index
+    }
+
+    /// Calculate total object size in words (not including header)
+    pub const fn total_size_words(arity_count: usize, closure_count: usize) -> usize {
+        4 + arity_count * ARITY_ENTRY_SIZE + closure_count
+    }
+
+    /// Sentinel value for "no variadic arity"
+    pub const NO_VARIADIC: usize = usize::MAX;
+}
+
+/// Cons cell layout for lists (used for variadic args)
+/// Layout:
+///   [header(8)]
+///   [head(8)]     - field 0: First element (tagged value)
+///   [tail(8)]     - field 1: Rest of list (tagged cons or nil)
+#[allow(dead_code)]
+pub mod cons_layout {
+    pub const FIELD_HEAD: usize = 0;
+    pub const FIELD_TAIL: usize = 1;
+    pub const SIZE_WORDS: usize = 2;
 }
 
 /// GC Runtime with pluggable allocator
@@ -108,6 +236,25 @@ pub struct GCRuntime {
 
     /// GC options
     options: AllocatorOptions,
+
+    /// Stack of exception handlers for try/catch
+    exception_handlers: Vec<ExceptionHandler>,
+
+    // ========== Protocol System ==========
+
+    /// Protocol registry: indexed by protocol_id
+    protocol_registry: Vec<ProtocolDef>,
+
+    /// Protocol name to ID mapping (fully qualified name -> protocol_id)
+    protocol_name_to_id: HashMap<String, usize>,
+
+    /// Global vtable for protocol dispatch
+    /// Key: (type_id, protocol_id, method_index) -> function pointer (tagged closure)
+    protocol_vtable: HashMap<(usize, usize, usize), usize>,
+
+    /// Reverse lookup: method_name -> (protocol_id, method_index)
+    /// Used for dispatch when we only know the method name
+    method_to_protocol: HashMap<String, (usize, usize)>,
 }
 
 impl Default for GCRuntime {
@@ -134,6 +281,12 @@ impl GCRuntime {
             type_registry: Vec::new(),
             type_name_to_id: HashMap::new(),
             options,
+            exception_handlers: Vec::new(),
+            // Protocol system
+            protocol_registry: Vec::new(),
+            protocol_name_to_id: HashMap::new(),
+            protocol_vtable: HashMap::new(),
+            method_to_protocol: HashMap::new(),
         }
     }
 
@@ -384,6 +537,11 @@ impl GCRuntime {
             }
         }
         self.namespace_roots.insert(name.to_string(), new_ptr);
+    }
+
+    /// Get all namespace pointers (for syncing compiler registry after GC)
+    pub fn get_namespace_pointers(&self) -> &HashMap<String, usize> {
+        &self.namespace_roots
     }
 
     /// Read a string from a tagged pointer
@@ -665,6 +823,172 @@ impl GCRuntime {
         }
     }
 
+    // ========== Multi-Arity Function Methods ==========
+
+    /// Allocate a multi-arity function object on the heap
+    ///
+    /// arities: Vec of (param_count, code_ptr) pairs for each arity
+    /// variadic_min: If Some(n), the function has a variadic arity accepting n+ args
+    /// closure_values: Captured closure values (shared across all arities)
+    pub fn allocate_multi_arity_function(
+        &mut self,
+        name: Option<String>,
+        arities: Vec<(usize, usize)>,
+        variadic_min: Option<usize>,
+        closure_values: Vec<usize>,
+    ) -> Result<usize, String> {
+        let name_ptr = if let Some(n) = name {
+            self.allocate_string(&n)?
+        } else {
+            0
+        };
+
+        let arity_count = arities.len();
+        let size_words = multi_arity_layout::total_size_words(arity_count, closure_values.len());
+        let fn_ptr = self.allocate_raw(size_words, TYPE_ID_MULTI_ARITY_FN)?;
+        let heap_obj = HeapObject::from_untagged(fn_ptr as *const u8);
+
+        // Write header fields
+        heap_obj.write_field(multi_arity_layout::FIELD_NAME_PTR, name_ptr);
+        heap_obj.write_field(multi_arity_layout::FIELD_ARITY_COUNT, arity_count);
+        heap_obj.write_field(
+            multi_arity_layout::FIELD_VARIADIC_MIN,
+            variadic_min.unwrap_or(multi_arity_layout::NO_VARIADIC),
+        );
+        heap_obj.write_field(multi_arity_layout::FIELD_CLOSURE_COUNT, closure_values.len());
+
+        // Write arity table
+        for (i, (param_count, code_ptr)) in arities.iter().enumerate() {
+            heap_obj.write_field(multi_arity_layout::arity_param_count_field(i), *param_count);
+            heap_obj.write_field(multi_arity_layout::arity_code_ptr_field(i), *code_ptr);
+        }
+
+        // Write closure values
+        for (i, value) in closure_values.iter().enumerate() {
+            heap_obj.write_field(
+                multi_arity_layout::closure_value_field(arity_count, i),
+                *value,
+            );
+        }
+
+        Ok(self.tag_closure(fn_ptr))
+    }
+
+    /// Check if a function is multi-arity (vs single-arity)
+    pub fn is_multi_arity_function(&self, fn_ptr: usize) -> bool {
+        let untagged = self.untag_closure(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_header().type_id == TYPE_ID_MULTI_ARITY_FN
+    }
+
+    /// Look up the code pointer for a given argument count in a multi-arity function
+    /// Returns (code_ptr, is_variadic) if found
+    pub fn multi_arity_lookup(&self, fn_ptr: usize, arg_count: usize) -> Option<(usize, bool)> {
+        let untagged = self.untag_closure(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+
+        let arity_count = heap_obj.get_field(multi_arity_layout::FIELD_ARITY_COUNT);
+        let variadic_min = heap_obj.get_field(multi_arity_layout::FIELD_VARIADIC_MIN);
+
+        // First, try to find an exact match
+        for i in 0..arity_count {
+            let param_count = heap_obj.get_field(multi_arity_layout::arity_param_count_field(i));
+            if param_count == arg_count {
+                let code_ptr = heap_obj.get_field(multi_arity_layout::arity_code_ptr_field(i));
+                return Some((code_ptr, false));
+            }
+        }
+
+        // If no exact match and we have a variadic arity, check if args >= variadic_min
+        if variadic_min != multi_arity_layout::NO_VARIADIC && arg_count >= variadic_min {
+            // Find the variadic arity (the one with param_count == variadic_min)
+            for i in 0..arity_count {
+                let param_count = heap_obj.get_field(multi_arity_layout::arity_param_count_field(i));
+                if param_count == variadic_min {
+                    let code_ptr = heap_obj.get_field(multi_arity_layout::arity_code_ptr_field(i));
+                    return Some((code_ptr, true));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get closure count from a multi-arity function
+    pub fn multi_arity_closure_count(&self, fn_ptr: usize) -> usize {
+        let untagged = self.untag_closure(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(multi_arity_layout::FIELD_CLOSURE_COUNT)
+    }
+
+    /// Get arity count from a multi-arity function
+    pub fn multi_arity_arity_count(&self, fn_ptr: usize) -> usize {
+        let untagged = self.untag_closure(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(multi_arity_layout::FIELD_ARITY_COUNT)
+    }
+
+    /// Get closure value by index from a multi-arity function
+    pub fn multi_arity_get_closure(&self, fn_ptr: usize, index: usize) -> usize {
+        let untagged = self.untag_closure(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        let arity_count = heap_obj.get_field(multi_arity_layout::FIELD_ARITY_COUNT);
+        let closure_count = heap_obj.get_field(multi_arity_layout::FIELD_CLOSURE_COUNT);
+        if index >= closure_count {
+            panic!("Multi-arity closure index out of bounds: {} >= {}", index, closure_count);
+        }
+        heap_obj.get_field(multi_arity_layout::closure_value_field(arity_count, index))
+    }
+
+    // ========== Cons Cell Methods (for variadic args) ==========
+
+    /// Allocate a cons cell (head, tail)
+    pub fn allocate_cons(&mut self, head: usize, tail: usize) -> Result<usize, String> {
+        let cons_ptr = self.allocate_raw(cons_layout::SIZE_WORDS, TYPE_ID_CONS)?;
+        let heap_obj = HeapObject::from_untagged(cons_ptr as *const u8);
+
+        heap_obj.write_field(cons_layout::FIELD_HEAD, head);
+        heap_obj.write_field(cons_layout::FIELD_TAIL, tail);
+
+        Ok(self.tag_heap_object(cons_ptr))
+    }
+
+    /// Get the head of a cons cell
+    pub fn cons_head(&self, cons_ptr: usize) -> usize {
+        let untagged = self.untag_heap_object(cons_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(cons_layout::FIELD_HEAD)
+    }
+
+    /// Get the tail of a cons cell
+    pub fn cons_tail(&self, cons_ptr: usize) -> usize {
+        let untagged = self.untag_heap_object(cons_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(cons_layout::FIELD_TAIL)
+    }
+
+    /// Check if a value is a cons cell
+    pub fn is_cons(&self, value: usize) -> bool {
+        // Check if it's a heap object
+        if (value & 0b111) != 0b110 {
+            return false;
+        }
+        let untagged = self.untag_heap_object(value);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_header().type_id == TYPE_ID_CONS
+    }
+
+    /// Build a list from a slice of values (right-to-left cons)
+    /// Returns nil (tagged) for empty slice
+    pub fn build_list(&mut self, values: &[usize]) -> Result<usize, String> {
+        let nil = 7usize; // Tagged nil value
+        let mut list = nil;
+        for value in values.iter().rev() {
+            list = self.allocate_cons(*value, list)?;
+        }
+        Ok(list)
+    }
+
     // ========== DefType Methods ==========
 
     /// Register a new deftype and return its type_id
@@ -848,7 +1172,8 @@ impl GCRuntime {
 
     /// Format a tagged value for display
     pub fn format_value(&self, value: usize) -> String {
-        match BuiltInTypes::get_kind(value) {
+        let kind = BuiltInTypes::get_kind(value);
+        match kind {
             BuiltInTypes::Int => format!("{}", (value as i64) >> 3),
             BuiltInTypes::Bool => {
                 if value == 11 { "true".to_string() }
@@ -886,6 +1211,10 @@ impl GCRuntime {
                             format!("#<deftype@{:x}>", untagged)
                         }
                     }
+                    TYPE_ID_CONS => {
+                        // Format cons cells as a list
+                        self.format_list(value)
+                    }
                     _ => format!("#<object@{:x}>", untagged),
                 }
             }
@@ -895,6 +1224,48 @@ impl GCRuntime {
                 format!("{}", f64::from_bits(bits))
             }
         }
+    }
+
+    /// Format a cons list as (a b c)
+    fn format_list(&self, value: usize) -> String {
+        let mut items = Vec::new();
+        let mut current = value;
+        let mut max_depth = 100; // Prevent infinite loops on circular lists
+
+        while max_depth > 0 {
+            max_depth -= 1;
+
+            // Check if current is nil (end of list)
+            if current == 7 {
+                break;
+            }
+
+            // Check if current is a cons cell
+            if BuiltInTypes::get_kind(current) != BuiltInTypes::HeapObject {
+                // Improper list - add dot notation
+                items.push(format!(". {}", self.format_value(current)));
+                break;
+            }
+
+            let untagged = current >> 3;
+            let obj = HeapObject::from_untagged(untagged as *const u8);
+            let type_id = obj.get_type_id() as u8;
+
+            if type_id != TYPE_ID_CONS {
+                // Improper list - add dot notation
+                items.push(format!(". {}", self.format_value(current)));
+                break;
+            }
+
+            // Get head and tail
+            let head = self.cons_head(current);
+            let tail = self.cons_tail(current);
+
+            items.push(self.format_value(head));
+            current = tail;
+        }
+
+        format!("({})", items.join(" "))
     }
 
     /// Find all objects that reference a given target object
@@ -981,6 +1352,175 @@ impl GCRuntime {
 
         roots.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
         roots
+    }
+
+    // ========== Exception Handling Methods ==========
+
+    /// Push an exception handler onto the stack
+    pub fn push_exception_handler(&mut self, handler: ExceptionHandler) {
+        self.exception_handlers.push(handler);
+    }
+
+    /// Pop an exception handler from the stack
+    pub fn pop_exception_handler(&mut self) -> Option<ExceptionHandler> {
+        self.exception_handlers.pop()
+    }
+
+    /// Get the current number of exception handlers
+    pub fn exception_handler_count(&self) -> usize {
+        self.exception_handlers.len()
+    }
+
+    // ========== Protocol Methods ==========
+
+    /// Register a new protocol and return its protocol_id
+    pub fn register_protocol(&mut self, name: String, methods: Vec<ProtocolMethod>) -> usize {
+        // Check if already registered
+        if let Some(&protocol_id) = self.protocol_name_to_id.get(&name) {
+            return protocol_id;
+        }
+
+        let protocol_id = self.protocol_registry.len();
+
+        // Register method -> (protocol_id, method_index) mappings
+        for (method_index, method) in methods.iter().enumerate() {
+            self.method_to_protocol.insert(
+                method.name.clone(),
+                (protocol_id, method_index),
+            );
+        }
+
+        self.protocol_registry.push(ProtocolDef {
+            name: name.clone(),
+            methods,
+        });
+        self.protocol_name_to_id.insert(name, protocol_id);
+        protocol_id
+    }
+
+    /// Get protocol definition by ID
+    pub fn get_protocol_def(&self, protocol_id: usize) -> Option<&ProtocolDef> {
+        self.protocol_registry.get(protocol_id)
+    }
+
+    /// Get protocol ID by name
+    pub fn get_protocol_id(&self, name: &str) -> Option<usize> {
+        self.protocol_name_to_id.get(name).copied()
+    }
+
+    /// Get method index within a protocol by method name
+    pub fn get_protocol_method_index(&self, protocol_id: usize, method_name: &str) -> Option<usize> {
+        self.protocol_registry.get(protocol_id)?.method_index(method_name)
+    }
+
+    /// Register a protocol method implementation in the vtable
+    pub fn register_protocol_method_impl(
+        &mut self,
+        type_id: usize,
+        protocol_id: usize,
+        method_index: usize,
+        fn_ptr: usize,
+    ) {
+        self.protocol_vtable.insert((type_id, protocol_id, method_index), fn_ptr);
+    }
+
+    /// Look up protocol method implementation by type_id and method_name
+    /// Returns the function pointer (tagged closure) if found
+    pub fn lookup_protocol_method(&self, type_id: usize, method_name: &str) -> Option<usize> {
+        // Look up which protocol this method belongs to
+        let &(protocol_id, method_index) = self.method_to_protocol.get(method_name)?;
+
+        // Look up the implementation in the vtable
+        self.protocol_vtable.get(&(type_id, protocol_id, method_index)).copied()
+    }
+
+    /// Look up protocol method by protocol_id and method_index (direct vtable lookup)
+    pub fn lookup_protocol_method_direct(
+        &self,
+        type_id: usize,
+        protocol_id: usize,
+        method_index: usize,
+    ) -> Option<usize> {
+        self.protocol_vtable.get(&(type_id, protocol_id, method_index)).copied()
+    }
+
+    /// Get the protocol type ID for a tagged value
+    /// This is used for protocol dispatch - extracts the type_id used in the vtable
+    pub fn get_type_id_for_value(&self, value: usize) -> usize {
+        let tag = value & 0b111;
+
+        match tag {
+            0b000 => BUILTIN_TYPE_INT,      // Integer
+            0b001 => BUILTIN_TYPE_FLOAT,    // Float
+            0b010 => BUILTIN_TYPE_STRING,   // String (could be keyword/symbol too)
+            0b011 => BUILTIN_TYPE_BOOL,     // Bool
+            0b100 => BUILTIN_TYPE_FUNCTION, // Function
+            0b101 => BUILTIN_TYPE_CLOSURE,  // Closure
+            0b110 => {
+                // HeapObject - need to check type_id in header
+                let untagged = value >> 3;
+                let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+                let header = heap_obj.get_header();
+
+                match header.type_id {
+                    TYPE_ID_NAMESPACE => BUILTIN_TYPE_NAMESPACE,
+                    TYPE_ID_VAR => BUILTIN_TYPE_VAR,
+                    TYPE_ID_DEFTYPE => {
+                        // For deftypes, use type_data + offset to get unique type_id
+                        header.type_data as usize + DEFTYPE_ID_OFFSET
+                    }
+                    // TODO: Add vector, map, list, set when implemented as heap objects
+                    _ => 0, // Unknown type
+                }
+            }
+            0b111 => BUILTIN_TYPE_NIL,      // Nil
+            _ => unreachable!(),
+        }
+    }
+
+    /// Check if a type implements a protocol
+    pub fn type_satisfies_protocol(&self, type_id: usize, protocol_id: usize) -> bool {
+        if let Some(protocol) = self.protocol_registry.get(protocol_id) {
+            // Check if at least one method is implemented
+            for method_index in 0..protocol.methods.len() {
+                if self.protocol_vtable.contains_key(&(type_id, protocol_id, method_index)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Get the name of a built-in type ID (for error messages)
+    pub fn builtin_type_name(type_id: usize) -> &'static str {
+        match type_id {
+            BUILTIN_TYPE_NIL => "nil",
+            BUILTIN_TYPE_BOOL => "Boolean",
+            BUILTIN_TYPE_INT => "Long",
+            BUILTIN_TYPE_FLOAT => "Double",
+            BUILTIN_TYPE_STRING => "String",
+            BUILTIN_TYPE_KEYWORD => "Keyword",
+            BUILTIN_TYPE_SYMBOL => "Symbol",
+            BUILTIN_TYPE_LIST => "PersistentList",
+            BUILTIN_TYPE_VECTOR => "PersistentVector",
+            BUILTIN_TYPE_MAP => "PersistentHashMap",
+            BUILTIN_TYPE_SET => "PersistentHashSet",
+            BUILTIN_TYPE_FUNCTION => "Function",
+            BUILTIN_TYPE_CLOSURE => "Closure",
+            BUILTIN_TYPE_NAMESPACE => "Namespace",
+            BUILTIN_TYPE_VAR => "Var",
+            _ if type_id >= DEFTYPE_ID_OFFSET => "deftype",
+            _ => "unknown",
+        }
+    }
+
+    /// List all registered protocols
+    pub fn list_protocols(&self) -> Vec<(usize, String, usize)> {
+        self.protocol_registry
+            .iter()
+            .enumerate()
+            .map(|(id, p)| (id, p.name.clone(), p.methods.len()))
+            .collect()
     }
 }
 

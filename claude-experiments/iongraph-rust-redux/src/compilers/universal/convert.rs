@@ -73,6 +73,8 @@ pub fn ion_to_universal(ion: &IonJSON) -> UniversalIR {
                                 .iter()
                                 .map(|s| format!("{}", s.0))
                                 .collect(),
+                            back_edges: Vec::new(), // Ion format doesn't have separate back edges
+                            has_self_loop: false,   // Ion format doesn't track self-loops
                             instructions: mir_block
                                 .instructions
                                 .iter()
@@ -133,6 +135,8 @@ pub fn ion_to_universal(ion: &IonJSON) -> UniversalIR {
                             .iter()
                             .map(|s| format!("{}", s.0))
                             .collect(),
+                        back_edges: Vec::new(), // Ion format doesn't have separate back edges
+                        has_self_loop: false,   // Ion format doesn't track self-loops
                         instructions: mir_block
                             .instructions
                             .iter()
@@ -205,6 +209,8 @@ pub fn pass_to_universal(pass: &Pass, function_name: &str) -> UniversalIR {
                     .iter()
                     .map(|s| format!("{}", s.0))
                     .collect(),
+                back_edges: Vec::new(), // Ion format doesn't have separate back edges
+                has_self_loop: false,   // Ion format doesn't track self-loops
                 instructions: mir_block
                     .instructions
                     .iter()

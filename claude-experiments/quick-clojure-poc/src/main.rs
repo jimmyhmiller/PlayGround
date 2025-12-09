@@ -22,7 +22,7 @@ use crate::gc_runtime::GCRuntime;
 
 /// Print a tagged value, matching Clojure's behavior
 /// nil prints nothing, other values print their untagged representation
-fn print_tagged_value(tagged_value: i64) {
+fn print_tagged_value(tagged_value: i64, runtime: &GCRuntime) {
     let tag = tagged_value & 0b111;
 
     match tagged_value {
@@ -45,9 +45,9 @@ fn print_tagged_value(tagged_value: i64) {
                     println!("#<closure@{:x}>", tagged_value as u64 >> 3);
                 }
                 0b110 => {
-                    // HeapObject (deftype instance, etc.)
-                    // TODO: Look up type name from registry
-                    println!("#<object@{:x}>", tagged_value as u64 >> 3);
+                    // HeapObject - use runtime's format_value for proper type handling
+                    let formatted = runtime.format_value(tagged_value as usize);
+                    println!("{}", formatted);
                 }
                 _ => {
                     // Unknown tag - print raw value
@@ -231,6 +231,63 @@ fn print_ast(ast: &Expr, indent: usize) {
             println!("{}FieldAccess(.-{})", prefix, field);
             println!("{}  object:", prefix);
             print_ast(object, indent + 2);
+        }
+        Expr::Throw { exception } => {
+            println!("{}Throw", prefix);
+            println!("{}  exception:", prefix);
+            print_ast(exception, indent + 2);
+        }
+        Expr::Try { body, catches, finally } => {
+            println!("{}Try", prefix);
+            println!("{}  body:", prefix);
+            for (i, expr) in body.iter().enumerate() {
+                println!("{}    [{}]:", prefix, i);
+                print_ast(expr, indent + 3);
+            }
+            if !catches.is_empty() {
+                println!("{}  catches:", prefix);
+                for (i, catch) in catches.iter().enumerate() {
+                    println!("{}    [{}] {} {}:", prefix, i, catch.exception_type, catch.binding);
+                    for (j, expr) in catch.body.iter().enumerate() {
+                        println!("{}      [{}]:", prefix, j);
+                        print_ast(expr, indent + 4);
+                    }
+                }
+            }
+            if let Some(finally_body) = finally {
+                println!("{}  finally:", prefix);
+                for (i, expr) in finally_body.iter().enumerate() {
+                    println!("{}    [{}]:", prefix, i);
+                    print_ast(expr, indent + 3);
+                }
+            }
+        }
+        // Protocol system
+        Expr::DefProtocol { name, methods } => {
+            println!("{}DefProtocol({})", prefix, name);
+            for method in methods {
+                println!("{}  method: {} (arities: {:?})", prefix, method.name, method.arities);
+            }
+        }
+        Expr::ExtendType { type_name, implementations } => {
+            println!("{}ExtendType({})", prefix, type_name);
+            for impl_ in implementations {
+                println!("{}  implements: {}", prefix, impl_.protocol_name);
+                for method in &impl_.methods {
+                    println!("{}    {} {:?}", prefix, method.name, method.params);
+                    for (i, expr) in method.body.iter().enumerate() {
+                        println!("{}      body[{}]:", prefix, i);
+                        print_ast(expr, indent + 4);
+                    }
+                }
+            }
+        }
+        Expr::ProtocolCall { method_name, args } => {
+            println!("{}ProtocolCall({})", prefix, method_name);
+            for (i, arg) in args.iter().enumerate() {
+                println!("{}  arg[{}]:", prefix, i);
+                print_ast(arg, indent + 2);
+            }
         }
     }
 }
@@ -542,21 +599,6 @@ fn run_script(filename: &str, gc_always: bool) {
                         match compiler.compile(&ast) {
                             Ok(result_reg) => {
                                 let instructions = compiler.take_instructions();
-
-                                // DEBUG: Print ALL IR
-                                if instructions.len() > 2 {
-                                    eprintln!("\n===== IR for {:?} ({} instructions) =====",
-                                        match &ast {
-                                            Expr::Def { name, .. } => format!("def {}", name),
-                                            _ => "expression".to_string()
-                                        },
-                                        instructions.len());
-                                    for (i, inst) in instructions.iter().enumerate() {
-                                        eprintln!("{:3}: {:?}", i, inst);
-                                    }
-                                    eprintln!("Result register: {:?}\n", result_reg);
-                                }
-
                                 let mut codegen = Arm64CodeGen::new();
 
                                 match codegen.compile(&instructions, &result_reg, 0) {
@@ -570,7 +612,11 @@ fn run_script(filename: &str, gc_always: bool) {
                                                     Expr::Ns { .. } |
                                                     Expr::Use { .. }
                                                 ) {
-                                                    print_tagged_value(result);
+                                                    // SAFETY: Single-threaded, not during compilation
+                                                    unsafe {
+                                                        let rt = &*runtime.get();
+                                                        print_tagged_value(result, rt);
+                                                    }
                                                 }
                                             }
                                             Err(e) => {
@@ -688,7 +734,11 @@ fn main() {
                     unsafe {
                         let rt = &mut *runtime.get();
                         match rt.run_gc() {
-                            Ok(_) => println!("✓ Garbage collection completed"),
+                            Ok(_) => {
+                                // Sync compiler's namespace registry after GC relocations
+                                repl_compiler.sync_namespace_registry();
+                                println!("✓ Garbage collection completed");
+                            }
                             Err(e) => eprintln!("GC error: {}", e),
                         }
                     }
@@ -1031,12 +1081,12 @@ fn main() {
                                                     Ok(_) => {
                                                         match codegen.execute() {
                                                             Ok(result) => {
-                                                                // If this was a top-level def, print the var instead of the value
-                                                                if let Expr::Def { name, .. } = &ast {
-                                                                    // Look up the var that was just stored
-                                                                    // SAFETY: After successful execution, not during compilation
-                                                                    unsafe {
-                                                                        let rt = &*runtime.get();
+                                                                // SAFETY: After successful execution, not during compilation
+                                                                unsafe {
+                                                                    let rt = &*runtime.get();
+                                                                    // If this was a top-level def, print the var instead of the value
+                                                                    if let Expr::Def { name, .. } = &ast {
+                                                                        // Look up the var that was just stored
                                                                         let ns_name = repl_compiler.get_current_namespace();
                                                                         let ns_ptr = rt.list_namespaces()
                                                                             .iter()
@@ -1048,10 +1098,10 @@ fn main() {
                                                                             let (ns_name, symbol_name) = rt.var_info(var_ptr);
                                                                             println!("#'{}/{}", ns_name, symbol_name);
                                                                         }
+                                                                    } else {
+                                                                        // For other expressions, print the result value
+                                                                        print_tagged_value(result, rt);
                                                                     }
-                                                                } else {
-                                                                    // For other expressions, print the result value
-                                                                    print_tagged_value(result);
                                                                 }
                                                             }
                                                             Err(e) => eprintln!("Execution error: {}", e),

@@ -120,6 +120,16 @@ impl BuiltInTypes {
             BuiltInTypes::Null => false,
         }
     }
+
+    /// Check if a tagged value is a closure (tag 0b101)
+    pub fn is_closure(value: usize) -> bool {
+        (value & 0b111) == 0b101
+    }
+
+    /// Check if a tagged value is a raw function (tag 0b100)
+    pub fn is_function(value: usize) -> bool {
+        (value & 0b111) == 0b100
+    }
 }
 
 /// Header for heap-allocated objects

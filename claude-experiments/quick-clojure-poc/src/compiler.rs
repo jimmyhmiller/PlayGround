@@ -1,4 +1,4 @@
-use crate::clojure_ast::Expr;
+use crate::clojure_ast::{Expr, CatchClause};
 use crate::value::Value;
 use crate::ir::{Instruction, IrValue, IrBuilder, Condition, Label};
 use crate::gc_runtime::GCRuntime;
@@ -132,6 +132,12 @@ impl Compiler {
             Expr::DefType { name, fields } => self.compile_deftype(name, fields),
             Expr::TypeConstruct { type_name, args } => self.compile_type_construct(type_name, args),
             Expr::FieldAccess { field, object } => self.compile_field_access(field, object),
+            Expr::Throw { exception } => self.compile_throw(exception),
+            Expr::Try { body, catches, finally } => self.compile_try(body, catches, finally),
+            // Protocol system - will be implemented in Phase 4
+            Expr::DefProtocol { name, methods } => self.compile_defprotocol(name, methods),
+            Expr::ExtendType { type_name, implementations } => self.compile_extend_type(type_name, implementations),
+            Expr::ProtocolCall { method_name, args } => self.compile_protocol_call(method_name, args),
         }
     }
 
@@ -354,6 +360,265 @@ impl Compiler {
         Ok(result)
     }
 
+    fn compile_throw(&mut self, exception: &Expr) -> Result<IrValue, String> {
+        // Compile the exception expression
+        let exc_val = self.compile(exception)?;
+
+        // Emit Throw instruction
+        self.builder.emit(Instruction::Throw(exc_val));
+
+        // Throw never returns, but return dummy nil for type consistency
+        let dummy = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(dummy, IrValue::Null));
+        Ok(dummy)
+    }
+
+    fn compile_try(
+        &mut self,
+        body: &[Expr],
+        catches: &[CatchClause],
+        finally: &Option<Vec<Expr>>,
+    ) -> Result<IrValue, String> {
+        // Layout:
+        //   exception_local = nil  (allocate local for exception)
+        //   push_exception_handler(catch_label, exception_local)
+        //   <try body>
+        //   result = body_result
+        //   pop_exception_handler
+        //   <finally if present>
+        //   jump after_catch_label
+        // catch_label:
+        //   <catch body with exception_local bound>
+        //   result = catch_result
+        //   <finally if present>
+        // after_catch_label:
+        //   return result
+
+        let result = self.builder.new_register();
+        let catch_label = self.builder.new_label();
+        let after_catch_label = self.builder.new_label();
+
+        // Allocate a dedicated stack slot for the exception value
+        // This is allocated BEFORE register allocation runs, ensuring the
+        // stack frame is properly sized in the prologue
+        let exception_slot = self.builder.allocate_exception_slot();
+
+        // Register to hold the exception value after loading from stack
+        let exception_local = self.builder.new_register();
+
+        // 1. Push exception handler with the pre-allocated slot index
+        self.builder.emit(Instruction::PushExceptionHandler(
+            catch_label.clone(),
+            exception_slot,
+        ));
+
+        // 2. Compile try body
+        let body_result = self.compile_do(body)?;
+        self.builder.emit(Instruction::Assign(result, body_result));
+
+        // 3. Pop handler (normal exit)
+        self.builder.emit(Instruction::PopExceptionHandler);
+
+        // 4. Handle finally for normal path
+        if let Some(finally_body) = finally {
+            self.compile_do(finally_body)?;
+        }
+        self.builder.emit(Instruction::Jump(after_catch_label.clone()));
+
+        // 5. Catch block (throw jumps here with exception stored at stack slot)
+        self.builder.emit(Instruction::Label(catch_label.clone()));
+
+        // Load exception from the pre-allocated stack slot into exception_local register
+        self.builder.emit(Instruction::LoadExceptionLocal(exception_local, exception_slot));
+
+        // Handle catch clauses
+        if !catches.is_empty() {
+            // For now, just handle the first catch clause (catch all)
+            let catch = &catches[0];
+            self.push_scope();
+            self.bind_local(catch.binding.clone(), exception_local);
+
+            let catch_result = self.compile_do(&catch.body)?;
+            self.builder.emit(Instruction::Assign(result, catch_result));
+
+            self.pop_scope();
+        } else {
+            // No catch - just re-throw
+            self.builder.emit(Instruction::Throw(exception_local));
+        }
+
+        // 6. Handle finally for catch path
+        if let Some(finally_body) = finally {
+            self.compile_do(finally_body)?;
+        }
+
+        // 7. End
+        self.builder.emit(Instruction::Label(after_catch_label));
+        Ok(result)
+    }
+
+    // ========== Protocol Compilation Methods ==========
+    // These are stubs that will be fully implemented in Phase 4
+
+    fn compile_defprotocol(
+        &mut self,
+        name: &str,
+        methods: &[crate::clojure_ast::ProtocolMethodSig],
+    ) -> Result<IrValue, String> {
+        // Register the protocol in the runtime
+        use crate::gc_runtime::ProtocolMethod;
+
+        let protocol_methods: Vec<ProtocolMethod> = methods
+            .iter()
+            .map(|m| ProtocolMethod {
+                name: m.name.clone(),
+                arities: m.arities.iter().map(|a| a.len()).collect(),
+            })
+            .collect();
+
+        // Fully qualify the protocol name
+        let full_name = format!("{}/{}", self.get_current_namespace(), name);
+
+        unsafe {
+            let rt = &mut *self.runtime.get();
+            rt.register_protocol(full_name, protocol_methods);
+        }
+
+        // defprotocol returns nil
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(result, IrValue::Null));
+        Ok(result)
+    }
+
+    fn compile_extend_type(
+        &mut self,
+        type_name: &str,
+        implementations: &[crate::clojure_ast::ProtocolImpl],
+    ) -> Result<IrValue, String> {
+        use crate::gc_runtime::DEFTYPE_ID_OFFSET;
+
+        // Resolve type_id
+        let type_id = self.resolve_type_id(type_name)?;
+
+        // For each protocol implementation
+        for impl_ in implementations {
+            // Get protocol_id
+            let protocol_full_name = format!("{}/{}", self.get_current_namespace(), &impl_.protocol_name);
+            let protocol_id = unsafe {
+                let rt = &*self.runtime.get();
+                rt.get_protocol_id(&protocol_full_name)
+                    .ok_or_else(|| format!("Unknown protocol: {}", impl_.protocol_name))?
+            };
+
+            // For each method
+            for method in &impl_.methods {
+                let method_index = unsafe {
+                    let rt = &*self.runtime.get();
+                    rt.get_protocol_method_index(protocol_id, &method.name)
+                        .ok_or_else(|| format!("Unknown method {} in protocol {}", method.name, impl_.protocol_name))?
+                };
+
+                // Compile method as a function
+                // Create a FnArity from the method
+                let fn_arity = crate::value::FnArity {
+                    params: method.params.clone(),
+                    rest_param: None,
+                    body: method.body.clone(),
+                    pre_conditions: vec![],
+                    post_conditions: vec![],
+                };
+
+                // Compile the method using compile_fn logic
+                let fn_value = self.compile_fn(&None, &[fn_arity])?;
+
+                // Emit RegisterProtocolMethod instruction
+                self.builder.emit(Instruction::RegisterProtocolMethod(
+                    type_id,
+                    protocol_id,
+                    method_index,
+                    fn_value,
+                ));
+            }
+        }
+
+        // Return nil
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(result, IrValue::Null));
+        Ok(result)
+    }
+
+    /// Resolve a type name to its type_id for protocol dispatch
+    fn resolve_type_id(&self, type_name: &str) -> Result<usize, String> {
+        use crate::gc_runtime::*;
+
+        // Check for built-in types first
+        match type_name {
+            "nil" | "Nil" => Ok(BUILTIN_TYPE_NIL),
+            "Boolean" | "bool" => Ok(BUILTIN_TYPE_BOOL),
+            "Long" | "Integer" | "int" => Ok(BUILTIN_TYPE_INT),
+            "Double" | "Float" | "float" => Ok(BUILTIN_TYPE_FLOAT),
+            "String" => Ok(BUILTIN_TYPE_STRING),
+            "Keyword" => Ok(BUILTIN_TYPE_KEYWORD),
+            "Symbol" => Ok(BUILTIN_TYPE_SYMBOL),
+            "PersistentList" | "List" => Ok(BUILTIN_TYPE_LIST),
+            "PersistentVector" | "Vector" => Ok(BUILTIN_TYPE_VECTOR),
+            "PersistentHashMap" | "Map" => Ok(BUILTIN_TYPE_MAP),
+            "PersistentHashSet" | "Set" => Ok(BUILTIN_TYPE_SET),
+            _ => {
+                // Try to find as deftype
+                let full_name = format!("{}/{}", self.get_current_namespace(), type_name);
+                unsafe {
+                    let rt = &*self.runtime.get();
+                    if let Some(deftype_id) = rt.get_type_id(&full_name) {
+                        Ok(deftype_id + DEFTYPE_ID_OFFSET)
+                    } else {
+                        Err(format!("Unknown type: {}", type_name))
+                    }
+                }
+            }
+        }
+    }
+
+    fn compile_protocol_call(
+        &mut self,
+        method_name: &str,
+        args: &[Expr],
+    ) -> Result<IrValue, String> {
+        if args.is_empty() {
+            return Err(format!("Protocol method {} requires at least 1 argument", method_name));
+        }
+
+        // Compile all arguments
+        let mut arg_values = Vec::new();
+        for arg in args {
+            arg_values.push(self.compile(arg)?);
+        }
+
+        // Leak method name string for trampoline (static lifetime)
+        let method_bytes = method_name.as_bytes();
+        let method_ptr = Box::leak(method_bytes.to_vec().into_boxed_slice()).as_ptr() as usize;
+        let method_len = method_name.len();
+
+        // Step 1: Call trampoline_protocol_lookup(target, method_ptr, method_len) -> fn_ptr
+        let fn_ptr = self.builder.new_register();
+        let trampoline_addr = crate::trampoline::trampoline_protocol_lookup as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            fn_ptr,
+            trampoline_addr,
+            vec![
+                arg_values[0].clone(),                      // target
+                IrValue::RawConstant(method_ptr as i64),    // method_name_ptr
+                IrValue::RawConstant(method_len as i64),    // method_name_len
+            ],
+        ));
+
+        // Step 2: Call fn_ptr with all args (register allocator handles saves)
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::Call(result, fn_ptr, arg_values));
+
+        Ok(result)
+    }
+
     fn compile_def(&mut self, name: &str, value_expr: &Expr, metadata: &Option<im::HashMap<String, Value>>) -> Result<IrValue, String> {
         // Check if var has ^:dynamic metadata
         let is_dynamic = metadata
@@ -395,15 +660,13 @@ impl Compiler {
                     .unwrap();
 
                 // Update current namespace pointer if it moved
+                // (namespace_add_binding now handles updating the GC root automatically)
                 if new_ns_ptr != self.current_namespace_ptr {
                     self.current_namespace_ptr = new_ns_ptr;
 
                     // Update in registry
                     let ns_name = rt.namespace_name(new_ns_ptr);
-                    self.namespace_registry.insert(ns_name.clone(), new_ns_ptr);
-
-                    // Update GC root
-                    rt.add_namespace_root(ns_name, new_ns_ptr);
+                    self.namespace_registry.insert(ns_name, new_ns_ptr);
                 }
 
                 new_var_ptr
@@ -430,6 +693,35 @@ impl Compiler {
         unsafe {
             let rt = &*self.runtime.get();
             rt.namespace_name(self.current_namespace_ptr)
+        }
+    }
+
+    /// Sync namespace registry with runtime after GC relocations
+    pub fn sync_namespace_registry(&mut self) {
+        // SAFETY: Single-threaded access after GC
+        unsafe {
+            let rt = &*self.runtime.get();
+
+            // Find current namespace name by reverse lookup BEFORE updating registry
+            // (Don't dereference current_namespace_ptr - it may be stale after compacting GC)
+            let current_ns_name = self.namespace_registry
+                .iter()
+                .find(|(_, ptr)| **ptr == self.current_namespace_ptr)
+                .map(|(name, _)| name.clone());
+
+            // Update registry from runtime's namespace roots
+            for (name, &ptr) in rt.get_namespace_pointers() {
+                if let Some(existing) = self.namespace_registry.get_mut(name) {
+                    *existing = ptr;
+                }
+            }
+
+            // Update current_namespace_ptr using the name we found
+            if let Some(name) = current_ns_name {
+                if let Some(&new_ptr) = rt.get_namespace_pointers().get(&name) {
+                    self.current_namespace_ptr = new_ptr;
+                }
+            }
         }
     }
 
@@ -797,16 +1089,10 @@ impl Compiler {
 
     fn compile_fn(&mut self, name: &Option<String>, arities: &[crate::value::FnArity]) -> Result<IrValue, String> {
         // Per-function compilation (Beagle's approach):
-        // Each function is compiled separately with its own register allocation
+        // Each function (or each arity) is compiled separately with its own register allocation
 
-        if arities.len() != 1 {
-            return Err("Multi-arity functions not yet implemented".to_string());
-        }
-
-        let arity = &arities[0];
-
-        // Step 1: Analyze closures - find free variables
-        let free_vars = self.find_free_variables_in_arity(arity, name)?;
+        // Step 1: Analyze closures - find free variables across ALL arities (union)
+        let free_vars = self.find_free_variables_across_arities(arities, name)?;
 
         // Step 2: Capture free variables (evaluate them in current scope)
         // IMPORTANT: This must happen BEFORE compiling the function body to capture
@@ -820,15 +1106,85 @@ impl Compiler {
             }
         }
 
-        // Step 3: Save the current IR builder and create a new one for the function
+        // Step 3: Compile each arity separately
+        let mut compiled_arities: Vec<(usize, usize, bool)> = Vec::new(); // (param_count, code_ptr, is_variadic)
+
+        // Determine if this is a multi-arity function definition
+        // Multi-arity functions ALWAYS use the closure calling convention (x0 = fn object)
+        // even if they have no captured closures, because the call site doesn't know
+        // which arity will be selected.
+        let is_multi_arity = arities.len() > 1 || arities.iter().any(|a| a.rest_param.is_some());
+
+        for arity in arities {
+            let is_variadic = arity.rest_param.is_some();
+            let param_count = arity.params.len();
+
+            let code_ptr = self.compile_single_arity(name, arity, &free_vars, is_multi_arity)?;
+
+            compiled_arities.push((param_count, code_ptr, is_variadic));
+        }
+
+        // Step 4: Determine variadic minimum (if any)
+        let variadic_min = compiled_arities.iter()
+            .find(|(_, _, is_var)| *is_var)
+            .map(|(count, _, _)| *count);
+
+        // Step 5: Create function object
+        let fn_obj_reg = self.builder.new_register();
+
+        if arities.len() == 1 && variadic_min.is_none() {
+            // Single fixed arity - use existing MakeFunctionPtr (more efficient)
+            self.builder.emit(Instruction::MakeFunctionPtr(
+                fn_obj_reg,
+                compiled_arities[0].1,
+                closure_values,
+            ));
+        } else {
+            // Multi-arity or variadic - use MakeMultiArityFn
+            let arity_table: Vec<(usize, usize)> = compiled_arities.iter()
+                .map(|(param_count, code_ptr, _)| (*param_count, *code_ptr))
+                .collect();
+
+            self.builder.emit(Instruction::MakeMultiArityFn(
+                fn_obj_reg,
+                arity_table,
+                variadic_min,
+                closure_values,
+            ));
+        }
+
+        Ok(fn_obj_reg)
+    }
+
+    /// Compile a single arity of a function
+    /// `is_multi_arity`: true if this arity is part of a multi-arity definition
+    fn compile_single_arity(
+        &mut self,
+        name: &Option<String>,
+        arity: &crate::value::FnArity,
+        free_vars: &[String],
+        is_multi_arity: bool,
+    ) -> Result<usize, String> {
+        // Save the current IR builder and create a new one for this arity
         let outer_builder = std::mem::replace(&mut self.builder, IrBuilder::new());
 
         // Push new scope for function parameters
         self.push_scope();
 
-        // Create a virtual register for the function object (self) if this function has closures
-        // For closures, the closure object is passed as the first argument (x0)
-        let self_reg = if !free_vars.is_empty() {
+        // Create a virtual register for the function object (self)
+        // For closures AND multi-arity functions, the function object is passed as the first argument (x0)
+        // Even if there are no captured closure values, multi-arity functions always receive
+        // the function object in x0 because the call site uses the closure calling convention.
+        let has_closures = !free_vars.is_empty();
+
+        // For multi-arity functions, we always use closure calling convention (x0 = fn obj)
+        // regardless of whether there are actual closure values, because the call site
+        // doesn't know which arity will be selected and uses the same calling convention.
+        // The self_reg is needed if:
+        // 1. There are captured closure values (has_closures), OR
+        // 2. This is part of a multi-arity definition (is_multi_arity)
+        let uses_closure_convention = has_closures || is_multi_arity;
+        let self_reg = if uses_closure_convention {
             Some(IrValue::Register(crate::ir::VirtualRegister::Argument(0)))
         } else {
             None
@@ -836,9 +1192,9 @@ impl Compiler {
 
         // Bind parameters to argument registers
         // ARM64 calling convention:
-        // - Regular functions: arguments are in x0, x1, x2, etc.
-        // - Closures: x0 = closure object, user args in x1, x2, x3, etc.
-        let param_offset = if self_reg.is_some() { 1 } else { 0 };
+        // - Regular functions (single arity, no closures): arguments are in x0, x1, x2, etc.
+        // - Closures/Multi-arity: x0 = closure object, user args in x1, x2, x3, etc.
+        let param_offset = if uses_closure_convention { 1 } else { 0 };
         let mut param_registers = Vec::new();
         for (i, param) in arity.params.iter().enumerate() {
             let arg_reg = IrValue::Register(crate::ir::VirtualRegister::Argument(i + param_offset));
@@ -847,20 +1203,35 @@ impl Compiler {
         }
 
         // Bind rest parameter if variadic
+        // CollectRestArgs reads the arg count from x9 (set by caller) and builds a list
+        // from excess arguments beyond the fixed params
         if let Some(rest) = &arity.rest_param {
             let rest_reg = self.builder.new_register();
-            self.builder.emit(Instruction::LoadConstant(rest_reg, IrValue::Null));
+            let fixed_count = arity.params.len();
+            self.builder.emit(Instruction::CollectRestArgs(rest_reg, fixed_count, param_offset));
             self.bind_local(rest.clone(), rest_reg);
+            param_registers.push(rest_reg);
         }
 
         // Bind closure variables
-        // Load them from the function object (self_reg = x0 for closures) using LoadClosure
+        // Load them from the function object (self_reg = x0 for closures)
+        // For multi-arity functions, we need to know the arity count to compute offsets
         if let Some(self_reg) = &self_reg {
             for (i, var_name) in free_vars.iter().enumerate() {
                 let closure_reg = self.builder.new_register();
+                // Use standard LoadClosure - the generated code will handle both
+                // single-arity and multi-arity layouts since both use the same
+                // calling convention (closure object in x0)
                 self.builder.emit(Instruction::LoadClosure(closure_reg, self_reg.clone(), i));
                 self.bind_local(var_name.clone(), closure_reg);
             }
+        }
+
+        // Compile and check pre-conditions
+        // Each :pre condition must be truthy, otherwise throw AssertionError
+        for (i, pre_cond) in arity.pre_conditions.iter().enumerate() {
+            let cond_result = self.compile(pre_cond)?;
+            self.builder.emit(Instruction::AssertPre(cond_result, i));
         }
 
         // Push loop context for recur in fn body
@@ -877,23 +1248,35 @@ impl Compiler {
         // Pop fn's loop context
         self.loop_contexts.pop();
 
+        // Compile and check post-conditions
+        // Each :post condition can reference % which is bound to the result
+        if !arity.post_conditions.is_empty() {
+            // Bind % to the result for post-condition expressions
+            self.bind_local("%".to_string(), result.clone());
+
+            for (i, post_cond) in arity.post_conditions.iter().enumerate() {
+                let cond_result = self.compile(post_cond)?;
+                self.builder.emit(Instruction::AssertPost(cond_result, i));
+            }
+        }
+
         // Return result
         self.builder.emit(Instruction::Ret(result));
 
         // Pop function scope
         self.pop_scope();
 
-        // Step 4: Compile this function's IR separately
+        // Compile this arity's IR to native code
+        let reserved_exception_slots = self.builder.reserved_exception_slots;
         let fn_instructions = self.builder.take_instructions();
 
-        // Store the function IR for display purposes (before compiling)
+        // Store the function IR for display purposes
         self.compiled_function_irs.push((name.clone(), fn_instructions.clone()));
 
         let num_params = arity.params.len();
-        let compiled = Arm64CodeGen::compile_function(&fn_instructions, num_params)?;
+        let compiled = Arm64CodeGen::compile_function(&fn_instructions, num_params, reserved_exception_slots)?;
 
-        // Step 5: Register stack map with runtime for GC
-        // SAFETY: We have exclusive access during compilation
+        // Register stack map with runtime for GC
         unsafe {
             let rt = &mut *self.runtime.get();
             for (pc, stack_size) in &compiled.stack_map {
@@ -906,14 +1289,29 @@ impl Compiler {
             }
         }
 
-        // Step 6: Restore the outer IR builder
+        // Restore the outer IR builder
         self.builder = outer_builder;
 
-        // Step 7: Create function object with closure values and the compiled code pointer
-        let fn_obj_reg = self.builder.new_register();
-        self.builder.emit(Instruction::MakeFunctionPtr(fn_obj_reg, compiled.code_ptr, closure_values));
+        Ok(compiled.code_ptr)
+    }
 
-        Ok(fn_obj_reg)
+    /// Find free variables across all arities (union)
+    fn find_free_variables_across_arities(
+        &self,
+        arities: &[crate::value::FnArity],
+        fn_name: &Option<String>,
+    ) -> Result<Vec<String>, String> {
+        let mut all_free_vars = std::collections::HashSet::new();
+
+        for arity in arities {
+            let arity_free_vars = self.find_free_variables_in_arity(arity, fn_name)?;
+            all_free_vars.extend(arity_free_vars);
+        }
+
+        // Return as sorted vector for consistent ordering
+        let mut result: Vec<String> = all_free_vars.into_iter().collect();
+        result.sort();
+        Ok(result)
     }
 
     /// Compile a sequence of expressions (like do)
@@ -1117,6 +1515,59 @@ impl Compiler {
             // FieldAccess: check object for free vars
             Expr::FieldAccess { object, .. } => {
                 self.collect_free_vars_from_expr(object, bound, free);
+            }
+
+            // Throw: check exception expression for free vars
+            Expr::Throw { exception } => {
+                self.collect_free_vars_from_expr(exception, bound, free);
+            }
+
+            // Try: check body, catches, and finally for free vars
+            Expr::Try { body, catches, finally } => {
+                for expr in body {
+                    self.collect_free_vars_from_expr(expr, bound, free);
+                }
+                for catch in catches {
+                    // The catch binding is bound within the catch body
+                    let mut catch_bound = bound.clone();
+                    catch_bound.insert(catch.binding.clone());
+                    for expr in &catch.body {
+                        self.collect_free_vars_from_expr(expr, &catch_bound, free);
+                    }
+                }
+                if let Some(finally_body) = finally {
+                    for expr in finally_body {
+                        self.collect_free_vars_from_expr(expr, bound, free);
+                    }
+                }
+            }
+
+            // Protocol-related expressions
+            Expr::DefProtocol { .. } => {
+                // DefProtocol is a declaration, no free vars
+            }
+
+            Expr::ExtendType { implementations, .. } => {
+                // Check method bodies for free vars
+                for impl_ in implementations {
+                    for method in &impl_.methods {
+                        // Parameters are bound within the method body
+                        let mut method_bound = bound.clone();
+                        for param in &method.params {
+                            method_bound.insert(param.clone());
+                        }
+                        for expr in &method.body {
+                            self.collect_free_vars_from_expr(expr, &method_bound, free);
+                        }
+                    }
+                }
+            }
+
+            Expr::ProtocolCall { args, .. } => {
+                // Check args for free vars
+                for arg in args {
+                    self.collect_free_vars_from_expr(arg, bound, free);
+                }
             }
         }
     }

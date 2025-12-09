@@ -2,141 +2,191 @@ package com.jsparser;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.jsparser.ast.Program;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Disabled;
 
+import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Auto-generated tests from Acorn AST cache.
+ * Auto-generated tests from cached JS source files.
  * Category: NodeModules
- * Generated: 2025-12-03T05:10:12.108028Z
+ * Generated: 2025-12-09T05:12:56.270440Z
  * 
- * These tests verify that the Java parser produces the same AST as Acorn.
- * Tests are initially @Disabled and will fail until parser bugs are fixed.
+ * Tests parse with both Acorn (real-time) and our parser, streaming ASTs to temp files
+ * for memory-efficient byte-for-byte comparison.
  */
 public class GeneratedNodeModulesTest {
 
-    private static final ObjectMapper mapper = new ObjectMapper();
+    private static final ObjectMapper mapper;
+    static {
+        mapper = new ObjectMapper();
+        // Configure to match Node.js JSON.stringify(obj, null, 2) format
+        mapper.enable(SerializationFeature.INDENT_OUTPUT);
+        mapper.setDefaultPrettyPrinter(new com.fasterxml.jackson.core.util.DefaultPrettyPrinter()
+            .withObjectIndenter(new com.fasterxml.jackson.core.util.DefaultIndenter("  ", "\n"))
+            .withSeparators(com.fasterxml.jackson.core.util.Separators.createDefaultInstance()
+                .withObjectFieldValueSpacing(com.fasterxml.jackson.core.util.Separators.Spacing.NONE)));
+    }
 
     @Test
-    @DisplayName("../ai-dashboard2/node_modules/node-api-version/electron-versions.js")
-    void test__ai_dashboard2_node_modules_node_api_version_electron_versions_js_0() throws Exception {
-        // Original file: ../ai-dashboard2/node_modules/node-api-version/electron-versions.js
-        // Cache file: ..__ai-dashboard2_node_modules_node-api-version_electron-versions.js.json
+    @DisplayName(".../jimmyhmiller/Documents/Code/poll-app/frontend/node_modules/next/dist/compiled/webpack/bundle5.js")
+    void test__Users_jimmyhmiller_Documents_Code_poll_app_frontend_node_modules_next_dist_comp_0() throws Exception {
+        // Original file: /Users/jimmyhmiller/Documents/Code/poll-app/frontend/node_modules/next/dist/compiled/webpack/bundle5.js
+        // Cached JS source: _Users_jimmyhmiller_Documents_Code_poll-app_frontend_node_modules_next_dist_compiled_webpack_bundle5.js
         assertASTMatches(
-            "test-oracles/adhoc-cache/..__ai-dashboard2_node_modules_node-api-version_electron-versions.js.json",
-            "../ai-dashboard2/node_modules/node-api-version/electron-versions.js",
-            false
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_poll-app_frontend_node_modules_next_dist_compiled_webpack_bundle5.js",
+            true
         );
     }
 
     // Helper methods
 
-    private void assertASTMatches(String cacheFilePath, String originalFilePath, boolean isModule) throws Exception {
-        // Read cached Acorn AST
-        String cacheContent = Files.readString(Paths.get(cacheFilePath));
-        JsonNode cacheRoot = mapper.readTree(cacheContent);
-        // Handle both old format (just AST) and new format (with _metadata)
-        JsonNode expectedAst = cacheRoot.has("ast") ? cacheRoot.get("ast") : cacheRoot;
+    private void assertASTMatches(String cachedJsPath, boolean isModule) throws Exception {
+        // Read cached JS source
+        String source = Files.readString(Paths.get(cachedJsPath));
 
-        // Read original source file
-        Path originalFile = Paths.get(originalFilePath);
-        if (!Files.exists(originalFile)) {
-            // File might have been moved/deleted - skip test
-            System.out.println("Skipping - file not found: " + originalFilePath);
-            return;
-        }
+        Path acornTmp = Files.createTempFile("acorn-ast-", ".json");
+        Path ourTmp = Files.createTempFile("our-ast-", ".json");
 
-        String source = Files.readString(originalFile);
+        try {
+            // 1. Stream Acorn AST to temp file (via Node.js subprocess)
+            runAcornToFile(cachedJsPath, isModule, acornTmp);
 
-        // Parse with Java parser
-        Program actual = Parser.parse(source, isModule);
-        String actualJson = mapper.writeValueAsString(actual);
-
-        // Compare ASTs
-        String expectedJson = mapper.writeValueAsString(expectedAst);
-        Object expectedObj = mapper.readValue(expectedJson, Object.class);
-        Object actualObj = mapper.readValue(actualJson, Object.class);
-
-        // Apply normalizations
-        normalizeRegexValues(expectedObj, actualObj);
-        normalizeBigIntValues(expectedObj, actualObj);
-
-        if (!Objects.deepEquals(expectedObj, actualObj)) {
-            System.out.println("\nAST mismatch for: " + originalFilePath);
-            // Could add diff printing here
-        }
-
-        assertTrue(Objects.deepEquals(expectedObj, actualObj),
-            "AST mismatch for " + originalFilePath);
-    }
-
-    @SuppressWarnings("unchecked")
-    private void normalizeRegexValues(Object expected, Object actual) {
-        if (expected instanceof Map && actual instanceof Map) {
-            Map<String, Object> expMap = (Map<String, Object>) expected;
-            Map<String, Object> actMap = (Map<String, Object>) actual;
-            if ("Literal".equals(expMap.get("type")) && expMap.containsKey("regex")) {
-                if (expMap.get("value") == null && actMap.get("value") instanceof Map) {
-                    Map<?, ?> actValue = (Map<?, ?>) actMap.get("value");
-                    if (actValue.isEmpty()) { actMap.put("value", null); }
-                }
+            // 2. Stream our AST to temp file
+            Program ourAst = Parser.parse(source, isModule);
+            try (var out = new BufferedOutputStream(Files.newOutputStream(ourTmp))) {
+                mapper.writeValue(out, ourAst);
             }
-            for (String key : expMap.keySet()) {
-                if (actMap.containsKey(key)) {
-                    normalizeRegexValues(expMap.get(key), actMap.get(key));
-                }
+
+            // 3. Compare files via hash (ignoring whitespace)
+            String acornHash = hashJsonContent(acornTmp);
+            String ourHash = hashJsonContent(ourTmp);
+
+            if (!acornHash.equals(ourHash)) {
+                // Hashes differ - show first difference
+                showFirstDifference(acornTmp, ourTmp, cachedJsPath);
+                fail("AST mismatch for " + cachedJsPath);
             }
-        } else if (expected instanceof List && actual instanceof List) {
-            List<Object> expList = (List<Object>) expected;
-            List<Object> actList = (List<Object>) actual;
-            for (int i = 0; i < Math.min(expList.size(), actList.size()); i++) {
-                normalizeRegexValues(expList.get(i), actList.get(i));
-            }
+        } finally {
+            Files.deleteIfExists(acornTmp);
+            Files.deleteIfExists(ourTmp);
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private void normalizeBigIntValues(Object expected, Object actual) {
-        if (expected instanceof Map && actual instanceof Map) {
-            Map<String, Object> expMap = (Map<String, Object>) expected;
-            Map<String, Object> actMap = (Map<String, Object>) actual;
-            if ("Literal".equals(expMap.get("type")) && expMap.containsKey("bigint")) {
-                Object expBigint = expMap.get("bigint");
-                Object actBigint = actMap.get("bigint");
-                if (expBigint != null && actBigint != null) {
-                    String expStr = expBigint.toString();
-                    String actStr = actBigint.toString();
-                    if (!expStr.equals(actStr)) {
-                        try {
-                            java.math.BigInteger expBI = new java.math.BigInteger(expStr);
-                            java.math.BigInteger actBI = new java.math.BigInteger(actStr);
-                            if (expBI.equals(actBI)) { actMap.put("bigint", expStr); }
-                        } catch (NumberFormatException e) {}
+    private void runAcornToFile(String jsPath, boolean isModule, Path outputFile) throws Exception {
+        String sourceType = isModule ? "module" : "script";
+        // Use streaming JSON writer to avoid Node.js string length limits
+        String script = """
+            const acorn = require('acorn');
+            const fs = require('fs');
+            const source = fs.readFileSync(process.argv[1], 'utf-8');
+            const ast = acorn.parse(source, {ecmaVersion: 2025, locations: true, sourceType: '%s'});
+            // Streaming JSON writer to avoid string length limits
+            const out = fs.createWriteStream(process.argv[2]);
+            function writeJson(obj, indent) {
+                if (obj === null) { out.write('null'); return; }
+                if (typeof obj === 'undefined') { out.write('null'); return; }
+                if (typeof obj === 'boolean') { out.write(obj.toString()); return; }
+                if (typeof obj === 'number') { out.write(obj.toString()); return; }
+                if (typeof obj === 'bigint') { out.write('\"' + obj.toString() + '\"'); return; }
+                if (typeof obj === 'string') { out.write(JSON.stringify(obj)); return; }
+                if (Array.isArray(obj)) {
+                    out.write('[');
+                    for (let i = 0; i < obj.length; i++) {
+                        if (i > 0) out.write(',');
+                        out.write('\\n' + indent + '  ');
+                        writeJson(obj[i], indent + '  ');
                     }
+                    if (obj.length > 0) out.write('\\n' + indent);
+                    out.write(']');
+                    return;
+                }
+                out.write('{');
+                const keys = Object.keys(obj);
+                for (let i = 0; i < keys.length; i++) {
+                    if (i > 0) out.write(',');
+                    out.write('\\n' + indent + '  ');
+                    out.write(JSON.stringify(keys[i]) + ': ');
+                    writeJson(obj[keys[i]], indent + '  ');
+                }
+                if (keys.length > 0) out.write('\\n' + indent);
+                out.write('}');
+            }
+            writeJson(ast, '');
+            out.write('\\n');
+            out.end(() => process.exit(0));
+            """.formatted(sourceType);
+
+        String[] cmd = { "node", "--max-old-space-size=8192", "-e", script, jsPath, outputFile.toString() };
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        Process process = pb.start();
+
+        // Capture stderr
+        CompletableFuture<String> errorFuture = CompletableFuture.supplyAsync(() -> {
+            try {
+                return new String(process.getErrorStream().readAllBytes());
+            } catch (IOException e) { return ""; }
+        });
+
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new RuntimeException("Acorn failed: " + errorFuture.get());
+        }
+    }
+
+    private String hashJsonContent(Path input) throws Exception {
+        java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+        try (BufferedReader reader = Files.newBufferedReader(input)) {
+            boolean inString = false;
+            boolean escape = false;
+            int ch;
+            while ((ch = reader.read()) != -1) {
+                if (escape) {
+                    digest.update((byte) ch);
+                    escape = false;
+                } else if (ch == '\\' && inString) {
+                    digest.update((byte) ch);
+                    escape = true;
+                } else if (ch == '"') {
+                    digest.update((byte) ch);
+                    inString = !inString;
+                } else if (inString) {
+                    digest.update((byte) ch);
+                } else if (!Character.isWhitespace(ch)) {
+                    digest.update((byte) ch);
                 }
             }
-            for (String key : expMap.keySet()) {
-                if (actMap.containsKey(key)) {
-                    normalizeBigIntValues(expMap.get(key), actMap.get(key));
-                }
-            }
-        } else if (expected instanceof List && actual instanceof List) {
-            List<Object> expList = (List<Object>) expected;
-            List<Object> actList = (List<Object>) actual;
-            for (int i = 0; i < Math.min(expList.size(), actList.size()); i++) {
-                normalizeBigIntValues(expList.get(i), actList.get(i));
-            }
+        }
+        return java.util.HexFormat.of().formatHex(digest.digest());
+    }
+
+    private void showFirstDifference(Path acornFile, Path ourFile, String jsPath) throws Exception {
+        // Run diff to get actual differences
+        ProcessBuilder pb = new ProcessBuilder("diff", "-u",
+            acornFile.toString(), ourFile.toString());
+        Process p = pb.start();
+        String diff = new String(p.getInputStream().readAllBytes());
+        p.waitFor();
+
+        System.err.println("\n=== AST MISMATCH: " + jsPath + " ===");
+        // Show first 50 lines of diff
+        String[] lines = diff.split("\\n");
+        for (int i = 0; i < Math.min(50, lines.length); i++) {
+            System.err.println(lines[i]);
+        }
+        if (lines.length > 50) {
+            System.err.println("... (" + (lines.length - 50) + " more lines)");
         }
     }
 }

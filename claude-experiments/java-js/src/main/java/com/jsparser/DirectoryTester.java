@@ -167,15 +167,13 @@ public class DirectoryTester {
 
             String relativePath = targetDir.relativize(file).toString();
 
-            // Print current file
-            System.out.println("Parsing file " + processed.get() + "/" + jsFiles.size() + ": " + relativePath);
-            System.out.flush();
-
-            // Print progress summary every 100 files
-            if (processed.get() % 100 == 0) {
-                System.out.printf("Progress: %d/%d (%d matched, %d mismatched, %d Java failed, %d Java too permissive, %d both failed)%n",
+            // Print progress every 100 files (or every 10 if less than 100 total)
+            int progressInterval = jsFiles.size() < 100 ? 10 : 100;
+            if (processed.get() % progressInterval == 0 || processed.get() == jsFiles.size()) {
+                System.out.printf("\rProgress: %d/%d (%d matched, %d mismatched, %d Java failed, %d too permissive, %d both failed)",
                     processed.get(), jsFiles.size(), matched.get(), mismatched.get(),
                     javaFailedAcornSucceeded.get(), javaSucceededAcornFailed.get(), bothFailed.get());
+                System.out.flush();
             }
 
             try {
@@ -384,6 +382,7 @@ public class DirectoryTester {
         }
 
         // Print results
+        System.out.println();  // New line after progress
         System.out.println("\n=== Results ===");
         System.out.printf("Total files: %d%n", jsFiles.size());
 

@@ -49,9 +49,17 @@ pub struct UniversalBlock {
     #[cfg_attr(feature = "serde", serde(default))]
     pub predecessors: Vec<String>,
 
-    /// Successor block IDs
+    /// Successor block IDs (forward edges only, used for layout)
     #[cfg_attr(feature = "serde", serde(default))]
     pub successors: Vec<String>,
+
+    /// Back edge target IDs (for rendering only, not used in layout)
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub back_edges: Vec<String>,
+
+    /// Whether this block has a self-loop edge
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub has_self_loop: bool,
 
     /// Instructions in this block
     pub instructions: Vec<UniversalInstruction>,
@@ -148,6 +156,8 @@ impl FromJson for UniversalBlock {
             loop_depth: value.get_field_renamed_or_default(&["loopDepth", "loop_depth"])?,
             predecessors: value.get_field_or_default("predecessors")?,
             successors: value.get_field_or_default("successors")?,
+            back_edges: value.get_field_or_default("back_edges")?,
+            has_self_loop: value.get_field_or_default("has_self_loop")?,
             instructions: value.get_field("instructions")?,
             metadata: value.get_field_or_default("metadata")?,
         })
@@ -216,6 +226,8 @@ impl ToJson for UniversalBlock {
         map.insert("loopDepth".to_string(), self.loop_depth.to_json());
         map.insert("predecessors".to_string(), self.predecessors.to_json());
         map.insert("successors".to_string(), self.successors.to_json());
+        map.insert("back_edges".to_string(), self.back_edges.to_json());
+        map.insert("has_self_loop".to_string(), self.has_self_loop.to_json());
         map.insert("instructions".to_string(), self.instructions.to_json());
         map.insert("metadata".to_string(), self.metadata.to_json());
         Value::Object(map)

@@ -91,6 +91,7 @@ public class TokenTypeProperties {
         // Note: YIELD removed - now tokenized as IDENTIFIER
         BEFORE_EXPR.put(TokenType.CASE, true);
         BEFORE_EXPR.put(TokenType.ELSE, true);
+        BEFORE_EXPR.put(TokenType.DEFAULT, true);  // export default /regex/
 
         // All other tokens default to beforeExpr = false
     }

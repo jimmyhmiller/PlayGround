@@ -747,7 +747,8 @@ public class Lexer {
 
         advance(); // closing quote
         String lexeme = source.substring(startPos, position);
-        return new Token(TokenType.STRING, lexeme, value.toString(), startLine, startColumn, startPos);
+        // Use the multi-line token constructor to properly record end line/column for strings with line continuations
+        return new Token(TokenType.STRING, lexeme, value.toString(), startLine, startColumn, startPos, position, line, column, null);
     }
 
     private Token scanNumber(int startLine, int startColumn, int startPos) {

@@ -10,7 +10,7 @@
 
 use std::alloc::{dealloc, Layout};
 use std::arch::asm;
-use crate::gc_runtime::GCRuntime;
+use crate::gc_runtime::{GCRuntime, ExceptionHandler};
 use std::cell::UnsafeCell;
 use std::sync::Arc;
 
@@ -304,6 +304,364 @@ pub extern "C" fn trampoline_load_type_field_by_name(
             Err(msg) => {
                 eprintln!("Error loading field: {}", msg);
                 7 // nil
+            }
+        }
+    }
+}
+
+// ========== Multi-Arity Function Trampolines ==========
+
+/// Trampoline: Allocate a multi-arity function object
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = name_ptr (0 for anonymous)
+///         x1 = arity_count
+///         x2 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
+///         x3 = variadic_min (usize::MAX if no variadic)
+///         x4 = closure_count
+///         x5 = closures_ptr (pointer to closure values on stack)
+/// - Returns: x0 = tagged closure pointer
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_allocate_multi_arity_fn(
+    _name_ptr: usize,
+    arity_count: usize,
+    arities_ptr: *const usize,
+    variadic_min: usize,
+    closure_count: usize,
+    closures_ptr: *const usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // GC before allocation if gc_always is enabled
+        rt.maybe_gc_before_alloc(get_frame_pointer());
+
+        // Read arities from pointer (each arity is 2 words: param_count, code_ptr)
+        let arities: Vec<(usize, usize)> = if arity_count > 0 {
+            let arities_slice = std::slice::from_raw_parts(arities_ptr, arity_count * 2);
+            arities_slice.chunks(2)
+                .map(|chunk| (chunk[0], chunk[1]))
+                .collect()
+        } else {
+            vec![]
+        };
+
+        // Read closure values from pointer
+        let closure_values: Vec<usize> = if closure_count > 0 {
+            let closures_slice = std::slice::from_raw_parts(closures_ptr, closure_count);
+            closures_slice.to_vec()
+        } else {
+            vec![]
+        };
+
+        // Convert variadic_min sentinel to Option
+        let variadic_min_opt = if variadic_min == usize::MAX {
+            None
+        } else {
+            Some(variadic_min)
+        };
+
+        // TODO: Handle name_ptr if non-zero
+        match rt.allocate_multi_arity_function(None, arities, variadic_min_opt, closure_values) {
+            Ok(fn_ptr) => fn_ptr,
+            Err(msg) => {
+                eprintln!("Error allocating multi-arity function: {}", msg);
+                7 // Return nil on error
+            }
+        }
+    }
+}
+
+/// Trampoline: Collect rest arguments into a list
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = pointer to args array on stack (excess args after fixed params)
+///         x1 = count of excess arguments
+/// - Returns: x0 = tagged list (cons cells) or nil
+///
+/// Builds a list from right to left using cons cells.
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_collect_rest_args(
+    args_ptr: *const usize,
+    count: usize,
+) -> usize {
+    if count == 0 {
+        return 7; // nil
+    }
+
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // GC before allocation if gc_always is enabled
+        rt.maybe_gc_before_alloc(get_frame_pointer());
+
+        // Read args from pointer
+        let args_slice = std::slice::from_raw_parts(args_ptr, count);
+
+        // Build list from the values
+        match rt.build_list(args_slice) {
+            Ok(list) => list,
+            Err(msg) => {
+                eprintln!("Error building rest args list: {}", msg);
+                7 // nil on error
+            }
+        }
+    }
+}
+
+/// Trampoline: Look up code pointer for multi-arity function dispatch
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = tagged closure pointer (multi-arity function)
+///         x1 = argument count
+/// - Returns: x0 = code pointer to call (or 0 if no matching arity)
+///
+/// This is called at runtime to determine which arity implementation to invoke.
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_multi_arity_lookup(
+    fn_ptr: usize,
+    arg_count: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        // Check if this is actually a multi-arity function
+        if !rt.is_multi_arity_function(fn_ptr) {
+            // Not a multi-arity function - return 0 to indicate error
+            eprintln!("Error: trampoline_multi_arity_lookup called on non-multi-arity function");
+            return 0;
+        }
+
+        match rt.multi_arity_lookup(fn_ptr, arg_count) {
+            Some((code_ptr, _is_variadic)) => code_ptr,
+            None => {
+                eprintln!("Error: No matching arity for {} args", arg_count);
+                0 // Return 0 to indicate no matching arity
+            }
+        }
+    }
+}
+
+// ========== Exception Handling Trampolines ==========
+
+/// Trampoline: Push exception handler
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = handler_address, x1 = result_local, x2 = link_register, x3 = stack_pointer, x4 = frame_pointer
+/// - Returns: x0 = nil (7)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_push_exception_handler(
+    handler_address: usize,
+    result_local: isize,  // Negative FP-relative offset
+    link_register: usize,
+    stack_pointer: usize,
+    frame_pointer: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        let handler = ExceptionHandler {
+            handler_address,
+            stack_pointer,
+            frame_pointer,
+            link_register,
+            result_local,
+        };
+
+        rt.push_exception_handler(handler);
+        7 // nil
+    }
+}
+
+/// Trampoline: Pop exception handler (normal exit from try)
+///
+/// ARM64 Calling Convention:
+/// - Args: none
+/// - Returns: x0 = nil (7)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_pop_exception_handler() -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        rt.pop_exception_handler();
+        7 // nil
+    }
+}
+
+/// Trampoline: Throw exception - never returns
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = stack_pointer (for potential stack trace), x1 = exception_value
+/// - Never returns (longjmp-like behavior)
+///
+/// This function:
+/// 1. Pops the exception handler
+/// 2. Stores exception value at result_local (FP-relative offset)
+/// 3. Restores SP, FP, LR from handler
+/// 4. Jumps to handler_address (catch block)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_throw(_stack_pointer: usize, exception_value: usize) -> ! {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        if let Some(handler) = rt.pop_exception_handler() {
+            // Store exception at result_local (FP-relative)
+            // result_local is a negative offset from FP (since locals are below FP)
+            // Use signed arithmetic to compute the address correctly
+            let result_ptr = ((handler.frame_pointer as isize) + handler.result_local) as *mut usize;
+            *result_ptr = exception_value;
+
+            // Restore SP, FP, LR and jump to handler
+            asm!(
+                "mov sp, {sp}",
+                "mov x29, {fp}",
+                "mov x30, {lr}",
+                "br {addr}",
+                sp = in(reg) handler.stack_pointer,
+                fp = in(reg) handler.frame_pointer,
+                lr = in(reg) handler.link_register,
+                addr = in(reg) handler.handler_address,
+                options(noreturn)
+            );
+        } else {
+            // No handler - format the exception value and abort
+            let formatted = rt.format_value(exception_value);
+            eprintln!("Uncaught exception: {}", formatted);
+            std::process::abort();
+        }
+    }
+}
+
+// ========== Assertion Trampolines ==========
+
+/// Trampoline: Pre-condition assertion failed
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = stack_pointer (for exception), x1 = condition index (0-based)
+/// - Never returns (throws AssertionError)
+///
+/// Creates an AssertionError with message "Assert failed: :pre condition {index}"
+/// and throws it via the exception mechanism.
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_pre_condition_failed(_stack_pointer: usize, condition_index: usize) -> ! {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // Create error message
+        let msg = format!("Assert failed: :pre condition {}", condition_index);
+        let msg_ptr = match rt.allocate_string(&msg) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                eprintln!("AssertionError: {}", msg);
+                std::process::abort();
+            }
+        };
+
+        // For now, throw the message string as the exception
+        // In a full implementation, we'd create an AssertionError object
+        trampoline_throw(0, msg_ptr);
+    }
+}
+
+/// Trampoline: Post-condition assertion failed
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = stack_pointer (for exception), x1 = condition index (0-based)
+/// - Never returns (throws AssertionError)
+///
+/// Creates an AssertionError with message "Assert failed: :post condition {index}"
+/// and throws it via the exception mechanism.
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_post_condition_failed(_stack_pointer: usize, condition_index: usize) -> ! {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // Create error message
+        let msg = format!("Assert failed: :post condition {}", condition_index);
+        let msg_ptr = match rt.allocate_string(&msg) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                eprintln!("AssertionError: {}", msg);
+                std::process::abort();
+            }
+        };
+
+        // For now, throw the message string as the exception
+        // In a full implementation, we'd create an AssertionError object
+        trampoline_throw(0, msg_ptr);
+    }
+}
+
+// ========== Protocol System Trampolines ==========
+
+/// Trampoline: Register a protocol method implementation in the vtable
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = type_id, x1 = protocol_id, x2 = method_index, x3 = fn_ptr (tagged)
+/// - Returns: x0 = nil (7)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_register_protocol_method(
+    type_id: usize,
+    protocol_id: usize,
+    method_index: usize,
+    fn_ptr: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        rt.register_protocol_method_impl(type_id, protocol_id, method_index, fn_ptr);
+        7 // nil
+    }
+}
+
+/// Trampoline: Look up a protocol method and return the fn_ptr
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = target (first arg, used for type dispatch)
+///         x1 = method_name_ptr, x2 = method_name_len
+/// - Returns: x0 = fn_ptr (tagged function/closure pointer)
+///
+/// This trampoline:
+/// 1. Gets the type_id from the target value
+/// 2. Looks up the method implementation in the vtable
+/// 3. Returns the fn_ptr (or throws IllegalArgumentException if not found)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_protocol_lookup(
+    target: usize,
+    method_name_ptr: *const u8,
+    method_name_len: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // Get method name
+        let method_name = std::str::from_utf8_unchecked(
+            std::slice::from_raw_parts(method_name_ptr, method_name_len)
+        );
+
+        // Get type_id from target
+        let type_id = rt.get_type_id_for_value(target);
+
+        // Look up method implementation
+        match rt.lookup_protocol_method(type_id, method_name) {
+            Some(fn_ptr) => fn_ptr,
+            None => {
+                // Throw IllegalArgumentException like Clojure
+                let type_name = crate::gc_runtime::GCRuntime::builtin_type_name(type_id);
+                let error_msg = format!(
+                    "IllegalArgumentException: No implementation of method: :{} found for class: {}",
+                    method_name, type_name
+                );
+                let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
+                trampoline_throw(0, error_str);
             }
         }
     }

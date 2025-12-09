@@ -14,8 +14,10 @@ import java.util.HexFormat;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Utility to cache Acorn AST results for files.
- * This allows us to create tests from discovered failures/mismatches.
+ * Utility to cache JavaScript source files for testing.
+ * Instead of caching the massive AST JSON (which can be 250x larger than source),
+ * we cache the JS source file and a small metadata file.
+ * At test time, both Acorn and our parser parse the source and compare ASTs.
  */
 public class AcornCacheBuilder {
 
@@ -27,44 +29,43 @@ public class AcornCacheBuilder {
     }
 
     /**
-     * Parse a file with Acorn and cache the result
-     * @param filePath Path to JavaScript file to parse
+     * Cache a JavaScript file for later testing.
+     * Copies the source file and creates a metadata file with sourceType info.
+     * @param filePath Path to JavaScript file to cache
      * @param sourceType "script" or "module"
      * @return CacheResult containing success status and cache file path
      */
     public CacheResult cacheFile(Path filePath, String sourceType) throws IOException {
         String source = Files.readString(filePath);
 
-        // Generate cache file path based on original file path
+        // Generate cache file paths
         Path cacheFilePath = generateCacheFilePath(filePath);
+        Path metaFilePath = Paths.get(cacheFilePath.toString() + ".meta");
 
         // Ensure cache directory exists
         Files.createDirectories(cacheFilePath.getParent());
 
-        // Parse with Acorn
-        AcornResult result = parseWithAcorn(source, filePath, sourceType);
+        // Verify Acorn can parse this file before caching
+        AcornResult result = verifyAcornCanParse(source, filePath, sourceType);
 
         if (!result.success) {
             return new CacheResult(false, null, result.error);
         }
 
-        // Create cached AST with metadata
-        ObjectNode cachedData = mapper.createObjectNode();
+        // Copy the JS source to cache (much smaller than AST JSON!)
+        Files.writeString(cacheFilePath, source,
+            StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 
-        // Add metadata
+        // Write small metadata file
         ObjectNode metadata = mapper.createObjectNode();
         metadata.put("originalFile", filePath.toString());
         metadata.put("sourceType", sourceType);
         metadata.put("cacheDate", java.time.Instant.now().toString());
         metadata.put("fileHash", computeFileHash(source));
-        cachedData.set("_metadata", metadata);
+        metadata.put("fileSize", source.length());
 
-        // Add AST
-        cachedData.set("ast", mapper.readTree(result.astJson));
-
-        // Write to cache
-        Files.writeString(cacheFilePath,
-            mapper.writerWithDefaultPrettyPrinter().writeValueAsString(cachedData),
+        Files.writeString(metaFilePath,
+            mapper.writerWithDefaultPrettyPrinter().writeValueAsString(metadata),
             StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 
         return new CacheResult(true, cacheFilePath, null);
@@ -85,7 +86,8 @@ public class AcornCacheBuilder {
             .replace("..", ".._")
             .replaceAll("[^a-zA-Z0-9._-]", "_");
 
-        return cacheBaseDir.resolve(safeName + ".json");
+        // Keep the .js extension since we're caching JS source now
+        return cacheBaseDir.resolve(safeName);
     }
 
     /**
@@ -102,14 +104,11 @@ public class AcornCacheBuilder {
     }
 
     /**
-     * Parse a file with Acorn and return the result
+     * Verify that Acorn can parse the file (but don't return the full AST - it can be huge!)
      */
-    private AcornResult parseWithAcorn(String source, Path filePath, String sourceType) {
+    private AcornResult verifyAcornCanParse(String source, Path filePath, String sourceType) {
         try {
-            // Write source to temp file
-            Path tempFile = Files.createTempFile("acorn-ast-", ".json");
-
-            // Build Node.js command to parse with Acorn
+            // Build Node.js command to parse with Acorn and just verify it succeeds
             String[] cmd = {
                 "node",
                 "-e",
@@ -118,14 +117,13 @@ public class AcornCacheBuilder {
                 "const source = fs.readFileSync(process.argv[1], 'utf-8'); " +
                 "try { " +
                 "  const ast = acorn.parse(source, {ecmaVersion: 2025, locations: true, sourceType: '" + sourceType + "'}); " +
-                "  fs.writeFileSync(process.argv[2], JSON.stringify(ast, (k,v) => typeof v === 'bigint' ? null : v)); " +
+                "  console.log('OK: ' + ast.body.length + ' statements'); " +
                 "  process.exit(0); " +
                 "} catch (e) { " +
                 "  console.error('PARSE_ERROR: ' + e.message); " +
                 "  process.exit(1); " +
                 "}",
-                filePath.toAbsolutePath().toString(),
-                tempFile.toAbsolutePath().toString()
+                filePath.toAbsolutePath().toString()
             };
 
             ProcessBuilder pb = new ProcessBuilder(cmd);
@@ -144,15 +142,10 @@ public class AcornCacheBuilder {
             String errorOutput = errorFuture.get();
 
             if (exitCode != 0) {
-                Files.deleteIfExists(tempFile);
                 return new AcornResult(false, null, null, errorOutput);
             }
 
-            // Read AST from temp file
-            String output = Files.readString(tempFile);
-            Files.deleteIfExists(tempFile);
-
-            return new AcornResult(true, output, sourceType, null);
+            return new AcornResult(true, null, sourceType, null);
         } catch (Exception e) {
             return new AcornResult(false, null, null, e.getMessage());
         }
@@ -222,13 +215,14 @@ public class AcornCacheBuilder {
         Path cacheDir = Paths.get("test-oracles/adhoc-cache");
         AcornCacheBuilder builder = new AcornCacheBuilder(cacheDir);
 
-        System.out.println("Caching AST for: " + filePath);
+        System.out.println("Caching JS source for: " + filePath);
         System.out.println("Source type: " + sourceType);
 
         CacheResult result = builder.cacheFile(filePath, sourceType);
 
         if (result.success) {
-            System.out.println("✓ Cached to: " + result.cacheFilePath);
+            System.out.println("✓ Cached source to: " + result.cacheFilePath);
+            System.out.println("✓ Metadata at: " + result.cacheFilePath + ".meta");
         } else {
             System.err.println("✗ Failed: " + result.error);
             System.exit(1);

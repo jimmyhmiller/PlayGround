@@ -2109,7 +2109,14 @@ public class Parser {
         // This is called when we see '(' and it's NOT an arrow function
         // (arrow functions are handled in tryParseArrowFunction before prefix dispatch)
         // So this is a grouped/parenthesized expression
+
+        // Save and enable allowIn - inside parentheses, 'in' is always allowed as an operator
+        // This is important for cases like: for (var x = (a in b) ? 1 : 2; ...)
+        boolean oldAllowIn = p.allowIn;
+        p.allowIn = true;
         Expression expr = p.parseExpr(BP_COMMA);
+        p.allowIn = oldAllowIn;
+
         p.consume(TokenType.RPAREN, "Expected ')' after expression");
         return expr;
     }
@@ -2839,7 +2846,10 @@ public class Parser {
         Expression superClass = null;
         if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("extends")) {
             advance(); // consume 'extends'
-            superClass = parseExpr(BP_POSTFIX + 1); // Parse the superclass expression
+            // Parse superclass - use BP_COMMA to allow member access like `orig.Minimatch`
+            // but stop at comma, etc. Using parseLeftHandSideExpression would be ideal,
+            // but BP_COMMA achieves similar result for practical cases
+            superClass = parseExpr(BP_COMMA);
         }
 
         // Class body

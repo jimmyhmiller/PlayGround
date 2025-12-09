@@ -39,6 +39,8 @@ pub struct Block<E> {
     pub attributes: Vec<String>,
     pub predecessors: Vec<usize>, // indices into blocks vec
     pub successors: Vec<usize>,   // indices into blocks vec
+    pub back_edges: Vec<usize>,   // indices into blocks vec (for rendering only)
+    pub has_self_loop: bool,      // true if this block has a self-loop edge
     pub succs: Vec<usize>,        // Copy for convenience
     pub instructions: Vec<UniversalInstruction>,
     pub element: Option<Box<E>>,
@@ -237,6 +239,8 @@ impl<P: LayoutProvider> Graph<P> {
                 attributes: universal_block.attributes.clone(),
                 predecessors: Vec::new(),
                 successors: Vec::new(),
+                back_edges: Vec::new(),
+                has_self_loop: universal_block.has_self_loop,
                 succs: Vec::new(),
                 instructions: universal_block.instructions.clone(),
                 element: None,
@@ -257,6 +261,12 @@ impl<P: LayoutProvider> Graph<P> {
                     self.blocks[idx].successors.push(succ_idx);
                     self.blocks[idx].succs.push(succ_idx);
                     self.blocks[succ_idx].predecessors.push(idx);
+                }
+            }
+            // Build back_edges separately (for rendering only, not layout)
+            for back_edge_id in &universal_block.back_edges {
+                if let Some(&back_edge_idx) = self.blocks_by_id.get(back_edge_id) {
+                    self.blocks[idx].back_edges.push(back_edge_idx);
                 }
             }
         }
@@ -698,7 +708,7 @@ impl<P: LayoutProvider> Graph<P> {
                                     x1,
                                     y1,
                                     x2,
-                                    y2 + 16.0, // Target the header area, not top edge
+                                    y2, // Target the top edge of the block
                                     do_arrowhead,
                                     1,
                                 );
@@ -728,6 +738,90 @@ impl<P: LayoutProvider> Graph<P> {
                     }
                 }
             }
+        }
+
+        // Render back edges (bidirectional edge support)
+        // Back edges are stored separately and rendered as curved arrows going up and around
+        for block_idx in 0..self.blocks.len() {
+            if self.blocks[block_idx].back_edges.is_empty() {
+                continue;
+            }
+
+            // Find the source block's layout node
+            let source_layout_idx = match self.blocks[block_idx].layout_node {
+                Some(idx) => idx,
+                None => continue,
+            };
+
+            let source_node = self.find_layout_node_by_global_idx(&nodes_by_layer, source_layout_idx);
+            let (source_pos, source_size) = match source_node {
+                Some(LayoutNode::BlockNode(n)) => (n.pos, n.size),
+                _ => continue,
+            };
+
+            // Render each back edge
+            for (i, &target_idx) in self.blocks[block_idx].back_edges.iter().enumerate() {
+                let target_layout_idx = match self.blocks[target_idx].layout_node {
+                    Some(idx) => idx,
+                    None => continue,
+                };
+
+                let target_node = self.find_layout_node_by_global_idx(&nodes_by_layer, target_layout_idx);
+                let (target_pos, _target_size) = match target_node {
+                    Some(LayoutNode::BlockNode(n)) => (n.pos, n.size),
+                    _ => continue,
+                };
+
+                // Calculate arrow start (bottom of source block, offset by port)
+                let num_successors = self.blocks[block_idx].successors.len();
+                let x1 = source_pos.x + PORT_START + PORT_SPACING * (num_successors + i) as f64;
+                let y1 = source_pos.y + source_size.y;
+
+                // Calculate arrow end (top edge of target block)
+                let x2 = target_pos.x + PORT_START;
+                let y2 = target_pos.y; // Top edge, not inside header
+
+                let arrow = back_edge_arrow(
+                    &mut self.layout_provider,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    true, // do_arrowhead
+                    1,    // stroke
+                );
+                self.layout_provider.append_child(&mut arrows_container, arrow);
+            }
+        }
+
+        // Render self-loops
+        for block_idx in 0..self.blocks.len() {
+            if !self.blocks[block_idx].has_self_loop {
+                continue;
+            }
+
+            // Find the block's layout node
+            let layout_idx = match self.blocks[block_idx].layout_node {
+                Some(idx) => idx,
+                None => continue,
+            };
+
+            let block_node = self.find_layout_node_by_global_idx(&nodes_by_layer, layout_idx);
+            let (block_pos, block_size) = match block_node {
+                Some(LayoutNode::BlockNode(n)) => (n.pos, n.size),
+                _ => continue,
+            };
+
+            // Draw self-loop arrow (starts from right side middle, curves out and back to header)
+            let arrow = self_loop_arrow(
+                &mut self.layout_provider,
+                block_pos.x,
+                block_pos.y,
+                block_size.x,
+                block_size.y,
+                1,
+            );
+            self.layout_provider.append_child(&mut arrows_container, arrow);
         }
 
         // Append arrows container to graph
@@ -1033,8 +1127,9 @@ fn loop_header_arrow<P: LayoutProvider>(
     g
 }
 
-/// Draw a back edge arrow that curves around to the right side
+/// Draw a back edge arrow using elbow-style routing (orthogonal lines with arc corners)
 /// Used for bidirectional edges where the destination is above the source
+/// Routes: right from source, up past destination, left, then down into destination header
 #[allow(clippy::too_many_arguments)]
 fn back_edge_arrow<P: LayoutProvider>(
     layout_provider: &mut P,
@@ -1055,41 +1150,48 @@ fn back_edge_arrow<P: LayoutProvider>(
         x2 += 0.5;
     }
 
-    // Calculate how far right to go (based on the vertical distance)
-    let vertical_distance = y1 - y2;
+    // Calculate how far right to extend (based on the vertical distance)
+    let vertical_distance = (y1 - y2).abs();
     let horizontal_offset = (vertical_distance / 3.0).max(40.0).min(80.0);
-    let x_mid = x1.max(x2) + horizontal_offset;
+    let x_right = x1.max(x2) + horizontal_offset;
 
+    // Offset the destination x to the right (don't land on left edge of block)
+    let x_dest = x2 + horizontal_offset;
+
+    // Y coordinate above the destination header
+    let y_above = y2 - 1.5 * r;
+
+    // Elbow path: right, up past destination, left, then down into header
+    // Visual:
+    //              ↓
+    //          ┌───┘
+    //          │
+    //   Start ─┘
     let mut path = String::new();
-    path.push_str(&format!("M {} {} ", x1, y1)); // Start at source
 
-    // Curve out to the right
-    path.push_str(&format!("L {} {} ", x1, y1 + r)); // Small line down
-    path.push_str(&format!(
-        "A {} {} 0 0 0 {} {} ",
-        r, r, x1 + r, y1 + 2.0 * r
-    )); // Arc to go right
+    // Start at source (bottom of source block)
+    path.push_str(&format!("M {} {} ", x1, y1));
 
-    // Line to the right
-    path.push_str(&format!("L {} {} ", x_mid - r, y1 + 2.0 * r));
+    // Horizontal line right to just before the corner
+    path.push_str(&format!("L {} {} ", x_right - r, y1));
 
-    // Arc to go up
-    path.push_str(&format!(
-        "A {} {} 0 0 0 {} {} ",
-        r, r, x_mid, y1 + r
-    ));
+    // Arc: bottom-right corner (right→up) - sweep=0 for outward bulge
+    path.push_str(&format!("A {} {} 0 0 0 {} {} ", r, r, x_right, y1 - r));
 
-    // Line up
-    path.push_str(&format!("L {} {} ", x_mid, y2 + r));
+    // Vertical line going up past the destination
+    path.push_str(&format!("L {} {} ", x_right, y_above + r));
 
-    // Arc to go left
-    path.push_str(&format!(
-        "A {} {} 0 0 0 {} {} ",
-        r, r, x_mid - r, y2
-    ));
+    // Arc: top-right corner (up→left) - sweep=0 for outward bulge
+    path.push_str(&format!("A {} {} 0 0 0 {} {} ", r, r, x_right - r, y_above));
 
-    // Line to destination
-    path.push_str(&format!("L {} {} ", x2, y2));
+    // Horizontal line left (above the destination header)
+    path.push_str(&format!("L {} {} ", x_dest + r, y_above));
+
+    // Arc: top-left corner (left→down) - sweep=0 for outward bulge
+    path.push_str(&format!("A {} {} 0 0 0 {} {} ", r, r, x_dest, y_above + r));
+
+    // Vertical line down to destination header
+    path.push_str(&format!("L {} {} ", x_dest, y2));
 
     let mut g = layout_provider.create_svg_element("g");
 
@@ -1101,10 +1203,93 @@ fn back_edge_arrow<P: LayoutProvider>(
     layout_provider.append_child(&mut g, p);
 
     if do_arrowhead {
-        // Arrowhead pointing left (270 degrees)
-        let v = arrowhead(layout_provider, x2, y2, 270, 5);
+        // Arrowhead pointing down into the destination header
+        let v = arrowhead(layout_provider, x_dest, y2, 180, 5);
         layout_provider.append_child(&mut g, v);
     }
+
+    g
+}
+
+/// Draw a self-loop arrow using elbow-style routing (orthogonal lines with arc corners)
+/// Routes: right from middle of block, up, then left back to block header
+#[allow(clippy::too_many_arguments)]
+fn self_loop_arrow<P: LayoutProvider>(
+    layout_provider: &mut P,
+    block_x: f64,
+    block_y: f64,
+    block_width: f64,
+    block_height: f64,
+    stroke: i32,
+) -> Box<P::Element> {
+    let r = ARROW_RADIUS;
+    let loop_extend = 35.0; // How far right of the block edge the loop extends
+
+    // Start point: middle-right of block (on the edge)
+    let x_start = block_x + block_width;
+    let y_start = block_y + block_height / 2.0;
+
+    // End point: offset from right edge so arrow comes down into header
+    let x_end = block_x + block_width - loop_extend;
+    let y_end = block_y;
+
+    // Rightmost point of the loop
+    let x_right = x_start + loop_extend;
+
+    // Align to pixels for crisp rendering
+    let x_start = if stroke % 2 == 1 { x_start + 0.5 } else { x_start };
+    let x_end = if stroke % 2 == 1 { x_end + 0.5 } else { x_end };
+    let x_right = if stroke % 2 == 1 { x_right + 0.5 } else { x_right };
+
+    // Elbow path: right, up, left (above header), then down into header
+    // Visual:
+    //        ↓
+    //    ┌───┘
+    //    │
+    //    │
+    //    └───── ← start (middle right of block)
+    let mut path = String::new();
+
+    // Y coordinate for the horizontal segment above the header
+    // Use 1.5*r to go higher and leave room for a straight vertical segment before the arrowhead
+    let y_above = y_end - 1.5 * r;
+
+    // Start at middle-right of block
+    path.push_str(&format!("M {} {} ", x_start, y_start));
+
+    // Horizontal line right to just before the corner
+    path.push_str(&format!("L {} {} ", x_right - r, y_start));
+
+    // Arc: bottom-right corner (right→up) - sweep=0 for outward bulge
+    path.push_str(&format!("A {} {} 0 0 0 {} {} ", r, r, x_right, y_start - r));
+
+    // Vertical line going up
+    path.push_str(&format!("L {} {} ", x_right, y_above + r));
+
+    // Arc: top-right corner (up→left) - sweep=0 for outward bulge
+    path.push_str(&format!("A {} {} 0 0 0 {} {} ", r, r, x_right - r, y_above));
+
+    // Horizontal line left (above the header)
+    path.push_str(&format!("L {} {} ", x_end + r, y_above));
+
+    // Arc: top-left corner (left→down) - sweep=0 for outward bulge
+    path.push_str(&format!("A {} {} 0 0 0 {} {} ", r, r, x_end, y_above + r));
+
+    // Vertical line down to header
+    path.push_str(&format!("L {} {} ", x_end, y_end));
+
+    let mut g = layout_provider.create_svg_element("g");
+
+    let mut p = layout_provider.create_svg_element("path");
+    layout_provider.set_attribute(&mut p, "d", &path);
+    layout_provider.set_attribute(&mut p, "fill", "none");
+    layout_provider.set_attribute(&mut p, "stroke", "black");
+    layout_provider.set_attribute(&mut p, "stroke-width", &format!("{} ", stroke));
+    layout_provider.append_child(&mut g, p);
+
+    // Arrowhead pointing down into the block header
+    let v = arrowhead(layout_provider, x_end, y_end, 180, 5);
+    layout_provider.append_child(&mut g, v);
 
     g
 }

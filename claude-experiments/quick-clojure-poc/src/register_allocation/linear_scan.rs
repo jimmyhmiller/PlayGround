@@ -96,15 +96,16 @@ impl LinearScan {
             }
         }
 
-        // DEBUG: Print lifetimes for multi-call cases (disabled)
-        // if result.len() > 8 {
-        //     eprintln!("DEBUG: Computed lifetimes for {} registers:", result.len());
-        //     let mut sorted_lifetimes: Vec<_> = result.iter().collect();
-        //     sorted_lifetimes.sort_by_key(|(_, (start, _))| *start);
-        //     for (reg, (start, end)) in sorted_lifetimes {
-        //         eprintln!("  {} lifetime: {} - {}", reg.display_name(), start, end);
-        //     }
-        // }
+        // Argument registers are live from function entry (instruction 0),
+        // even if their first explicit use is later. This ensures they're
+        // properly saved across any calls that precede their first use.
+        for (reg, (start, end)) in result.iter_mut() {
+            if let VirtualRegister::Argument(_) = reg {
+                if *start > 0 {
+                    *start = 0;
+                }
+            }
+        }
 
         result
     }
@@ -230,6 +231,71 @@ impl LinearScan {
 
             Instruction::CallGC(dst) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
+            }
+
+            Instruction::PushExceptionHandler(_label, _slot) => {
+                // No registers - uses pre-allocated stack slot
+            }
+
+            Instruction::PopExceptionHandler => {
+                // No registers
+            }
+
+            Instruction::Throw(exc) => {
+                if let IrValue::Register(r) = exc { regs.push(*r); }
+            }
+
+            Instruction::LoadExceptionLocal(dest, _label) => {
+                if let IrValue::Register(r) = dest { regs.push(*r); }
+            }
+
+            // Protocol system instructions
+            Instruction::RegisterProtocolMethod(_type_id, _protocol_id, _method_index, fn_ptr) => {
+                if let IrValue::Register(r) = fn_ptr { regs.push(*r); }
+            }
+
+            // External calls (trampolines)
+            Instruction::ExternalCall(dst, _func_addr, args) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                for arg in args {
+                    if let IrValue::Register(r) = arg { regs.push(*r); }
+                }
+            }
+
+            Instruction::ExternalCallWithSaves(dst, _func_addr, args, saves) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                for arg in args {
+                    if let IrValue::Register(r) = arg { regs.push(*r); }
+                }
+                for save in saves {
+                    if let IrValue::Register(r) = save { regs.push(*r); }
+                }
+            }
+
+            // Multi-arity function instructions
+            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, closure_values) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                for val in closure_values {
+                    if let IrValue::Register(r) = val { regs.push(*r); }
+                }
+            }
+
+            Instruction::LoadClosureMultiArity(dst, fn_obj, _arity_count, _index) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = fn_obj { regs.push(*r); }
+            }
+
+            Instruction::CollectRestArgs(dst, _fixed_count, _param_offset) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+            }
+
+            // Assertion instructions
+            Instruction::AssertPre(cond, _index) => {
+                if let IrValue::Register(r) = cond { regs.push(*r); }
+            }
+
+            Instruction::AssertPost(cond, _index) => {
+                if let IrValue::Register(r) = cond { regs.push(*r); }
             }
         }
 
@@ -474,6 +540,71 @@ impl LinearScan {
             Instruction::CallGC(dst) => {
                 replace(dst);
             }
+
+            Instruction::PushExceptionHandler(_label, _slot) => {
+                // No registers - uses pre-allocated stack slot
+            }
+
+            Instruction::PopExceptionHandler => {
+                // No registers
+            }
+
+            Instruction::Throw(exc) => {
+                replace(exc);
+            }
+
+            Instruction::LoadExceptionLocal(dest, _slot) => {
+                replace(dest);
+            }
+
+            // Protocol system instructions
+            Instruction::RegisterProtocolMethod(_type_id, _protocol_id, _method_index, fn_ptr) => {
+                replace(fn_ptr);
+            }
+
+            // External calls (trampolines)
+            Instruction::ExternalCall(dst, _func_addr, args) => {
+                replace(dst);
+                for arg in args {
+                    replace(arg);
+                }
+            }
+
+            Instruction::ExternalCallWithSaves(dst, _func_addr, args, saves) => {
+                replace(dst);
+                for arg in args {
+                    replace(arg);
+                }
+                for save in saves {
+                    replace(save);
+                }
+            }
+
+            // Multi-arity function instructions
+            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, closure_values) => {
+                replace(dst);
+                for val in closure_values {
+                    replace(val);
+                }
+            }
+
+            Instruction::LoadClosureMultiArity(dst, fn_obj, _arity_count, _index) => {
+                replace(dst);
+                replace(fn_obj);
+            }
+
+            Instruction::CollectRestArgs(dst, _fixed_count, _param_offset) => {
+                replace(dst);
+            }
+
+            // Assertion instructions
+            Instruction::AssertPre(cond, _index) => {
+                replace(cond);
+            }
+
+            Instruction::AssertPost(cond, _index) => {
+                replace(cond);
+            }
         }
     }
 
@@ -710,31 +841,93 @@ impl LinearScan {
             Instruction::CallGC(dst) => {
                 replace(dst);
             }
+
+            Instruction::PushExceptionHandler(_label, _slot) => {
+                // No registers - uses pre-allocated stack slot
+            }
+
+            Instruction::PopExceptionHandler => {
+                // No registers
+            }
+
+            Instruction::Throw(exc) => {
+                replace(exc);
+            }
+
+            Instruction::LoadExceptionLocal(dest, _slot) => {
+                replace(dest);
+            }
+
+            // Protocol system instructions
+            Instruction::RegisterProtocolMethod(_type_id, _protocol_id, _method_index, fn_ptr) => {
+                replace(fn_ptr);
+            }
+
+            // External calls (trampolines)
+            Instruction::ExternalCall(dst, _func_addr, args) => {
+                replace(dst);
+                for arg in args {
+                    replace(arg);
+                }
+            }
+
+            Instruction::ExternalCallWithSaves(dst, _func_addr, args, saves) => {
+                replace(dst);
+                for arg in args {
+                    replace(arg);
+                }
+                for save in saves {
+                    replace(save);
+                }
+            }
+
+            // Multi-arity function instructions
+            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, closure_values) => {
+                replace(dst);
+                for val in closure_values {
+                    replace(val);
+                }
+            }
+
+            Instruction::LoadClosureMultiArity(dst, fn_obj, _arity_count, _index) => {
+                replace(dst);
+                replace(fn_obj);
+            }
+
+            Instruction::CollectRestArgs(dst, _fixed_count, _param_offset) => {
+                replace(dst);
+            }
+
+            // Assertion instructions
+            Instruction::AssertPre(cond, _index) => {
+                replace(cond);
+            }
+
+            Instruction::AssertPost(cond, _index) => {
+                replace(cond);
+            }
         }
     }
 
-    /// Transform Call instructions to CallWithSaves after register allocation
+    /// Transform Call and ExternalCall instructions to their WithSaves variants
     ///
     /// This analyzes which registers are live across each call site and generates
-    /// CallWithSaves instructions with explicit register preservation.
+    /// CallWithSaves/ExternalCallWithSaves instructions with explicit register preservation.
     fn transform_calls_to_saves(&mut self) {
-        // eprintln!("DEBUG: transform_calls_to_saves - analyzing {} instructions", self.instructions.len());
-
         for i in 0..self.instructions.len() {
-            // Check if this is a Call instruction
+            // Check if this is a Call or ExternalCall instruction
             let is_call = matches!(self.instructions[i], Instruction::Call(_, _, _));
+            let is_external_call = matches!(self.instructions[i], Instruction::ExternalCall(_, _, _));
 
-            if !is_call {
+            if !is_call && !is_external_call {
                 continue;
             }
 
-            // eprintln!("DEBUG: Found Call instruction at index {}", i);
-
-            // Extract the Call instruction components
-            let (dest, func, args) = if let Instruction::Call(d, f, a) = &self.instructions[i] {
-                (*d, *f, a.clone())
-            } else {
-                continue; // Not a Call (shouldn't happen due to check above)
+            // Extract destination register for exclusion from saves
+            let dest = match &self.instructions[i] {
+                Instruction::Call(d, _, _) => *d,
+                Instruction::ExternalCall(d, _, _) => *d,
+                _ => continue,
             };
 
             // Find registers live across this call
@@ -742,10 +935,10 @@ impl LinearScan {
 
             for (vreg, (start, end)) in &self.lifetimes {
                 // Register is live across the call if:
-                // 1. It starts before the call (start < i)
+                // 1. It starts at or before the call (start <= i) - used as argument or earlier
                 // 2. It ends after the call (end > i) - must be used after the call
                 // 3. It's not spilled (has a physical register allocation)
-                if *start < i && *end > i && !self.spill_locations.contains_key(vreg) {
+                if *start <= i && *end > i && !self.spill_locations.contains_key(vreg) {
                     // Get the physical register
                     if let Some(&physical_reg) = self.allocated_registers.get(vreg) {
                         // Don't save the destination register (it's about to be overwritten)
@@ -759,25 +952,57 @@ impl LinearScan {
                         };
 
                         if !is_dest {
-                            // eprintln!("DEBUG:   Register {:?} (physical {:?}) is live across call (lifetime {}-{})",
-                            //          vreg, physical_reg, start, end);
-                            saves.push(IrValue::Register(physical_reg));
+                            // IMPORTANT: Push the VIRTUAL register, not the physical register!
+                            // The codegen will look up the physical register from the allocation map.
+                            // If we pushed the physical register (e.g., Temp(1) meaning x1), it would
+                            // get confused with any IR virtual register that happens to have the same name.
+                            saves.push(IrValue::Register(*vreg));
                         }
                     }
                 }
             }
 
-            // Remove duplicates from saves (same physical register might be used by multiple virtuals)
+            // Remove duplicates - sort by physical register and dedup
+            // Multiple virtual registers might map to the same physical register
             saves.sort_by_key(|v| match v {
-                IrValue::Register(r) => r.index(),
+                IrValue::Register(vreg) => {
+                    self.allocated_registers.get(vreg)
+                        .map(|phys| phys.index())
+                        .unwrap_or(vreg.index())
+                }
                 _ => 0,
             });
-            saves.dedup();
+            // Dedup by physical register, not by virtual register
+            let mut seen_physical = std::collections::HashSet::new();
+            saves.retain(|v| {
+                match v {
+                    IrValue::Register(vreg) => {
+                        let phys_idx = self.allocated_registers.get(vreg)
+                            .map(|phys| phys.index())
+                            .unwrap_or(vreg.index());
+                        seen_physical.insert(phys_idx)
+                    }
+                    _ => true,
+                }
+            });
 
-            // eprintln!("DEBUG: Transforming Call at index {} with {} saves", i, saves.len());
-
-            // Transform Call → CallWithSaves
-            self.instructions[i] = Instruction::CallWithSaves(dest, func, args, saves);
+            // Transform to WithSaves variant
+            if is_call {
+                let (func, args) = if let Instruction::Call(_, f, a) = &self.instructions[i] {
+                    (*f, a.clone())
+                } else {
+                    continue;
+                };
+                self.instructions[i] = Instruction::CallWithSaves(dest, func, args, saves);
+            } else {
+                // ExternalCall
+                let (func_addr, args) = if let Instruction::ExternalCall(_, addr, a) = &self.instructions[i] {
+                    (*addr, a.clone())
+                } else {
+                    continue;
+                };
+                self.instructions[i] = Instruction::ExternalCallWithSaves(dest, func_addr, args, saves);
+            }
         }
     }
 

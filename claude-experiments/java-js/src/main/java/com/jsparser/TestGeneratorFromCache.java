@@ -11,8 +11,9 @@ import java.util.*;
 import java.util.stream.Stream;
 
 /**
- * Generate JUnit test files from cached Acorn ASTs.
- * Scans the cache directory and creates test classes for failures and mismatches.
+ * Generate JUnit test files from cached JavaScript source files.
+ * Scans the cache directory for .js files (with .meta files) and creates test classes.
+ * Tests run both Acorn and our parser in real-time and compare ASTs using temp files.
  */
 public class TestGeneratorFromCache {
 
@@ -31,18 +32,19 @@ public class TestGeneratorFromCache {
     public void generateTests() throws IOException {
         System.out.println("Scanning cache directory: " + cacheBaseDir);
 
-        // Collect all cache files
+        // Collect all cached JS files (those with .meta files)
         List<Path> cacheFiles = new ArrayList<>();
         try (Stream<Path> paths = Files.walk(cacheBaseDir)) {
             paths.filter(Files::isRegularFile)
-                .filter(p -> p.toString().endsWith(".json") && !p.toString().endsWith("_summary.json"))
+                .filter(p -> p.toString().endsWith(".js") &&
+                             Files.exists(Paths.get(p.toString() + ".meta")))
                 .forEach(cacheFiles::add);
         }
 
-        System.out.println("Found " + cacheFiles.size() + " cached AST files");
+        System.out.println("Found " + cacheFiles.size() + " cached JS files");
 
         if (cacheFiles.isEmpty()) {
-            System.out.println("No cache files found. Run DirectoryTester first to cache results.");
+            System.out.println("No cache files found. Run DirectoryTester or AcornCacheBuilder first.");
             return;
         }
 
@@ -72,36 +74,15 @@ public class TestGeneratorFromCache {
     }
 
     /**
-     * Read a cache file and extract metadata
+     * Read a cache file and extract metadata from the .meta file
      */
     private CacheEntry readCacheFile(Path cacheFile) throws IOException {
-        String content = Files.readString(cacheFile);
-        JsonNode root = mapper.readTree(content);
+        Path metaFile = Paths.get(cacheFile.toString() + ".meta");
+        String metaContent = Files.readString(metaFile);
+        JsonNode metadata = mapper.readTree(metaContent);
 
-        // Check if file has new format (with _metadata) or old format (just AST)
-        JsonNode metadata = root.get("_metadata");
-        String originalFile;
-        String sourceType;
-
-        if (metadata != null && metadata.get("originalFile") != null) {
-            // New format with metadata
-            originalFile = metadata.get("originalFile").asText();
-            sourceType = metadata.get("sourceType").asText("script");
-        } else {
-            // Old format - derive info from cache file path
-            String fileName = cacheFile.getFileName().toString();
-            // Remove .json extension
-            if (fileName.endsWith(".json")) {
-                fileName = fileName.substring(0, fileName.length() - 5);
-            }
-            // Reconstruct original path from encoded filename
-            originalFile = fileName.replace(".._", "../").replace("_", "/");
-            // Guess source type - default to script
-            sourceType = "script";
-            if (originalFile.endsWith(".mjs")) {
-                sourceType = "module";
-            }
-        }
+        String originalFile = metadata.get("originalFile").asText();
+        String sourceType = metadata.get("sourceType").asText("script");
 
         return new CacheEntry(cacheFile, originalFile, sourceType);
     }
@@ -141,30 +122,40 @@ public class TestGeneratorFromCache {
         sb.append("package com.jsparser;\n\n");
         sb.append("import com.fasterxml.jackson.databind.JsonNode;\n");
         sb.append("import com.fasterxml.jackson.databind.ObjectMapper;\n");
+        sb.append("import com.fasterxml.jackson.databind.SerializationFeature;\n");
         sb.append("import com.jsparser.ast.Program;\n");
         sb.append("import org.junit.jupiter.api.DisplayName;\n");
-        sb.append("import org.junit.jupiter.api.Test;\n");
-        sb.append("import org.junit.jupiter.api.Disabled;\n\n");
+        sb.append("import org.junit.jupiter.api.Test;\n\n");
+        sb.append("import java.io.*;\n");
         sb.append("import java.nio.file.Files;\n");
         sb.append("import java.nio.file.Path;\n");
         sb.append("import java.nio.file.Paths;\n");
         sb.append("import java.util.List;\n");
         sb.append("import java.util.Map;\n");
-        sb.append("import java.util.Objects;\n\n");
-        sb.append("import static org.junit.jupiter.api.Assertions.assertTrue;\n\n");
+        sb.append("import java.util.Objects;\n");
+        sb.append("import java.util.concurrent.CompletableFuture;\n\n");
+        sb.append("import static org.junit.jupiter.api.Assertions.fail;\n\n");
 
         // Class javadoc
         sb.append("/**\n");
-        sb.append(" * Auto-generated tests from Acorn AST cache.\n");
+        sb.append(" * Auto-generated tests from cached JS source files.\n");
         sb.append(" * Category: ").append(category).append("\n");
         sb.append(" * Generated: ").append(java.time.Instant.now()).append("\n");
         sb.append(" * \n");
-        sb.append(" * These tests verify that the Java parser produces the same AST as Acorn.\n");
-        sb.append(" * Tests are initially @Disabled and will fail until parser bugs are fixed.\n");
+        sb.append(" * Tests parse with both Acorn (real-time) and our parser, streaming ASTs to temp files\n");
+        sb.append(" * for memory-efficient byte-for-byte comparison.\n");
         sb.append(" */\n");
-        sb.append("@Disabled(\"Auto-generated tests - enable when ready to fix\")\n");
         sb.append("public class ").append(className).append(" {\n\n");
-        sb.append("    private static final ObjectMapper mapper = new ObjectMapper();\n\n");
+        sb.append("    private static final ObjectMapper mapper;\n");
+        sb.append("    static {\n");
+        sb.append("        mapper = new ObjectMapper();\n");
+        sb.append("        // Configure to match Node.js JSON.stringify(obj, null, 2) format\n");
+        sb.append("        mapper.enable(SerializationFeature.INDENT_OUTPUT);\n");
+        sb.append("        mapper.setDefaultPrettyPrinter(new com.fasterxml.jackson.core.util.DefaultPrettyPrinter()\n");
+        sb.append("            .withObjectIndenter(new com.fasterxml.jackson.core.util.DefaultIndenter(\"  \", \"\\n\"))\n");
+        sb.append("            .withSeparators(com.fasterxml.jackson.core.util.Separators.createDefaultInstance()\n");
+        sb.append("                .withObjectFieldValueSpacing(com.fasterxml.jackson.core.util.Separators.Spacing.NONE)));\n");
+        sb.append("    }\n\n");
 
         // Generate test methods (limit to first 50 to avoid huge files)
         int count = 0;
@@ -201,109 +192,172 @@ public class TestGeneratorFromCache {
         sb.append("    @DisplayName(\"").append(escapeJava(displayName)).append("\")\n");
         sb.append("    void ").append(methodName).append("() throws Exception {\n");
         sb.append("        // Original file: ").append(entry.originalFile).append("\n");
-        sb.append("        // Cache file: ").append(entry.cacheFile.getFileName()).append("\n");
+        sb.append("        // Cached JS source: ").append(entry.cacheFile.getFileName()).append("\n");
         sb.append("        assertASTMatches(\n");
         sb.append("            \"").append(escapeJava(entry.cacheFile.toString())).append("\",\n");
-        sb.append("            \"").append(escapeJava(entry.originalFile)).append("\",\n");
         sb.append("            ").append(entry.sourceType.equals("module")).append("\n");
         sb.append("        );\n");
         sb.append("    }\n\n");
     }
 
     /**
-     * Append helper methods to test class
+     * Append helper methods to test class - memory-efficient streaming approach
      */
     private void appendHelperMethods(StringBuilder sb) {
         sb.append("    // Helper methods\n\n");
-        sb.append("    private void assertASTMatches(String cacheFilePath, String originalFilePath, boolean isModule) throws Exception {\n");
-        sb.append("        // Read cached Acorn AST\n");
-        sb.append("        String cacheContent = Files.readString(Paths.get(cacheFilePath));\n");
-        sb.append("        JsonNode cacheRoot = mapper.readTree(cacheContent);\n");
-        sb.append("        // Handle both old format (just AST) and new format (with _metadata)\n");
-        sb.append("        JsonNode expectedAst = cacheRoot.has(\"ast\") ? cacheRoot.get(\"ast\") : cacheRoot;\n\n");
-        sb.append("        // Read original source file\n");
-        sb.append("        Path originalFile = Paths.get(originalFilePath);\n");
-        sb.append("        if (!Files.exists(originalFile)) {\n");
-        sb.append("            // File might have been moved/deleted - skip test\n");
-        sb.append("            System.out.println(\"Skipping - file not found: \" + originalFilePath);\n");
-        sb.append("            return;\n");
-        sb.append("        }\n\n");
-        sb.append("        String source = Files.readString(originalFile);\n\n");
-        sb.append("        // Parse with Java parser\n");
-        sb.append("        Program actual = Parser.parse(source, isModule);\n");
-        sb.append("        String actualJson = mapper.writeValueAsString(actual);\n\n");
-        sb.append("        // Compare ASTs\n");
-        sb.append("        String expectedJson = mapper.writeValueAsString(expectedAst);\n");
-        sb.append("        Object expectedObj = mapper.readValue(expectedJson, Object.class);\n");
-        sb.append("        Object actualObj = mapper.readValue(actualJson, Object.class);\n\n");
-        sb.append("        // Apply normalizations\n");
-        sb.append("        normalizeRegexValues(expectedObj, actualObj);\n");
-        sb.append("        normalizeBigIntValues(expectedObj, actualObj);\n\n");
-        sb.append("        if (!Objects.deepEquals(expectedObj, actualObj)) {\n");
-        sb.append("            System.out.println(\"\\nAST mismatch for: \" + originalFilePath);\n");
-        sb.append("            // Could add diff printing here\n");
-        sb.append("        }\n\n");
-        sb.append("        assertTrue(Objects.deepEquals(expectedObj, actualObj),\n");
-        sb.append("            \"AST mismatch for \" + originalFilePath);\n");
-        sb.append("    }\n\n");
 
-        // Add normalization methods
-        sb.append("    @SuppressWarnings(\"unchecked\")\n");
-        sb.append("    private void normalizeRegexValues(Object expected, Object actual) {\n");
-        sb.append("        if (expected instanceof Map && actual instanceof Map) {\n");
-        sb.append("            Map<String, Object> expMap = (Map<String, Object>) expected;\n");
-        sb.append("            Map<String, Object> actMap = (Map<String, Object>) actual;\n");
-        sb.append("            if (\"Literal\".equals(expMap.get(\"type\")) && expMap.containsKey(\"regex\")) {\n");
-        sb.append("                if (expMap.get(\"value\") == null && actMap.get(\"value\") instanceof Map) {\n");
-        sb.append("                    Map<?, ?> actValue = (Map<?, ?>) actMap.get(\"value\");\n");
-        sb.append("                    if (actValue.isEmpty()) { actMap.put(\"value\", null); }\n");
-        sb.append("                }\n");
+        // Main assertion method - streams both ASTs to temp files and uses hash comparison
+        sb.append("    private void assertASTMatches(String cachedJsPath, boolean isModule) throws Exception {\n");
+        sb.append("        // Read cached JS source\n");
+        sb.append("        String source = Files.readString(Paths.get(cachedJsPath));\n\n");
+        sb.append("        Path acornTmp = Files.createTempFile(\"acorn-ast-\", \".json\");\n");
+        sb.append("        Path ourTmp = Files.createTempFile(\"our-ast-\", \".json\");\n\n");
+        sb.append("        try {\n");
+        sb.append("            // 1. Stream Acorn AST to temp file (via Node.js subprocess)\n");
+        sb.append("            runAcornToFile(cachedJsPath, isModule, acornTmp);\n\n");
+        sb.append("            // 2. Stream our AST to temp file\n");
+        sb.append("            Program ourAst = Parser.parse(source, isModule);\n");
+        sb.append("            try (var out = new BufferedOutputStream(Files.newOutputStream(ourTmp))) {\n");
+        sb.append("                mapper.writeValue(out, ourAst);\n");
+        sb.append("            }\n\n");
+        sb.append("            // 3. Compare files via hash (ignoring whitespace)\n");
+        sb.append("            String acornHash = hashJsonContent(acornTmp);\n");
+        sb.append("            String ourHash = hashJsonContent(ourTmp);\n\n");
+        sb.append("            if (!acornHash.equals(ourHash)) {\n");
+        sb.append("                // Hashes differ - show first difference\n");
+        sb.append("                showFirstDifference(acornTmp, ourTmp, cachedJsPath);\n");
+        sb.append("                fail(\"AST mismatch for \" + cachedJsPath);\n");
         sb.append("            }\n");
-        sb.append("            for (String key : expMap.keySet()) {\n");
-        sb.append("                if (actMap.containsKey(key)) {\n");
-        sb.append("                    normalizeRegexValues(expMap.get(key), actMap.get(key));\n");
-        sb.append("                }\n");
-        sb.append("            }\n");
-        sb.append("        } else if (expected instanceof List && actual instanceof List) {\n");
-        sb.append("            List<Object> expList = (List<Object>) expected;\n");
-        sb.append("            List<Object> actList = (List<Object>) actual;\n");
-        sb.append("            for (int i = 0; i < Math.min(expList.size(), actList.size()); i++) {\n");
-        sb.append("                normalizeRegexValues(expList.get(i), actList.get(i));\n");
-        sb.append("            }\n");
+        sb.append("        } finally {\n");
+        sb.append("            Files.deleteIfExists(acornTmp);\n");
+        sb.append("            Files.deleteIfExists(ourTmp);\n");
         sb.append("        }\n");
         sb.append("    }\n\n");
 
-        sb.append("    @SuppressWarnings(\"unchecked\")\n");
-        sb.append("    private void normalizeBigIntValues(Object expected, Object actual) {\n");
-        sb.append("        if (expected instanceof Map && actual instanceof Map) {\n");
-        sb.append("            Map<String, Object> expMap = (Map<String, Object>) expected;\n");
-        sb.append("            Map<String, Object> actMap = (Map<String, Object>) actual;\n");
-        sb.append("            if (\"Literal\".equals(expMap.get(\"type\")) && expMap.containsKey(\"bigint\")) {\n");
-        sb.append("                Object expBigint = expMap.get(\"bigint\");\n");
-        sb.append("                Object actBigint = actMap.get(\"bigint\");\n");
-        sb.append("                if (expBigint != null && actBigint != null) {\n");
-        sb.append("                    String expStr = expBigint.toString();\n");
-        sb.append("                    String actStr = actBigint.toString();\n");
-        sb.append("                    if (!expStr.equals(actStr)) {\n");
-        sb.append("                        try {\n");
-        sb.append("                            java.math.BigInteger expBI = new java.math.BigInteger(expStr);\n");
-        sb.append("                            java.math.BigInteger actBI = new java.math.BigInteger(actStr);\n");
-        sb.append("                            if (expBI.equals(actBI)) { actMap.put(\"bigint\", expStr); }\n");
-        sb.append("                        } catch (NumberFormatException e) {}\n");
+        // Method to run Acorn and write to file using streaming JSON for large files
+        sb.append("    private void runAcornToFile(String jsPath, boolean isModule, Path outputFile) throws Exception {\n");
+        sb.append("        String sourceType = isModule ? \"module\" : \"script\";\n");
+        sb.append("        // Use streaming JSON writer to avoid Node.js string length limits\n");
+        sb.append("        String script = \"\"\"\n");
+        sb.append("            const acorn = require('acorn');\n");
+        sb.append("            const fs = require('fs');\n");
+        sb.append("            const source = fs.readFileSync(process.argv[1], 'utf-8');\n");
+        sb.append("            const ast = acorn.parse(source, {ecmaVersion: 2025, locations: true, sourceType: '%s'});\n");
+        sb.append("            // Streaming JSON writer to avoid string length limits\n");
+        sb.append("            const out = fs.createWriteStream(process.argv[2]);\n");
+        sb.append("            function writeJson(obj, indent) {\n");
+        sb.append("                if (obj === null) { out.write('null'); return; }\n");
+        sb.append("                if (typeof obj === 'undefined') { out.write('null'); return; }\n");
+        sb.append("                if (typeof obj === 'boolean') { out.write(obj.toString()); return; }\n");
+        sb.append("                if (typeof obj === 'number') { out.write(obj.toString()); return; }\n");
+        sb.append("                if (typeof obj === 'bigint') { out.write('\\\"' + obj.toString() + '\\\"'); return; }\n");
+        sb.append("                if (typeof obj === 'string') { out.write(JSON.stringify(obj)); return; }\n");
+        sb.append("                if (Array.isArray(obj)) {\n");
+        sb.append("                    out.write('[');\n");
+        sb.append("                    for (let i = 0; i < obj.length; i++) {\n");
+        sb.append("                        if (i > 0) out.write(',');\n");
+        sb.append("                        out.write('\\\\n' + indent + '  ');\n");
+        sb.append("                        writeJson(obj[i], indent + '  ');\n");
         sb.append("                    }\n");
+        sb.append("                    if (obj.length > 0) out.write('\\\\n' + indent);\n");
+        sb.append("                    out.write(']');\n");
+        sb.append("                    return;\n");
         sb.append("                }\n");
-        sb.append("            }\n");
-        sb.append("            for (String key : expMap.keySet()) {\n");
-        sb.append("                if (actMap.containsKey(key)) {\n");
-        sb.append("                    normalizeBigIntValues(expMap.get(key), actMap.get(key));\n");
+        sb.append("                out.write('{');\n");
+        sb.append("                const keys = Object.keys(obj);\n");
+        sb.append("                for (let i = 0; i < keys.length; i++) {\n");
+        sb.append("                    if (i > 0) out.write(',');\n");
+        sb.append("                    out.write('\\\\n' + indent + '  ');\n");
+        sb.append("                    out.write(JSON.stringify(keys[i]) + ': ');\n");
+        sb.append("                    writeJson(obj[keys[i]], indent + '  ');\n");
         sb.append("                }\n");
+        sb.append("                if (keys.length > 0) out.write('\\\\n' + indent);\n");
+        sb.append("                out.write('}');\n");
         sb.append("            }\n");
-        sb.append("        } else if (expected instanceof List && actual instanceof List) {\n");
-        sb.append("            List<Object> expList = (List<Object>) expected;\n");
-        sb.append("            List<Object> actList = (List<Object>) actual;\n");
-        sb.append("            for (int i = 0; i < Math.min(expList.size(), actList.size()); i++) {\n");
-        sb.append("                normalizeBigIntValues(expList.get(i), actList.get(i));\n");
+        sb.append("            writeJson(ast, '');\n");
+        sb.append("            out.write('\\\\n');\n");
+        sb.append("            out.end(() => process.exit(0));\n");
+        sb.append("            \"\"\".formatted(sourceType);\n\n");
+        sb.append("        String[] cmd = { \"node\", \"--max-old-space-size=8192\", \"-e\", script, jsPath, outputFile.toString() };\n");
+        sb.append("        ProcessBuilder pb = new ProcessBuilder(cmd);\n");
+        sb.append("        Process process = pb.start();\n\n");
+        sb.append("        // Capture stderr\n");
+        sb.append("        CompletableFuture<String> errorFuture = CompletableFuture.supplyAsync(() -> {\n");
+        sb.append("            try {\n");
+        sb.append("                return new String(process.getErrorStream().readAllBytes());\n");
+        sb.append("            } catch (IOException e) { return \"\"; }\n");
+        sb.append("        });\n\n");
+        sb.append("        int exitCode = process.waitFor();\n");
+        sb.append("        if (exitCode != 0) {\n");
+        sb.append("            throw new RuntimeException(\"Acorn failed: \" + errorFuture.get());\n");
+        sb.append("        }\n");
+        sb.append("    }\n\n");
+
+        // Method to compute a normalized hash of JSON - sorts keys and streams hash
+        sb.append("    private String hashJsonContent(Path input) throws Exception {\n");
+        sb.append("        // Use Node.js to sort keys and stream hash computation (no full string needed)\n");
+        sb.append("        String script = \"\"\"\n");
+        sb.append("            const fs = require('fs');\n");
+        sb.append("            const crypto = require('crypto');\n");
+        sb.append("            const json = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8'));\n");
+        sb.append("            const hash = crypto.createHash('sha256');\n");
+        sb.append("            function hashObj(obj) {\n");
+        sb.append("                if (obj === null) { hash.update('null'); return; }\n");
+        sb.append("                if (typeof obj === 'undefined') { hash.update('null'); return; }\n");
+        sb.append("                if (typeof obj === 'boolean') { hash.update(obj.toString()); return; }\n");
+        sb.append("                if (typeof obj === 'number') { hash.update(obj.toString()); return; }\n");
+        sb.append("                if (typeof obj === 'bigint') { hash.update('\"' + obj.toString() + '\"'); return; }\n");
+        sb.append("                if (typeof obj === 'string') { hash.update(JSON.stringify(obj)); return; }\n");
+        sb.append("                if (Array.isArray(obj)) {\n");
+        sb.append("                    hash.update('[');\n");
+        sb.append("                    for (let i = 0; i < obj.length; i++) {\n");
+        sb.append("                        if (i > 0) hash.update(',');\n");
+        sb.append("                        hashObj(obj[i]);\n");
+        sb.append("                    }\n");
+        sb.append("                    hash.update(']');\n");
+        sb.append("                    return;\n");
+        sb.append("                }\n");
+        sb.append("                hash.update('{');\n");
+        sb.append("                const keys = Object.keys(obj).sort();\n");
+        sb.append("                for (let i = 0; i < keys.length; i++) {\n");
+        sb.append("                    if (i > 0) hash.update(',');\n");
+        sb.append("                    hash.update(JSON.stringify(keys[i]) + ':');\n");
+        sb.append("                    hashObj(obj[keys[i]]);\n");
+        sb.append("                }\n");
+        sb.append("                hash.update('}');\n");
         sb.append("            }\n");
+        sb.append("            hashObj(json);\n");
+        sb.append("            console.log(hash.digest('hex'));\n");
+        sb.append("            \"\"\";\n\n");
+        sb.append("        String[] cmd = { \"node\", \"--max-old-space-size=8192\", \"-e\", script, input.toString() };\n");
+        sb.append("        ProcessBuilder pb = new ProcessBuilder(cmd);\n");
+        sb.append("        pb.redirectErrorStream(false);\n");
+        sb.append("        Process p = pb.start();\n");
+        sb.append("        String stdout = new String(p.getInputStream().readAllBytes()).trim();\n");
+        sb.append("        String stderr = new String(p.getErrorStream().readAllBytes());\n");
+        sb.append("        int exitCode = p.waitFor();\n");
+        sb.append("        if (exitCode != 0) {\n");
+        sb.append("            throw new RuntimeException(\"Node hash failed for \" + input + \": \" + stderr);\n");
+        sb.append("        }\n");
+        sb.append("        return stdout;\n");
+        sb.append("    }\n\n");
+
+        // Method to show first difference
+        sb.append("    private void showFirstDifference(Path acornFile, Path ourFile, String jsPath) throws Exception {\n");
+        sb.append("        // Run diff to get actual differences\n");
+        sb.append("        ProcessBuilder pb = new ProcessBuilder(\"diff\", \"-u\",\n");
+        sb.append("            acornFile.toString(), ourFile.toString());\n");
+        sb.append("        Process p = pb.start();\n");
+        sb.append("        String diff = new String(p.getInputStream().readAllBytes());\n");
+        sb.append("        p.waitFor();\n\n");
+        sb.append("        System.err.println(\"\\n=== AST MISMATCH: \" + jsPath + \" ===\");\n");
+        sb.append("        // Show first 50 lines of diff\n");
+        sb.append("        String[] lines = diff.split(\"\\\\n\");\n");
+        sb.append("        for (int i = 0; i < Math.min(50, lines.length); i++) {\n");
+        sb.append("            System.err.println(lines[i]);\n");
+        sb.append("        }\n");
+        sb.append("        if (lines.length > 50) {\n");
+        sb.append("            System.err.println(\"... (\" + (lines.length - 50) + \" more lines)\");\n");
         sb.append("        }\n");
         sb.append("    }\n");
     }

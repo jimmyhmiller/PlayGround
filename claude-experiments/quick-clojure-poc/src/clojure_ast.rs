@@ -122,6 +122,84 @@ pub enum Expr {
         field: String,
         object: Box<Expr>,
     },
+
+    /// (throw expr)
+    /// Throws an exception value
+    Throw {
+        exception: Box<Expr>,
+    },
+
+    /// (try expr* catch-clause* finally-clause?)
+    /// Exception handling
+    Try {
+        body: Vec<Expr>,
+        catches: Vec<CatchClause>,
+        finally: Option<Vec<Expr>>,
+    },
+
+    // ========== Protocol System ==========
+
+    /// (defprotocol ProtocolName
+    ///   (method1 [this arg1])
+    ///   (method2 [this arg1 arg2]))
+    /// Defines a protocol with method signatures
+    DefProtocol {
+        name: String,
+        methods: Vec<ProtocolMethodSig>,
+    },
+
+    /// (extend-type TypeName
+    ///   ProtocolName
+    ///   (method1 [this] body...)
+    ///   ProtocolName2
+    ///   (method2 [this x] body...))
+    /// Extends protocols to an existing type
+    ExtendType {
+        type_name: String,
+        implementations: Vec<ProtocolImpl>,
+    },
+
+    /// Protocol method call: (-first coll)
+    /// Protocol methods are called like regular functions but dispatch on first arg's type
+    ProtocolCall {
+        method_name: String,  // e.g., "-first"
+        args: Vec<Expr>,      // First arg is the dispatch target
+    },
+}
+
+/// A catch clause in a try expression
+/// (catch ExceptionType binding body*)
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatchClause {
+    pub exception_type: String,  // e.g., "Exception" (ignored for now - catch all)
+    pub binding: String,         // Local binding for caught exception
+    pub body: Vec<Expr>,
+}
+
+// ========== Protocol-related Structs ==========
+
+/// Method signature in a defprotocol
+/// (method-name [this arg1 arg2] [this arg1])  ; multiple arities
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProtocolMethodSig {
+    pub name: String,
+    /// Each arity is a list of parameter names (including 'this')
+    pub arities: Vec<Vec<String>>,
+}
+
+/// Protocol implementation block in extend-type or deftype
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProtocolImpl {
+    pub protocol_name: String,
+    pub methods: Vec<ProtocolMethodImpl>,
+}
+
+/// Method implementation in a protocol block
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProtocolMethodImpl {
+    pub name: String,
+    pub params: Vec<String>,  // Includes 'this'
+    pub body: Vec<Expr>,
 }
 
 /// Convert parsed Value to AST
@@ -191,6 +269,10 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
                     "binding" => analyze_binding(items),
                     "var" => analyze_var_ref(items),
                     "deftype*" | "deftype" => analyze_deftype(items),
+                    "throw" => analyze_throw(items),
+                    "try" => analyze_try(items),
+                    "defprotocol" => analyze_defprotocol(items),
+                    "extend-type" => analyze_extend_type(items),
                     _ => analyze_call(items),
                 }
             } else {
@@ -749,6 +831,295 @@ fn validate_fn_arities(arities: &[crate::value::FnArity]) -> Result<(), String> 
     Ok(())
 }
 
+fn analyze_throw(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // (throw expr)
+    if items.len() != 2 {
+        return Err(format!("throw requires 1 argument, got {}", items.len() - 1));
+    }
+
+    let exception = analyze(&items[1])?;
+    Ok(Expr::Throw {
+        exception: Box::new(exception),
+    })
+}
+
+fn analyze_try(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // (try body... (catch ExType e handler...) ... (finally cleanup...))
+    // Body is everything before catch/finally clauses
+    // Can have multiple catch clauses
+    // Finally is optional, must be last
+
+    if items.len() < 2 {
+        return Err("try requires at least 1 body expression".to_string());
+    }
+
+    let mut body = Vec::new();
+    let mut catches = Vec::new();
+    let mut finally = None;
+
+    // Iterate through items[1..] and categorize them
+    for i in 1..items.len() {
+        let item = &items[i];
+
+        // Check if this is a catch or finally clause
+        if let Value::List(list_items) = item {
+            if let Some(Value::Symbol(sym)) = list_items.get(0) {
+                if sym == "catch" {
+                    // (catch ExType binding body*)
+                    if list_items.len() < 3 {
+                        return Err("catch requires at least exception type and binding".to_string());
+                    }
+
+                    let exception_type = match &list_items[1] {
+                        Value::Symbol(s) => s.clone(),
+                        _ => return Err("catch exception type must be a symbol".to_string()),
+                    };
+
+                    let binding = match &list_items[2] {
+                        Value::Symbol(s) => s.clone(),
+                        _ => return Err("catch binding must be a symbol".to_string()),
+                    };
+
+                    let mut catch_body = Vec::new();
+                    for j in 3..list_items.len() {
+                        catch_body.push(analyze(&list_items[j])?);
+                    }
+
+                    if catch_body.is_empty() {
+                        catch_body.push(Expr::Literal(Value::Nil));
+                    }
+
+                    catches.push(CatchClause {
+                        exception_type,
+                        binding,
+                        body: catch_body,
+                    });
+                    continue;
+                } else if sym == "finally" {
+                    // (finally body*)
+                    if finally.is_some() {
+                        return Err("try can have at most one finally clause".to_string());
+                    }
+
+                    let mut finally_body = Vec::new();
+                    for j in 1..list_items.len() {
+                        finally_body.push(analyze(&list_items[j])?);
+                    }
+
+                    finally = Some(finally_body);
+                    continue;
+                }
+            }
+        }
+
+        // Not a catch or finally - must be body
+        if !catches.is_empty() || finally.is_some() {
+            return Err("try body expressions must come before catch/finally".to_string());
+        }
+
+        body.push(analyze(item)?);
+    }
+
+    if body.is_empty() {
+        body.push(Expr::Literal(Value::Nil));
+    }
+
+    Ok(Expr::Try {
+        body,
+        catches,
+        finally,
+    })
+}
+
+// ========== Protocol Analyzer Functions ==========
+
+fn analyze_defprotocol(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // (defprotocol ProtocolName
+    //   (method1 [this arg1])
+    //   (method2 [this] [this arg1 arg2]))  ; multiple arities
+    if items.len() < 2 {
+        return Err("defprotocol requires at least a name".to_string());
+    }
+
+    // Get protocol name
+    let name = match &items[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Err("defprotocol name must be a symbol".to_string()),
+    };
+
+    // Parse method signatures
+    let mut methods = Vec::new();
+    for i in 2..items.len() {
+        let method_sig = parse_protocol_method_sig(&items[i])?;
+        methods.push(method_sig);
+    }
+
+    Ok(Expr::DefProtocol { name, methods })
+}
+
+fn parse_protocol_method_sig(value: &Value) -> Result<ProtocolMethodSig, String> {
+    // (method-name [this arg1] [this arg1 arg2])  ; or just (method-name [this])
+    let items = match value {
+        Value::List(items) => items,
+        _ => return Err("Protocol method signature must be a list".to_string()),
+    };
+
+    if items.is_empty() {
+        return Err("Protocol method signature cannot be empty".to_string());
+    }
+
+    // Get method name
+    let name = match &items[0] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Err("Protocol method name must be a symbol".to_string()),
+    };
+
+    // Parse arities - can be multiple vectors
+    let mut arities = Vec::new();
+    for i in 1..items.len() {
+        match &items[i] {
+            Value::Vector(params) => {
+                let mut param_names = Vec::new();
+                for param in params.iter() {
+                    match param {
+                        Value::Symbol(s) => param_names.push(s.clone()),
+                        _ => return Err(format!("Protocol method parameter must be a symbol, got {:?}", param)),
+                    }
+                }
+                if param_names.is_empty() || param_names[0] != "this" {
+                    // For flexibility, don't require 'this' but recommend it
+                }
+                arities.push(param_names);
+            }
+            Value::String(_) => {
+                // Docstring - skip it
+            }
+            _ => {
+                return Err(format!("Protocol method arity must be a vector, got {:?}", items[i]));
+            }
+        }
+    }
+
+    if arities.is_empty() {
+        return Err(format!("Protocol method {} requires at least one arity", name));
+    }
+
+    Ok(ProtocolMethodSig { name, arities })
+}
+
+fn analyze_extend_type(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // (extend-type TypeName
+    //   ProtocolName
+    //   (method1 [this] body...)
+    //   (method2 [this x] body...)
+    //   AnotherProtocol
+    //   (method3 [this] body...))
+    if items.len() < 2 {
+        return Err("extend-type requires at least a type name".to_string());
+    }
+
+    // Get type name
+    let type_name = match &items[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Err("extend-type type name must be a symbol".to_string()),
+    };
+
+    // Parse protocol implementations
+    let implementations = parse_protocol_implementations(&items, 2)?;
+
+    Ok(Expr::ExtendType { type_name, implementations })
+}
+
+fn parse_protocol_implementations(items: &im::Vector<Value>, start_idx: usize) -> Result<Vec<ProtocolImpl>, String> {
+    // Protocol implementations are grouped by protocol name:
+    // ProtocolName
+    // (method1 [this] body...)
+    // (method2 [this x] body...)
+    // AnotherProtocol
+    // (method3 [this] body...)
+
+    let mut implementations = Vec::new();
+    let mut current_protocol: Option<String> = None;
+    let mut current_methods: Vec<ProtocolMethodImpl> = Vec::new();
+
+    for i in start_idx..items.len() {
+        match &items[i] {
+            // A bare symbol is a protocol name
+            Value::Symbol(s) => {
+                // Save previous protocol if any
+                if let Some(protocol_name) = current_protocol.take() {
+                    implementations.push(ProtocolImpl {
+                        protocol_name,
+                        methods: std::mem::take(&mut current_methods),
+                    });
+                }
+                current_protocol = Some(s.clone());
+            }
+            // A list is a method implementation
+            Value::List(method_items) => {
+                if current_protocol.is_none() {
+                    return Err("Method implementation found before protocol name".to_string());
+                }
+                let method_impl = parse_protocol_method_impl(method_items)?;
+                current_methods.push(method_impl);
+            }
+            _ => {
+                return Err(format!("Expected protocol name or method implementation, got {:?}", items[i]));
+            }
+        }
+    }
+
+    // Save last protocol
+    if let Some(protocol_name) = current_protocol {
+        implementations.push(ProtocolImpl {
+            protocol_name,
+            methods: current_methods,
+        });
+    }
+
+    Ok(implementations)
+}
+
+fn parse_protocol_method_impl(items: &im::Vector<Value>) -> Result<ProtocolMethodImpl, String> {
+    // (method-name [this arg1 arg2] body...)
+    if items.len() < 2 {
+        return Err("Protocol method implementation requires at least name and params".to_string());
+    }
+
+    // Get method name
+    let name = match &items[0] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Err("Protocol method name must be a symbol".to_string()),
+    };
+
+    // Get params
+    let params = match &items[1] {
+        Value::Vector(params) => {
+            let mut param_names = Vec::new();
+            for param in params.iter() {
+                match param {
+                    Value::Symbol(s) => param_names.push(s.clone()),
+                    _ => return Err(format!("Method parameter must be a symbol, got {:?}", param)),
+                }
+            }
+            param_names
+        }
+        _ => return Err("Method params must be a vector".to_string()),
+    };
+
+    // Parse body
+    let mut body = Vec::new();
+    for i in 2..items.len() {
+        body.push(analyze(&items[i])?);
+    }
+
+    if body.is_empty() {
+        body.push(Expr::Literal(Value::Nil));
+    }
+
+    Ok(ProtocolMethodImpl { name, params, body })
+}
+
 fn analyze_call(items: &im::Vector<Value>) -> Result<Expr, String> {
     // Check for special call patterns based on the first symbol
     if let Some(Value::Symbol(sym)) = items.get(0) {
@@ -773,6 +1144,31 @@ fn analyze_call(items: &im::Vector<Value>) -> Result<Expr, String> {
                 field,
                 object: Box::new(object),
             });
+        }
+
+        // Check for factory constructor call: (->TypeName arg1 arg2 ...)
+        // This must come before protocol method check since both start with "-"
+        if sym.starts_with("->") && sym.len() > 2 {
+            let type_name = sym[2..].to_string();
+            let mut args = Vec::new();
+            for i in 1..items.len() {
+                args.push(analyze(&items[i])?);
+            }
+            return Ok(Expr::TypeConstruct { type_name, args });
+        }
+
+        // Check for protocol method call: (-method-name obj args...)
+        // Protocol methods start with "-" but not ".-" or "->"
+        if sym.starts_with('-') && sym.len() > 1 && !sym.starts_with(".-") && !sym.starts_with("->") {
+            if items.len() < 2 {
+                return Err(format!("Protocol method {} requires at least 1 argument (the target)", sym));
+            }
+            let method_name = sym.clone();
+            let mut args = Vec::new();
+            for i in 1..items.len() {
+                args.push(analyze(&items[i])?);
+            }
+            return Ok(Expr::ProtocolCall { method_name, args });
         }
     }
 

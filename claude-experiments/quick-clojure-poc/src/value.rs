@@ -13,6 +13,10 @@ pub struct FnArity {
     pub post_conditions: Vec<crate::clojure_ast::Expr>,  // :post assertions (can use %)
 }
 
+// NOTE: Parameter destructuring (Phase 4) is deferred for future implementation.
+// The infrastructure for DestructuringPattern types would be added here when needed.
+// For now, functions only support simple symbol parameters.
+
 /// Clojure value representation
 ///
 /// For Stage 0, we use im-rs for persistent data structures (temporary)

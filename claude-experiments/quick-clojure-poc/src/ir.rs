@@ -74,6 +74,7 @@ impl PartialOrd for VirtualRegister {
 pub enum IrValue {
     Register(VirtualRegister),
     TaggedConstant(isize),  // For tagged integers
+    RawConstant(i64),       // For untagged values (pointers, lengths, etc.)
     True,
     False,
     Null,
@@ -124,6 +125,26 @@ pub enum Instruction {
     Call(IrValue, IrValue, Vec<IrValue>),   // Call(dst, fn, args) - invoke function
     CallWithSaves(IrValue, IrValue, Vec<IrValue>, Vec<IrValue>),  // CallWithSaves(dst, fn, args, saves) - call with register preservation
 
+    // Multi-arity function operations
+    /// MakeMultiArityFn(dst, arities, variadic_min, closure_values)
+    /// arities: Vec of (param_count, code_ptr) pairs
+    /// variadic_min: If Some, the minimum arg count for variadic dispatch
+    MakeMultiArityFn(IrValue, Vec<(usize, usize)>, Option<usize>, Vec<IrValue>),
+
+    /// LoadClosureMultiArity(dst, fn_obj, arity_count, index)
+    /// Load closure variable from multi-arity function (needs arity_count to compute offset)
+    LoadClosureMultiArity(IrValue, IrValue, usize, usize),
+
+    // Variadic argument operations
+    /// CollectRestArgs(dst, fixed_count, param_offset)
+    /// Collects excess args into a list for variadic functions.
+    /// - At runtime, x9 contains the total argument count
+    /// - fixed_count: number of fixed parameters in this arity
+    /// - param_offset: offset for user args (1 for closures, 0 for raw functions)
+    /// The instruction computes: excess_count = x9 - fixed_count
+    /// Then collects args from x(param_offset + fixed_count) onwards into a list.
+    CollectRestArgs(IrValue, usize, usize),
+
     // DefType operations
     /// MakeType(dst, type_id, field_values) - create deftype instance
     MakeType(IrValue, usize, Vec<IrValue>),
@@ -136,6 +157,52 @@ pub enum Instruction {
 
     // GC
     CallGC(IrValue),  // CallGC(dst) - force garbage collection, returns nil
+
+    // Exception handling
+    /// PushExceptionHandler(catch_label, exception_slot_index) - setup exception handler
+    /// Saves SP/FP/LR and catch label; if exception occurs, jumps to catch_label
+    /// with exception stored at the given stack slot index
+    /// The slot index is pre-allocated by the compiler to ensure proper stack frame sizing
+    PushExceptionHandler(Label, usize),
+
+    /// PopExceptionHandler - remove exception handler (normal exit from try)
+    PopExceptionHandler,
+
+    /// Throw(exception_value) - throw exception, never returns
+    /// Pops handler, stores exception, restores SP/FP/LR, jumps to catch
+    Throw(IrValue),
+
+    /// LoadExceptionLocal(dest, exception_slot_index) - load exception value from stack after catch
+    /// Loads the exception from the pre-allocated stack slot into dest register
+    LoadExceptionLocal(IrValue, usize),
+
+    // Assertion checking (pre/post conditions)
+
+    /// AssertPre(condition_value, condition_index)
+    /// Checks if condition_value is truthy; if falsy, throws AssertionError
+    /// condition_index is used in error message
+    AssertPre(IrValue, usize),
+
+    /// AssertPost(condition_value, condition_index)
+    /// Like AssertPre but for post-conditions
+    AssertPost(IrValue, usize),
+
+    // Protocol system
+
+    /// RegisterProtocolMethod(type_id, protocol_id, method_index, fn_ptr)
+    /// Registers a method implementation in the protocol vtable
+    RegisterProtocolMethod(usize, usize, usize, IrValue),
+
+    // External calls (for trampolines)
+
+    /// ExternalCall(dst, func_addr, args) - call a known function address
+    /// func_addr is an untagged constant (the trampoline address)
+    /// Used for protocol lookup, var access, etc.
+    ExternalCall(IrValue, usize, Vec<IrValue>),
+
+    /// ExternalCallWithSaves(dst, func_addr, args, saves) - with register preservation
+    /// Created by register allocator from ExternalCall
+    ExternalCallWithSaves(IrValue, usize, Vec<IrValue>, Vec<IrValue>),
 }
 
 /// IR builder - helps construct IR instructions
@@ -145,6 +212,10 @@ pub struct IrBuilder {
     next_argument_register: usize,
     next_label: usize,
     pub instructions: Vec<Instruction>,
+    /// Number of stack slots reserved for exception handling
+    /// These are allocated before register allocation runs, ensuring
+    /// the stack frame is sized correctly in the prologue
+    pub reserved_exception_slots: usize,
 }
 
 impl Default for IrBuilder {
@@ -161,7 +232,16 @@ impl IrBuilder {
             next_argument_register: 0,
             next_label: 0,
             instructions: Vec::new(),
+            reserved_exception_slots: 0,
         }
+    }
+
+    /// Allocate a stack slot for exception handling
+    /// Returns the slot index (0-based, will be converted to FP-relative offset in codegen)
+    pub fn allocate_exception_slot(&mut self) -> usize {
+        let slot = self.reserved_exception_slots;
+        self.reserved_exception_slots += 1;
+        slot
     }
 
     /// Create a new temporary register
@@ -193,14 +273,10 @@ impl IrBuilder {
     }
 
     /// Take the instructions without consuming the builder, clearing the buffer
+    /// Also resets the reserved_exception_slots counter
     pub fn take_instructions(&mut self) -> Vec<Instruction> {
-        let instructions = std::mem::take(&mut self.instructions);
-        // for inst in &instructions {
-        //     if let Instruction::MakeFunction(_, _, closure_values) = inst {
-        //         eprintln!("DEBUG IrBuilder::take_instructions - MakeFunction with closure_values = {:?}", closure_values);
-        //     }
-        // }
-        instructions
+        self.reserved_exception_slots = 0;
+        std::mem::take(&mut self.instructions)
     }
 }
 
