@@ -36,6 +36,11 @@ fn print_tagged_value(tagged_value: i64, runtime: &GCRuntime) {
                     let untagged = tagged_value >> 3;
                     println!("{}", untagged);
                 }
+                0b001 => {
+                    // Float - heap-allocated, read from heap
+                    let float_val = runtime.read_float(tagged_value as usize);
+                    println!("{}", float_val);
+                }
                 0b100 => {
                     // Function pointer
                     println!("#<fn@{:x}>", tagged_value as u64 >> 3);
@@ -43,6 +48,11 @@ fn print_tagged_value(tagged_value: i64, runtime: &GCRuntime) {
                 0b101 => {
                     // Closure
                     println!("#<closure@{:x}>", tagged_value as u64 >> 3);
+                }
+                0b010 => {
+                    // String - use runtime's format_value
+                    let formatted = runtime.format_value(tagged_value as usize);
+                    println!("{}", formatted);
                 }
                 0b110 => {
                     // HeapObject - use runtime's format_value for proper type handling
@@ -61,30 +71,30 @@ fn print_tagged_value(tagged_value: i64, runtime: &GCRuntime) {
 fn print_help() {
     println!("\nClojure REPL Commands:");
     println!("  (+ 1 2)           - Execute expression");
-    println!("  :ast (+ 1 2)      - Show AST");
-    println!("  :ir (+ 1 2)       - Show IR instructions");
-    println!("  :asm (+ 1 2)      - Show ARM64 machine code");
+    println!("  /ast (+ 1 2)      - Show AST");
+    println!("  /ir (+ 1 2)       - Show IR instructions");
+    println!("  /asm (+ 1 2)      - Show ARM64 machine code");
     println!();
     println!("GC Commands:");
-    println!("  :gc               - Run garbage collection");
-    println!("  :gc-always        - Enable GC before every allocation (stress test)");
-    println!("  :gc-always off    - Disable gc-always mode");
+    println!("  /gc               - Run garbage collection");
+    println!("  /gc-always        - Enable GC before every allocation (stress test)");
+    println!("  /gc-always off    - Disable gc-always mode");
     println!();
     println!("Heap Inspection:");
-    println!("  :heap             - Show basic heap statistics");
-    println!("  :stats            - Show detailed heap stats (objects by type, free list)");
-    println!("  :objects          - List all live objects");
-    println!("  :objects <Type>   - List objects by type (String, Var, Namespace, etc.)");
-    println!("  :inspect-addr 0x..- Inspect object at address");
-    println!("  :refs 0x...       - Find references to an object");
-    println!("  :roots            - List all GC roots");
+    println!("  /heap             - Show basic heap statistics");
+    println!("  /stats            - Show detailed heap stats (objects by type, free list)");
+    println!("  /objects          - List all live objects");
+    println!("  /objects <Type>   - List objects by type (String, Var, Namespace, etc.)");
+    println!("  /inspect-addr 0x..- Inspect object at address");
+    println!("  /refs 0x...       - Find references to an object");
+    println!("  /roots            - List all GC roots");
     println!();
     println!("Namespace:");
-    println!("  :namespaces       - List all namespaces");
-    println!("  :inspect <ns>     - Inspect namespace bindings");
+    println!("  /namespaces       - List all namespaces");
+    println!("  /inspect <ns>     - Inspect namespace bindings");
     println!();
-    println!("  :help             - Show this help");
-    println!("  :quit             - Exit REPL");
+    println!("  /help             - Show this help");
+    println!("  /quit             - Exit REPL");
     println!();
 }
 
@@ -720,16 +730,16 @@ fn main() {
                 }
 
                 // Check for REPL commands
-                if input == ":help" {
+                if input == "/help" {
                     print_help();
                     continue;
                 }
 
-                if input == ":quit" || input == ":exit" {
+                if input == "/quit" || input == "/exit" {
                     break;
                 }
 
-                if input == ":gc" {
+                if input == "/gc" {
                     // SAFETY: REPL command, not during compilation
                     unsafe {
                         let rt = &mut *runtime.get();
@@ -745,7 +755,7 @@ fn main() {
                     continue;
                 }
 
-                if input == ":gc-always" || input == ":gc-always on" {
+                if input == "/gc-always" || input == "/gc-always on" {
                     // SAFETY: REPL command, not during compilation
                     unsafe {
                         let rt = &mut *runtime.get();
@@ -755,7 +765,7 @@ fn main() {
                     continue;
                 }
 
-                if input == ":gc-always off" {
+                if input == "/gc-always off" {
                     // SAFETY: REPL command, not during compilation
                     unsafe {
                         let rt = &mut *runtime.get();
@@ -765,7 +775,7 @@ fn main() {
                     continue;
                 }
 
-                if input == ":heap" {
+                if input == "/heap" {
                     // SAFETY: REPL command, not during compilation
                     let stats = unsafe {
                         let rt = &*runtime.get();
@@ -781,7 +791,7 @@ fn main() {
                     continue;
                 }
 
-                if input == ":namespaces" {
+                if input == "/namespaces" {
                     // SAFETY: REPL command, not during compilation
                     let namespaces = unsafe {
                         let rt = &*runtime.get();
@@ -797,8 +807,8 @@ fn main() {
                     continue;
                 }
 
-                if input.starts_with(":inspect ") {
-                    let ns_name = input.trim_start_matches(":inspect ").trim();
+                if input.starts_with("/inspect ") {
+                    let ns_name = input.trim_start_matches("/inspect ").trim();
 
                     // SAFETY: REPL command, not during compilation
                     unsafe {
@@ -817,7 +827,8 @@ fn main() {
                             for (name, var_ptr) in bindings {
                                 let value = rt.var_get_value(var_ptr);
                                 let untagged = value >> 3;
-                                println!("  {:12}  0x{:08x}      {}", name, var_ptr, untagged);
+                                let tag = value & 7;
+                                println!("  {:12}  0x{:08x}      {} (tag={})", name, var_ptr, untagged, tag);
                             }
                             println!("╚═══════════════════════════════════════════════════╝\n");
                         } else {
@@ -829,7 +840,7 @@ fn main() {
 
                 // ========== Heap Inspection Commands ==========
 
-                if input == ":stats" {
+                if input == "/stats" {
                     // Detailed heap statistics
                     let stats = unsafe {
                         let rt = &*runtime.get();
@@ -863,10 +874,10 @@ fn main() {
                     continue;
                 }
 
-                if input == ":objects" || input.starts_with(":objects ") {
+                if input == "/objects" || input.starts_with("/objects ") {
                     // List objects (optionally filtered by type)
-                    let type_filter = if input.starts_with(":objects ") {
-                        Some(input.trim_start_matches(":objects ").trim())
+                    let type_filter = if input.starts_with("/objects ") {
+                        Some(input.trim_start_matches("/objects ").trim())
                     } else {
                         None
                     };
@@ -901,9 +912,9 @@ fn main() {
                     continue;
                 }
 
-                if input.starts_with(":inspect-addr ") {
+                if input.starts_with("/inspect-addr ") {
                     // Inspect object at address
-                    let addr_str = input.trim_start_matches(":inspect-addr ").trim();
+                    let addr_str = input.trim_start_matches("/inspect-addr ").trim();
                     let addr = if addr_str.starts_with("0x") || addr_str.starts_with("0X") {
                         usize::from_str_radix(&addr_str[2..], 16)
                     } else {
@@ -944,9 +955,9 @@ fn main() {
                     continue;
                 }
 
-                if input.starts_with(":refs ") {
+                if input.starts_with("/refs ") {
                     // Find references to object
-                    let addr_str = input.trim_start_matches(":refs ").trim();
+                    let addr_str = input.trim_start_matches("/refs ").trim();
                     let addr = if addr_str.starts_with("0x") || addr_str.starts_with("0X") {
                         usize::from_str_radix(&addr_str[2..], 16)
                     } else {
@@ -982,7 +993,7 @@ fn main() {
                     continue;
                 }
 
-                if input == ":roots" {
+                if input == "/roots" {
                     // List all GC roots
                     let roots = unsafe {
                         let rt = &*runtime.get();
@@ -1006,7 +1017,7 @@ fn main() {
                 }
 
                 // Parse command and code
-                let (command, code) = if input.starts_with(':') {
+                let (command, code) = if input.starts_with('/') {
                     let parts: Vec<&str> = input.splitn(2, ' ').collect();
                     if parts.len() == 2 {
                         (parts[0], parts[1])
@@ -1024,12 +1035,12 @@ fn main() {
                         match analyze(&value) {
                             Ok(ast) => {
                                 match command {
-                                    ":ast" => {
+                                    "/ast" => {
                                         println!("\nAST:");
                                         print_ast(&ast, 0);
                                         println!();
                                     }
-                                    ":ir" => {
+                                    "/ir" => {
                                         // Use the REPL compiler so we can access defined vars
                                         match repl_compiler.compile(&ast) {
                                             Ok(_) => {
@@ -1054,7 +1065,7 @@ fn main() {
                                             Err(e) => eprintln!("Compile error: {}", e),
                                         }
                                     }
-                                    ":asm" | ":machine" => {
+                                    "/asm" | "/machine" => {
                                         // Use the REPL compiler so we can access defined vars
                                         match repl_compiler.compile(&ast) {
                                             Ok(result_reg) => {
@@ -1115,7 +1126,7 @@ fn main() {
                                     }
                                     _ => {
                                         eprintln!("Unknown command: {}", command);
-                                        eprintln!("Type :help for available commands");
+                                        eprintln!("Type /help for available commands");
                                     }
                                 }
                             }

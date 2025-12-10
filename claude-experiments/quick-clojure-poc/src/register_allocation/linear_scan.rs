@@ -118,10 +118,29 @@ impl LinearScan {
             Instruction::AddInt(dst, src1, src2)
             | Instruction::Sub(dst, src1, src2)
             | Instruction::Mul(dst, src1, src2)
-            | Instruction::Div(dst, src1, src2) => {
+            | Instruction::Div(dst, src1, src2)
+            | Instruction::AddFloat(dst, src1, src2)
+            | Instruction::SubFloat(dst, src1, src2)
+            | Instruction::MulFloat(dst, src1, src2)
+            | Instruction::DivFloat(dst, src1, src2)
+            | Instruction::BitAnd(dst, src1, src2)
+            | Instruction::BitOr(dst, src1, src2)
+            | Instruction::BitXor(dst, src1, src2)
+            | Instruction::BitShiftLeft(dst, src1, src2)
+            | Instruction::BitShiftRight(dst, src1, src2)
+            | Instruction::UnsignedBitShiftRight(dst, src1, src2) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
                 if let IrValue::Register(r) = src1 { regs.push(*r); }
                 if let IrValue::Register(r) = src2 { regs.push(*r); }
+            }
+
+            Instruction::IntToFloat(dst, src)
+            | Instruction::GetTag(dst, src)
+            | Instruction::LoadFloat(dst, src)
+            | Instruction::AllocateFloat(dst, src)
+            | Instruction::BitNot(dst, src) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = src { regs.push(*r); }
             }
 
             Instruction::Compare(dst, src1, src2, _) => {
@@ -230,6 +249,10 @@ impl LinearScan {
             }
 
             Instruction::CallGC(dst) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+            }
+
+            Instruction::LoadKeyword(dst, _index) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
             }
 
@@ -427,7 +450,17 @@ impl LinearScan {
             Instruction::AddInt(dst, src1, src2)
             | Instruction::Sub(dst, src1, src2)
             | Instruction::Mul(dst, src1, src2)
-            | Instruction::Div(dst, src1, src2) => {
+            | Instruction::Div(dst, src1, src2)
+            | Instruction::AddFloat(dst, src1, src2)
+            | Instruction::SubFloat(dst, src1, src2)
+            | Instruction::MulFloat(dst, src1, src2)
+            | Instruction::DivFloat(dst, src1, src2)
+            | Instruction::BitAnd(dst, src1, src2)
+            | Instruction::BitOr(dst, src1, src2)
+            | Instruction::BitXor(dst, src1, src2)
+            | Instruction::BitShiftLeft(dst, src1, src2)
+            | Instruction::BitShiftRight(dst, src1, src2)
+            | Instruction::UnsignedBitShiftRight(dst, src1, src2) => {
                 replace(dst);
                 replace(src1);
                 replace(src2);
@@ -444,7 +477,12 @@ impl LinearScan {
                 replace(src);
             }
 
-            Instruction::Untag(dst, src) => {
+            Instruction::Untag(dst, src)
+            | Instruction::IntToFloat(dst, src)
+            | Instruction::GetTag(dst, src)
+            | Instruction::LoadFloat(dst, src)
+            | Instruction::AllocateFloat(dst, src)
+            | Instruction::BitNot(dst, src) => {
                 replace(dst);
                 replace(src);
             }
@@ -538,6 +576,10 @@ impl LinearScan {
             }
 
             Instruction::CallGC(dst) => {
+                replace(dst);
+            }
+
+            Instruction::LoadKeyword(dst, _index) => {
                 replace(dst);
             }
 
@@ -728,7 +770,17 @@ impl LinearScan {
             Instruction::AddInt(dst, src1, src2)
             | Instruction::Sub(dst, src1, src2)
             | Instruction::Mul(dst, src1, src2)
-            | Instruction::Div(dst, src1, src2) => {
+            | Instruction::Div(dst, src1, src2)
+            | Instruction::AddFloat(dst, src1, src2)
+            | Instruction::SubFloat(dst, src1, src2)
+            | Instruction::MulFloat(dst, src1, src2)
+            | Instruction::DivFloat(dst, src1, src2)
+            | Instruction::BitAnd(dst, src1, src2)
+            | Instruction::BitOr(dst, src1, src2)
+            | Instruction::BitXor(dst, src1, src2)
+            | Instruction::BitShiftLeft(dst, src1, src2)
+            | Instruction::BitShiftRight(dst, src1, src2)
+            | Instruction::UnsignedBitShiftRight(dst, src1, src2) => {
                 replace(dst);
                 replace(src1);
                 replace(src2);
@@ -745,7 +797,12 @@ impl LinearScan {
                 replace(src);
             }
 
-            Instruction::Untag(dst, src) => {
+            Instruction::Untag(dst, src)
+            | Instruction::IntToFloat(dst, src)
+            | Instruction::GetTag(dst, src)
+            | Instruction::LoadFloat(dst, src)
+            | Instruction::AllocateFloat(dst, src)
+            | Instruction::BitNot(dst, src) => {
                 replace(dst);
                 replace(src);
             }
@@ -839,6 +896,10 @@ impl LinearScan {
             }
 
             Instruction::CallGC(dst) => {
+                replace(dst);
+            }
+
+            Instruction::LoadKeyword(dst, _index) => {
                 replace(dst);
             }
 

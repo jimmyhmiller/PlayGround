@@ -51,6 +51,13 @@ public class Parser {
     private int exprStartPos = 0;
     private SourceLocation.Position exprStartLoc = null;
 
+    // Track whether current expression came from a parenthesized context (for directive detection)
+    private boolean lastExpressionWasParenthesized = false;
+
+    // Track whether we're parsing statements in a context where directives are valid
+    // (Program body or function body - not loop bodies, if consequents, etc.)
+    private boolean inDirectiveContext = false;
+
     public Parser(String source) {
         this(source, false, false);
     }
@@ -69,7 +76,7 @@ public class Parser {
         boolean initialStrictMode = forceModuleMode || forceStrictMode;
         this.strictMode = initialStrictMode;
 
-        this.lexer = new Lexer(source, initialStrictMode);
+        this.lexer = new Lexer(source, initialStrictMode, forceModuleMode);
         this.tokens = lexer.tokenize();
         this.forceModuleMode = forceModuleMode;
         this.lineOffsets = buildLineOffsetIndex();
@@ -78,9 +85,12 @@ public class Parser {
     public Program parse() {
         List<Statement> statements = new ArrayList<>();
 
+        // Enable directive context for program body
+        inDirectiveContext = true;
         while (!isAtEnd()) {
             statements.add(parseStatement());
         }
+        inDirectiveContext = false;
 
         // Process directive prologue for program
         statements = processDirectives(statements);
@@ -172,6 +182,20 @@ public class Parser {
     }
 
     /**
+     * Parse a nested statement (e.g., for-loop body, if consequent).
+     * Clears directive context since directives are only valid at the top level of Program/function body.
+     */
+    private Statement parseNestedStatement() {
+        boolean savedDirectiveContext = inDirectiveContext;
+        inDirectiveContext = false;
+        try {
+            return parseStatement();
+        } finally {
+            inDirectiveContext = savedDirectiveContext;
+        }
+    }
+
+    /**
      * Handle LET which can be either a declaration keyword or an identifier.
      * - let x = 1     → VariableDeclaration
      * - let = 5       → ExpressionStatement (let as identifier)
@@ -234,7 +258,7 @@ public class Parser {
         // Check if this is a labeled statement (identifier followed by colon)
         if (expr instanceof Identifier id && check(TokenType.COLON)) {
             advance(); // consume ':'
-            Statement labeledBody = parseStatement();
+            Statement labeledBody = parseNestedStatement();
             Token endToken = previous();
             return new LabeledStatement(getStart(token), getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), id, labeledBody);
         }
@@ -250,19 +274,27 @@ public class Parser {
      * Also handles labeled statements if the expression is an identifier followed by colon.
      */
     private Statement parseExpressionStatement(Token token) {
+        // Reset parenthesized flag before parsing expression
+        lastExpressionWasParenthesized = false;
         Expression expr = parseExpression();
+        // Capture whether the expression was parenthesized (for directive detection)
+        boolean wasParenthesized = lastExpressionWasParenthesized;
 
         // Check if this is a labeled statement (identifier followed by colon)
         if (expr instanceof Identifier id && check(TokenType.COLON)) {
             advance(); // consume ':'
-            Statement labeledBody = parseStatement();
+            Statement labeledBody = parseNestedStatement();
             Token endToken = previous();
             return new LabeledStatement(getStart(token), getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), id, labeledBody);
         }
 
         consumeSemicolon("Expected ';' after expression");
         Token endToken = previous();
-        return new ExpressionStatement(getStart(token), getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), expr);
+
+        // If expression was parenthesized and we're in a directive context, mark it so it won't be treated as directive
+        // Only use the empty directive marker in directive contexts (Program/function body)
+        String directive = (inDirectiveContext && wasParenthesized) ? "" : null;
+        return new ExpressionStatement(getStart(token), getEnd(endToken), token.line(), token.column(), endToken.endLine(), endToken.endColumn(), expr, directive);
     }
 
     private WhileStatement parseWhileStatement() {
@@ -273,7 +305,7 @@ public class Parser {
         Expression test = parseExpression();
         consume(TokenType.RPAREN, "Expected ')' after while condition");
 
-        Statement body = parseStatement();
+        Statement body = parseNestedStatement();
 
         Token endToken = previous();
         return new WhileStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), test, body);
@@ -283,7 +315,7 @@ public class Parser {
         Token startToken = peek();
         advance(); // consume 'do'
 
-        Statement body = parseStatement();
+        Statement body = parseNestedStatement();
 
         consume(TokenType.WHILE, "Expected 'while' after do body");
         consume(TokenType.LPAREN, "Expected '(' after 'while'");
@@ -425,7 +457,7 @@ public class Parser {
 
             Expression right = parseExpression();
             consume(TokenType.RPAREN, "Expected ')' after for-in");
-            Statement body = parseStatement();
+            Statement body = parseNestedStatement();
             Token endToken = previous();
             return new ForInStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), initOrLeft, right, body);
         } else if (isOfKeyword) {
@@ -436,7 +468,7 @@ public class Parser {
             }
             Expression right = parseExpression();
             consume(TokenType.RPAREN, "Expected ')' after for-of");
-            Statement body = parseStatement();
+            Statement body = parseNestedStatement();
             Token endToken = previous();
             return new ForOfStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), isAwait, initOrLeft, right, body);
         }
@@ -458,7 +490,7 @@ public class Parser {
         }
         consume(TokenType.RPAREN, "Expected ')' after for clauses");
 
-        Statement body = parseStatement();
+        Statement body = parseNestedStatement();
 
         Token endToken = previous();
         return new ForStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), initOrLeft, test, update, body);
@@ -472,11 +504,11 @@ public class Parser {
         Expression test = parseExpression();
         consume(TokenType.RPAREN, "Expected ')' after if condition");
 
-        Statement consequent = parseStatement();
+        Statement consequent = parseNestedStatement();
 
         Statement alternate = null;
         if (match(TokenType.ELSE)) {
-            alternate = parseStatement();
+            alternate = parseNestedStatement();
         }
 
         Token endToken = previous();
@@ -568,7 +600,7 @@ public class Parser {
                 // Parse consequent statements until we hit another case/default or closing brace
                 List<Statement> consequent = new ArrayList<>();
                 while (!check(TokenType.CASE) && !check(TokenType.DEFAULT) && !check(TokenType.RBRACE) && !isAtEnd()) {
-                    consequent.add(parseStatement());
+                    consequent.add(parseNestedStatement());
                 }
 
                 Token caseEnd = previous();
@@ -581,7 +613,7 @@ public class Parser {
                 // Parse consequent statements
                 List<Statement> consequent = new ArrayList<>();
                 while (!check(TokenType.CASE) && !check(TokenType.DEFAULT) && !check(TokenType.RBRACE) && !isAtEnd()) {
-                    consequent.add(parseStatement());
+                    consequent.add(parseNestedStatement());
                 }
 
                 Token caseEnd = previous();
@@ -669,7 +701,7 @@ public class Parser {
         Expression object = parseExpression();
         consume(TokenType.RPAREN, "Expected ')' after with object");
 
-        Statement body = parseStatement();
+        Statement body = parseNestedStatement();
 
         Token endToken = previous();
         return new WithStatement(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), object, body);
@@ -847,7 +879,7 @@ public class Parser {
 
                         List<Statement> blockBody = new ArrayList<>();
                         while (!check(TokenType.RBRACE) && !isAtEnd()) {
-                            blockBody.add(parseStatement());
+                            blockBody.add(parseNestedStatement());
                         }
 
                         Token blockEnd = peek();
@@ -859,13 +891,26 @@ public class Parser {
                 }
             }
 
-            // Check for 'async' keyword (but not if it's a method named "async")
+            // Check for 'async' keyword (but not if it's a method named "async" or field named "async")
             boolean isAsync = false;
             if (check(TokenType.IDENTIFIER) && peek().lexeme().equals("async")) {
-                // Look ahead to see if this is "async()" (method name) or "async something" (modifier)
-                if (current + 1 < tokens.size() && tokens.get(current + 1).type() != TokenType.LPAREN) {
-                    advance();
-                    isAsync = true;
+                // Look ahead to see if this is "async()" (method name), "async;" or "async =" (field),
+                // or "async something" (modifier)
+                if (current + 1 < tokens.size()) {
+                    Token currentToken = peek();
+                    Token nextToken = tokens.get(current + 1);
+                    TokenType nextType = nextToken.type();
+
+                    // async is NOT a modifier if followed by ( ; = or if there's a line break (ASI)
+                    if (nextType != TokenType.LPAREN && nextType != TokenType.SEMICOLON &&
+                        nextType != TokenType.ASSIGN) {
+                        // Check for ASI: if there's a line break after "async", it's a field, not a modifier
+                        boolean hasLineBreak = nextToken.line() > currentToken.line();
+                        if (!hasLineBreak) {
+                            advance();
+                            isAsync = true;
+                        }
+                    }
                 }
             }
 
@@ -963,8 +1008,9 @@ public class Parser {
                             // Keep original if conversion fails
                         }
                     }
-
-                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), null, keyLexeme, null, bigintValue);
+                    // value should be the decimal bigint + 'n' to match Acorn's JSON serialization of BigInt
+                    String valueStr = bigintValue + "n";
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), valueStr, keyLexeme, null, bigintValue);
                 } else {
                     Object literalValue = keyToken.literal();
                     if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
@@ -1486,10 +1532,21 @@ public class Parser {
         boolean oldAllowIn = allowIn;
         allowIn = true;
 
+        // Enable directive context for function bodies
+        boolean oldDirectiveContext = inDirectiveContext;
+        if (isFunctionBody) {
+            inDirectiveContext = true;
+        } else {
+            inDirectiveContext = false;
+        }
+
         List<Statement> statements = new ArrayList<>();
         while (!check(TokenType.RBRACE) && !isAtEnd()) {
             statements.add(parseStatement());
         }
+
+        // Restore directive context
+        inDirectiveContext = oldDirectiveContext;
 
         // Process directive prologue only for function bodies
         if (isFunctionBody) {
@@ -1511,6 +1568,25 @@ public class Parser {
         boolean inPrologue = true;
 
         for (Statement stmt : statements) {
+            // First, handle parenthesized expressions (marked with empty directive)
+            // These need their empty directive cleared, regardless of prologue state
+            if (stmt instanceof ExpressionStatement exprStmt && exprStmt.directive() != null && exprStmt.directive().isEmpty()) {
+                // Clear the empty directive marker and add as regular statement
+                processed.add(new ExpressionStatement(
+                    exprStmt.start(),
+                    exprStmt.end(),
+                    exprStmt.startLine(),
+                    exprStmt.startCol(),
+                    exprStmt.endLine(),
+                    exprStmt.endCol(),
+                    exprStmt.expression(),
+                    null
+                ));
+                // Parenthesized expression ends the prologue
+                inPrologue = false;
+                continue;
+            }
+
             if (inPrologue && stmt instanceof ExpressionStatement exprStmt) {
                 if (exprStmt.expression() instanceof Literal lit && lit.value() instanceof String) {
                     // This is a directive
@@ -1537,7 +1613,7 @@ public class Parser {
                     // Non-string-literal expression ends the prologue
                     inPrologue = false;
                 }
-            } else {
+            } else if (inPrologue) {
                 // Non-expression statement ends the prologue
                 inPrologue = false;
             }
@@ -1589,7 +1665,12 @@ public class Parser {
 
         // Check for default value: pattern = defaultValue
         if (match(TokenType.ASSIGN)) {
+            // Inside destructuring patterns, 'in' is always the operator, not for-in keyword
+            // For example: for (let [x = 'a' in {}] = []; ...) - the 'in' is an operator
+            boolean savedAllowIn = allowIn;
+            allowIn = true;
             Expression defaultValue = parseExpr(BP_ASSIGNMENT);
+            allowIn = savedAllowIn;
             Token endToken = previous();
             return new AssignmentPattern(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), pattern, defaultValue);
         }
@@ -1677,8 +1758,9 @@ public class Parser {
                             // Keep original if conversion fails
                         }
                     }
-
-                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), null, keyLexeme, null, bigintValue);
+                    // value should be the decimal bigint + 'n' to match Acorn's JSON serialization of BigInt
+                    String valueStr = bigintValue + "n";
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), valueStr, keyLexeme, null, bigintValue);
                 } else {
                     Object literalValue = keyToken.literal();
                     if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
@@ -1709,7 +1791,11 @@ public class Parser {
                     // Check for default value in shorthand: { x = 1 }
                     if (match(TokenType.ASSIGN)) {
                         Token assignStart = previous();
+                        // Inside destructuring patterns, 'in' is always the operator, not for-in keyword
+                        boolean savedAllowIn = allowIn;
+                        allowIn = true;
                         Expression defaultValue = parseExpr(BP_ASSIGNMENT);
+                        allowIn = savedAllowIn;
                         Token assignEnd = previous();
                         value = new AssignmentPattern(getStart(propStart), getEnd(assignEnd), propStart.line(), propStart.column(), assignEnd.endLine(), assignEnd.endColumn(), id, defaultValue);
                     }
@@ -1859,6 +1945,7 @@ public class Parser {
 
                 // Identifiers and keywords
                 case IDENTIFIER -> prefixIdentifier(this, prevToken);
+                case LET, OF -> prefixIdentifier(this, prevToken); // let and of are valid identifiers in non-strict mode
                 case THIS -> prefixThis(this, prevToken);
                 case SUPER -> prefixSuper(this, prevToken);
 
@@ -1962,6 +2049,21 @@ public class Parser {
                 break;
             }
 
+            // ASI rules for ( and [:
+            // - If previous token is }, ASI applies before ( (but not [)
+            // - In class field context, ASI applies before [
+            if (previous().line() < peek().line()) {
+                Token prevToken = previous();
+                if (tt == TokenType.LPAREN && prevToken.type() == TokenType.RBRACE) {
+                    // ASI before ( when previous is } (e.g., arrow function body)
+                    break;
+                }
+                if (tt == TokenType.LBRACKET && inClassFieldInitializer) {
+                    // ASI before [ in class field context
+                    break;
+                }
+            }
+
             // Track optional chaining - only ?. and subsequent chain operations
             boolean isChainOperator = tt == TokenType.QUESTION_DOT ||
                 (hasOptionalChaining && (
@@ -2045,7 +2147,9 @@ public class Parser {
                     bigintValue = bi.toString();
                 } catch (NumberFormatException e) { /* keep original */ }
             }
-            return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), null, lexeme, null, bigintValue);
+            // value should be the decimal bigint + 'n' to match Acorn's JSON serialization of BigInt
+            String valueStr = bigintValue + "n";
+            return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), valueStr, lexeme, null, bigintValue);
         }
 
         // Handle Infinity/-Infinity/NaN - value should be null per ESTree spec
@@ -2118,6 +2222,10 @@ public class Parser {
         p.allowIn = oldAllowIn;
 
         p.consume(TokenType.RPAREN, "Expected ')' after expression");
+
+        // Mark that this expression was parenthesized (for directive detection)
+        p.lastExpressionWasParenthesized = true;
+
         return expr;
     }
 
@@ -2563,6 +2671,9 @@ public class Parser {
 
     private List<Expression> parseArgumentList() {
         List<Expression> args = new ArrayList<>();
+        // Arguments to function calls should always allow 'in' operator
+        boolean savedAllowIn = allowIn;
+        allowIn = true;
         if (!check(TokenType.RPAREN)) {
             do {
                 if (check(TokenType.RPAREN)) break; // trailing comma
@@ -2576,6 +2687,7 @@ public class Parser {
                 }
             } while (match(TokenType.COMMA));
         }
+        allowIn = savedAllowIn;
         return args;
     }
 
@@ -2965,7 +3077,40 @@ public class Parser {
             consume(TokenType.RBRACKET, "Expected ']' after computed property name");
         } else if (check(TokenType.STRING) || check(TokenType.NUMBER)) {
             Token keyToken = advance();
-            key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), keyToken.literal(), keyToken.lexeme());
+            String keyLexeme = keyToken.lexeme();
+
+            // Check if this is a BigInt literal (ends with 'n')
+            if (keyToken.type() == TokenType.NUMBER && keyLexeme.endsWith("n")) {
+                // BigInt literal: value is null, bigint field has the numeric part
+                String bigintValue = keyLexeme.substring(0, keyLexeme.length() - 1).replace("_", "");
+                // Convert hex/octal/binary BigInt to decimal string
+                if (bigintValue.startsWith("0x") || bigintValue.startsWith("0X")) {
+                    try {
+                        java.math.BigInteger bi = new java.math.BigInteger(bigintValue.substring(2), 16);
+                        bigintValue = bi.toString();
+                    } catch (NumberFormatException e) { /* keep original */ }
+                } else if (bigintValue.startsWith("0o") || bigintValue.startsWith("0O")) {
+                    try {
+                        java.math.BigInteger bi = new java.math.BigInteger(bigintValue.substring(2), 8);
+                        bigintValue = bi.toString();
+                    } catch (NumberFormatException e) { /* keep original */ }
+                } else if (bigintValue.startsWith("0b") || bigintValue.startsWith("0B")) {
+                    try {
+                        java.math.BigInteger bi = new java.math.BigInteger(bigintValue.substring(2), 2);
+                        bigintValue = bi.toString();
+                    } catch (NumberFormatException e) { /* keep original */ }
+                }
+                // value should be the decimal bigint + 'n' to match Acorn's JSON serialization of BigInt
+                String valueStr = bigintValue + "n";
+                key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), valueStr, keyLexeme, null, bigintValue);
+            } else {
+                // Handle Infinity/-Infinity/NaN - value should be null per ESTree spec
+                Object literalValue = keyToken.literal();
+                if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
+                    literalValue = null;
+                }
+                key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), literalValue, keyLexeme);
+            }
         } else {
             Token keyToken = peek();
             if (!check(TokenType.IDENTIFIER) && !isKeyword(keyToken)) {
@@ -3031,6 +3176,26 @@ public class Parser {
             Token endToken = previous();
             // Property: start, end, loc, method, shorthand, computed, key, value, kind
             return new Property(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), false, false, computed, key, value, "init");
+        } else if (match(TokenType.ASSIGN)) {
+            // Shorthand property with default value: { x = value }
+            // This is only valid in destructuring patterns but we parse it as an object expression
+            // and convert it later. The value is an AssignmentExpression.
+            if (!(key instanceof Identifier)) {
+                throw new ExpectedTokenException("identifier", peek());
+            }
+            Identifier id = (Identifier) key;
+            // Inside object literals with default values (destructuring), 'in' is always the operator
+            boolean savedAllowIn = allowIn;
+            allowIn = true;
+            Expression defaultValue = parseExpr(BP_ASSIGNMENT);
+            allowIn = savedAllowIn;
+            Token endToken = previous();
+            // Create an AssignmentExpression as the value, which will be converted to AssignmentPattern later
+            AssignmentExpression assignExpr = new AssignmentExpression(
+                getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(),
+                "=", id, defaultValue);
+            // Property: start, end, loc, method, shorthand, computed, key, value, kind
+            return new Property(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), false, true, computed, key, assignExpr, "init");
         } else {
             // Shorthand property: { x } means { x: x }
             if (!(key instanceof Identifier)) {
@@ -3175,25 +3340,15 @@ public class Parser {
             } else {
                 // Expression body: () => expr
                 Expression body = parseExpr(BP_ASSIGNMENT);
-            Token endToken = previous();
+                Token endToken = previous();
 
-            // Use body.end() and accurate location for template literals and complex expressions
-            int arrowEnd;
-            int endLine;
-            int endCol;
-            if (body instanceof TemplateLiteral) {
-                arrowEnd = body.end();
-                // Create location using getPositionFromOffset for accurate line/column
-                SourceLocation.Position endPos = getPositionFromOffset(arrowEnd);
-                endLine = endPos.line();
-                endCol = endPos.column();
-            } else {
-                arrowEnd = getEnd(endToken);
-                endLine = endToken.endLine();
-                endCol = endToken.endColumn();
-            }
+                // Always use endToken for arrow end position - this correctly handles
+                // parenthesized expressions like () => (expr) where the ) is consumed
+                int arrowEnd = getEnd(endToken);
+                int endLine = endToken.endLine();
+                int endCol = endToken.endColumn();
 
-            return new ArrowFunctionExpression(getStart(startToken), arrowEnd, startToken.line(), startToken.column(), endLine, endCol, null, true, false, isAsync, params, body);
+                return new ArrowFunctionExpression(getStart(startToken), arrowEnd, startToken.line(), startToken.column(), endLine, endCol, null, true, false, isAsync, params, body);
             }
         } finally {
             inAsyncContext = savedInAsyncContext;
@@ -3258,8 +3413,11 @@ public class Parser {
 
             // Parse expressions and middle/tail quasis
             while (true) {
-                // Parse the expression
+                // Parse the expression - allow 'in' operator in template interpolations
+                boolean savedAllowIn = allowIn;
+                allowIn = true;
                 Expression expr = parseExpression();
+                allowIn = savedAllowIn;
                 expressions.add(expr);
 
                 // Next token should be TEMPLATE_MIDDLE or TEMPLATE_TAIL

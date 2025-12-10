@@ -85,11 +85,34 @@ pub type Label = String;
 
 #[derive(Debug, Clone)]
 pub enum Instruction {
-    // Arithmetic (work on untagged values)
+    // Integer Arithmetic (work on untagged values)
     AddInt(IrValue, IrValue, IrValue),  // dst, src1, src2
     Sub(IrValue, IrValue, IrValue),
     Mul(IrValue, IrValue, IrValue),
     Div(IrValue, IrValue, IrValue),
+
+    // Bitwise operations (work on untagged values)
+    BitAnd(IrValue, IrValue, IrValue),    // dst, src1, src2
+    BitOr(IrValue, IrValue, IrValue),     // dst, src1, src2
+    BitXor(IrValue, IrValue, IrValue),    // dst, src1, src2
+    BitNot(IrValue, IrValue),             // dst, src
+    BitShiftLeft(IrValue, IrValue, IrValue),  // dst, src, amount
+    BitShiftRight(IrValue, IrValue, IrValue), // dst, src, amount (arithmetic/signed)
+    UnsignedBitShiftRight(IrValue, IrValue, IrValue), // dst, src, amount (logical/unsigned)
+
+    // Float Arithmetic (work on raw f64 bits in registers)
+    AddFloat(IrValue, IrValue, IrValue),  // dst, src1, src2 - f64 addition
+    SubFloat(IrValue, IrValue, IrValue),
+    MulFloat(IrValue, IrValue, IrValue),
+    DivFloat(IrValue, IrValue, IrValue),
+    IntToFloat(IrValue, IrValue),         // dst, src - convert int to float
+
+    // Float heap operations (floats are heap-allocated)
+    LoadFloat(IrValue, IrValue),          // dst, src - load f64 from heap float pointer
+    AllocateFloat(IrValue, IrValue),      // dst, src - allocate heap float with f64 value, returns tagged ptr
+
+    // Type tag extraction
+    GetTag(IrValue, IrValue),  // dst, src - extract tag bits (last 3 bits)
 
     // Comparison (produces boolean in register)
     Compare(IrValue, IrValue, IrValue, Condition),  // dst, src1, src2, condition
@@ -157,6 +180,11 @@ pub enum Instruction {
 
     // GC
     CallGC(IrValue),  // CallGC(dst) - force garbage collection, returns nil
+
+    // Keyword literals
+    /// LoadKeyword(dst, keyword_index) - load/intern keyword constant
+    /// At runtime, calls intern_keyword_runtime to get the tagged keyword pointer
+    LoadKeyword(IrValue, usize),
 
     // Exception handling
     /// PushExceptionHandler(catch_label, exception_slot_index) - setup exception handler

@@ -50,6 +50,531 @@ public class GeneratedNodeModulesTest {
         );
     }
 
+    // motion-dom tests
+
+    @Test
+    @DisplayName("motion-dom.dev.js")
+    void test_motionDom_dev() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_jimmyhmiller.github.io_node_modules_motion-dom_dist_motion-dom.dev.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("motion-dom parse-transform.mjs")
+    void test_motionDom_parseTransform() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_jimmyhmiller.github.io_node_modules_motion-dom_dist_es_render_dom_parse-transform.mjs",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("motion-dom.js")
+    void test_motionDom() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_jimmyhmiller.github.io_node_modules_motion-dom_dist_motion-dom.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("motion-dom cjs/index.js")
+    void test_motionDom_cjs() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_jimmyhmiller.github.io_node_modules_motion-dom_dist_cjs_index.js",
+            false
+        );
+    }
+
+    // framer-motion tests
+
+    @Test
+    @DisplayName("framer-motion size-rollup-dom-max.js")
+    void test_framerMotion_sizeRollupDomMax() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_jimmyhmiller.github.io_node_modules_framer-motion_dist_size-rollup-dom-max.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("framer-motion.js")
+    void test_framerMotion() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_jimmyhmiller.github.io_node_modules_framer-motion_dist_framer-motion.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("framer-motion.dev.js")
+    void test_framerMotion_dev() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_jimmyhmiller.github.io_node_modules_framer-motion_dist_framer-motion.dev.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("framer-motion size-rollup-animate.js")
+    void test_framerMotion_sizeRollupAnimate() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_jimmyhmiller.github.io_node_modules_framer-motion_dist_size-rollup-animate.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("framer-motion size-rollup-motion.js")
+    void test_framerMotion_sizeRollupMotion() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_jimmyhmiller.github.io_node_modules_framer-motion_dist_size-rollup-motion.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("framer-motion dom.js")
+    void test_framerMotion_dom() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_jimmyhmiller.github.io_node_modules_framer-motion_dist_dom.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("framer-motion size-rollup-dom-animation.js")
+    void test_framerMotion_sizeRollupDomAnimation() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_jimmyhmiller.github.io_node_modules_framer-motion_dist_size-rollup-dom-animation.js",
+            true
+        );
+    }
+
+    // ==================== AST Mismatch Tests ====================
+
+    @Test
+    @DisplayName("prefer-reflect-apply.js")
+    void test_preferReflectApply() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_ink_node_modules_eslint-plugin-unicorn_rules_prefer-reflect-apply.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("binaryIntegerLiteral.js")
+    void test_binaryIntegerLiteral() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_TypeScript_tests_baselines_reference_binaryIntegerLiteral.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("octalIntegerLiteral.js")
+    void test_octalIntegerLiteral() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_TypeScript_tests_baselines_reference_octalIntegerLiteral.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("octalIntegerLiteralES6.js")
+    void test_octalIntegerLiteralES6() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_TypeScript_tests_baselines_reference_octalIntegerLiteralES6.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("binaryIntegerLiteralES6.js")
+    void test_binaryIntegerLiteralES6() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_TypeScript_tests_baselines_reference_binaryIntegerLiteralES6.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("parenthesizedExpressionInternalComments.js")
+    void test_parenthesizedExpressionInternalComments() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_TypeScript_tests_baselines_reference_parenthesizedExpressionInternalComments.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("swc-8253.js")
+    void test_swc8253() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_oxc_tasks_coverage_misc_pass_swc-8253.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("property-name.js (BigInt)")
+    void test_propertyNameBigInt() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_staging_sm_BigInt_property-name.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("function-name-computed-01.js")
+    void test_functionNameComputed01() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_staging_sm_Function_function-name-computed-01.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("function-name-computed-02.js")
+    void test_functionNameComputed02() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_staging_sm_Function_function-name-computed-02.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("11.1.5-01.js (expressions)")
+    void test_expressions11_1_5_01() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_staging_sm_expressions_11.1.5-01.js",
+            false
+        );
+    }
+
+    // ==================== Parse Failure Tests ====================
+
+    @Test
+    @DisplayName("watchpack.js (poll-app)")
+    void test_watchpackPollApp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_poll-app_frontend_node_modules_watchpack_lib_watchpack.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("watchpack.js (jimmyhmiller.github.io)")
+    void test_watchpackJimmyhmiller() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_jimmyhmiller.github.io_node_modules_watchpack_lib_watchpack.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("watchpack.js (ink)")
+    void test_watchpackInk() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_ink_node_modules_watchpack_lib_watchpack.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("doNotEmitDetachedCommentsAtStartOfLambdaFunction.js")
+    void test_doNotEmitDetachedComments() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_TypeScript_tests_baselines_reference_doNotEmitDetachedCommentsAtStartOfLambdaFunction.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("parserForStatement9.js")
+    void test_parserForStatement9() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_TypeScript_tests_baselines_reference_parserForStatement9.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("parserForOfStatement25.js")
+    void test_parserForOfStatement25() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_TypeScript_tests_baselines_reference_parserForOfStatement25.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("babel-16776-m.js")
+    void test_babel16776m() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_oxc_tasks_coverage_misc_pass_babel-16776-m.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("oxc-255.js")
+    void test_oxc255() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_oxc_tasks_coverage_misc_pass_oxc-255.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("object.js (oxc assignments)")
+    void test_oxcAssignmentsObject() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_oxc_crates_oxc_semantic_tests_fixtures_oxc_js_assignments_object.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("nested-assignment.js (oxc)")
+    void test_oxcNestedAssignment() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_open-source_oxc_crates_oxc_semantic_tests_fixtures_oxc_js_assignments_nested-assignment.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("object-pattern-emulates-undefined.js (annexB)")
+    void test_annexBObjectPatternEmulatesUndefined() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_annexB_language_expressions_assignment_dstr_object-pattern-emulates-undefined.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("rest-parameter-names.js")
+    void test_restParameterNames() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_staging_sm_Function_rest-parameter-names.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("destructuring-object-__proto__-2.js")
+    void test_destructuringObjectProto2() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_staging_sm_expressions_destructuring-object-__proto__-2.js",
+            false
+        );
+    }
+
+    // ==================== Top-Level Await Tests (modules) ====================
+
+    @Test
+    @DisplayName("for-await-await-expr-regexp.js")
+    void test_forAwaitAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_for-await-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("for-in-await-expr-regexp.js")
+    void test_forInAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_for-in-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("export-dflt-assign-expr-await-expr-regexp.js")
+    void test_exportDfltAssignExprAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_export-dflt-assign-expr-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("try-await-expr-regexp.js")
+    void test_tryAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_try-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("while-await-expr-regexp.js")
+    void test_whileAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_while-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("export-dft-class-decl-await-expr-regexp.js")
+    void test_exportDftClassDeclAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_export-dft-class-decl-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("for-await-expr-regexp.js")
+    void test_forAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_for-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("export-lex-decl-await-expr-regexp.js")
+    void test_exportLexDeclAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_export-lex-decl-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("if-expr-await-expr-regexp.js")
+    void test_ifExprAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_if-expr-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("if-block-await-expr-regexp.js")
+    void test_ifBlockAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_if-block-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("export-var-await-expr-regexp.js")
+    void test_exportVarAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_export-var-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("typeof-await-expr-regexp.js")
+    void test_typeofAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_typeof-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("void-await-expr-regexp.js")
+    void test_voidAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_void-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("export-class-decl-await-expr-regexp.js")
+    void test_exportClassDeclAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_export-class-decl-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("top-level-await-expr-regexp.js")
+    void test_topLevelAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_top-level-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("block-await-expr-regexp.js")
+    void test_blockAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_block-await-expr-regexp.js",
+            true
+        );
+    }
+
+    @Test
+    @DisplayName("for-of-await-expr-regexp.js")
+    void test_forOfAwaitExprRegexp() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_module-code_top-level-await_syntax_for-of-await-expr-regexp.js",
+            true
+        );
+    }
+
+    // ==================== For-Await-Of Tests (scripts) ====================
+
+    @Test
+    @DisplayName("async-func-decl-dstr-obj-id-init-fn-name-cover.js")
+    void test_asyncFuncDeclDstrObjIdInitFnNameCover() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_statements_for-await-of_async-func-decl-dstr-obj-id-init-fn-name-cover.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("async-func-decl-dstr-obj-id-init-simple-no-strict.js")
+    void test_asyncFuncDeclDstrObjIdInitSimpleNoStrict() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_statements_for-await-of_async-func-decl-dstr-obj-id-init-simple-no-strict.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("async-gen-decl-dstr-obj-id-init-evaluation.js")
+    void test_asyncGenDeclDstrObjIdInitEvaluation() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_statements_for-await-of_async-gen-decl-dstr-obj-id-init-evaluation.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("async-func-decl-dstr-obj-id-init-fn-name-fn.js")
+    void test_asyncFuncDeclDstrObjIdInitFnNameFn() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_statements_for-await-of_async-func-decl-dstr-obj-id-init-fn-name-fn.js",
+            false
+        );
+    }
+
+    @Test
+    @DisplayName("async-gen-decl-dstr-obj-id-init-in.js")
+    void test_asyncGenDeclDstrObjIdInitIn() throws Exception {
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_Users_jimmyhmiller_Documents_Code_PlayGround_claude-experiments_java-js_test-oracles_test262_test_language_statements_for-await-of_async-gen-decl-dstr-obj-id-init-in.js",
+            false
+        );
+    }
+
     // Helper methods
 
     private void assertASTMatches(String cachedJsPath, boolean isModule) throws Exception {

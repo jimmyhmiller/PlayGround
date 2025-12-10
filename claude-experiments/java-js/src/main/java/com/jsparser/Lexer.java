@@ -22,19 +22,27 @@ public class Lexer {
     private boolean exprAllowed = true;
     private int generatorDepth = 0; // Track nesting level of generator functions
     private Stack<Boolean> functionIsGeneratorStack = new Stack<>(); // Track if each function level is a generator
+    private int asyncDepth = 0; // Track nesting level of async functions
+    private Stack<Boolean> functionIsAsyncStack = new Stack<>(); // Track if each function level is async
 
 
     private boolean strictMode;
+    private boolean isModule; // Whether parsing in module mode (enables top-level await)
 
     public Lexer(String source) {
-        this(source, false);
+        this(source, false, false);
     }
 
     public Lexer(String source, boolean strictMode) {
+        this(source, strictMode, false);
+    }
+
+    public Lexer(String source, boolean strictMode, boolean isModule) {
         this.source = source;
         this.buf = source.toCharArray();
         this.length = buf.length;
         this.strictMode = strictMode;
+        this.isModule = isModule;
         // Initialize with statement context
         contextStack.push(LexerContext.B_STAT);
     }
@@ -120,6 +128,13 @@ public class Lexer {
                                 generatorDepth--;
                             }
                         }
+                        // Pop the async tracking stack and update depth
+                        if (!functionIsAsyncStack.isEmpty()) {
+                            boolean wasAsync = functionIsAsyncStack.pop();
+                            if (wasAsync && asyncDepth > 0) {
+                                asyncDepth--;
+                            }
+                        }
                     }
                     exprAllowed = !out.isExpr();
                 } else {
@@ -154,6 +169,12 @@ public class Lexer {
                 exprAllowed = false;
                 // Mark this function as non-generator by default (will be updated if we see *)
                 functionIsGeneratorStack.push(false);
+                // Mark this function as async if preceded by 'async' keyword
+                boolean isAsync = prevType == TokenType.ASYNC;
+                functionIsAsyncStack.push(isAsync);
+                if (isAsync) {
+                    asyncDepth++;
+                }
             }
             case STAR -> {
                 // After function*, we're entering a generator function
@@ -201,6 +222,11 @@ public class Lexer {
                     // In generator functions, yield allows expressions after it (like return/throw)
                     // Outside generator functions, yield is just an identifier (no expressions after)
                     exprAllowed = generatorDepth > 0;
+                } else if (currentType == TokenType.IDENTIFIER && "await".equals(currentToken.lexeme())) {
+                    // Special handling for contextual keyword 'await'
+                    // In async functions or module mode (top-level await), await allows expressions after it
+                    // Outside these contexts, await is just an identifier (no expressions after)
+                    exprAllowed = asyncDepth > 0 || isModule;
                 } else {
                     exprAllowed = TokenTypeProperties.beforeExpr(currentType);
                 }

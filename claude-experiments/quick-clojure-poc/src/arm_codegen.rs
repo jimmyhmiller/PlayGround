@@ -526,6 +526,47 @@ impl Arm64CodeGen {
                 }
             }
 
+            Instruction::LoadKeyword(dst, keyword_index) => {
+                // LoadKeyword: call trampoline to intern and return keyword pointer
+                // The keyword text is already stored in runtime.keyword_constants[index]
+                // We need to call trampoline_intern_keyword(index) which returns tagged pointer
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+
+                // Save x0-x7 to stack (argument registers that might be in use)
+                self.emit_stp(0, 1, 31, -2);
+                self.emit_stp(2, 3, 31, -2);
+                self.emit_stp(4, 5, 31, -2);
+                self.emit_stp(6, 7, 31, -2);
+
+                // Load keyword index into x0 (first argument)
+                self.emit_mov_imm(0, *keyword_index as i64);
+
+                // Load trampoline function address into x15
+                let func_addr = crate::trampoline::trampoline_intern_keyword as usize;
+                self.emit_mov_imm(15, func_addr as i64);
+
+                // Call the trampoline
+                self.emit_blr(15);
+
+                // Result is in x0, save to temp register x9
+                let temp_result = 9;
+                self.emit_mov(temp_result, 0);
+
+                // Restore x0-x7 from stack (reverse order)
+                self.emit_ldp(6, 7, 31, 2);
+                self.emit_ldp(4, 5, 31, 2);
+                self.emit_ldp(2, 3, 31, 2);
+                self.emit_ldp(0, 1, 31, 2);
+
+                // Move result from temp to final destination
+                if dst_reg != temp_result {
+                    self.emit_mov(dst_reg, temp_result);
+                }
+
+                self.store_spill(dst_reg, dest_spill);
+            }
+
             Instruction::LoadTrue(dst) => {
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
@@ -597,6 +638,191 @@ impl Arm64CodeGen {
                 let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
                 let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
                 self.emit_sdiv(dst_reg, src1_reg, src2_reg);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            // Bitwise operations (work on untagged values)
+            Instruction::BitAnd(dst, src1, src2) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
+                self.emit_and(dst_reg, src1_reg, src2_reg);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::BitOr(dst, src1, src2) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
+                self.emit_orr(dst_reg, src1_reg, src2_reg);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::BitXor(dst, src1, src2) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
+                self.emit_eor(dst_reg, src1_reg, src2_reg);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::BitNot(dst, src) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                self.emit_mvn(dst_reg, src_reg);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::BitShiftLeft(dst, src, amt) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                let amt_reg = self.get_physical_reg_for_irvalue(amt, false)?;
+                self.emit_lsl(dst_reg, src_reg, amt_reg);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::BitShiftRight(dst, src, amt) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                let amt_reg = self.get_physical_reg_for_irvalue(amt, false)?;
+                self.emit_asr(dst_reg, src_reg, amt_reg);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::UnsignedBitShiftRight(dst, src, amt) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                let amt_reg = self.get_physical_reg_for_irvalue(amt, false)?;
+                self.emit_lsr(dst_reg, src_reg, amt_reg);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            // Float arithmetic operations
+            // For floats, src1/src2 contain untagged f64 bits in general registers
+            // We move to FP registers, perform the op, and move result back
+            Instruction::AddFloat(dst, src1, src2) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
+                // Move to FP registers d0, d1
+                self.emit_fmov_general_to_float(0, src1_reg);
+                self.emit_fmov_general_to_float(1, src2_reg);
+                // Add
+                self.emit_fadd(0, 0, 1);
+                // Move result back to general register
+                self.emit_fmov_float_to_general(dst_reg, 0);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::SubFloat(dst, src1, src2) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
+                self.emit_fmov_general_to_float(0, src1_reg);
+                self.emit_fmov_general_to_float(1, src2_reg);
+                self.emit_fsub(0, 0, 1);
+                self.emit_fmov_float_to_general(dst_reg, 0);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::MulFloat(dst, src1, src2) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
+                self.emit_fmov_general_to_float(0, src1_reg);
+                self.emit_fmov_general_to_float(1, src2_reg);
+                self.emit_fmul(0, 0, 1);
+                self.emit_fmov_float_to_general(dst_reg, 0);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::DivFloat(dst, src1, src2) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
+                self.emit_fmov_general_to_float(0, src1_reg);
+                self.emit_fmov_general_to_float(1, src2_reg);
+                self.emit_fdiv(0, 0, 1);
+                self.emit_fmov_float_to_general(dst_reg, 0);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::IntToFloat(dst, src) => {
+                // Convert signed integer to double
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                // SCVTF converts integer in general reg to float in FP reg
+                self.emit_scvtf(0, src_reg);
+                // Move result back to general register (as raw bits)
+                self.emit_fmov_float_to_general(dst_reg, 0);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::GetTag(dst, src) => {
+                // Extract the tag bits (last 3 bits) from a tagged value
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                // AND with 0b111 to extract tag
+                self.emit_and_imm(dst_reg, src_reg, 0b111);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::LoadFloat(dst, src) => {
+                // Load f64 bits from a heap-allocated float
+                // src contains tagged float pointer
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                // Untag: shift right by 3 to get heap pointer
+                self.emit_asr_imm(dst_reg, src_reg, 3);
+                // Load f64 bits from offset 8 (skip header)
+                self.emit_ldr_offset(dst_reg, dst_reg, 8);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::AllocateFloat(dst, src) => {
+                // Allocate a new float on the heap
+                // src contains f64 bits, dst will receive tagged float pointer
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+
+                // Save caller-saved registers before the call
+                // stp x19, x20, [sp, #-16]!
+                self.emit_stp(19, 20, 31, -2);
+
+                // Move src to x0 (first argument)
+                if src_reg != 0 {
+                    self.emit_mov(0, src_reg);
+                }
+
+                // Call trampoline_allocate_float
+                let trampoline_addr = crate::trampoline::trampoline_allocate_float as usize;
+                self.emit_mov_imm(16, trampoline_addr as i64);  // x16 = trampoline address
+                self.emit_blr(16);  // call trampoline
+
+                // Result is in x0, move to dst
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
+                }
+
+                // Restore caller-saved registers
+                // ldp x19, x20, [sp], #16
+                self.emit_ldp(19, 20, 31, 2);
+
                 self.store_spill(dst_reg, dest_spill);
             }
 
@@ -725,10 +951,18 @@ impl Arm64CodeGen {
             Instruction::JumpIf(label, cond, src1, src2) => {
                 // Compare src1 and src2
                 let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
-                let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
 
-                // Emit CMP instruction
-                self.emit_cmp(src1_reg, src2_reg);
+                // Handle comparing with immediate values
+                match src2 {
+                    IrValue::TaggedConstant(imm) => {
+                        // Use CMP with immediate
+                        self.emit_cmp_imm(src1_reg, *imm as i64);
+                    }
+                    _ => {
+                        let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
+                        self.emit_cmp(src1_reg, src2_reg);
+                    }
+                }
 
                 // Emit conditional branch
                 let fixup_index = self.code.len();
@@ -884,7 +1118,7 @@ impl Arm64CodeGen {
             }
 
             Instruction::Call(dst, fn_val, args) => {
-                // eprintln!("DEBUG: Call - dst={:?}, fn_val={:?}", dst, fn_val);
+                eprintln!("DEBUG: Call - dst={:?}, fn_val={:?}, args={:?}", dst, fn_val, args);
                 // Call: Invoke a function with arguments
                 //
                 // Following Beagle's approach - NO hardcoded x19!
@@ -906,6 +1140,7 @@ impl Arm64CodeGen {
 
                 // Get function pointer in its allocated register (no move to hardcoded x19!)
                 let fn_reg = self.get_physical_reg_for_irvalue(fn_val, false)?;
+                eprintln!("DEBUG: Call - fn_reg=x{}", fn_reg);
 
                 // Collect argument source registers
                 // x0-x7 are never used by the allocator (which only uses x19-x28).
@@ -960,7 +1195,7 @@ impl Arm64CodeGen {
 
                 // Set up normal calling convention: args in x0-x7
                 for (i, &src_reg) in arg_source_regs.iter().enumerate() {
-                    // eprintln!("DEBUG: Call - moving arg {} from x{} to x{}", i, src_reg, i);
+                    eprintln!("DEBUG: Call (fn path) - moving arg {} from x{} to x{}", i, src_reg, i);
                     if i != src_reg {  // Only move if source != destination
                         self.emit_mov(i, src_reg);  // x0, x1, x2, etc.
                     }
@@ -2240,6 +2475,107 @@ impl Arm64CodeGen {
     fn emit_sdiv(&mut self, dst: usize, src1: usize, src2: usize) {
         // SDIV Xd, Xn, Xm - signed division
         let instruction = 0x9AC00C00 | ((src2 as u32) << 16) | ((src1 as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    // Bitwise operations
+
+    fn emit_and(&mut self, dst: usize, src1: usize, src2: usize) {
+        // AND Xd, Xn, Xm - bitwise AND
+        let instruction = 0x8A000000 | ((src2 as u32) << 16) | ((src1 as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_orr(&mut self, dst: usize, src1: usize, src2: usize) {
+        // ORR Xd, Xn, Xm - bitwise OR
+        let instruction = 0xAA000000 | ((src2 as u32) << 16) | ((src1 as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_eor(&mut self, dst: usize, src1: usize, src2: usize) {
+        // EOR Xd, Xn, Xm - bitwise XOR (exclusive OR)
+        let instruction = 0xCA000000 | ((src2 as u32) << 16) | ((src1 as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_mvn(&mut self, dst: usize, src: usize) {
+        // MVN Xd, Xm - bitwise NOT (move with NOT)
+        // MVN is actually ORN Xd, XZR, Xm
+        let instruction = 0xAA2003E0 | ((src as u32) << 16) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_lsl(&mut self, dst: usize, src1: usize, src2: usize) {
+        // LSL Xd, Xn, Xm - logical shift left (variable)
+        // This is actually LSLV
+        let instruction = 0x9AC02000 | ((src2 as u32) << 16) | ((src1 as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_asr(&mut self, dst: usize, src1: usize, src2: usize) {
+        // ASR Xd, Xn, Xm - arithmetic shift right (variable)
+        // This is actually ASRV - preserves sign bit
+        let instruction = 0x9AC02800 | ((src2 as u32) << 16) | ((src1 as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_lsr(&mut self, dst: usize, src1: usize, src2: usize) {
+        // LSR Xd, Xn, Xm - logical shift right (variable)
+        // This is actually LSRV - zero-fills from left
+        let instruction = 0x9AC02400 | ((src2 as u32) << 16) | ((src1 as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    // Floating-point operations (double precision)
+    // We use D registers (which are the low 64 bits of V registers)
+    // Register encoding: d0-d31 use same encoding as v0-v31
+
+    fn emit_fmov_general_to_float(&mut self, dst_fp: usize, src_gp: usize) {
+        // FMOV Dd, Xn - move from general register to FP register (as raw bits)
+        // Encoding: 0x9E670000 | (Rn << 5) | Rd
+        let instruction = 0x9E670000 | ((src_gp as u32) << 5) | (dst_fp as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_fmov_float_to_general(&mut self, dst_gp: usize, src_fp: usize) {
+        // FMOV Xd, Dn - move from FP register to general register (as raw bits)
+        // Encoding: 0x9E660000 | (Rn << 5) | Rd
+        let instruction = 0x9E660000 | ((src_fp as u32) << 5) | (dst_gp as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_fadd(&mut self, dst: usize, src1: usize, src2: usize) {
+        // FADD Dd, Dn, Dm - double-precision add
+        // Encoding: 0x1E602800 | (Rm << 16) | (Rn << 5) | Rd
+        let instruction = 0x1E602800 | ((src2 as u32) << 16) | ((src1 as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_fsub(&mut self, dst: usize, src1: usize, src2: usize) {
+        // FSUB Dd, Dn, Dm - double-precision subtract
+        // Encoding: 0x1E603800 | (Rm << 16) | (Rn << 5) | Rd
+        let instruction = 0x1E603800 | ((src2 as u32) << 16) | ((src1 as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_fmul(&mut self, dst: usize, src1: usize, src2: usize) {
+        // FMUL Dd, Dn, Dm - double-precision multiply
+        // Encoding: 0x1E600800 | (Rm << 16) | (Rn << 5) | Rd
+        let instruction = 0x1E600800 | ((src2 as u32) << 16) | ((src1 as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_fdiv(&mut self, dst: usize, src1: usize, src2: usize) {
+        // FDIV Dd, Dn, Dm - double-precision divide
+        // Encoding: 0x1E601800 | (Rm << 16) | (Rn << 5) | Rd
+        let instruction = 0x1E601800 | ((src2 as u32) << 16) | ((src1 as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
+    fn emit_scvtf(&mut self, dst_fp: usize, src_gp: usize) {
+        // SCVTF Dd, Xn - convert signed integer to double
+        // Encoding: 0x9E620000 | (Rn << 5) | Rd
+        let instruction = 0x9E620000 | ((src_gp as u32) << 5) | (dst_fp as u32);
         self.code.push(instruction);
     }
 

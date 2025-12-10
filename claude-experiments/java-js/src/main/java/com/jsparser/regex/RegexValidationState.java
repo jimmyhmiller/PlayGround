@@ -97,6 +97,11 @@ public class RegexValidationState {
      */
     private void parseTerm() {
         if (parseAssertion()) {
+            // Assertions can be followed by quantifiers (though semantically meaningless for lookahead/lookbehind)
+            // We need to consume any quantifier to avoid infinite loops
+            if (isQuantifierStart()) {
+                parseQuantifier();
+            }
             return;
         }
 
@@ -929,6 +934,7 @@ public class RegexValidationState {
     private void parseCharacterClassU() {
         boolean lastWasCharacterClass = false; // Track if last atom was a character class escape
         boolean expectingRangeEnd = false; // True if we just saw 'X-' and are expecting the end atom
+        boolean hadPreviousAtom = false; // Track if we've seen at least one atom (for detecting literal '-' at start)
 
         while (!isAtEnd() && peek() != ']') {
             if (peek() == '\\') {
@@ -950,19 +956,25 @@ public class RegexValidationState {
 
                 lastWasCharacterClass = isCharClassEscape;
                 expectingRangeEnd = false;
+                hadPreviousAtom = true;
             } else if (peek() == '-') {
                 // This could be a range operator
                 consume();
-                // Mark that we're expecting a range end if there's something after the dash
-                if (peek() != ']') {
+                // '-' is a range operator only if:
+                // 1. We've seen a previous atom (not at start of class)
+                // 2. There's something after the dash (not at end of class)
+                // Otherwise it's a literal '-'
+                if (hadPreviousAtom && peek() != ']') {
                     expectingRangeEnd = true;
                 } else {
                     expectingRangeEnd = false;
                 }
+                // '-' itself doesn't count as an atom for range purposes
             } else {
                 consume();
                 lastWasCharacterClass = false;
                 expectingRangeEnd = false;
+                hadPreviousAtom = true;
             }
         }
     }

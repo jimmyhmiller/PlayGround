@@ -10,6 +10,7 @@
 
 use std::alloc::{dealloc, Layout};
 use std::arch::asm;
+use std::collections::HashMap;
 use crate::gc_runtime::{GCRuntime, ExceptionHandler};
 use std::cell::UnsafeCell;
 use std::sync::Arc;
@@ -34,6 +35,204 @@ fn get_frame_pointer() -> usize {
 /// SAFETY: Must be called exactly once before any JIT code runs
 pub fn set_runtime(runtime: Arc<UnsafeCell<GCRuntime>>) {
     unsafe { RUNTIME = Some(runtime); }
+}
+
+// ========== Builtin Wrapper Code Generation ==========
+
+/// Generate ARM64 wrapper functions for all builtins.
+/// Returns a map of builtin name -> code pointer.
+///
+/// Each wrapper is a proper function that can be called via BLR:
+/// - Binary ops: x0 = arg0 (tagged), x1 = arg1 (tagged) -> x0 = result (tagged)
+/// - Unary ops: x0 = arg (tagged) -> x0 = result (tagged)
+///
+/// The wrappers untag inputs, perform the operation, and retag the result.
+pub fn generate_builtin_wrappers() -> HashMap<&'static str, usize> {
+    let mut wrappers = HashMap::new();
+
+    // Allocate a page for all builtin code
+    // Each builtin is ~20 bytes max, we have ~15 builtins, so 4KB is plenty
+    let page_size = 4096;
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            page_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+
+    if ptr == libc::MAP_FAILED {
+        panic!("Failed to allocate builtin wrapper code memory");
+    }
+
+    let base = ptr as *mut u32;
+    let mut offset = 0;
+
+    // Helper to emit a builtin and advance offset
+    let mut emit_builtin = |name: &'static str, code: &[u32]| {
+        unsafe {
+            for (i, &instr) in code.iter().enumerate() {
+                *base.add(offset + i) = instr;
+            }
+        }
+        let code_ptr = unsafe { base.add(offset) } as usize;
+        wrappers.insert(name, code_ptr);
+        offset += code.len();
+    };
+
+    // +: (x0, x1) -> x0 + x1  (tagged integers)
+    // Untag both, add, retag
+    emit_builtin("+", &[
+        0xD343FC00,  // lsr x0, x0, #3  (untag arg0)
+        0xD343FC21,  // lsr x1, x1, #3  (untag arg1)
+        0x8B010000,  // add x0, x0, x1
+        0xD37DF000,  // lsl x0, x0, #3  (retag)
+        0xD65F03C0,  // ret
+    ]);
+
+    // -: (x0, x1) -> x0 - x1
+    emit_builtin("-", &[
+        0xD343FC00,  // lsr x0, x0, #3
+        0xD343FC21,  // lsr x1, x1, #3
+        0xCB010000,  // sub x0, x0, x1
+        0xD37DF000,  // lsl x0, x0, #3
+        0xD65F03C0,  // ret
+    ]);
+
+    // *: (x0, x1) -> x0 * x1
+    emit_builtin("*", &[
+        0xD343FC00,  // lsr x0, x0, #3
+        0xD343FC21,  // lsr x1, x1, #3
+        0x9B017C00,  // mul x0, x0, x1
+        0xD37DF000,  // lsl x0, x0, #3
+        0xD65F03C0,  // ret
+    ]);
+
+    // /: (x0, x1) -> x0 / x1  (signed division)
+    emit_builtin("/", &[
+        0xD343FC00,  // lsr x0, x0, #3
+        0xD343FC21,  // lsr x1, x1, #3
+        0x9AC10C00,  // sdiv x0, x0, x1
+        0xD37DF000,  // lsl x0, x0, #3
+        0xD65F03C0,  // ret
+    ]);
+
+    // <: (x0, x1) -> true if x0 < x1
+    // Compare untagged values, return tagged boolean (true=11, false=3)
+    emit_builtin("<", &[
+        0xD343FC00,  // lsr x0, x0, #3  (untag for proper signed compare)
+        0xD343FC21,  // lsr x1, x1, #3
+        0xEB01001F,  // cmp x0, x1
+        0x9A9FB7E0,  // cset x0, lt (set x0 = 1 if less than, else 0)
+        0xD37DF000,  // lsl x0, x0, #3  (0 -> 0, 1 -> 8)
+        0x91000C00,  // add x0, x0, #3  (0 -> 3=false, 8 -> 11=true)
+        0xD65F03C0,  // ret
+    ]);
+
+    // >: (x0, x1) -> true if x0 > x1
+    emit_builtin(">", &[
+        0xD343FC00,  // lsr x0, x0, #3
+        0xD343FC21,  // lsr x1, x1, #3
+        0xEB01001F,  // cmp x0, x1
+        0x9A9FC7E0,  // cset x0, gt (set x0 = 1 if greater than, else 0)
+        0xD37DF000,  // lsl x0, x0, #3
+        0x91000C00,  // add x0, x0, #3
+        0xD65F03C0,  // ret
+    ]);
+
+    // =: (x0, x1) -> true if x0 == x1
+    // Compare tagged values directly (identity comparison)
+    emit_builtin("=", &[
+        0xEB01001F,  // cmp x0, x1  (compare tagged values directly)
+        0x9A9F17E0,  // cset x0, eq (set x0 = 1 if equal, else 0)
+        0xD37DF000,  // lsl x0, x0, #3
+        0x91000C00,  // add x0, x0, #3
+        0xD65F03C0,  // ret
+    ]);
+
+    // bit-and: (x0, x1) -> x0 & x1
+    emit_builtin("bit-and", &[
+        0xD343FC00,  // lsr x0, x0, #3
+        0xD343FC21,  // lsr x1, x1, #3
+        0x8A010000,  // and x0, x0, x1
+        0xD37DF000,  // lsl x0, x0, #3
+        0xD65F03C0,  // ret
+    ]);
+
+    // bit-or: (x0, x1) -> x0 | x1
+    emit_builtin("bit-or", &[
+        0xD343FC00,  // lsr x0, x0, #3
+        0xD343FC21,  // lsr x1, x1, #3
+        0xAA010000,  // orr x0, x0, x1
+        0xD37DF000,  // lsl x0, x0, #3
+        0xD65F03C0,  // ret
+    ]);
+
+    // bit-xor: (x0, x1) -> x0 ^ x1
+    emit_builtin("bit-xor", &[
+        0xD343FC00,  // lsr x0, x0, #3
+        0xD343FC21,  // lsr x1, x1, #3
+        0xCA010000,  // eor x0, x0, x1
+        0xD37DF000,  // lsl x0, x0, #3
+        0xD65F03C0,  // ret
+    ]);
+
+    // bit-not: (x0) -> ~x0
+    emit_builtin("bit-not", &[
+        0xD343FC00,  // lsr x0, x0, #3
+        0xAA2003E0,  // mvn x0, x0  (orn x0, xzr, x0)
+        0xD37DF000,  // lsl x0, x0, #3
+        0xD65F03C0,  // ret
+    ]);
+
+    // bit-shift-left: (x0, x1) -> x0 << x1
+    emit_builtin("bit-shift-left", &[
+        0xD343FC00,  // lsr x0, x0, #3  (untag value)
+        0xD343FC21,  // lsr x1, x1, #3  (untag shift amount)
+        0x9AC12000,  // lsl x0, x0, x1  (lslv)
+        0xD37DF000,  // lsl x0, x0, #3  (retag)
+        0xD65F03C0,  // ret
+    ]);
+
+    // bit-shift-right: (x0, x1) -> x0 >> x1 (arithmetic/signed)
+    emit_builtin("bit-shift-right", &[
+        0xD343FC00,  // lsr x0, x0, #3
+        0xD343FC21,  // lsr x1, x1, #3
+        0x9AC12800,  // asr x0, x0, x1  (asrv)
+        0xD37DF000,  // lsl x0, x0, #3
+        0xD65F03C0,  // ret
+    ]);
+
+    // unsigned-bit-shift-right: (x0, x1) -> x0 >>> x1 (logical/unsigned)
+    emit_builtin("unsigned-bit-shift-right", &[
+        0xD343FC00,  // lsr x0, x0, #3
+        0xD343FC21,  // lsr x1, x1, #3
+        0x9AC12400,  // lsr x0, x0, x1  (lsrv)
+        0xD37DF000,  // lsl x0, x0, #3
+        0xD65F03C0,  // ret
+    ]);
+
+    // Make the page executable
+    unsafe {
+        if libc::mprotect(ptr, page_size, libc::PROT_READ | libc::PROT_EXEC) != 0 {
+            libc::munmap(ptr, page_size);
+            panic!("Failed to make builtin wrappers executable");
+        }
+
+        // Clear instruction cache on ARM64
+        #[cfg(target_os = "macos")]
+        {
+            unsafe extern "C" {
+                fn sys_icache_invalidate(start: *const libc::c_void, size: libc::size_t);
+            }
+            sys_icache_invalidate(ptr, page_size);
+        }
+    }
+
+    wrappers
 }
 
 /// Trampoline: Get var value checking dynamic bindings
@@ -265,6 +464,31 @@ pub extern "C" fn trampoline_load_type_field(
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
         rt.read_type_field(obj_ptr, field_index)
+    }
+}
+
+/// Trampoline: Allocate a float on the heap
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = f64 bits (as u64)
+/// - Returns: x0 = tagged float pointer
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_allocate_float(float_bits: u64) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // GC before allocation if gc_always is enabled
+        rt.maybe_gc_before_alloc(get_frame_pointer());
+
+        let value = f64::from_bits(float_bits);
+        match rt.allocate_float(value) {
+            Ok(ptr) => ptr,
+            Err(msg) => {
+                eprintln!("Error allocating float: {}", msg);
+                7 // Return nil on error
+            }
+        }
     }
 }
 
@@ -662,6 +886,32 @@ pub extern "C" fn trampoline_protocol_lookup(
                 );
                 let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
                 trampoline_throw(0, error_str);
+            }
+        }
+    }
+}
+
+/// Trampoline: Intern a keyword constant
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = keyword_index (index into keyword_constants table)
+/// - Returns: x0 = tagged keyword pointer
+///
+/// This is called the first time a keyword literal is used. After that,
+/// the keyword is cached in keyword_heap_ptrs and subsequent calls return
+/// the cached pointer (ensuring identity-based equality works).
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_intern_keyword(keyword_index: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        match rt.intern_keyword(keyword_index) {
+            Ok(ptr) => ptr,
+            Err(msg) => {
+                eprintln!("Failed to intern keyword: {}", msg);
+                // Return nil on error
+                7  // nil tagged value
             }
         }
     }

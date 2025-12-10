@@ -88,8 +88,8 @@ fn test_deftype_basic_construction() {
 (Point. 10 20)
 "#;
     let output = run_and_get_stdout(code);
-    // Should return a heap object representation
-    assert!(output.contains("#<object@"), "Expected object output, got: {}", output);
+    // Should return a heap object representation (may include type name like #<user/Point@...>)
+    assert!(output.contains("#<") && output.contains("@"), "Expected object output, got: {}", output);
 }
 
 #[test]

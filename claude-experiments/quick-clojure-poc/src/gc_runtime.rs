@@ -33,6 +33,8 @@ type Alloc = crate::gc::mutex_allocator::MutexAllocator<AllocImpl>;
 type Alloc = AllocImpl;
 
 const TYPE_ID_STRING: u8 = 2;
+const TYPE_ID_FLOAT: u8 = 3;
+const TYPE_ID_KEYWORD: u8 = 4;
 const TYPE_ID_NAMESPACE: u8 = 10;
 const TYPE_ID_VAR: u8 = 11;
 const TYPE_ID_FUNCTION: u8 = 12;
@@ -255,6 +257,14 @@ pub struct GCRuntime {
     /// Reverse lookup: method_name -> (protocol_id, method_index)
     /// Used for dispatch when we only know the method name
     method_to_protocol: HashMap<String, (usize, usize)>,
+
+    // ========== Keyword Interning ==========
+
+    /// Keyword constant storage: index -> keyword text (without colon)
+    keyword_constants: Vec<String>,
+
+    /// Cache of allocated keyword heap pointers: index -> Some(tagged_ptr) if allocated
+    keyword_heap_ptrs: Vec<Option<usize>>,
 }
 
 impl Default for GCRuntime {
@@ -287,6 +297,9 @@ impl GCRuntime {
             protocol_name_to_id: HashMap::new(),
             protocol_vtable: HashMap::new(),
             method_to_protocol: HashMap::new(),
+            // Keyword interning
+            keyword_constants: Vec::new(),
+            keyword_heap_ptrs: Vec::new(),
         }
     }
 
@@ -393,6 +406,38 @@ impl GCRuntime {
         Ok(self.tag_string(ptr))
     }
 
+    /// Allocate a float on the heap
+    /// Floats are heap-allocated because embedding 64-bit float bits in a tagged
+    /// pointer would lose precision (we only have 61 bits after the 3-bit tag)
+    pub fn allocate_float(&mut self, value: f64) -> Result<usize, String> {
+        // Allocate 1 word for the float value (8 bytes)
+        let ptr = self.allocate_raw(1, TYPE_ID_FLOAT)?;
+
+        let mut heap_obj = HeapObject::from_untagged(ptr as *const u8);
+
+        // Mark as opaque so GC doesn't scan float bits as pointers
+        let mut header = heap_obj.get_header();
+        header.opaque = true;
+        heap_obj.write_header_direct(header);
+
+        // Write the float bits directly to the heap
+        unsafe {
+            let data_ptr = (ptr + 8) as *mut u64;  // Skip header (8 bytes)
+            *data_ptr = value.to_bits();
+        }
+
+        Ok(self.tag_float(ptr))
+    }
+
+    /// Read a float value from a tagged float pointer
+    pub fn read_float(&self, tagged: usize) -> f64 {
+        let ptr = self.untag_float(tagged);
+        unsafe {
+            let data_ptr = (ptr + 8) as *const u64;  // Skip header
+            f64::from_bits(*data_ptr)
+        }
+    }
+
     /// Tag a pointer as a string
     fn tag_string(&self, ptr: usize) -> usize {
         (ptr << 3) | 0b010
@@ -408,6 +453,11 @@ impl GCRuntime {
         (ptr << 3) | 0b101
     }
 
+    /// Tag a pointer as a float
+    fn tag_float(&self, ptr: usize) -> usize {
+        (ptr << 3) | 0b001
+    }
+
     /// Untag a string pointer
     fn untag_string(&self, tagged: usize) -> usize {
         tagged >> 3
@@ -421,6 +471,131 @@ impl GCRuntime {
     /// Untag a closure pointer
     fn untag_closure(&self, tagged: usize) -> usize {
         tagged >> 3
+    }
+
+    /// Untag a float pointer
+    pub fn untag_float(&self, tagged: usize) -> usize {
+        tagged >> 3
+    }
+
+    // ========== Keyword Interning ==========
+
+    /// Add a keyword to the constant table (at compile time)
+    /// Returns the index into keyword_constants
+    pub fn add_keyword(&mut self, text: String) -> usize {
+        // Check if keyword already exists
+        if let Some(index) = self.keyword_constants.iter().position(|k| k == &text) {
+            return index;
+        }
+        // Add new keyword
+        let index = self.keyword_constants.len();
+        self.keyword_constants.push(text);
+        self.keyword_heap_ptrs.push(None);
+        index
+    }
+
+    /// Allocate a keyword on the heap
+    /// Layout: [header(8)][hash(8)][text bytes padded to word boundary]
+    fn allocate_keyword(&mut self, text: &str) -> Result<usize, String> {
+        let bytes = text.as_bytes();
+        // Words needed: 1 for hash + ceil(bytes.len() / 8) for text
+        let text_words = bytes.len().div_ceil(8);
+        let total_words = 1 + text_words;
+
+        let ptr = self.allocate_raw(total_words, TYPE_ID_KEYWORD)?;
+
+        let mut heap_obj = HeapObject::from_untagged(ptr as *const u8);
+
+        // Update header with text length and mark as opaque
+        let mut header = heap_obj.get_header();
+        header.type_data = bytes.len() as u32;
+        header.opaque = true;
+        heap_obj.write_header_direct(header);
+
+        // Compute hash using DefaultHasher for stable hashing
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        // Write hash as first 8 bytes after header
+        unsafe {
+            let hash_ptr = (ptr + 8) as *mut u64;
+            *hash_ptr = hash;
+
+            // Write text bytes after hash
+            let text_ptr = (ptr + 16) as *mut u8;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), text_ptr, bytes.len());
+        }
+
+        Ok(self.tag_heap_object(ptr))
+    }
+
+    /// Intern a keyword - ensures same text always returns same heap pointer
+    /// This is called at runtime when a keyword constant is first used
+    pub fn intern_keyword(&mut self, index: usize) -> Result<usize, String> {
+        // Check if already allocated
+        if let Some(ptr) = self.keyword_heap_ptrs.get(index).and_then(|p| *p) {
+            return Ok(ptr);
+        }
+
+        // Get the text from constants
+        let text = self.keyword_constants.get(index)
+            .ok_or_else(|| format!("Invalid keyword index: {}", index))?
+            .clone();
+
+        // Allocate the keyword
+        let ptr = self.allocate_keyword(&text)?;
+
+        // Cache and register as root (keywords are permanent)
+        if let Some(slot) = self.keyword_heap_ptrs.get_mut(index) {
+            *slot = Some(ptr);
+        }
+
+        // Register as GC root so keywords are never collected
+        self.allocator.gc_add_root(ptr);
+
+        Ok(ptr)
+    }
+
+    /// Get keyword text from a tagged keyword pointer
+    pub fn get_keyword_text(&self, tagged: usize) -> Result<&str, String> {
+        let ptr = self.untag_heap_object(tagged);
+        let heap_obj = HeapObject::from_untagged(ptr as *const u8);
+
+        // Verify it's a keyword
+        let header = heap_obj.get_header();
+        if header.type_id != TYPE_ID_KEYWORD {
+            return Err(format!("Not a keyword: type_id={}", header.type_id));
+        }
+
+        let text_len = header.type_data as usize;
+        unsafe {
+            // Skip header (8 bytes) and hash (8 bytes)
+            let text_ptr = (ptr + 16) as *const u8;
+            let bytes = std::slice::from_raw_parts(text_ptr, text_len);
+            std::str::from_utf8(bytes)
+                .map_err(|e| format!("Invalid UTF-8 in keyword: {}", e))
+        }
+    }
+
+    /// Check if a tagged value is a keyword
+    pub fn is_keyword(&self, tagged: usize) -> bool {
+        // Check tag bits first
+        let tag = tagged & 0b111;
+        if tag != 0b110 {  // heap object tag
+            return false;
+        }
+
+        let ptr = self.untag_heap_object(tagged);
+        let heap_obj = HeapObject::from_untagged(ptr as *const u8);
+        heap_obj.get_header().type_id == TYPE_ID_KEYWORD
+    }
+
+    /// Get the keyword constant text by index (for trampolines)
+    pub fn get_keyword_constant(&self, index: usize) -> Option<&str> {
+        self.keyword_constants.get(index).map(|s| s.as_str())
     }
 
     /// Allocate a namespace object on the heap
@@ -665,6 +840,34 @@ impl GCRuntime {
         heap_obj.write_field(2, initial_value);
 
         Ok(self.tag_heap_object(var_ptr))
+    }
+
+    /// Bootstrap all builtin functions as Vars in clojure.core.
+    ///
+    /// This creates proper function objects for each builtin (+, -, *, /, etc.)
+    /// and binds them as Vars in the clojure.core namespace. This enables:
+    /// - `(def my-add +)` to work (passing builtins as values)
+    /// - `(map + [1 2] [3 4])` to work (builtins as first-class functions)
+    ///
+    /// Returns the updated core_ns_ptr after adding all bindings.
+    pub fn bootstrap_builtins(&mut self, mut core_ns_ptr: usize) -> Result<usize, String> {
+        use crate::trampoline::generate_builtin_wrappers;
+
+        let wrappers = generate_builtin_wrappers();
+
+        for (name, code_ptr) in wrappers {
+            // Create a tagged function pointer (no closures, just raw code)
+            // Function tag is 0b100 (4)
+            let fn_tagged = (code_ptr << 3) | 0b100;
+
+            // Create a var for this builtin in clojure.core
+            let var_ptr = self.allocate_var(core_ns_ptr, name, fn_tagged)?;
+
+            // Add the var to the namespace bindings
+            core_ns_ptr = self.namespace_add_binding(core_ns_ptr, name, var_ptr)?;
+        }
+
+        Ok(core_ns_ptr)
     }
 
     /// Get the current value from a var
@@ -1215,13 +1418,21 @@ impl GCRuntime {
                         // Format cons cells as a list
                         self.format_list(value)
                     }
+                    TYPE_ID_KEYWORD => {
+                        // Format keyword with colon prefix
+                        match self.get_keyword_text(value) {
+                            Ok(text) => format!(":{}", text),
+                            Err(_) => format!("#<keyword@{:x}>", untagged),
+                        }
+                    }
                     _ => format!("#<object@{:x}>", untagged),
                 }
             }
             BuiltInTypes::Function => format!("#<fn@{:x}>", value >> 3),
             BuiltInTypes::Float => {
-                let bits = (value >> 3) as u64;
-                format!("{}", f64::from_bits(bits))
+                // Floats are heap-allocated
+                let float_val = self.read_float(value);
+                format!("{}", float_val)
             }
         }
     }
@@ -1564,5 +1775,92 @@ mod tests {
         // Look it up
         let result = runtime.namespace_lookup(new_ns_ptr, "x");
         assert_eq!(result, Some(value));
+    }
+
+    #[test]
+    fn test_string_is_opaque() {
+        use crate::gc::types::HeapObject;
+
+        let mut runtime = GCRuntime::new();
+        let str_ptr = runtime.allocate_string("hello").unwrap();
+
+        // Untag to get raw pointer
+        let untagged = str_ptr >> 3;
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // Verify it's marked as opaque
+        assert!(heap_obj.is_opaque_object(), "String should be opaque");
+
+        // Verify get_fields returns empty (GC won't scan contents)
+        assert!(heap_obj.get_fields().is_empty(), "Opaque object should have no fields");
+    }
+
+    #[test]
+    fn test_string_with_pointer_like_content() {
+        // Test that strings containing bytes that look like pointers don't confuse the GC
+        use crate::gc::types::HeapObject;
+
+        let mut runtime = GCRuntime::new();
+
+        // Create a string with content that could be misinterpreted as a pointer
+        // (8 bytes that when interpreted as usize would look like an address)
+        let str_ptr = runtime.allocate_string("\x00\x00\x00\x10\x00\x00\x00\x00").unwrap();
+
+        let untagged = str_ptr >> 3;
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // Verify GC won't try to follow the "pointer"
+        assert!(heap_obj.is_opaque_object());
+        let refs: Vec<_> = heap_obj.get_heap_references().collect();
+        assert!(refs.is_empty(), "Opaque objects should not report heap references");
+    }
+
+    #[test]
+    fn test_string_survives_gc() {
+        let mut runtime = GCRuntime::new();
+
+        // Allocate a namespace to serve as root
+        let ns_ptr = runtime.allocate_namespace("test").unwrap();
+        runtime.add_namespace_root("test".to_string(), ns_ptr);
+
+        // Allocate a string and bind it to the namespace
+        let str_ptr = runtime.allocate_string("test string").unwrap();
+        let ns_ptr = runtime.namespace_add_binding(ns_ptr, "s", str_ptr).unwrap();
+        runtime.add_namespace_root("test".to_string(), ns_ptr);
+
+        // Run GC
+        runtime.run_gc().unwrap();
+
+        // String should still be readable
+        let result = runtime.namespace_lookup(ns_ptr, "s").unwrap();
+        let s = runtime.read_string(result);
+        assert_eq!(s, "test string");
+    }
+
+    #[test]
+    fn test_format_value_string() {
+        let mut runtime = GCRuntime::new();
+        let str_ptr = runtime.allocate_string("hello").unwrap();
+
+        let formatted = runtime.format_value(str_ptr);
+        assert_eq!(formatted, "\"hello\"");
+    }
+
+    #[test]
+    fn test_format_value_empty_string() {
+        let mut runtime = GCRuntime::new();
+        let str_ptr = runtime.allocate_string("").unwrap();
+
+        let formatted = runtime.format_value(str_ptr);
+        assert_eq!(formatted, "\"\"");
+    }
+
+    #[test]
+    fn test_string_tag() {
+        let mut runtime = GCRuntime::new();
+        let str_ptr = runtime.allocate_string("test").unwrap();
+
+        // Verify the tag is correct (0b010 for String)
+        assert_eq!(str_ptr & 0b111, 0b010);
     }
 }
