@@ -167,9 +167,8 @@ impl LinearScan {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
             }
 
-            Instruction::StoreVar(var_ptr, value) => {
-                // StoreVar uses both var_ptr and value registers
-                if let IrValue::Register(r) = var_ptr { regs.push(*r); }
+            Instruction::StoreVar(_var_id, value) => {
+                // StoreVar only uses the value register (var_id is a u32, not a register)
                 if let IrValue::Register(r) = value { regs.push(*r); }
             }
 
@@ -511,8 +510,8 @@ impl LinearScan {
                 replace(dst);
             }
 
-            Instruction::StoreVar(var_ptr, value) => {
-                replace(var_ptr);
+            Instruction::StoreVar(_var_id, value) => {
+                // var_id is u32, only value needs register replacement
                 replace(value);
             }
 
@@ -847,8 +846,8 @@ impl LinearScan {
                 replace(dst);
             }
 
-            Instruction::StoreVar(var_ptr, value) => {
-                replace(var_ptr);
+            Instruction::StoreVar(_var_id, value) => {
+                // var_id is u32, only value needs register replacement
                 replace(value);
             }
 

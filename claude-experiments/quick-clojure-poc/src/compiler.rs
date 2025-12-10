@@ -82,7 +82,7 @@ impl Compiler {
 
             // Bootstrap *ns* var in clojure.core
             // Initially set to user namespace (since that's the default starting namespace)
-            let ns_var_ptr = rt.allocate_var(core_ns_ptr, "*ns*", user_ns_ptr).unwrap();
+            let (ns_var_ptr, _ns_var_id) = rt.allocate_var(core_ns_ptr, "*ns*", user_ns_ptr).unwrap();
             let new_core_ns_ptr = rt.namespace_add_binding(core_ns_ptr, "*ns*", ns_var_ptr).unwrap();
 
             // Mark *ns* as dynamic so it can be rebound later
@@ -239,19 +239,20 @@ impl Compiler {
             // Try current namespace first
             if let Some(var_ptr) = rt.namespace_lookup(self.current_namespace_ptr, name) {
                 // eprintln!("DEBUG compile_var (current ns): found var '{}' at {:x}", name, var_ptr);
+                let var_id = rt.get_var_id(var_ptr).expect("var should have var_id");
                 let result = self.builder.new_register();
                 // Check if var is dynamic at compile time
                 if rt.is_var_dynamic(var_ptr) {
                     // Dynamic var - use trampoline for binding lookup
                     self.builder.emit(Instruction::LoadVarDynamic(
                         result,
-                        IrValue::TaggedConstant(var_ptr as isize),
+                        var_id,
                     ));
                 } else {
                     // Non-dynamic var - direct memory load
                     self.builder.emit(Instruction::LoadVar(
                         result,
-                        IrValue::TaggedConstant(var_ptr as isize),
+                        var_id,
                     ));
                 }
                 return Ok(result);
@@ -264,17 +265,18 @@ impl Compiler {
                     if let Some(&used_ns_ptr) = self.namespace_registry.get(used_ns)
                         && let Some(var_ptr) = rt.namespace_lookup(used_ns_ptr, name) {
                             // eprintln!("DEBUG compile_var (used ns {}): found var '{}' at {:x}", used_ns, name, var_ptr);
+                            let var_id = rt.get_var_id(var_ptr).expect("var should have var_id");
                             let result = self.builder.new_register();
                             // Check if var is dynamic at compile time
                             if rt.is_var_dynamic(var_ptr) {
                                 self.builder.emit(Instruction::LoadVarDynamic(
                                     result,
-                                    IrValue::TaggedConstant(var_ptr as isize),
+                                    var_id,
                                 ));
                             } else {
                                 self.builder.emit(Instruction::LoadVar(
                                     result,
-                                    IrValue::TaggedConstant(var_ptr as isize),
+                                    var_id,
                                 ));
                             }
                             return Ok(result);
@@ -288,19 +290,20 @@ impl Compiler {
         // Look up in specified namespace
         if let Some(var_ptr) = rt.namespace_lookup(ns_ptr, name) {
             // eprintln!("DEBUG compile_var: found var '{}' at {:x}", name, var_ptr);
+            let var_id = rt.get_var_id(var_ptr).expect("var should have var_id");
             let result = self.builder.new_register();
             // Check if var is dynamic at compile time
             if rt.is_var_dynamic(var_ptr) {
                 // Dynamic var - use trampoline for binding lookup
                 self.builder.emit(Instruction::LoadVarDynamic(
                     result,
-                    IrValue::TaggedConstant(var_ptr as isize),
+                    var_id,
                 ));
             } else {
                 // Non-dynamic var - direct memory load
                 self.builder.emit(Instruction::LoadVar(
                     result,
-                    IrValue::TaggedConstant(var_ptr as isize),
+                    var_id,
                 ));
             }
             Ok(result)
@@ -713,15 +716,17 @@ impl Compiler {
         // SAFETY: Single-threaded REPL - no concurrent access during compilation
         // IMPORTANT: Create/lookup the Var BEFORE compiling the value expression.
         // This allows recursive functions to resolve their own name via LoadVar.
-        let var_ptr = unsafe {
+        let (var_ptr, var_id) = unsafe {
             let rt = &mut *self.runtime.get();
 
             // Check if var already exists
             if let Some(existing_var_ptr) = rt.namespace_lookup(self.current_namespace_ptr, name) {
-                existing_var_ptr
+                // Get var_id for existing var
+                let var_id = rt.get_var_id(existing_var_ptr).expect("existing var should have var_id");
+                (existing_var_ptr, var_id)
             } else {
                 // Create new var with nil placeholder (7) - will be overwritten after compilation
-                let new_var_ptr = rt.allocate_var(
+                let (new_var_ptr, new_var_id) = rt.allocate_var(
                     self.current_namespace_ptr,
                     name,
                     7, // nil placeholder
@@ -748,7 +753,7 @@ impl Compiler {
                     self.namespace_registry.insert(ns_name, new_ns_ptr);
                 }
 
-                new_var_ptr
+                (new_var_ptr, new_var_id)
             }
         };
 
@@ -756,9 +761,9 @@ impl Compiler {
         let value_reg = self.compile(value_expr)?;
 
         // Emit StoreVar instruction to update the var at runtime
-        // Pass var_ptr as a tagged constant directly
+        // Use var_id for GC-safe indirect access via var table
         self.builder.emit(Instruction::StoreVar(
-            IrValue::TaggedConstant(var_ptr as isize),
+            var_id,
             value_reg,
         ));
 
@@ -828,11 +833,12 @@ impl Compiler {
         }
 
         // Emit instruction to set *ns* at runtime
-        // Look up the *ns* var pointer
-        let ns_var_ptr = unsafe {
+        // Look up the *ns* var pointer and var_id
+        let ns_var_id = unsafe {
             let rt = &*self.runtime.get();
             let core_ns_ptr = *self.namespace_registry.get("clojure.core").unwrap();
-            rt.namespace_lookup(core_ns_ptr, "*ns*").unwrap()
+            let ns_var_ptr = rt.namespace_lookup(core_ns_ptr, "*ns*").unwrap();
+            rt.get_var_id(ns_var_ptr).expect("*ns* var should have var_id")
         };
 
         // Load the current namespace pointer as a tagged constant
@@ -844,7 +850,7 @@ impl Compiler {
 
         // Store it into *ns* var
         self.builder.emit(Instruction::StoreVar(
-            IrValue::TaggedConstant(ns_var_ptr as isize),
+            ns_var_id,
             ns_value,
         ));
 
@@ -1360,8 +1366,14 @@ impl Compiler {
         // Store the function IR for display purposes
         self.compiled_function_irs.push((name.clone(), fn_instructions.clone()));
 
+        // Get var_table_ptr for GC-safe var access in codegen
+        let var_table_ptr = unsafe {
+            let rt = &*self.runtime.get();
+            rt.var_table_ptr() as usize
+        };
+
         let num_params = arity.params.len();
-        let compiled = Arm64CodeGen::compile_function(&fn_instructions, num_params, reserved_exception_slots)?;
+        let compiled = Arm64CodeGen::compile_function(&fn_instructions, num_params, reserved_exception_slots, var_table_ptr)?;
 
         // Register stack map with runtime for GC
         unsafe {

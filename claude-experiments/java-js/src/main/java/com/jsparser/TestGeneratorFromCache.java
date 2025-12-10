@@ -157,14 +157,9 @@ public class TestGeneratorFromCache {
         sb.append("                .withObjectFieldValueSpacing(com.fasterxml.jackson.core.util.Separators.Spacing.NONE)));\n");
         sb.append("    }\n\n");
 
-        // Generate test methods (limit to first 50 to avoid huge files)
+        // Generate test methods for ALL cached files
         int count = 0;
         for (CacheEntry entry : entries) {
-            if (count >= 50) {
-                sb.append("    // ... ").append(entries.size() - 50).append(" more tests omitted\n\n");
-                break;
-            }
-
             generateTestMethod(sb, entry, count);
             count++;
         }
@@ -178,7 +173,7 @@ public class TestGeneratorFromCache {
         Files.createDirectories(testOutputDir);
         Files.writeString(outputFile, sb.toString());
 
-        System.out.println("Generated: " + outputFile + " (" + Math.min(count, entries.size()) + " tests)");
+        System.out.println("Generated: " + outputFile + " (" + count + " tests)");
     }
 
     /**

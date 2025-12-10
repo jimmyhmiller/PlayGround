@@ -215,6 +215,56 @@ pub fn generate_builtin_wrappers() -> HashMap<&'static str, usize> {
         0xD65F03C0,  // ret
     ]);
 
+    // Helper to emit a wrapper that calls a trampoline
+    // Args are already in x0, x1, x2 - just need to call the trampoline
+    let mut emit_trampoline_wrapper = |name: &'static str, trampoline_addr: usize| {
+        let addr = trampoline_addr;
+        let mut code = Vec::new();
+
+        // stp x29, x30, [sp, #-16]!   ; save fp/lr
+        code.push(0xA9BF7BFD);
+        // mov x29, sp                  ; set frame pointer
+        code.push(0x910003FD);
+
+        // Load 64-bit address into x9 using movz/movk sequence
+        // movz x9, #(addr[15:0])
+        code.push(0xD2800009 | (((addr & 0xFFFF) as u32) << 5));
+        // movk x9, #(addr[31:16]), lsl 16
+        code.push(0xF2A00009 | ((((addr >> 16) & 0xFFFF) as u32) << 5));
+        // movk x9, #(addr[47:32]), lsl 32
+        code.push(0xF2C00009 | ((((addr >> 32) & 0xFFFF) as u32) << 5));
+        // movk x9, #(addr[63:48]), lsl 48
+        code.push(0xF2E00009 | ((((addr >> 48) & 0xFFFF) as u32) << 5));
+
+        // blr x9                       ; call trampoline
+        code.push(0xD63F0120);
+        // ldp x29, x30, [sp], #16      ; restore fp/lr
+        code.push(0xA8C17BFD);
+        // ret
+        code.push(0xD65F03C0);
+
+        unsafe {
+            for (i, &instr) in code.iter().enumerate() {
+                *base.add(offset + i) = instr;
+            }
+        }
+        let code_ptr = unsafe { base.add(offset) } as usize;
+        wrappers.insert(name, code_ptr);
+        offset += code.len();
+    };
+
+    // make-array: (x0 = length) -> array
+    emit_trampoline_wrapper("make-array", trampoline_make_array as usize);
+
+    // aget: (x0 = array, x1 = index) -> value
+    emit_trampoline_wrapper("aget", trampoline_aget as usize);
+
+    // aset!: (x0 = array, x1 = index, x2 = value) -> value
+    emit_trampoline_wrapper("aset!", trampoline_aset as usize);
+
+    // alength: (x0 = array) -> length
+    emit_trampoline_wrapper("alength", trampoline_alength as usize);
+
     // Make the page executable
     unsafe {
         if libc::mprotect(ptr, page_size, libc::PROT_READ | libc::PROT_EXEC) != 0 {
@@ -1013,6 +1063,100 @@ pub extern "C" fn trampoline_intern_keyword(keyword_index: usize) -> usize {
                 7  // nil tagged value
             }
         }
+    }
+}
+
+// ========== Raw Mutable Array Trampolines ==========
+
+/// Trampoline: Allocate a new raw mutable array
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = length (tagged integer)
+/// - Returns: x0 = tagged array pointer
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_make_array(length: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // GC before allocation if gc_always is enabled
+        rt.maybe_gc_before_alloc(get_frame_pointer());
+
+        // Untag the length
+        let len = length >> 3;
+
+        match rt.allocate_array(len) {
+            Ok(ptr) => ptr,
+            Err(msg) => {
+                eprintln!("Error allocating array: {}", msg);
+                7 // Return nil on error
+            }
+        }
+    }
+}
+
+/// Trampoline: Get array element at index
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = array (tagged), x1 = index (tagged integer)
+/// - Returns: x0 = element value (tagged)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_aget(arr_ptr: usize, index: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        // Untag index
+        let idx = index >> 3;
+
+        match rt.array_get(arr_ptr, idx) {
+            Ok(value) => value,
+            Err(msg) => {
+                eprintln!("IndexOutOfBoundsException: {}", msg);
+                7 // Return nil on error
+            }
+        }
+    }
+}
+
+/// Trampoline: Set array element at index
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = array (tagged), x1 = index (tagged integer), x2 = value (tagged)
+/// - Returns: x0 = value (tagged)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_aset(arr_ptr: usize, index: usize, value: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        // Untag index
+        let idx = index >> 3;
+
+        match rt.array_set(arr_ptr, idx, value) {
+            Ok(val) => val,
+            Err(msg) => {
+                eprintln!("IndexOutOfBoundsException: {}", msg);
+                7 // Return nil on error
+            }
+        }
+    }
+}
+
+/// Trampoline: Get array length
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = array (tagged)
+/// - Returns: x0 = length (tagged integer)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_alength(arr_ptr: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        let len = rt.array_length(arr_ptr);
+        // Tag as integer
+        len << 3
     }
 }
 

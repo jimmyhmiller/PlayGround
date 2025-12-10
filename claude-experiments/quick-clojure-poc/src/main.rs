@@ -619,6 +619,13 @@ fn run_script(filename: &str, gc_always: bool) {
                                 let instructions = compiler.take_instructions();
                                 let mut codegen = Arm64CodeGen::new();
 
+                                // Set var_table_ptr for GC-safe var access
+                                let var_table_ptr = unsafe {
+                                    let rt = &*runtime.get();
+                                    rt.var_table_ptr() as usize
+                                };
+                                codegen.set_var_table_ptr(var_table_ptr);
+
                                 match codegen.compile(&instructions, &result_reg, 0) {
                                     Ok(_) => {
                                         match codegen.execute() {
@@ -1079,6 +1086,12 @@ fn main() {
                                             Ok(result_reg) => {
                                                 let instructions = repl_compiler.take_instructions();
                                                 let mut codegen = Arm64CodeGen::new();
+                                                // Set var_table_ptr for GC-safe var access
+                                                let var_table_ptr = unsafe {
+                                                    let rt = &*runtime.get();
+                                                    rt.var_table_ptr() as usize
+                                                };
+                                                codegen.set_var_table_ptr(var_table_ptr);
                                                 match codegen.compile(&instructions, &result_reg, 0) {
                                                     Ok(code) => {
                                                         print_machine_code(&code);
@@ -1096,10 +1109,20 @@ fn main() {
                                             Ok(result_reg) => {
                                                 let instructions = repl_compiler.take_instructions();
                                                 let mut codegen = Arm64CodeGen::new();
+                                                // Set var_table_ptr for GC-safe var access
+                                                let var_table_ptr = unsafe {
+                                                    let rt = &*runtime.get();
+                                                    rt.var_table_ptr() as usize
+                                                };
+                                                codegen.set_var_table_ptr(var_table_ptr);
                                                 match codegen.compile(&instructions, &result_reg, 0) {
                                                     Ok(_) => {
                                                         match codegen.execute() {
                                                             Ok(result) => {
+                                                                // Sync compiler's namespace registry in case GC relocated objects
+                                                                // (This can happen during allocation in gc-always mode or when heap is full)
+                                                                repl_compiler.sync_namespace_registry();
+
                                                                 // SAFETY: After successful execution, not during compilation
                                                                 unsafe {
                                                                     let rt = &*runtime.get();

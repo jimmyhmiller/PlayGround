@@ -967,9 +967,10 @@ public class RegexValidationState {
                 if (hadPreviousAtom && peek() != ']') {
                     expectingRangeEnd = true;
                 } else {
+                    // '-' as a literal (at start or end) IS an atom
                     expectingRangeEnd = false;
+                    hadPreviousAtom = true;
                 }
-                // '-' itself doesn't count as an atom for range purposes
             } else {
                 consume();
                 lastWasCharacterClass = false;

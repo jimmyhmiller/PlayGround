@@ -1008,8 +1008,8 @@ public class Parser {
                             // Keep original if conversion fails
                         }
                     }
-                    // value should be the decimal bigint WITHOUT 'n' to match Acorn's JSON serialization
-                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), bigintValue, keyLexeme, null, bigintValue);
+                    // For BigInt literals, Acorn sets value to null
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), null, keyLexeme, null, bigintValue);
                 } else {
                     Object literalValue = keyToken.literal();
                     if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
@@ -1040,6 +1040,15 @@ public class Parser {
             if (match(TokenType.LPAREN)) {
                 // It's a method - parse as function expression
                 Token fnStart = previous(); // The opening paren
+
+                // Set generator/async context BEFORE parsing parameters
+                // Default parameter initializers use the method's context, not the outer
+                boolean savedInGenerator = inGenerator;
+                boolean savedInAsyncContext = inAsyncContext;
+                boolean savedStrictMode = strictMode;
+                inGenerator = isGenerator;
+                inAsyncContext = isAsync;
+
                 List<Pattern> params = new ArrayList<>();
 
                 while (!check(TokenType.RPAREN)) {
@@ -1062,13 +1071,6 @@ public class Parser {
                 }
 
                 consume(TokenType.RPAREN, "Expected ')' after parameters");
-
-                // Parse body with proper generator/async context
-                boolean savedInGenerator = inGenerator;
-                boolean savedInAsyncContext = inAsyncContext;
-                boolean savedStrictMode = strictMode;
-                inGenerator = isGenerator;
-                inAsyncContext = isAsync;
 
                 // Reset strict mode for method body (unless in module mode)
                 if (!forceModuleMode) {
@@ -1722,7 +1724,11 @@ public class Parser {
             if (match(TokenType.LBRACKET)) {
                 // Computed property: [expr]
                 computed = true;
+                // Allow 'in' operator in computed property names
+                boolean savedAllowIn = allowIn;
+                allowIn = true;
                 key = parseExpr(BP_ASSIGNMENT);
+                allowIn = savedAllowIn;
                 consume(TokenType.RBRACKET, "Expected ']' after computed property");
             } else if (check(TokenType.STRING) || check(TokenType.NUMBER)) {
                 // Literal key (string or numeric)
@@ -1757,8 +1763,8 @@ public class Parser {
                             // Keep original if conversion fails
                         }
                     }
-                    // value should be the decimal bigint WITHOUT 'n' to match Acorn's JSON serialization
-                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), bigintValue, keyLexeme, null, bigintValue);
+                    // For BigInt literals, Acorn sets value to null
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), null, keyLexeme, null, bigintValue);
                 } else {
                     Object literalValue = keyToken.literal();
                     if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
@@ -2047,18 +2053,15 @@ public class Parser {
                 break;
             }
 
-            // ASI rules for ( and [:
-            // - If previous token is }, ASI applies before ( (but not [)
-            // - In class field context, ASI applies before [
-            if (previous().line() < peek().line()) {
-                Token prevToken = previous();
-                if (tt == TokenType.LPAREN && prevToken.type() == TokenType.RBRACE) {
-                    // ASI before ( when previous is } (e.g., arrow function body)
-                    break;
-                }
-                if (tt == TokenType.LBRACKET && inClassFieldInitializer) {
-                    // ASI before [ in class field context
-                    break;
+            // ASI rules for ( and [ after arrow functions with block bodies:
+            // Arrow functions with block bodies (e.g., () => {}) end with } which cannot
+            // be called or indexed. So ( or [ on the next line should trigger ASI.
+            // See Test262: fields-asi-1.js (no ASI for obj[]) vs function-name-computed (ASI after arrow)
+            // Also: doNotEmitDetachedCommentsAtStartOfLambdaFunction.js (ASI between arrow expressions)
+            if (previous().line() < peek().line() && (tt == TokenType.LBRACKET || tt == TokenType.LPAREN)) {
+                // Check if left is an arrow function with block body
+                if (left instanceof ArrowFunctionExpression arrow && arrow.body() instanceof BlockStatement) {
+                    break; // ASI before [ or ( after arrow function with block body
                 }
             }
 
@@ -2145,9 +2148,8 @@ public class Parser {
                     bigintValue = bi.toString();
                 } catch (NumberFormatException e) { /* keep original */ }
             }
-            // value should be the decimal bigint WITHOUT 'n' to match Acorn's JSON serialization of BigInt
-            // (BigInt.toString() outputs just the number, no 'n' suffix)
-            return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), bigintValue, lexeme, null, bigintValue);
+            // For BigInt literals, Acorn sets value to null
+            return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), null, lexeme, null, bigintValue);
         }
 
         // Handle Infinity/-Infinity/NaN - value should be null per ESTree spec
@@ -2708,6 +2710,17 @@ public class Parser {
         }
 
         consume(TokenType.LPAREN, "Expected '(' after function");
+
+        // Save and set generator/async context BEFORE parsing parameters
+        // Default parameter initializers use the inner function's context
+        boolean savedInGenerator = inGenerator;
+        boolean savedInAsyncContext = inAsyncContext;
+        boolean savedStrictMode = strictMode;
+        boolean savedInClassFieldInitializer = inClassFieldInitializer;
+        inGenerator = isGenerator;
+        inAsyncContext = true;
+        inClassFieldInitializer = false;
+
         List<Pattern> params = new ArrayList<>();
 
         if (!check(TokenType.RPAREN)) {
@@ -2729,14 +2742,6 @@ public class Parser {
         }
 
         consume(TokenType.RPAREN, "Expected ')' after parameters");
-
-        boolean savedInGenerator = inGenerator;
-        boolean savedInAsyncContext = inAsyncContext;
-        boolean savedStrictMode = strictMode;
-        boolean savedInClassFieldInitializer = inClassFieldInitializer;
-        inGenerator = isGenerator;
-        inAsyncContext = true;
-        inClassFieldInitializer = false;
 
         if (!forceModuleMode) {
             strictMode = false;
@@ -2775,7 +2780,13 @@ public class Parser {
         Expression options = null;
         if (match(TokenType.COMMA)) {
             if (!check(TokenType.RPAREN)) {
+                // Allow 'in' operator in options expression
+                boolean savedAllowIn = allowIn;
+                allowIn = true;
                 options = parseExpr(BP_ASSIGNMENT);
+                allowIn = savedAllowIn;
+                // Allow trailing comma after second argument: import(source, options,)
+                match(TokenType.COMMA);
             }
         }
 
@@ -2876,6 +2887,12 @@ public class Parser {
                 consume(TokenType.RBRACKET, "Expected ']' after computed property");
                 Token endToken = previous();
                 callee = new MemberExpression(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), callee, property, true, false);
+            } else if (check(TokenType.TEMPLATE_LITERAL) || check(TokenType.TEMPLATE_HEAD)) {
+                // Tagged template: new tag`template` should parse as new (tag`template`)
+                // parseTemplateLiteral expects current to point at the template token
+                Expression template = parseTemplateLiteral();
+                Token endToken = previous();
+                callee = new TaggedTemplateExpression(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), callee, (TemplateLiteral) template);
             } else {
                 break;
             }
@@ -2897,6 +2914,17 @@ public class Parser {
         }
 
         consume(TokenType.LPAREN, "Expected '(' after function");
+
+        // Save and set generator/async context BEFORE parsing parameters
+        // Default parameter initializers use the inner function's context, not the outer
+        boolean savedInGenerator = inGenerator;
+        boolean savedInAsyncContext = inAsyncContext;
+        boolean savedStrictMode = strictMode;
+        boolean savedInClassFieldInitializer = inClassFieldInitializer;
+        inGenerator = isGenerator;
+        inAsyncContext = false;
+        inClassFieldInitializer = false;
+
         List<Pattern> params = new ArrayList<>();
 
         if (!check(TokenType.RPAREN)) {
@@ -2918,14 +2946,6 @@ public class Parser {
         }
 
         consume(TokenType.RPAREN, "Expected ')' after parameters");
-
-        boolean savedInGenerator = inGenerator;
-        boolean savedInAsyncContext = inAsyncContext;
-        boolean savedStrictMode = strictMode;
-        boolean savedInClassFieldInitializer = inClassFieldInitializer;
-        inGenerator = isGenerator;
-        inAsyncContext = false;
-        inClassFieldInitializer = false;
 
         if (!forceModuleMode) {
             strictMode = false;
@@ -2971,6 +2991,10 @@ public class Parser {
 
     private Expression parseArrayLiteral(Token lbracket) {
         List<Expression> elements = new ArrayList<>();
+        // Allow 'in' operator in array element expressions
+        // (e.g., for destructuring: [ x = 'a' in {} ])
+        boolean savedAllowIn = allowIn;
+        allowIn = true;
 
         while (!check(TokenType.RBRACKET) && !isAtEnd()) {
             if (check(TokenType.COMMA)) {
@@ -2994,6 +3018,7 @@ public class Parser {
             }
         }
 
+        allowIn = savedAllowIn;
         consume(TokenType.RBRACKET, "Expected ']' after array elements");
         Token endToken = previous();
         return new ArrayExpression(getStart(lbracket), getEnd(endToken), lbracket.line(), lbracket.column(), endToken.endLine(), endToken.endColumn(), elements);
@@ -3071,7 +3096,12 @@ public class Parser {
 
         if (match(TokenType.LBRACKET)) {
             computed = true;
+            // Allow 'in' operator in computed property names
+            // (e.g., { ['a' in {}]: value })
+            boolean savedAllowIn = allowIn;
+            allowIn = true;
             key = parseExpr(BP_ASSIGNMENT);
+            allowIn = savedAllowIn;
             consume(TokenType.RBRACKET, "Expected ']' after computed property name");
         } else if (check(TokenType.STRING) || check(TokenType.NUMBER)) {
             Token keyToken = advance();
@@ -3122,6 +3152,17 @@ public class Parser {
             // Method - FunctionExpression starts at '(' not at the method name
             Token funcStartToken = peek(); // Save the '(' token for FunctionExpression start
             advance(); // consume (
+
+            // Save and set generator/async context BEFORE parsing parameters
+            // Default parameter initializers use the method's context
+            boolean savedInGenerator = inGenerator;
+            boolean savedInAsyncContext = inAsyncContext;
+            boolean savedStrictMode = strictMode;
+            boolean savedInClassFieldInitializer = inClassFieldInitializer;
+            inGenerator = isGenerator;
+            inAsyncContext = isAsync;
+            inClassFieldInitializer = false;
+
             List<Pattern> params = new ArrayList<>();
 
             if (!check(TokenType.RPAREN)) {
@@ -3144,14 +3185,6 @@ public class Parser {
 
             consume(TokenType.RPAREN, "Expected ')' after parameters");
 
-            boolean savedInGenerator = inGenerator;
-            boolean savedInAsyncContext = inAsyncContext;
-            boolean savedStrictMode = strictMode;
-            boolean savedInClassFieldInitializer = inClassFieldInitializer;
-            inGenerator = isGenerator;
-            inAsyncContext = isAsync;
-            inClassFieldInitializer = false;
-
             BlockStatement body = parseBlockStatement(true);
 
             inGenerator = savedInGenerator;
@@ -3168,8 +3201,12 @@ public class Parser {
             // Property: start, end, loc, method, shorthand, computed, key, value, kind
             return new Property(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), isMethod, false, computed, key, value, kind);
         } else if (match(TokenType.COLON)) {
-            // Regular property
+            // Regular property - allow 'in' operator in value expressions
+            // (e.g., for destructuring: { x: y = 'a' in {} })
+            boolean savedAllowIn = allowIn;
+            allowIn = true;
             Expression value = parseExpr(BP_ASSIGNMENT);
+            allowIn = savedAllowIn;
             Token endToken = previous();
             // Property: start, end, loc, method, shorthand, computed, key, value, kind
             return new Property(getStart(startToken), getEnd(endToken), startToken.line(), startToken.column(), endToken.endLine(), endToken.endColumn(), false, false, computed, key, value, "init");

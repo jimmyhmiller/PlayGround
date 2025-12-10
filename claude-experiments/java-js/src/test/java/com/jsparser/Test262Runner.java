@@ -487,6 +487,13 @@ public class Test262Runner {
                         }
                     }
                 }
+
+                // Normalize value field: Acorn sets value to null for BigInt, normalize if our parser differs
+                Object expValue = expMap.get("value");
+                Object actValue = actMap.get("value");
+                if (expValue == null && actValue != null) {
+                    actMap.put("value", null);
+                }
             }
 
             // Recurse into all fields

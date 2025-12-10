@@ -297,7 +297,13 @@ fn test_ir_backend_def_with_persistent_compiler() {
     // This test simulates REPL behavior with a persistent compiler
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
-    let mut compiler = compiler::Compiler::new(runtime);
+    let mut compiler = compiler::Compiler::new(runtime.clone());
+
+    // Helper to get var_table_ptr from runtime
+    let get_var_table_ptr = || unsafe {
+        let rt = &*runtime.get();
+        rt.var_table_ptr() as usize
+    };
 
     // Define a variable
     let code = "(def x 5)";
@@ -306,6 +312,7 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let result_reg = compiler.compile(&ast).unwrap();
     let instructions = compiler.take_instructions();
     let mut codegen = arm_codegen::Arm64CodeGen::new();
+    codegen.set_var_table_ptr(get_var_table_ptr());
     codegen.compile(&instructions, &result_reg, 0).unwrap();
     let tagged_result = codegen.execute().unwrap();
     assert_eq!(tagged_result >> 3, 5);
@@ -321,6 +328,7 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let result_reg = compiler.compile(&ast).unwrap();
     let instructions = compiler.take_instructions();
     let mut codegen = arm_codegen::Arm64CodeGen::new();
+    codegen.set_var_table_ptr(get_var_table_ptr());
     codegen.compile(&instructions, &result_reg, 0).unwrap();
     let tagged_result = codegen.execute().unwrap();
     assert_eq!(tagged_result >> 3, 5);
@@ -332,6 +340,7 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let result_reg = compiler.compile(&ast).unwrap();
     let instructions = compiler.take_instructions();
     let mut codegen = arm_codegen::Arm64CodeGen::new();
+    codegen.set_var_table_ptr(get_var_table_ptr());
     codegen.compile(&instructions, &result_reg, 0).unwrap();
     let tagged_result = codegen.execute().unwrap();
     assert_eq!(tagged_result >> 3, 10);
@@ -346,6 +355,7 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let result_reg = compiler.compile(&ast).unwrap();
     let instructions = compiler.take_instructions();
     let mut codegen = arm_codegen::Arm64CodeGen::new();
+    codegen.set_var_table_ptr(get_var_table_ptr());
     codegen.compile(&instructions, &result_reg, 0).unwrap();
     let tagged_result = codegen.execute().unwrap();
     assert_eq!(tagged_result >> 3, 15);

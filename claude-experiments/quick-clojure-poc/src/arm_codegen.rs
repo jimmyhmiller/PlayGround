@@ -86,6 +86,10 @@ pub struct Arm64CodeGen {
 
     /// Number of reserved exception slots (from compiler)
     reserved_exception_slots: usize,
+
+    /// Var table pointer for GC-safe var access
+    /// This is the address of the var_table Vec's data, used for indirect var access
+    var_table_ptr: usize,
 }
 
 impl Default for Arm64CodeGen {
@@ -118,7 +122,14 @@ impl Arm64CodeGen {
             num_locals: 0,
             num_spill_slots: 0,
             reserved_exception_slots: 0,
+            // Var table pointer (set before codegen)
+            var_table_ptr: 0,
         }
+    }
+
+    /// Set the var table pointer for GC-safe var access
+    pub fn set_var_table_ptr(&mut self, ptr: usize) {
+        self.var_table_ptr = ptr;
     }
 
     fn new_label(&mut self) -> Label {
@@ -139,13 +150,17 @@ impl Arm64CodeGen {
     /// - Callee-saved registers (x19-x28) saved as needed
     /// - Spill slots at FP-relative offsets
     /// - Exception slots after spill slots
+    ///
+    /// var_table_ptr: Address of the var_table data for GC-safe var access
     pub fn compile_function(
         instructions: &[Instruction],
         num_params: usize,
         reserved_exception_slots: usize,
+        var_table_ptr: usize,
     ) -> Result<CompiledFunction, String> {
         let mut codegen = Arm64CodeGen::new();
         codegen.num_locals = num_params;
+        codegen.var_table_ptr = var_table_ptr;
         codegen.reserved_exception_slots = reserved_exception_slots;
 
         // Run register allocation for THIS function only
@@ -430,100 +445,102 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            Instruction::LoadVar(dst, var_ptr) => {
-                // LoadVar: Direct memory load from var's value field (non-dynamic vars)
-                // Var layout: [header(8)] [ns_ptr(8)] [symbol_ptr(8)] [value(8)]
-                // Value is at offset 24 (3 * 8 bytes)
+            Instruction::LoadVar(dst, var_id) => {
+                // LoadVar: Load var value via var table indirection (GC-safe)
+                // 1. Load var_table_ptr into temp
+                // 2. Load var_ptr = var_table[var_id]
+                // 3. Untag var_ptr
+                // 4. Load value from var_ptr + 24
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
-                match var_ptr {
-                    IrValue::TaggedConstant(tagged_ptr) => {
-                        // Untag var pointer (shift right 3)
-                        let untagged_ptr = (*tagged_ptr as usize) >> 3;
+                let temp_reg = 15;  // x15 as temp
 
-                        // Load untagged pointer into temp register
-                        let temp_reg = 15;  // x15 as temp
-                        self.emit_mov_imm(temp_reg, untagged_ptr as i64);
+                // Load var_table_ptr into temp register
+                self.emit_mov_imm(temp_reg, self.var_table_ptr as i64);
 
-                        // Load value field (offset 24)
-                        self.emit_ldr_offset(dst_reg, temp_reg, 24);
-                    }
-                    _ => return Err(format!("LoadVar requires constant var pointer: {:?}", var_ptr)),
-                }
+                // Load var_ptr from var_table[var_id]
+                let offset = (*var_id as i32) * 8;
+                self.emit_ldr_offset(temp_reg, temp_reg, offset);
+
+                // Untag var_ptr (shift right 3)
+                // LSR Xd, Xn, #3 = UBFM Xd, Xn, #3, #63 = 0xD343FC00
+                let lsr_instruction = 0xD343FC00u32 | ((temp_reg as u32) << 5) | (temp_reg as u32);
+                self.code.push(lsr_instruction);
+
+                // Load value field (offset 24)
+                self.emit_ldr_offset(dst_reg, temp_reg, 24);
+
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            Instruction::LoadVarDynamic(dst, var_ptr) => {
+            Instruction::LoadVarDynamic(dst, var_id) => {
                 // LoadVarDynamic: Call trampoline to check dynamic bindings (^:dynamic vars)
-                // This is slower but necessary for vars that may have thread-local bindings
+                // First load var_ptr from var_table, then pass to trampoline
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
-                match var_ptr {
-                    IrValue::TaggedConstant(tagged_ptr) => {
-                        // Save x0-x7 to stack (argument registers that might be in use)
-                        self.emit_stp(0, 1, 31, -2);
-                        self.emit_stp(2, 3, 31, -2);
-                        self.emit_stp(4, 5, 31, -2);
-                        self.emit_stp(6, 7, 31, -2);
+                // Save x0-x7 to stack (argument registers that might be in use)
+                self.emit_stp(0, 1, 31, -2);
+                self.emit_stp(2, 3, 31, -2);
+                self.emit_stp(4, 5, 31, -2);
+                self.emit_stp(6, 7, 31, -2);
 
-                        // Load tagged var_ptr into x0 (first argument)
-                        self.emit_mov_imm(0, *tagged_ptr as i64);
+                // Load var_ptr from var_table[var_id] into x0 (first argument)
+                let temp_reg = 15;
+                self.emit_mov_imm(temp_reg, self.var_table_ptr as i64);
+                let offset = (*var_id as i32) * 8;
+                self.emit_ldr_offset(0, temp_reg, offset);  // x0 = var_table[var_id] (tagged var_ptr)
 
-                        // Load trampoline function address into x15
-                        let func_addr = crate::trampoline::trampoline_var_get_value_dynamic as usize;
-                        self.emit_mov_imm(15, func_addr as i64);
+                // Load trampoline function address into x15
+                let func_addr = crate::trampoline::trampoline_var_get_value_dynamic as usize;
+                self.emit_mov_imm(15, func_addr as i64);
 
-                        // Call the trampoline
-                        self.emit_blr(15);
+                // Call the trampoline
+                self.emit_blr(15);
 
-                        // Result is in x0, save to temp register x9
-                        let temp_result = 9;
-                        self.emit_mov(temp_result, 0);
+                // Result is in x0, save to temp register x9
+                let temp_result = 9;
+                self.emit_mov(temp_result, 0);
 
-                        // Restore x0-x7 from stack (reverse order)
-                        self.emit_ldp(6, 7, 31, 2);
-                        self.emit_ldp(4, 5, 31, 2);
-                        self.emit_ldp(2, 3, 31, 2);
-                        self.emit_ldp(0, 1, 31, 2);
+                // Restore x0-x7 from stack (reverse order)
+                self.emit_ldp(6, 7, 31, 2);
+                self.emit_ldp(4, 5, 31, 2);
+                self.emit_ldp(2, 3, 31, 2);
+                self.emit_ldp(0, 1, 31, 2);
 
-                        // Move result from temp to final destination
-                        if dst_reg != temp_result {
-                            self.emit_mov(dst_reg, temp_result);
-                        }
-                    }
-                    _ => return Err(format!("LoadVarDynamic requires constant var pointer: {:?}", var_ptr)),
+                // Move result from temp to final destination
+                if dst_reg != temp_result {
+                    self.emit_mov(dst_reg, temp_result);
                 }
+
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            Instruction::StoreVar(var_ptr, value) => {
-                // eprintln!("DEBUG: StoreVar - var_ptr={:?}, value={:?}", var_ptr, value);
-                // eprintln!("DEBUG: StoreVar - code position before: {}", self.code.len());
-                // StoreVar: store value into var at runtime
-                // Var layout: [header(8)] [ns_ptr(8)] [symbol_ptr(8)] [value(8)]
-                // We want to write to field 2 (value) which is at offset 24 bytes (3 * 8)
+            Instruction::StoreVar(var_id, value) => {
+                // StoreVar: Store value to var via var table indirection (GC-safe)
+                // 1. Load var_table_ptr into temp
+                // 2. Load var_ptr = var_table[var_id]
+                // 3. Untag var_ptr
+                // 4. Store value to var_ptr + 24
                 let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
-                // eprintln!("DEBUG: StoreVar - value_reg=x{}, code position: {}", value_reg, self.code.len());
 
-                match var_ptr {
-                    IrValue::TaggedConstant(tagged_ptr) => {
-                        // Untag the var pointer (shift right by 3)
-                        let untagged_ptr = (*tagged_ptr as usize) >> 3;
+                let temp_reg = 15;  // x15 as temp
 
-                        // Load var pointer into a temp register
-                        // Use x15 as temp register - it's the highest general purpose register
-                        // and unlikely to be allocated by our simple allocator
-                        let temp_reg = 15;
-                        self.emit_mov_imm(temp_reg, untagged_ptr as i64);
+                // Load var_table_ptr into temp register
+                self.emit_mov_imm(temp_reg, self.var_table_ptr as i64);
 
-                        // Store value into var (offset 24 = header + ns_ptr + symbol_ptr)
-                        // str value_reg, [temp_reg, #24]
-                        self.emit_str_offset(value_reg, temp_reg, 24);
-                    }
-                    _ => return Err(format!("StoreVar requires constant var pointer: {:?}", var_ptr)),
-                }
+                // Load var_ptr from var_table[var_id]
+                let offset = (*var_id as i32) * 8;
+                self.emit_ldr_offset(temp_reg, temp_reg, offset);
+
+                // Untag var_ptr (shift right 3)
+                // LSR Xd, Xn, #3 = UBFM Xd, Xn, #3, #63 = 0xD343FC00
+                let lsr_instruction = 0xD343FC00u32 | ((temp_reg as u32) << 5) | (temp_reg as u32);
+                self.code.push(lsr_instruction);
+
+                // Store value into var (offset 24 = header + ns_ptr + symbol_ptr)
+                self.emit_str_offset(value_reg, temp_reg, 24);
             }
 
             Instruction::LoadKeyword(dst, keyword_index) => {

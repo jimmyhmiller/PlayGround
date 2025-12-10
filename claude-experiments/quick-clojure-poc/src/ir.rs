@@ -123,9 +123,15 @@ pub enum Instruction {
 
     // Constants
     LoadConstant(IrValue, IrValue),
-    LoadVar(IrValue, IrValue),  // LoadVar(dest_reg, var_ptr) - direct load for non-dynamic vars
-    LoadVarDynamic(IrValue, IrValue),  // LoadVarDynamic(dest_reg, var_ptr) - trampoline call for ^:dynamic vars
-    StoreVar(IrValue, IrValue), // StoreVar(var_ptr, value_reg) - stores value into var at runtime
+    /// LoadVar(dest_reg, var_id) - load var value via var table indirection
+    /// var_id indexes into the var_table to get current var pointer (GC-safe)
+    LoadVar(IrValue, u32),
+    /// LoadVarDynamic(dest_reg, var_id) - trampoline call for ^:dynamic vars
+    /// var_id indexes into var_table to get var pointer for dynamic binding lookup
+    LoadVarDynamic(IrValue, u32),
+    /// StoreVar(var_id, value_reg) - store value to var via var table indirection
+    /// var_id indexes into var_table to get current var pointer (GC-safe)
+    StoreVar(u32, IrValue),
     LoadTrue(IrValue),
     LoadFalse(IrValue),
 
