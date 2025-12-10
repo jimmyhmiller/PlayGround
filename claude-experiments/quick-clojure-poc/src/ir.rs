@@ -174,12 +174,27 @@ pub enum Instruction {
     /// LoadTypeField(dst, obj, field_name) - load field from deftype instance
     /// Field name is used for runtime lookup (future: inline caching)
     LoadTypeField(IrValue, IrValue, String),
+    /// StoreTypeField(obj, field_name, value) - store to deftype field
+    /// Requires field to be declared as ^:mutable
+    /// Field name is used for runtime lookup
+    StoreTypeField(IrValue, String, IrValue),
+
+    // Write barrier for generational GC
+    /// GcAddRoot(obj) - register object with GC write barrier
+    /// Must be called before storing a pointer to a mutable field
+    /// Adds object to the remembered set for generational GC
+    GcAddRoot(IrValue),
 
     // Return
     Ret(IrValue),
 
     // GC
     CallGC(IrValue),  // CallGC(dst) - force garbage collection, returns nil
+
+    // I/O
+    /// Println(dst, values) - print values followed by newline, returns nil
+    /// values is a vector of tagged values to print (space-separated)
+    Println(IrValue, Vec<IrValue>),
 
     // Keyword literals
     /// LoadKeyword(dst, keyword_index) - load/intern keyword constant

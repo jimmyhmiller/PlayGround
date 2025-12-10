@@ -324,6 +324,105 @@ pub extern "C" fn trampoline_gc(stack_pointer: usize) -> usize {
     }
 }
 
+/// Trampoline: Add object to GC write barrier (for mutable field writes)
+///
+/// This is critical for generational GC correctness. When storing a pointer
+/// to a mutable field in an old-generation object, we must track that object
+/// so the GC can find cross-generational references during minor collection.
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = object_ptr (tagged pointer to deftype instance)
+/// - Returns: x0 = nil (0b111)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_gc_add_root(object_ptr: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        rt.gc_add_root(object_ptr);
+        7 // nil
+    }
+}
+
+/// Trampoline: Store to mutable field in deftype
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = object_ptr (tagged), x1 = field_name_ptr (pointer to bytes),
+///         x2 = field_name_len, x3 = value (tagged)
+/// - Returns: x0 = value (the stored value)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_store_type_field(
+    object_ptr: usize,
+    field_name_ptr: *const u8,
+    field_name_len: usize,
+    value: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // Convert field name pointer to string slice
+        let field_name_bytes = std::slice::from_raw_parts(field_name_ptr, field_name_len);
+        let field_name = match std::str::from_utf8(field_name_bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("Error: Invalid UTF-8 in field name");
+                return 7; // nil
+            }
+        };
+
+        match rt.store_type_field_by_name(object_ptr, field_name, value) {
+            Ok(v) => v,
+            Err(msg) => {
+                eprintln!("Error storing field: {}", msg);
+                7 // nil
+            }
+        }
+    }
+}
+
+/// Trampoline: Print values followed by newline
+///
+/// This implements the println builtin. It takes a count and a pointer to
+/// an array of tagged values on the stack.
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = count (number of values), x1 = values_ptr (pointer to array of tagged values)
+/// - Returns: x0 = nil (0b111)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_println(count: usize, values_ptr: *const usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        // Collect values into a slice
+        let values = if count > 0 && !values_ptr.is_null() {
+            std::slice::from_raw_parts(values_ptr, count)
+        } else {
+            &[]
+        };
+
+        // Print each value, space-separated
+        for (i, &val) in values.iter().enumerate() {
+            if i > 0 {
+                print!(" ");
+            }
+            // Use runtime's value_to_string for proper formatting
+            let s = rt.format_value(val);
+            // format_value wraps strings in quotes, but println should print raw strings
+            // Check if it's a string and unwrap
+            let kind = crate::gc::types::BuiltInTypes::get_kind(val);
+            if kind == crate::gc::types::BuiltInTypes::String && s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+                print!("{}", &s[1..s.len()-1]);
+            } else {
+                print!("{}", s);
+            }
+        }
+        println!();
+
+        7 // nil
+    }
+}
+
 /// Trampoline: Allocate function object
 ///
 /// ARM64 Calling Convention:

@@ -1236,6 +1236,83 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
             }
 
+            Instruction::Println(dst, args) => {
+                // Println: Print values followed by newline
+                // ARM64 Calling Convention for trampoline_println:
+                // - x0 = count (number of values)
+                // - x1 = values_ptr (pointer to array of tagged values on stack)
+                // - Returns: x0 = nil (7)
+
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let num_args = args.len();
+
+                // Save caller-saved registers we might clobber
+                self.emit_stp(0, 1, 31, -2);
+                self.emit_stp(2, 3, 31, -2);
+
+                if num_args > 0 {
+                    // Allocate stack space for argument array (8 bytes per value)
+                    let stack_space = (num_args * 8) as i64;
+                    // Align to 16 bytes
+                    let aligned_space = (stack_space + 15) & !15;
+                    self.emit_sub_imm(31, 31, aligned_space);
+
+                    // Store each argument value to the stack array
+                    for (i, arg) in args.iter().enumerate() {
+                        let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
+                        // If arg_reg is 0-3, it was saved on the stack above
+                        if arg_reg <= 3 {
+                            // Load from saved area: saved regs are at SP + aligned_space + 16 (for stp x2,x3) + 16 (for stp x0,x1)
+                            // Actually the saved regs are at offsets relative to the CURRENT sp:
+                            // SP + aligned_space + 0  -> x2
+                            // SP + aligned_space + 8  -> x3
+                            // SP + aligned_space + 16 -> x0
+                            // SP + aligned_space + 24 -> x1
+                            let saved_offset = (aligned_space + match arg_reg {
+                                0 => 16,
+                                1 => 24,
+                                2 => 0,
+                                3 => 8,
+                                _ => unreachable!(),
+                            }) as i32;
+                            self.emit_ldr_offset(15, 31, saved_offset);
+                            self.emit_str_offset(15, 31, (i * 8) as i32);
+                        } else {
+                            self.emit_str_offset(arg_reg, 31, (i * 8) as i32);
+                        }
+                    }
+
+                    // x0 = count, x1 = SP (pointer to array)
+                    self.emit_mov_imm(0, num_args as i64);
+                    self.emit_mov(1, 31);
+
+                    // Call trampoline_println
+                    let func_addr = crate::trampoline::trampoline_println as usize;
+                    self.emit_mov_imm(15, func_addr as i64);
+                    self.emit_blr(15);
+
+                    // Deallocate stack space
+                    self.emit_add_imm(31, 31, aligned_space);
+                } else {
+                    // No arguments - just call with count=0, ptr=null
+                    self.emit_mov_imm(0, 0);
+                    self.emit_mov_imm(1, 0);
+
+                    let func_addr = crate::trampoline::trampoline_println as usize;
+                    self.emit_mov_imm(15, func_addr as i64);
+                    self.emit_blr(15);
+                }
+
+                // Restore saved registers
+                self.emit_ldp(2, 3, 31, 2);
+                self.emit_ldp(0, 1, 31, 2);
+
+                // Result is nil (7), move to dst
+                self.emit_mov_imm(dst_reg, 7);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
             Instruction::PushExceptionHandler(catch_label, exception_slot) => {
                 // PushExceptionHandler: Setup exception handler
                 // Call trampoline_push_exception_handler(handler_addr, result_local, LR, SP, FP)
@@ -1834,6 +1911,120 @@ impl Arm64CodeGen {
                 }
 
                 self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::StoreTypeField(obj, field_name, value) => {
+                // StoreTypeField: Store a value to a mutable field in a deftype instance
+                //
+                // ARM64 Calling Convention for trampoline_store_type_field:
+                // - x0 = obj_ptr (tagged HeapObject)
+                // - x1 = field_name_ptr (pointer to string bytes on stack)
+                // - x2 = field_name_len
+                // - x3 = value (tagged value to store)
+                // - Returns: x0 = value (the stored value)
+                //
+                // Note: The write barrier (GcAddRoot) should be emitted BEFORE this instruction
+
+                let obj_reg = self.get_physical_reg_for_irvalue(obj, false)?;
+                let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
+
+                let field_bytes = field_name.as_bytes();
+                let field_len = field_bytes.len();
+
+                // Save registers that might be in use (x0-x3 for args)
+                self.emit_stp(0, 1, 31, -2);
+                self.emit_stp(2, 3, 31, -2);
+
+                // Allocate stack space for field name string (16-byte aligned)
+                let string_stack_space = ((field_len + 15) / 16) * 16;
+                if string_stack_space > 0 {
+                    self.emit_sub_sp_imm(string_stack_space as i64);
+                }
+
+                // Store field name bytes to stack
+                let temp_byte_reg = 10;
+                for (i, &byte) in field_bytes.iter().enumerate() {
+                    self.emit_mov_imm(temp_byte_reg, byte as i64);
+                    self.emit_strb_offset(temp_byte_reg, 31, i as i32);
+                }
+
+                // Save pointer to field name string
+                let field_name_ptr_reg = 12;
+                self.emit_mov(field_name_ptr_reg, 31);
+
+                // Save value to a safe register (in case value_reg is x0-x3)
+                let saved_value_reg = 11;
+                if value_reg <= 3 {
+                    // Reload value from stack
+                    let saved_offset = string_stack_space as i32 + if value_reg <= 1 { 16 } else { 0 };
+                    let slot_offset = (value_reg % 2) as i32 * 8;
+                    self.emit_ldr_offset(saved_value_reg, 31, saved_offset + slot_offset);
+                } else {
+                    self.emit_mov(saved_value_reg, value_reg);
+                }
+
+                // Set up trampoline arguments:
+                // x0 = obj_ptr
+                if obj_reg <= 3 {
+                    let saved_offset = string_stack_space as i32 + if obj_reg <= 1 { 16 } else { 0 };
+                    let slot_offset = (obj_reg % 2) as i32 * 8;
+                    self.emit_ldr_offset(0, 31, saved_offset + slot_offset);
+                } else {
+                    self.emit_mov(0, obj_reg);
+                }
+                self.emit_mov(1, field_name_ptr_reg);           // x1 = field_name_ptr
+                self.emit_mov_imm(2, field_len as i64);         // x2 = field_name_len
+                self.emit_mov(3, saved_value_reg);              // x3 = value
+
+                // Call trampoline_store_type_field
+                let func_addr = crate::trampoline::trampoline_store_type_field as usize;
+                self.emit_mov_imm(15, func_addr as i64);
+                self.emit_blr(15);
+
+                // Clean up stack space
+                if string_stack_space > 0 {
+                    self.emit_add_sp_imm(string_stack_space as i64);
+                }
+
+                // Restore saved registers
+                self.emit_ldp(2, 3, 31, 2);
+                self.emit_ldp(0, 1, 31, 2);
+            }
+
+            Instruction::GcAddRoot(obj) => {
+                // GcAddRoot: Add object to GC write barrier remembered set
+                //
+                // ARM64 Calling Convention for trampoline_gc_add_root:
+                // - x0 = obj_ptr (tagged HeapObject)
+                // - Returns: x0 = nil (7)
+                //
+                // This is critical for generational GC correctness.
+                // Must be called BEFORE storing a pointer to a mutable field.
+
+                let obj_reg = self.get_physical_reg_for_irvalue(obj, false)?;
+
+                // Save registers that might be in use
+                self.emit_stp(0, 1, 31, -2);
+                self.emit_stp(2, 3, 31, -2);
+
+                // Set up argument: x0 = obj_ptr
+                if obj_reg <= 3 {
+                    // Need to load from saved area on stack
+                    let saved_offset = if obj_reg <= 1 { 16 } else { 0 };
+                    let slot_offset = (obj_reg % 2) as i32 * 8;
+                    self.emit_ldr_offset(0, 31, saved_offset + slot_offset);
+                } else {
+                    self.emit_mov(0, obj_reg);
+                }
+
+                // Call trampoline_gc_add_root
+                let func_addr = crate::trampoline::trampoline_gc_add_root as usize;
+                self.emit_mov_imm(15, func_addr as i64);
+                self.emit_blr(15);
+
+                // Restore saved registers
+                self.emit_ldp(2, 3, 31, 2);
+                self.emit_ldp(0, 1, 31, 2);
             }
 
             Instruction::ExternalCall(_, _, _) => {

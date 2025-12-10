@@ -243,6 +243,13 @@ fn print_ast(ast: &Expr, indent: usize) {
             println!("{}  object:", prefix);
             print_ast(object, indent + 2);
         }
+        Expr::FieldSet { field, object, value } => {
+            println!("{}FieldSet(.-{})", prefix, field);
+            println!("{}  object:", prefix);
+            print_ast(object, indent + 2);
+            println!("{}  value:", prefix);
+            print_ast(value, indent + 2);
+        }
         Expr::Throw { exception } => {
             println!("{}Throw", prefix);
             println!("{}  exception:", prefix);

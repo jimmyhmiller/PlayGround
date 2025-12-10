@@ -248,8 +248,24 @@ impl LinearScan {
                 if let IrValue::Register(r) = obj { regs.push(*r); }
             }
 
+            Instruction::StoreTypeField(obj, _field_name, value) => {
+                if let IrValue::Register(r) = obj { regs.push(*r); }
+                if let IrValue::Register(r) = value { regs.push(*r); }
+            }
+
+            Instruction::GcAddRoot(obj) => {
+                if let IrValue::Register(r) = obj { regs.push(*r); }
+            }
+
             Instruction::CallGC(dst) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
+            }
+
+            Instruction::Println(dst, args) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                for arg in args {
+                    if let IrValue::Register(r) = arg { regs.push(*r); }
+                }
             }
 
             Instruction::LoadKeyword(dst, _index) => {
@@ -575,8 +591,24 @@ impl LinearScan {
                 replace(obj);
             }
 
+            Instruction::StoreTypeField(obj, _field_name, value) => {
+                replace(obj);
+                replace(value);
+            }
+
+            Instruction::GcAddRoot(obj) => {
+                replace(obj);
+            }
+
             Instruction::CallGC(dst) => {
                 replace(dst);
+            }
+
+            Instruction::Println(dst, args) => {
+                replace(dst);
+                for arg in args {
+                    replace(arg);
+                }
             }
 
             Instruction::LoadKeyword(dst, _index) => {
@@ -895,8 +927,24 @@ impl LinearScan {
                 replace(obj);
             }
 
+            Instruction::StoreTypeField(obj, _field_name, value) => {
+                replace(obj);
+                replace(value);
+            }
+
+            Instruction::GcAddRoot(obj) => {
+                replace(obj);
+            }
+
             Instruction::CallGC(dst) => {
                 replace(dst);
+            }
+
+            Instruction::Println(dst, args) => {
+                replace(dst);
+                for arg in args {
+                    replace(arg);
+                }
             }
 
             Instruction::LoadKeyword(dst, _index) => {

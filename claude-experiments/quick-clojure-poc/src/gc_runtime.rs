@@ -323,6 +323,13 @@ impl GCRuntime {
         self.options.gc_always
     }
 
+    /// Add an object to the GC root set (write barrier for generational GC)
+    /// This should be called before writing a pointer to a mutable field
+    /// to ensure the old-generation object is scanned for young-generation references
+    pub fn gc_add_root(&mut self, ptr: usize) {
+        self.allocator.gc_add_root(ptr);
+    }
+
     /// Run GC if gc_always is enabled (called before allocations)
     pub fn maybe_gc_before_alloc(&mut self, stack_pointer: usize) {
         if self.options.gc_always && self.stack_base != 0 {
@@ -1282,6 +1289,30 @@ impl GCRuntime {
             .ok_or_else(|| format!("Field '{}' not found in type '{}'", field_name, type_def.name))?;
 
         Ok(self.read_type_field(obj_ptr, field_index))
+    }
+
+    /// Store a value to a field in a deftype instance by field name
+    /// Used by trampoline_store_type_field for mutable field assignment
+    pub fn store_type_field_by_name(&mut self, obj_ptr: usize, field_name: &str, value: usize) -> Result<usize, String> {
+        let type_id = self.get_instance_type_id(obj_ptr);
+
+        let type_def = self.type_registry.get(type_id)
+            .ok_or_else(|| format!("Unknown type_id {} in object", type_id))?;
+
+        let field_index = type_def.fields.iter()
+            .position(|f| f == field_name)
+            .ok_or_else(|| format!("Field '{}' not found in type '{}'", field_name, type_def.name))?;
+
+        self.write_type_field(obj_ptr, field_index, value);
+        Ok(value)
+    }
+
+    /// Write a value to a field in a deftype instance
+    fn write_type_field(&mut self, obj_ptr: usize, field_index: usize, value: usize) {
+        // Use the proper untagging and HeapObject API for consistency
+        let untagged = self.untag_heap_object(obj_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.write_field(field_index, value);
     }
 
     // ========== Heap Inspection Methods ==========

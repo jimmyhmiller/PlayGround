@@ -249,7 +249,7 @@ public class TestGeneratorFromCache {
         sb.append("                if (obj === null) { out.write('null'); return; }\n");
         sb.append("                if (typeof obj === 'undefined') { out.write('null'); return; }\n");
         sb.append("                if (typeof obj === 'boolean') { out.write(obj.toString()); return; }\n");
-        sb.append("                if (typeof obj === 'number') { out.write(obj.toString()); return; }\n");
+        sb.append("                if (typeof obj === 'number') { out.write(Number.isFinite(obj) ? obj.toString() : 'null'); return; }\n");
         sb.append("                if (typeof obj === 'bigint') { out.write('\\\"' + obj.toString() + '\\\"'); return; }\n");
         sb.append("                if (typeof obj === 'string') { out.write(JSON.stringify(obj)); return; }\n");
         sb.append("                if (Array.isArray(obj)) {\n");

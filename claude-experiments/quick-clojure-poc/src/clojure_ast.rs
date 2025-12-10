@@ -102,11 +102,12 @@ pub enum Expr {
         name: String,
     },
 
-    /// (deftype* TypeName [field1 field2 ...])
+    /// (deftype* TypeName [field1 ^:mutable field2 ...])
     /// Defines a new type with named fields
+    /// Fields can have ^:mutable metadata for mutable fields
     DefType {
         name: String,
-        fields: Vec<String>,
+        fields: Vec<FieldDef>,
     },
 
     /// (TypeName. arg1 arg2 ...) - constructor call
@@ -121,6 +122,15 @@ pub enum Expr {
     FieldAccess {
         field: String,
         object: Box<Expr>,
+    },
+
+    /// (set! (.-field obj) value) - field assignment
+    /// Writes a value to a mutable field in a deftype instance
+    /// Requires the field to be declared as ^:mutable
+    FieldSet {
+        field: String,
+        object: Box<Expr>,
+        value: Box<Expr>,
     },
 
     /// (throw expr)
@@ -200,6 +210,14 @@ pub struct ProtocolMethodImpl {
     pub name: String,
     pub params: Vec<String>,  // Includes 'this'
     pub body: Vec<Expr>,
+}
+
+/// Field definition in deftype
+/// Supports ^:mutable metadata for mutable fields
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldDef {
+    pub name: String,
+    pub mutable: bool,
 }
 
 /// Convert parsed Value to AST
@@ -325,13 +343,27 @@ fn analyze_set(items: &im::Vector<Value>) -> Result<Expr, String> {
         return Err(format!("set! requires 2 arguments, got {}", items.len() - 1));
     }
 
-    let var = analyze(&items[1])?;
+    // First, analyze the target to see what it is
+    let target = analyze(&items[1])?;
     let value = analyze(&items[2])?;
 
-    Ok(Expr::Set {
-        var: Box::new(var),
-        value: Box::new(value),
-    })
+    // Check if target is a field access - if so, this is a field set
+    match target {
+        Expr::FieldAccess { field, object } => {
+            Ok(Expr::FieldSet {
+                field,
+                object,
+                value: Box::new(value),
+            })
+        }
+        _ => {
+            // Original behavior for var set!
+            Ok(Expr::Set {
+                var: Box::new(target),
+                value: Box::new(value),
+            })
+        }
+    }
 }
 
 fn analyze_if(items: &im::Vector<Value>) -> Result<Expr, String> {
@@ -408,7 +440,7 @@ fn analyze_var_ref(items: &im::Vector<Value>) -> Result<Expr, String> {
 }
 
 fn analyze_deftype(items: &im::Vector<Value>) -> Result<Expr, String> {
-    // (deftype* TypeName [field1 field2 ...])
+    // (deftype* TypeName [field1 ^:mutable field2 ...])
     if items.len() != 3 {
         return Err(format!("deftype* requires 2 arguments (name and fields), got {}", items.len() - 1));
     }
@@ -419,17 +451,36 @@ fn analyze_deftype(items: &im::Vector<Value>) -> Result<Expr, String> {
         _ => return Err("deftype* requires a symbol as type name".to_string()),
     };
 
-    // Get field names from vector
+    // Get field definitions from vector
+    // Supports ^:mutable metadata on field symbols
     let fields = match &items[2] {
         Value::Vector(v) => {
-            let mut field_names = Vec::new();
+            let mut field_defs = Vec::new();
             for field in v.iter() {
-                match field {
-                    Value::Symbol(s) => field_names.push(s.clone()),
+                let field_def = match field {
+                    // Field with metadata (e.g., ^:mutable field-name)
+                    Value::WithMeta(meta, inner) => {
+                        let field_name = match &**inner {
+                            Value::Symbol(s) => s.clone(),
+                            _ => return Err(format!("deftype* field must be a symbol, got {:?}", inner)),
+                        };
+                        // Check if :mutable is in the metadata
+                        let is_mutable = meta.contains_key(":mutable") || meta.contains_key("mutable");
+                        FieldDef {
+                            name: field_name,
+                            mutable: is_mutable,
+                        }
+                    }
+                    // Plain field symbol (immutable)
+                    Value::Symbol(s) => FieldDef {
+                        name: s.clone(),
+                        mutable: false,
+                    },
                     _ => return Err(format!("deftype* field must be a symbol, got {:?}", field)),
-                }
+                };
+                field_defs.push(field_def);
             }
-            field_names
+            field_defs
         }
         _ => return Err("deftype* requires a vector of field names".to_string()),
     };

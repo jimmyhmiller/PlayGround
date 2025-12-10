@@ -37,7 +37,10 @@ public class DirectoryTester {
             System.err.println("  --max-failures=N        Stop after N Java parser failures (Acorn succeeded but Java failed) (default: unlimited)");
             System.err.println("  --max-mismatches=N      Stop after N AST mismatches (both succeeded but different ASTs) (default: unlimited)");
             System.err.println("  --max-too-permissive=N  Stop after N cases where Java is too permissive (Java succeeded but Acorn failed) (default: unlimited)");
-            System.err.println("  --cache                 Cache Acorn AST results for failures and mismatches (creates test-oracles/adhoc-cache)");
+            System.err.println("  --no-cache              Disable automatic caching of failures and mismatches");
+            System.err.println("");
+            System.err.println("Failures and mismatches are automatically cached to test-oracles/adhoc-cache");
+            System.err.println("and JUnit tests are regenerated after testing completes.");
             System.err.println("");
             System.err.println("Categories:");
             System.err.println("  - Both succeeded + matched: Perfect agreement");
@@ -52,7 +55,7 @@ public class DirectoryTester {
         int maxFailures = Integer.MAX_VALUE;
         int maxMismatches = Integer.MAX_VALUE;
         int maxTooPermissive = Integer.MAX_VALUE;
-        boolean enableCaching = false;
+        boolean enableCaching = true;  // Caching enabled by default
 
         // Parse arguments
         for (int i = 1; i < args.length; i++) {
@@ -77,8 +80,10 @@ public class DirectoryTester {
                     System.err.println("Invalid value for --max-too-permissive: " + args[i]);
                     System.exit(1);
                 }
+            } else if (args[i].equals("--no-cache")) {
+                enableCaching = false;
             } else if (args[i].equals("--cache")) {
-                enableCaching = true;
+                enableCaching = true;  // Keep for backwards compatibility
             }
         }
 
@@ -92,7 +97,7 @@ public class DirectoryTester {
         System.out.println("Ad-hoc directory testing (real-time comparison)");
         System.out.println("Directory: " + targetDir.toAbsolutePath());
         if (enableCaching) {
-            System.out.println("Caching enabled: Acorn results will be saved to test-oracles/adhoc-cache");
+            System.out.println("Auto-caching enabled: failures/mismatches will be saved to test-oracles/adhoc-cache");
         }
         System.out.println("");
 
@@ -435,9 +440,21 @@ public class DirectoryTester {
 
         if (enableCaching && cachedCount.get() > 0) {
             System.out.println("\n=== Cache Summary ===");
-            System.out.printf("Cached %d Acorn AST results to test-oracles/adhoc-cache%n", cachedCount.get());
-            System.out.println("\nTo generate JUnit tests from cached results, run:");
-            System.out.println("  mvn exec:java -Dexec.mainClass=\"com.jsparser.TestGeneratorFromCache\"");
+            System.out.printf("Cached %d files to test-oracles/adhoc-cache%n", cachedCount.get());
+
+            // Automatically regenerate JUnit tests from cache
+            System.out.println("\nRegenerating JUnit tests from cache...");
+            try {
+                Path cacheDir = Paths.get("test-oracles/adhoc-cache");
+                Path testOutputDir = Paths.get("src/test/java/com/jsparser");
+                TestGeneratorFromCache generator = new TestGeneratorFromCache(cacheDir, testOutputDir);
+                generator.generateTests();
+                System.out.println("\n✓ JUnit tests regenerated successfully!");
+                System.out.println("  Run 'mvn test' to execute the new tests.");
+            } catch (Exception e) {
+                System.err.println("\n✗ Failed to regenerate tests: " + e.getMessage());
+                System.err.println("  You can manually run: mvn exec:java -Dexec.mainClass=\"com.jsparser.TestGeneratorFromCache\"");
+            }
         }
     }
 

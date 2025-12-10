@@ -14,6 +14,13 @@ struct LoopContext {
     binding_registers: Vec<IrValue>,
 }
 
+/// Type information for deftype
+#[derive(Clone, Debug)]
+struct TypeInfo {
+    type_id: usize,
+    fields: Vec<(String, bool)>,  // (name, is_mutable)
+}
+
 /// Clojure to IR compiler
 ///
 /// Compiles Clojure AST to our IR, which is then compiled to ARM64.
@@ -55,8 +62,8 @@ pub struct Compiler {
     /// Cleared after each top-level compile
     compiled_function_irs: Vec<(Option<String>, Vec<Instruction>)>,
 
-    /// Type registry for deftype: type_name → (type_id, field_names)
-    type_registry: HashMap<String, (usize, Vec<String>)>,
+    /// Type registry for deftype: type_name → TypeInfo
+    type_registry: HashMap<String, TypeInfo>,
 }
 
 impl Compiler {
@@ -135,6 +142,7 @@ impl Compiler {
             Expr::DefType { name, fields } => self.compile_deftype(name, fields),
             Expr::TypeConstruct { type_name, args } => self.compile_type_construct(type_name, args),
             Expr::FieldAccess { field, object } => self.compile_field_access(field, object),
+            Expr::FieldSet { field, object, value } => self.compile_field_set(field, object, value),
             Expr::Throw { exception } => self.compile_throw(exception),
             Expr::Try { body, catches, finally } => self.compile_try(body, catches, finally),
             // Protocol system - will be implemented in Phase 4
@@ -303,10 +311,10 @@ impl Compiler {
 
     /// Check if a symbol is a built-in function
     fn is_builtin(&self, name: &str) -> bool {
-        matches!(name, "+" | "-" | "*" | "/" | "<" | ">" | "=" | "__gc" |
+        matches!(name, "+" | "-" | "*" | "/" | "<" | ">" | "<=" | ">=" | "=" | "__gc" |
                  "bit-and" | "bit-or" | "bit-xor" | "bit-not" |
                  "bit-shift-left" | "bit-shift-right" | "unsigned-bit-shift-right" |
-                 "nil?" | "number?" | "string?" | "fn?" | "identical?")
+                 "nil?" | "number?" | "string?" | "fn?" | "identical?" | "println")
     }
 
     /// Compile (var symbol) - returns the Var object itself, not its value
@@ -325,22 +333,30 @@ impl Compiler {
         Ok(result)
     }
 
-    /// Compile (deftype* TypeName [field1 field2 ...])
+    /// Compile (deftype* TypeName [field1 ^:mutable field2 ...])
     /// Registers the type and returns nil
-    fn compile_deftype(&mut self, name: &str, fields: &[String]) -> Result<IrValue, String> {
+    fn compile_deftype(&mut self, name: &str, fields: &[crate::clojure_ast::FieldDef]) -> Result<IrValue, String> {
         // Register the type with the runtime using fully qualified name
         let current_ns = self.get_current_namespace();
         let qualified_name = format!("{}/{}", current_ns, name);
 
+        // Extract just the field names for runtime registration
+        let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+
         // Get mutable access to runtime to register type
         let type_id = {
             let rt = unsafe { &mut *self.runtime.get() };
-            rt.register_type(qualified_name.clone(), fields.to_vec())
+            rt.register_type(qualified_name.clone(), field_names)
         };
 
         // Store in compiler's type registry with FULLY QUALIFIED name
         // This prevents namespace collisions and enables qualified constructor calls
-        self.type_registry.insert(qualified_name, (type_id, fields.to_vec()));
+        // Also track mutability for each field
+        let type_info = TypeInfo {
+            type_id,
+            fields: fields.iter().map(|f| (f.name.clone(), f.mutable)).collect(),
+        };
+        self.type_registry.insert(qualified_name, type_info);
 
         // deftype* returns nil
         let result = self.builder.new_register();
@@ -360,15 +376,15 @@ impl Compiler {
         };
 
         // Look up the type by fully qualified name
-        let (type_id, fields) = self.type_registry.get(&qualified_name)
+        let type_info = self.type_registry.get(&qualified_name)
             .cloned()
             .ok_or_else(|| format!("Unknown type: {}", qualified_name))?;
 
         // Check arg count matches field count
-        if args.len() != fields.len() {
+        if args.len() != type_info.fields.len() {
             return Err(format!(
                 "Type {} requires {} arguments, got {}",
-                type_name, fields.len(), args.len()
+                type_name, type_info.fields.len(), args.len()
             ));
         }
 
@@ -380,7 +396,7 @@ impl Compiler {
 
         // Emit MakeType instruction
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::MakeType(result, type_id, arg_values));
+        self.builder.emit(Instruction::MakeType(result, type_info.type_id, arg_values));
 
         Ok(result)
     }
@@ -399,6 +415,28 @@ impl Compiler {
         self.builder.emit(Instruction::LoadTypeField(result, obj_value, field.to_string()));
 
         Ok(result)
+    }
+
+    /// Compile (set! (.-field obj) value) - field assignment
+    /// Requires the field to be declared as ^:mutable in the deftype
+    fn compile_field_set(&mut self, field: &str, object: &Expr, value: &Expr) -> Result<IrValue, String> {
+        // 1. Compile the object
+        let obj_value = self.compile(object)?;
+
+        // 2. Compile the new value
+        let new_value = self.compile(value)?;
+
+        // 3. Emit GcAddRoot for write barrier (BEFORE the store)
+        // This is critical for generational GC correctness:
+        // When storing a young-generation pointer into an old-generation object,
+        // we must track the old object so the GC can find the cross-generational reference.
+        self.builder.emit(Instruction::GcAddRoot(obj_value));
+
+        // 4. Emit the field store
+        self.builder.emit(Instruction::StoreTypeField(obj_value, field.to_string(), new_value));
+
+        // 5. set! returns the new value
+        Ok(new_value)
     }
 
     fn compile_throw(&mut self, exception: &Expr) -> Result<IrValue, String> {
@@ -1577,6 +1615,12 @@ impl Compiler {
                 self.collect_free_vars_from_expr(object, bound, free);
             }
 
+            // FieldSet: check object and value for free vars
+            Expr::FieldSet { object, value, .. } => {
+                self.collect_free_vars_from_expr(object, bound, free);
+                self.collect_free_vars_from_expr(value, bound, free);
+            }
+
             // Throw: check exception expression for free vars
             Expr::Throw { exception } => {
                 self.collect_free_vars_from_expr(exception, bound, free);
@@ -1653,7 +1697,10 @@ impl Compiler {
                     "/" => self.compile_builtin_div(args),
                     "<" => self.compile_builtin_lt(args),
                     ">" => self.compile_builtin_gt(args),
+                    "<=" => self.compile_builtin_le(args),
+                    ">=" => self.compile_builtin_ge(args),
                     "=" => self.compile_builtin_eq(args),
+                    "println" => self.compile_builtin_println(args),
                     "__gc" => self.compile_builtin_gc(args),
                     "bit-and" => self.compile_builtin_bit_and(args),
                     "bit-or" => self.compile_builtin_bit_or(args),
@@ -1927,6 +1974,59 @@ impl Compiler {
         self.builder.emit(Instruction::Compare(result, left_untagged, right_untagged, Condition::GreaterThan));
 
         // Compare now returns properly tagged boolean (3 or 11)
+        Ok(result)
+    }
+
+    fn compile_builtin_le(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 2 {
+            return Err(format!("<= requires 2 arguments, got {}", args.len()));
+        }
+
+        let left = self.compile(&args[0])?;
+        let right = self.compile(&args[1])?;
+
+        let left_untagged = self.builder.new_register();
+        let right_untagged = self.builder.new_register();
+        self.builder.emit(Instruction::Untag(left_untagged, left));
+        self.builder.emit(Instruction::Untag(right_untagged, right));
+
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::Compare(result, left_untagged, right_untagged, Condition::LessThanOrEqual));
+
+        Ok(result)
+    }
+
+    fn compile_builtin_ge(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 2 {
+            return Err(format!(">= requires 2 arguments, got {}", args.len()));
+        }
+
+        let left = self.compile(&args[0])?;
+        let right = self.compile(&args[1])?;
+
+        let left_untagged = self.builder.new_register();
+        let right_untagged = self.builder.new_register();
+        self.builder.emit(Instruction::Untag(left_untagged, left));
+        self.builder.emit(Instruction::Untag(right_untagged, right));
+
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::Compare(result, left_untagged, right_untagged, Condition::GreaterThanOrEqual));
+
+        Ok(result)
+    }
+
+    fn compile_builtin_println(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        // println takes any number of arguments (including 0)
+        // Compile all arguments
+        let mut arg_vals = Vec::new();
+        for arg in args {
+            arg_vals.push(self.compile(arg)?);
+        }
+
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::Println(result, arg_vals));
+
+        // println returns nil
         Ok(result)
     }
 
