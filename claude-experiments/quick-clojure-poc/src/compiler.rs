@@ -305,7 +305,8 @@ impl Compiler {
     fn is_builtin(&self, name: &str) -> bool {
         matches!(name, "+" | "-" | "*" | "/" | "<" | ">" | "=" | "__gc" |
                  "bit-and" | "bit-or" | "bit-xor" | "bit-not" |
-                 "bit-shift-left" | "bit-shift-right" | "unsigned-bit-shift-right")
+                 "bit-shift-left" | "bit-shift-right" | "unsigned-bit-shift-right" |
+                 "nil?" | "number?" | "string?" | "fn?" | "identical?")
     }
 
     /// Compile (var symbol) - returns the Var object itself, not its value
@@ -1661,6 +1662,11 @@ impl Compiler {
                     "bit-shift-left" => self.compile_builtin_bit_shift_left(args),
                     "bit-shift-right" => self.compile_builtin_bit_shift_right(args),
                     "unsigned-bit-shift-right" => self.compile_builtin_unsigned_bit_shift_right(args),
+                    "nil?" => self.compile_builtin_nil_pred(args),
+                    "number?" => self.compile_builtin_number_pred(args),
+                    "string?" => self.compile_builtin_string_pred(args),
+                    "fn?" => self.compile_builtin_fn_pred(args),
+                    "identical?" => self.compile_builtin_identical(args),
                     _ => unreachable!(),
                 };
             }
@@ -2102,6 +2108,109 @@ impl Compiler {
         let result = self.builder.new_register();
         self.builder.emit(Instruction::Tag(result, result_untagged, IrValue::TaggedConstant(0)));
 
+        Ok(result)
+    }
+
+    // Type predicates
+
+    fn compile_builtin_nil_pred(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("nil? requires 1 argument, got {}", args.len()));
+        }
+        let val = self.compile(&args[0])?;
+
+        // Load nil constant (7) into a register for comparison
+        let nil_const = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(nil_const, IrValue::Null));
+
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::Compare(result, val, nil_const, Condition::Equal));
+        Ok(result)
+    }
+
+    fn compile_builtin_number_pred(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("number? requires 1 argument, got {}", args.len()));
+        }
+        let val = self.compile(&args[0])?;
+        let tag = self.builder.new_register();
+        self.builder.emit(Instruction::GetTag(tag, val));
+
+        // Load constant 2 into a register for comparison
+        let two_const = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(two_const, IrValue::TaggedConstant(2)));
+
+        // Check if tag < 2 (i.e., tag is 0 for int or 1 for float)
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::Compare(result, tag, two_const, Condition::LessThan));
+        Ok(result)
+    }
+
+    fn compile_builtin_string_pred(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("string? requires 1 argument, got {}", args.len()));
+        }
+        let val = self.compile(&args[0])?;
+        let tag = self.builder.new_register();
+        self.builder.emit(Instruction::GetTag(tag, val));
+
+        // Load constant 2 into a register for comparison
+        let two_const = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(two_const, IrValue::TaggedConstant(2)));
+
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::Compare(result, tag, two_const, Condition::Equal));
+        Ok(result)
+    }
+
+    fn compile_builtin_fn_pred(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("fn? requires 1 argument, got {}", args.len()));
+        }
+        let val = self.compile(&args[0])?;
+        let tag = self.builder.new_register();
+        self.builder.emit(Instruction::GetTag(tag, val));
+
+        // fn? is true if tag == 4 (function) or tag == 5 (closure)
+        // Use branching: check tag == 4, if not check tag == 5
+        let is_fn_label = self.builder.new_label();
+        let done_label = self.builder.new_label();
+        let result = self.builder.new_register();
+
+        // Load constants into registers
+        let four_const = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(four_const, IrValue::TaggedConstant(4)));
+        let five_const = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(five_const, IrValue::TaggedConstant(5)));
+
+        // Check tag == 4 (function)
+        self.builder.emit(Instruction::JumpIf(is_fn_label.clone(), Condition::Equal, tag, four_const));
+
+        // Check tag == 5 (closure)
+        self.builder.emit(Instruction::JumpIf(is_fn_label.clone(), Condition::Equal, tag, five_const));
+
+        // Neither: return false
+        self.builder.emit(Instruction::LoadFalse(result));
+        self.builder.emit(Instruction::Jump(done_label.clone()));
+
+        // Is function: return true
+        self.builder.emit(Instruction::Label(is_fn_label));
+        self.builder.emit(Instruction::LoadTrue(result));
+
+        self.builder.emit(Instruction::Label(done_label));
+        Ok(result)
+    }
+
+    fn compile_builtin_identical(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 2 {
+            return Err(format!("identical? requires 2 arguments, got {}", args.len()));
+        }
+        let left = self.compile(&args[0])?;
+        let right = self.compile(&args[1])?;
+
+        // Compare raw tagged values - identical values have identical bit patterns
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::Compare(result, left, right, Condition::Equal));
         Ok(result)
     }
 
