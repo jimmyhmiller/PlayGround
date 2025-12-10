@@ -1508,6 +1508,11 @@ impl Arm64CodeGen {
                 let save_bytes = ((saves.len() + 1) / 2) * 16;
                 self.current_function_stack_bytes += save_bytes;
 
+                // IMPORTANT: Update current_stack_size so GC can find saved roots!
+                // Without this, GC won't scan the saved registers and may miss heap pointers.
+                let save_words = ((saves.len() + 1) / 2) * 2;  // 2 words per 16-byte chunk
+                self.increment_stack_size(save_words);
+
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
@@ -1540,6 +1545,10 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
 
                 // STEP 5: Restore volatile registers (reverse order)
+                // First, update stack size tracking (must match increment above)
+                let save_words = ((saves.len() + 1) / 2) * 2;
+                self.decrement_stack_size(save_words);
+
                 for save_pair in saves.chunks(2).rev() {
                     if save_pair.len() == 2 {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
@@ -1614,6 +1623,11 @@ impl Arm64CodeGen {
                 // Track stack bytes for patching
                 let save_bytes = ((saves.len() + 1) / 2) * 16;
                 self.current_function_stack_bytes += save_bytes;
+
+                // IMPORTANT: Update current_stack_size so GC can find saved roots!
+                // Without this, GC won't scan the saved registers and may miss heap pointers.
+                let save_words = ((saves.len() + 1) / 2) * 2;  // 2 words per 16-byte chunk
+                self.increment_stack_size(save_words);
 
                 // STEP 2: Tag-aware call logic
                 // Supports:
@@ -1773,6 +1787,10 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
 
                 // STEP 3: Restore volatile registers (reverse order)
+                // First, update stack size tracking (must match increment above)
+                let save_words = ((saves.len() + 1) / 2) * 2;
+                self.decrement_stack_size(save_words);
+
                 for save_pair in saves.chunks(2).rev() {
                     if save_pair.len() == 2 {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
@@ -3147,6 +3165,9 @@ impl Arm64CodeGen {
         // str x30, [sp]
         self.emit_str_offset(30, 31, 0);  // x31 = sp
 
+        // Track the X30 save for GC stack map (2 words = 16 bytes)
+        self.increment_stack_size(2);
+
         // Load function address and call
         self.emit_mov_imm(15, target_fn as i64);  // Use x15 as temp
         self.emit_blr(15);
@@ -3156,6 +3177,9 @@ impl Arm64CodeGen {
         self.emit_ldr_offset(30, 31, 0);
         // add sp, sp, #16
         self.emit_add_sp_imm(16);
+
+        // Restore stack size tracking
+        self.decrement_stack_size(2);
     }
 
     /// Execute the compiled code (for testing)
