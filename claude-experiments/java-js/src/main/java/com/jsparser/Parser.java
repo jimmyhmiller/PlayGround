@@ -1008,9 +1008,8 @@ public class Parser {
                             // Keep original if conversion fails
                         }
                     }
-                    // value should be the decimal bigint + 'n' to match Acorn's JSON serialization of BigInt
-                    String valueStr = bigintValue + "n";
-                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), valueStr, keyLexeme, null, bigintValue);
+                    // value should be the decimal bigint WITHOUT 'n' to match Acorn's JSON serialization
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), bigintValue, keyLexeme, null, bigintValue);
                 } else {
                     Object literalValue = keyToken.literal();
                     if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
@@ -1758,9 +1757,8 @@ public class Parser {
                             // Keep original if conversion fails
                         }
                     }
-                    // value should be the decimal bigint + 'n' to match Acorn's JSON serialization of BigInt
-                    String valueStr = bigintValue + "n";
-                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), valueStr, keyLexeme, null, bigintValue);
+                    // value should be the decimal bigint WITHOUT 'n' to match Acorn's JSON serialization
+                    key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), bigintValue, keyLexeme, null, bigintValue);
                 } else {
                     Object literalValue = keyToken.literal();
                     if (literalValue instanceof Double d && (d.isInfinite() || d.isNaN())) {
@@ -2147,9 +2145,9 @@ public class Parser {
                     bigintValue = bi.toString();
                 } catch (NumberFormatException e) { /* keep original */ }
             }
-            // value should be the decimal bigint + 'n' to match Acorn's JSON serialization of BigInt
-            String valueStr = bigintValue + "n";
-            return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), valueStr, lexeme, null, bigintValue);
+            // value should be the decimal bigint WITHOUT 'n' to match Acorn's JSON serialization of BigInt
+            // (BigInt.toString() outputs just the number, no 'n' suffix)
+            return new Literal(p.getStart(token), p.getEnd(token), token.line(), token.column(), token.endLine(), token.endColumn(), bigintValue, lexeme, null, bigintValue);
         }
 
         // Handle Infinity/-Infinity/NaN - value should be null per ESTree spec
@@ -3100,9 +3098,8 @@ public class Parser {
                         bigintValue = bi.toString();
                     } catch (NumberFormatException e) { /* keep original */ }
                 }
-                // value should be the decimal bigint + 'n' to match Acorn's JSON serialization of BigInt
-                String valueStr = bigintValue + "n";
-                key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), valueStr, keyLexeme, null, bigintValue);
+                // value should be the decimal bigint WITHOUT 'n' to match Acorn's JSON serialization
+                key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), bigintValue, keyLexeme, null, bigintValue);
             } else {
                 // Handle Infinity/-Infinity/NaN - value should be null per ESTree spec
                 Object literalValue = keyToken.literal();

@@ -1,113 +1,194 @@
 package com.jsparser;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.jsparser.ast.*;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.jsparser.ast.Program;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.io.BufferedOutputStream;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.CompletableFuture;
 
+import static org.junit.jupiter.api.Assertions.fail;
+
+/**
+ * Test for React development build parsing.
+ * Uses cached file from test-oracles/adhoc-cache.
+ */
 public class DebugReactPosition {
 
-    private static final ObjectMapper mapper = new ObjectMapper();
+    private static final ObjectMapper mapper;
+    static {
+        mapper = new ObjectMapper();
+        mapper.enable(SerializationFeature.INDENT_OUTPUT);
+        mapper.setDefaultPrettyPrinter(new com.fasterxml.jackson.core.util.DefaultPrettyPrinter()
+            .withObjectIndenter(new com.fasterxml.jackson.core.util.DefaultIndenter("  ", "\n"))
+            .withSeparators(com.fasterxml.jackson.core.util.Separators.createDefaultInstance()
+                .withObjectFieldValueSpacing(com.fasterxml.jackson.core.util.Separators.Spacing.NONE)));
+    }
 
     @Test
-    public void debugFirstMismatch() throws Exception {
-        String filePath = "../simple-nextjs-demo/simple-nextjs-demo/node_modules/next/dist/compiled/react-experimental/cjs/react.development.js";
-        String source = Files.readString(Paths.get(filePath));
+    @DisplayName("React experimental development build")
+    public void testReactDevelopmentBuild() throws Exception {
+        // Uses cached file from test-oracles/adhoc-cache
+        assertASTMatches(
+            "test-oracles/adhoc-cache/_react.development.js",
+            false
+        );
+    }
 
-        // The first mismatch is at:
-        // .body[1].expression.right.callee.body.body[2].body.body[2].expression.right.loc.end.column: 66 != 65
-        // Let's navigate to that node
+    private void assertASTMatches(String cachedJsPath, boolean isModule) throws Exception {
+        String source = Files.readString(Paths.get(cachedJsPath));
 
-        Program ast = Parser.parse(source, false);
+        Path acornTmp = Files.createTempFile("acorn-ast-", ".json");
+        Path ourTmp = Files.createTempFile("our-ast-", ".json");
 
-        // body[1]
-        ExpressionStatement stmt1 = (ExpressionStatement) ast.body().get(1);
-        // .expression.right.callee.body.body[2].body.body[2].expression.right
-        AssignmentExpression assign = (AssignmentExpression) stmt1.expression();
-        CallExpression call = (CallExpression) assign.right();
-        FunctionExpression func = (FunctionExpression) call.callee();
-        BlockStatement block = func.body();
+        try {
+            // 1. Stream Acorn AST to temp file
+            runAcornToFile(cachedJsPath, isModule, acornTmp);
 
-        // body[2]
-        BlockStatement innerBlock2 = (BlockStatement) block.body().get(2);
-        // body[2]
-        ExpressionStatement exprStmt = (ExpressionStatement) innerBlock2.body().get(2);
-        AssignmentExpression innerAssign = (AssignmentExpression) exprStmt.expression();
+            // 2. Stream our AST to temp file
+            Program ourAst = Parser.parse(source, isModule);
+            try (var out = new BufferedOutputStream(Files.newOutputStream(ourTmp))) {
+                mapper.writeValue(out, ourAst);
+            }
 
-        Expression right = innerAssign.right();
+            // 3. Compare files via hash
+            String acornHash = hashJsonContent(acornTmp);
+            String ourHash = hashJsonContent(ourTmp);
 
-        System.out.println("Expression type: " + right.getClass().getSimpleName());
-        System.out.println("Start: " + right.start());
-        System.out.println("End: " + right.end());
-        System.out.println("Loc: " + right.loc());
-        System.out.println("Loc end column: " + right.loc().end().column());
-
-        // Let's also print the source text at this position
-        int start = right.start();
-        int end = right.end();
-        String text = source.substring(start, Math.min(end, start + 200));
-        System.out.println("\nSource text:");
-        System.out.println(text);
-
-        // Check what Acorn says
-        String acornJson = parseWithAcorn(source, filePath);
-        if (acornJson != null) {
-            Object acornObj = mapper.readValue(acornJson, Object.class);
-            // Navigate to the same node in Acorn's AST
-            java.util.Map<?,?> acornAst = (java.util.Map<?,?>) acornObj;
-            java.util.List<?> body = (java.util.List<?>) acornAst.get("body");
-            java.util.Map<?,?> stmt = (java.util.Map<?,?>) body.get(1);
-            java.util.Map<?,?> expr = (java.util.Map<?,?>) stmt.get("expression");
-            java.util.Map<?,?> rightExpr = (java.util.Map<?,?>) expr.get("right");
-            java.util.Map<?,?> callee = (java.util.Map<?,?>) rightExpr.get("callee");
-            java.util.Map<?,?> funcBody = (java.util.Map<?,?>) callee.get("body");
-            java.util.List<?> funcBodyBody = (java.util.List<?>) funcBody.get("body");
-            java.util.Map<?,?> block2 = (java.util.Map<?,?>) funcBodyBody.get(2);
-            java.util.List<?> block2Body = (java.util.List<?>) block2.get("body");
-            java.util.Map<?,?> exprStmt2 = (java.util.Map<?,?>) block2Body.get(2);
-            java.util.Map<?,?> exprStmtExpr = (java.util.Map<?,?>) exprStmt2.get("expression");
-            java.util.Map<?,?> rightNode = (java.util.Map<?,?>) exprStmtExpr.get("right");
-            java.util.Map<?,?> loc = (java.util.Map<?,?>) rightNode.get("loc");
-            java.util.Map<?,?> locEnd = (java.util.Map<?,?>) loc.get("end");
-
-            System.out.println("\nAcorn says:");
-            System.out.println("Start: " + rightNode.get("start"));
-            System.out.println("End: " + rightNode.get("end"));
-            System.out.println("Loc end column: " + locEnd.get("column"));
+            if (!acornHash.equals(ourHash)) {
+                showFirstDifference(acornTmp, ourTmp, cachedJsPath);
+                fail("AST mismatch for " + cachedJsPath);
+            }
+        } finally {
+            Files.deleteIfExists(acornTmp);
+            Files.deleteIfExists(ourTmp);
         }
     }
 
-    private String parseWithAcorn(String source, String filePath) throws Exception {
-        Path tempFile = Files.createTempFile("acorn-ast-", ".json");
-        try {
-            String[] cmd = {
-                    "node",
-                    "-e",
-                    "const acorn = require('acorn'); " +
-                            "const fs = require('fs'); " +
-                            "const source = fs.readFileSync(process.argv[1], 'utf-8'); " +
-                            "try { const ast = acorn.parse(source, {ecmaVersion: 2025, locations: true, sourceType: 'script'}); " +
-                            "fs.writeFileSync(process.argv[2], JSON.stringify(ast, (k,v) => typeof v === 'bigint' ? null : v)); " +
-                            "process.exit(0); } catch(e) { console.error(e.message); process.exit(1); }",
-                    filePath,
-                    tempFile.toAbsolutePath().toString()
-            };
-
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectErrorStream(true);
-            Process process = pb.start();
-
-            int exitCode = process.waitFor();
-            if (exitCode != 0) {
-                return null;
+    private void runAcornToFile(String jsPath, boolean isModule, Path outputFile) throws Exception {
+        String sourceType = isModule ? "module" : "script";
+        String script = """
+            const acorn = require('acorn');
+            const fs = require('fs');
+            const source = fs.readFileSync(process.argv[1], 'utf-8');
+            const ast = acorn.parse(source, {ecmaVersion: 2025, locations: true, sourceType: '%s'});
+            const out = fs.createWriteStream(process.argv[2]);
+            function writeJson(obj, indent) {
+                if (obj === null) { out.write('null'); return; }
+                if (typeof obj === 'undefined') { out.write('null'); return; }
+                if (typeof obj === 'boolean') { out.write(obj.toString()); return; }
+                if (typeof obj === 'number') { out.write(Number.isFinite(obj) ? obj.toString() : 'null'); return; }
+                if (typeof obj === 'bigint') { out.write('"' + obj.toString() + '"'); return; }
+                if (typeof obj === 'string') { out.write(JSON.stringify(obj)); return; }
+                if (Array.isArray(obj)) {
+                    out.write('[');
+                    for (let i = 0; i < obj.length; i++) {
+                        if (i > 0) out.write(',');
+                        out.write('\\n' + indent + '  ');
+                        writeJson(obj[i], indent + '  ');
+                    }
+                    if (obj.length > 0) out.write('\\n' + indent);
+                    out.write(']');
+                    return;
+                }
+                out.write('{');
+                const keys = Object.keys(obj);
+                for (let i = 0; i < keys.length; i++) {
+                    if (i > 0) out.write(',');
+                    out.write('\\n' + indent + '  ');
+                    out.write(JSON.stringify(keys[i]) + ': ');
+                    writeJson(obj[keys[i]], indent + '  ');
+                }
+                if (keys.length > 0) out.write('\\n' + indent);
+                out.write('}');
             }
+            writeJson(ast, '');
+            out.write('\\n');
+            out.end(() => process.exit(0));
+            """.formatted(sourceType);
 
-            return Files.readString(tempFile);
-        } finally {
-            Files.deleteIfExists(tempFile);
+        String[] cmd = { "node", "--max-old-space-size=8192", "-e", script, jsPath, outputFile.toString() };
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        Process process = pb.start();
+
+        CompletableFuture<String> errorFuture = CompletableFuture.supplyAsync(() -> {
+            try {
+                return new String(process.getErrorStream().readAllBytes());
+            } catch (IOException e) { return ""; }
+        });
+
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new RuntimeException("Acorn failed: " + errorFuture.get());
+        }
+    }
+
+    private String hashJsonContent(Path input) throws Exception {
+        ObjectMapper localMapper = new ObjectMapper();
+        com.fasterxml.jackson.databind.JsonNode tree = localMapper.readTree(input.toFile());
+        java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+        hashNode(tree, digest);
+        return java.util.HexFormat.of().formatHex(digest.digest());
+    }
+
+    private void hashNode(com.fasterxml.jackson.databind.JsonNode node, java.security.MessageDigest digest) {
+        if (node.isNull()) { digest.update("null".getBytes()); return; }
+        if (node.isBoolean()) { digest.update(node.asText().getBytes()); return; }
+        if (node.isNumber()) { digest.update(node.asText().getBytes()); return; }
+        if (node.isTextual()) {
+            try { digest.update(mapper.writeValueAsBytes(node.asText())); }
+            catch (Exception e) { throw new RuntimeException(e); }
+            return;
+        }
+        if (node.isArray()) {
+            digest.update((byte)'[');
+            boolean first = true;
+            for (var elem : node) {
+                if (!first) digest.update((byte)',');
+                first = false;
+                hashNode(elem, digest);
+            }
+            digest.update((byte)']');
+            return;
+        }
+        if (node.isObject()) {
+            digest.update((byte)'{');
+            var fields = new java.util.ArrayList<String>();
+            node.fieldNames().forEachRemaining(fields::add);
+            java.util.Collections.sort(fields);
+            boolean first = true;
+            for (String field : fields) {
+                if (!first) digest.update((byte)',');
+                first = false;
+                try { digest.update(mapper.writeValueAsBytes(field)); }
+                catch (Exception e) { throw new RuntimeException(e); }
+                digest.update((byte)':');
+                hashNode(node.get(field), digest);
+            }
+            digest.update((byte)'}');
+        }
+    }
+
+    private void showFirstDifference(Path acornFile, Path ourFile, String jsPath) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder("diff", "-u",
+            acornFile.toString(), ourFile.toString());
+        Process p = pb.start();
+        String diff = new String(p.getInputStream().readAllBytes());
+        p.waitFor();
+
+        System.err.println("\n=== AST MISMATCH: " + jsPath + " ===");
+        String[] lines = diff.split("\\n");
+        for (int i = 0; i < Math.min(50, lines.length); i++) {
+            System.err.println(lines[i]);
+        }
+        if (lines.length > 50) {
+            System.err.println("... (" + (lines.length - 50) + " more lines)");
         }
     }
 }

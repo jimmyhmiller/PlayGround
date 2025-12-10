@@ -5,6 +5,7 @@ mod clojure_ast;
 // Our own IR and compiler
 mod ir;
 mod compiler;
+mod arm_instructions;
 mod arm_codegen;
 mod gc;
 mod gc_runtime;

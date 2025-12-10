@@ -623,7 +623,7 @@ public class GeneratedNodeModulesTest {
                 if (obj === null) { out.write('null'); return; }
                 if (typeof obj === 'undefined') { out.write('null'); return; }
                 if (typeof obj === 'boolean') { out.write(obj.toString()); return; }
-                if (typeof obj === 'number') { out.write(obj.toString()); return; }
+                if (typeof obj === 'number') { out.write(Number.isFinite(obj) ? obj.toString() : 'null'); return; }
                 if (typeof obj === 'bigint') { out.write('\"' + obj.toString() + '\"'); return; }
                 if (typeof obj === 'string') { out.write(JSON.stringify(obj)); return; }
                 if (Array.isArray(obj)) {
@@ -673,6 +673,8 @@ public class GeneratedNodeModulesTest {
     private String hashJsonContent(Path input) throws Exception {
         // Parse JSON tree and hash with sorted keys using Jackson
         ObjectMapper localMapper = new ObjectMapper();
+        // Allow non-standard JSON numbers like Infinity and NaN (from Acorn output)
+        localMapper.configure(com.fasterxml.jackson.core.JsonParser.Feature.ALLOW_NON_NUMERIC_NUMBERS, true);
         com.fasterxml.jackson.databind.JsonNode tree = localMapper.readTree(input.toFile());
         java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
         hashNode(tree, digest);

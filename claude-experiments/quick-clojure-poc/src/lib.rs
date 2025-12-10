@@ -7,6 +7,7 @@ pub mod reader;
 pub mod clojure_ast;
 pub mod ir;
 pub mod compiler;
+pub mod arm_instructions;
 pub mod arm_codegen;
 pub mod gc;
 pub mod gc_runtime;
