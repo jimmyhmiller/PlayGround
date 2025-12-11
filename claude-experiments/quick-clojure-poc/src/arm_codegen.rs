@@ -237,9 +237,13 @@ impl Arm64CodeGen {
 
         // Store info for Ret to emit correct epilogue
         codegen.num_stack_slots = total_stack_slots;
-        codegen.saved_callee_registers = used_callee_saved;
+        codegen.saved_callee_registers = used_callee_saved.clone();
         codegen.function_stack_space = stack_space;
         codegen.is_per_function_compilation = true;
+
+        // DEBUG: Print function frame info
+        // eprintln!("DEBUG compile_function: callee_saved={:?}, stack_space={}, spill_slots={}",
+        //           used_callee_saved, stack_space, num_spill_slots);
 
         // Compile instructions (Ret will emit its own epilogue using saved_callee_registers)
         for inst in &allocated_instructions {
@@ -317,16 +321,6 @@ impl Arm64CodeGen {
             return Err(format!("Expected register for result, got {:?}", result_reg));
         };
 
-        // Determine which callee-saved registers (x19-x28) are used
-        let mut used_callee_saved: Vec<usize> = allocator.allocated_registers
-            .values()
-            .map(|vreg| vreg.index())
-            .filter(|&idx| idx >= 19 && idx <= 28)
-            .collect();
-        used_callee_saved.sort_unstable();
-        used_callee_saved.dedup();
-        // eprintln!("DEBUG: Saving/restoring callee-saved registers: {:?}", used_callee_saved);
-
         // Count spills to determine stack space needed
         // Add 8 bytes padding so spills are above SP (ARM64 requirement)
         let stack_space = if num_stack_slots > 0 {
@@ -342,24 +336,25 @@ impl Arm64CodeGen {
 
         let allocated_instructions = allocator.finish();
 
-        // Emit function prologue
-        // FIXED: Save callee-saved registers (x19-x28) that are actually used
-        // Previously relied on trampoline, but BLR calls don't go through trampoline!
-        // Save FP and LR
+        // Emit function prologue (matching Beagle's approach)
+        // Stack layout after prologue:
+        //   [FP + 8]:   saved x30 (LR)
+        //   [FP + 0]:   saved x29 (old FP) <- FP points here
+        //   [FP - 8]:   spill slot 0
+        //   [FP - 16]:  spill slot 1
+        //   ...
+        //   [SP]:       <- SP after stack allocation
+        //
+        // NOTE: We don't save callee-saved registers (x19-x28) in the prologue.
+        // They're callee-saved, meaning any function we call will preserve them.
+
+        // Step 1: Save FP and LR
         self.emit_stp(29, 30, 31, -2);  // stp x29, x30, [sp, #-16]!
-        self.emit_mov(29, 31);           // mov x29, sp (set frame pointer)
 
-        // Save used callee-saved registers in pairs (for 16-byte alignment)
-        for chunk in used_callee_saved.chunks(2) {
-            if chunk.len() == 2 {
-                self.emit_stp(chunk[0], chunk[1], 31, -2);  // stp xN, xM, [sp, #-16]!
-            } else {
-                // Odd number - save single register with padding
-                self.emit_stp(chunk[0], 31, 31, -2);  // stp xN, xzr, [sp, #-16]!
-            }
-        }
+        // Step 2: Set FP = SP (immediately after saving FP/LR)
+        self.emit_mov(29, 31);  // mov x29, sp
 
-        // Allocate stack space for spills if needed
+        // Step 3: Allocate stack space for spills
         if stack_space > 0 {
             // sub sp, sp, #stack_space
             self.emit_sub_sp_imm(stack_space as i64);
@@ -386,24 +381,14 @@ impl Arm64CodeGen {
             self.emit_mov(0, result_physical);
         }
 
+        // Emit function epilogue (matching Beagle's approach)
         // Deallocate stack space for spills if needed
         if stack_space > 0 {
             // add sp, sp, #stack_space
             self.emit_add_sp_imm(stack_space as i64);
         }
 
-        // Emit function epilogue
-        // FIXED: Restore callee-saved registers in reverse order
-        for chunk in used_callee_saved.chunks(2).rev() {
-            if chunk.len() == 2 {
-                self.emit_ldp(chunk[0], chunk[1], 31, 2);  // ldp xN, xM, [sp], #16
-            } else {
-                // Odd number - restore single register (ignore padding)
-                self.emit_ldp(chunk[0], 31, 31, 2);  // ldp xN, xzr, [sp], #16
-            }
-        }
-
-        // Restore FP and LR
+        // Restore FP and LR (no callee-saved register restoration needed)
         self.emit_ldp(29, 30, 31, 2);    // ldp x29, x30, [sp], #16
 
         // Emit return instruction
@@ -965,6 +950,87 @@ impl Arm64CodeGen {
                 self.code.push(0x14000000); // B #0
             }
 
+            Instruction::Recur(label, assignments) => {
+                // Simple recur without saves - just do assignments and jump
+                if !assignments.is_empty() {
+                    // Phase 1: Push all source values to stack
+                    for (_, src) in assignments.iter() {
+                        let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                        self.emit_stp(src_reg, 31, 31, -2); // stp src, xzr, [sp, #-16]!
+                    }
+
+                    // Phase 2: Pop into destinations (reverse order)
+                    for (dst, _) in assignments.iter().rev() {
+                        let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                        self.emit_ldp(dst_reg, 31, 31, 2); // ldp dst, xzr, [sp], #16
+                    }
+                }
+
+                // Jump to loop label
+                let fixup_index = self.code.len();
+                self.pending_fixups.push((fixup_index, label.clone()));
+                self.code.push(0x14000000); // B #0
+            }
+
+            Instruction::RecurWithSaves(label, assignments, saves) => {
+                // Loop back-edge with register preservation
+                // Save registers that are live across the loop iteration
+
+                // DEBUG: Print what we're saving AND destinations (need to clear temps after)
+                let save_regs: Vec<usize> = saves.iter()
+                    .filter_map(|v| self.get_physical_reg_for_irvalue(v, false).ok())
+                    .collect();
+                self.clear_temp_registers();
+                let dest_regs: Vec<usize> = assignments.iter()
+                    .filter_map(|(dst, _)| self.get_physical_reg_for_irvalue(dst, true).ok())
+                    .collect();
+                self.clear_temp_registers();
+                // eprintln!("DEBUG RecurWithSaves: saves={:?}, dests={:?}", save_regs, dest_regs);
+
+                // Check for overlap - this would be a bug!
+                for &save_reg in &save_regs {
+                    if dest_regs.contains(&save_reg) {
+                        eprintln!("BUG! Register x{} is both saved and a destination!", save_reg);
+                    }
+                }
+
+                // Step 1: Save all the saves (registers that need to survive)
+                // Clear temps between each iteration to avoid exhausting the pool
+                for save in saves.iter() {
+                    let save_reg = self.get_physical_reg_for_irvalue(save, false)?;
+                    self.emit_stp(save_reg, 31, 31, -2); // stp save, xzr, [sp, #-16]!
+                    self.clear_temp_registers();
+                }
+
+                // Step 2: Push assignment sources to stack (for parallel assignment)
+                if !assignments.is_empty() {
+                    for (_, src) in assignments.iter() {
+                        let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                        self.emit_stp(src_reg, 31, 31, -2); // stp src, xzr, [sp, #-16]!
+                        self.clear_temp_registers();
+                    }
+
+                    // Step 3: Pop into destinations (reverse order)
+                    for (dst, _) in assignments.iter().rev() {
+                        let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                        self.emit_ldp(dst_reg, 31, 31, 2); // ldp dst, xzr, [sp], #16
+                        self.clear_temp_registers();
+                    }
+                }
+
+                // Step 4: Restore the saves (reverse order)
+                for save in saves.iter().rev() {
+                    let save_reg = self.get_physical_reg_for_irvalue(save, false)?;
+                    self.emit_ldp(save_reg, 31, 31, 2); // ldp save, xzr, [sp], #16
+                    self.clear_temp_registers();
+                }
+
+                // Step 5: Jump to loop label
+                let fixup_index = self.code.len();
+                self.pending_fixups.push((fixup_index, label.clone()));
+                self.code.push(0x14000000); // B #0
+            }
+
             Instruction::JumpIf(label, cond, src1, src2) => {
                 // Compare src1 and src2
                 let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
@@ -1135,7 +1201,6 @@ impl Arm64CodeGen {
             }
 
             Instruction::Call(dst, fn_val, args) => {
-                eprintln!("DEBUG: Call - dst={:?}, fn_val={:?}, args={:?}", dst, fn_val, args);
                 // Call: Invoke a function with arguments
                 //
                 // Following Beagle's approach - NO hardcoded x19!
@@ -1157,7 +1222,6 @@ impl Arm64CodeGen {
 
                 // Get function pointer in its allocated register (no move to hardcoded x19!)
                 let fn_reg = self.get_physical_reg_for_irvalue(fn_val, false)?;
-                eprintln!("DEBUG: Call - fn_reg=x{}", fn_reg);
 
                 // Collect argument source registers
                 // x0-x7 are never used by the allocator (which only uses x19-x28).
@@ -1212,7 +1276,7 @@ impl Arm64CodeGen {
 
                 // Set up normal calling convention: args in x0-x7
                 for (i, &src_reg) in arg_source_regs.iter().enumerate() {
-                    eprintln!("DEBUG: Call (fn path) - moving arg {} from x{} to x{}", i, src_reg, i);
+                    // eprintln!("DEBUG: Call (fn path) - moving arg {} from x{} to x{}", i, src_reg, i);
                     if i != src_reg {  // Only move if source != destination
                         self.emit_mov(i, src_reg);  // x0, x1, x2, etc.
                     }
@@ -1231,6 +1295,8 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
                 // eprintln!("DEBUG: Call - done, dst_reg=x{}, spill={:?}", dst_reg, dest_spill);
             }
+
+            // NOTE: CallWithSaves is handled later in the match with multi-arity support
 
             Instruction::CallGC(dst) => {
                 // CallGC: Force garbage collection
@@ -1558,6 +1624,7 @@ impl Arm64CodeGen {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
                         self.emit_ldp(r1, 31, 31, 2);  // ldp r1, xzr, [sp], #16
                     }
+                    self.clear_temp_registers();
                 }
 
                 // Decrement stack counter (deallocate what we allocated)
@@ -1570,6 +1637,10 @@ impl Arm64CodeGen {
                 if src_reg != 0 {
                     self.emit_mov(0, src_reg);
                 }
+
+                // DEBUG: Print epilogue info
+                // eprintln!("DEBUG Ret: is_per_function={}, stack_space={}, callee_saved={:?}",
+                //           self.is_per_function_compilation, self.function_stack_space, self.saved_callee_registers);
 
                 // Emit function epilogue
                 if self.is_per_function_compilation {
@@ -1607,7 +1678,15 @@ impl Arm64CodeGen {
             }
 
             Instruction::CallWithSaves(dst, fn_val, args, saves) => {
+                // DEBUG: Print what we're saving (clear temps after)
+                let save_regs: Vec<usize> = saves.iter()
+                    .filter_map(|v| self.get_physical_reg_for_irvalue(v, false).ok())
+                    .collect();
+                self.clear_temp_registers();
+                // eprintln!("DEBUG CallWithSaves: saving {} registers: {:?}", saves.len(), save_regs);
+
                 // STEP 1: Save volatile registers to stack (in pairs for 16-byte alignment)
+                // Clear temps between pairs to avoid exhausting pool
                 for save_pair in saves.chunks(2) {
                     if save_pair.len() == 2 {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
@@ -1618,6 +1697,7 @@ impl Arm64CodeGen {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
                         self.emit_stp(r1, 31, 31, -2);  // stp r1, xzr, [sp, #-16]!
                     }
+                    self.clear_temp_registers();
                 }
 
                 // Track stack bytes for patching
@@ -1643,12 +1723,15 @@ impl Arm64CodeGen {
 
                 // Get function pointer in its allocated register
                 let fn_reg = self.get_physical_reg_for_irvalue(fn_val, false)?;
+                self.clear_temp_registers();
 
                 // Track argument source registers (x0-x7 are never used by allocator)
+                // Clear temps after each to avoid exhausting pool with many args
                 let mut arg_source_regs = Vec::new();
                 for arg in args.iter() {
                     let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
                     arg_source_regs.push(arg_reg);
+                    self.clear_temp_registers();
                 }
 
                 let arg_count = args.len();
@@ -1800,6 +1883,7 @@ impl Arm64CodeGen {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
                         self.emit_ldp(r1, 31, 31, 2);  // ldp r1, xzr, [sp], #16
                     }
+                    self.clear_temp_registers();
                 }
 
                 // Decrement stack counter (deallocate what we allocated)
@@ -1827,10 +1911,12 @@ impl Arm64CodeGen {
                 }
 
                 // Step 2: Store field values to stack
+                // Clear temps after each to avoid exhausting pool with many fields
                 for (i, value) in field_values.iter().enumerate() {
                     let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
                     let offset = i * 8;
                     self.emit_str_offset(src_reg, 31, offset as i32);
+                    self.clear_temp_registers();
                 }
 
                 // Step 3: Save stack pointer for values_ptr argument
@@ -1857,6 +1943,75 @@ impl Arm64CodeGen {
                 }
 
                 self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::MakeTypeWithSaves(dst, type_id, field_values, saves) => {
+                // MakeTypeWithSaves: Create a deftype instance with register preservation
+                //
+                // Following Beagle's CallWithSaves pattern EXACTLY:
+                // - Push saves to FP-relative stack one at a time (in order)
+                // - Do the call (just BLR, no X30 save - that's in prologue)
+                // - Pop saves from stack in REVERSE order
+
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                self.clear_temp_registers();
+
+                // STEP 1: Push saves to stack one at a time
+                // Uses STR with pre-decrement to grow stack
+                for save in saves.iter() {
+                    let save_reg = self.get_physical_reg_for_irvalue(save, false)?;
+                    self.push_to_stack(save_reg);
+                    self.clear_temp_registers();
+                }
+
+                // STEP 2: Allocate stack space for field values (16-byte aligned)
+                // This uses SP for the trampoline call's argument array
+                let total_stack_space = field_values.len() * 8;
+                let aligned_stack_space = ((total_stack_space + 15) / 16) * 16;
+                if aligned_stack_space > 0 {
+                    self.emit_sub_sp_imm(aligned_stack_space as i64);
+                }
+
+                // STEP 3: Store field values to stack (SP-relative for trampoline args)
+                for (i, value) in field_values.iter().enumerate() {
+                    let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
+                    let offset = i * 8;
+                    self.emit_str_offset(src_reg, 31, offset as i32);
+                    self.clear_temp_registers();
+                }
+
+                // STEP 4: Save stack pointer for values_ptr argument
+                let values_ptr_reg = 10;
+                self.emit_mov(values_ptr_reg, 31);
+
+                // STEP 5: Set up arguments for trampoline call
+                self.emit_mov_imm(0, *type_id as i64);           // x0 = type_id
+                self.emit_mov_imm(1, field_values.len() as i64); // x1 = field_count
+                self.emit_mov(2, values_ptr_reg);                // x2 = values_ptr
+
+                // STEP 6: Call trampoline (just BLR, like Beagle's call_builtin)
+                let func_addr = crate::trampoline::trampoline_allocate_type as usize;
+                self.emit_external_call(func_addr, "trampoline_allocate_type");
+
+                // STEP 7: Clean up field values stack space
+                if aligned_stack_space > 0 {
+                    self.emit_add_sp_imm(aligned_stack_space as i64);
+                }
+
+                // STEP 8: Move result to destination
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
+                }
+                self.store_spill(dst_reg, dest_spill);
+
+                // STEP 9: Pop saves from stack in REVERSE order
+                // Uses LDR with post-increment to shrink stack
+                for save in saves.iter().rev() {
+                    let save_reg = self.get_physical_reg_for_irvalue(save, false)?;
+                    self.pop_from_stack(save_reg);
+                    self.clear_temp_registers();
+                }
             }
 
             Instruction::LoadTypeField(dst, obj, field_name) => {
@@ -2426,9 +2581,18 @@ impl Arm64CodeGen {
                 // If the register is in the allocation map, it's an original virtual register
                 // and we need to look up its physical register.
                 // If not in the map, it's already a physical register, so just use its index.
-                self.register_map.get(vreg)
-                    .map(|physical| physical.index())
-                    .unwrap_or_else(|| vreg.index())  // Already physical, use index directly
+                match self.register_map.get(vreg) {
+                    Some(physical) => physical.index(),
+                    None => {
+                        // Check if this is a valid physical register (x19-x28)
+                        let idx = vreg.index();
+                        if idx >= 19 && idx <= 28 {
+                            idx  // Already physical, use index directly
+                        } else {
+                            panic!("Result register {:?} not allocated", vreg);
+                        }
+                    }
+                }
             }
         }
     }
@@ -2454,7 +2618,10 @@ impl Arm64CodeGen {
             //   [FP - (N+1)*8]: spill slot N
             //   [FP - stack_space]: SP
             let offset = -((stack_offset as i32 + 1) * 8);
-            // eprintln!("DEBUG store_spill: slot {} -> offset {}", stack_offset, offset);
+            // eprintln!("DEBUG store_spill: slot {} -> offset {} (x{} to [FP{}])", stack_offset, offset, src_reg, offset);
+            if offset >= 0 {
+                eprintln!("ERROR: Positive spill offset would corrupt saved registers!");
+            }
             self.emit_store_to_fp(src_reg, offset);
         }
     }
@@ -2906,21 +3073,122 @@ impl Arm64CodeGen {
 
     fn emit_load_from_fp(&mut self, dst: usize, offset: i32) {
         // LDR Xd, [x29, #offset] with signed offset
-        // Using LDUR for signed 9-bit offset
-        let offset_bits = (offset as u32) & 0x1FF; // 9-bit signed
-        let instruction = 0xF8400000 | (offset_bits << 12) | (29 << 5) | (dst as u32);
-        self.code.push(instruction);
+        // LDUR only supports 9-bit signed offset (-256 to +255)
+        // For larger offsets, we need to compute the address first
+        if offset >= -256 && offset <= 255 {
+            // LDUR Xd, [x29, #offset]
+            let offset_bits = (offset as u32) & 0x1FF; // 9-bit signed
+            let instruction = 0xF8400000 | (offset_bits << 12) | (29 << 5) | (dst as u32);
+            self.code.push(instruction);
+        } else {
+            // Large offset: compute address in dst, then load
+            // ADD dst, x29, #offset (may need multiple instructions for large negative)
+            self.emit_add_imm_large(dst, 29, offset as i64);
+            // LDR dst, [dst, #0]
+            // Encoding: 0xF9400000 | (imm12 << 10) | (Rn << 5) | Rt
+            // For offset 0: imm12 = 0
+            let instruction = 0xF9400000 | ((dst as u32) << 5) | (dst as u32);
+            self.code.push(instruction);
+        }
     }
 
     fn emit_store_to_fp(&mut self, src: usize, offset: i32) {
         // STR Xt, [x29, #offset] with signed offset
-        // Using STUR for signed 9-bit offset
-        let offset_bits = (offset as u32) & 0x1FF; // 9-bit signed
-        let instruction = 0xF8000000 | (offset_bits << 12) | (29 << 5) | (src as u32);
-        // eprintln!("DEBUG emit_store_to_fp: offset={}, offset_bits={:03x}, instruction={:08x}",
-        //           offset, offset_bits, instruction);
+        // STUR only supports 9-bit signed offset (-256 to +255)
+        // For larger offsets, we need to compute the address first
+        if offset >= -256 && offset <= 255 {
+            // STUR Xt, [x29, #offset]
+            let offset_bits = (offset as u32) & 0x1FF; // 9-bit signed
+            let instruction = 0xF8000000 | (offset_bits << 12) | (29 << 5) | (src as u32);
+            self.code.push(instruction);
+        } else {
+            // Large offset: compute address in a scratch register, then store
+            // We need to pick a scratch that's NOT src
+            let scratch = if src == 9 { 10 } else if src == 10 { 11 } else { 9 };
+            // ADD scratch, x29, #offset
+            self.emit_add_imm_large(scratch, 29, offset as i64);
+            // STR src, [scratch, #0]
+            // Encoding: 0xF9000000 | (imm12 << 10) | (Rn << 5) | Rt
+            // For offset 0: imm12 = 0
+            let instruction = 0xF9000000 | ((scratch as u32) << 5) | (src as u32);
+            self.code.push(instruction);
+        }
+    }
+
+    // === Beagle-style stack operations (FP-relative) ===
+    // These methods mimic Beagle's approach exactly:
+    // - Stack is addressed relative to frame pointer (x29), not SP
+    // - push/pop track logical stack_size without modifying SP
+    // - Actual stack space is reserved in prologue/epilogue
+
+    /// Store register to stack at FP-relative offset (Beagle: store_on_stack)
+    fn store_on_stack(&mut self, reg: usize, offset: i32) {
+        let byte_offset = offset * 8;
+        self.emit_store_to_fp(reg, byte_offset);
+    }
+
+    /// Load register from stack at FP-relative offset (Beagle: load_from_stack)
+    fn load_from_stack(&mut self, reg: usize, offset: i32) {
+        let byte_offset = offset * 8;
+        self.emit_load_from_fp(reg, byte_offset);
+    }
+
+    /// Push register to stack using STR with pre-decrement
+    /// This modifies SP and stores at the new SP location
+    fn push_to_stack(&mut self, reg: usize) {
+        // STR Xreg, [SP, #-16]! (pre-decrement SP by 16 for alignment, store reg)
+        // We use 16-byte alignment for ABI compliance
+        self.emit_str_pre_index(reg, 31, -16);
+    }
+
+    /// Pop register from stack using LDR with post-increment
+    /// This loads from SP and then increments SP
+    fn pop_from_stack(&mut self, reg: usize) {
+        // LDR Xreg, [SP], #16 (load reg, then post-increment SP by 16)
+        self.emit_ldr_post_index(reg, 31, 16);
+    }
+
+    /// Emit STR with pre-indexed addressing: STR Xt, [Xn, #imm]!
+    fn emit_str_pre_index(&mut self, rt: usize, rn: usize, imm: i32) {
+        // STR (immediate, pre-index): 1111100000 0 imm9 11 Rn Rt
+        // imm9 is signed 9-bit offset (-256 to 255)
+        let imm9 = (imm as u32) & 0x1FF;
+        let instruction = 0xF8000C00
+            | (imm9 << 12)
+            | ((rn as u32) << 5)
+            | (rt as u32);
         self.code.push(instruction);
     }
+
+    /// Emit LDR with post-indexed addressing: LDR Xt, [Xn], #imm
+    fn emit_ldr_post_index(&mut self, rt: usize, rn: usize, imm: i32) {
+        // LDR (immediate, post-index): 1111100001 0 imm9 01 Rn Rt
+        // imm9 is signed 9-bit offset (-256 to 255)
+        let imm9 = (imm as u32) & 0x1FF;
+        let instruction = 0xF8400400
+            | (imm9 << 12)
+            | ((rn as u32) << 5)
+            | (rt as u32);
+        self.code.push(instruction);
+    }
+
+    /// Emit ADD with potentially large immediate (positive or negative)
+    fn emit_add_imm_large(&mut self, dst: usize, src: usize, imm: i64) {
+        if imm >= 0 && imm <= 4095 {
+            // Simple ADD with 12-bit immediate
+            self.emit_add_imm(dst, src, imm);
+        } else if imm < 0 && imm >= -4095 {
+            // SUB with negated immediate
+            self.emit_sub_imm(dst, src, -imm);
+        } else {
+            // Large immediate: load into dst first, then add
+            self.emit_mov_imm(dst, imm);
+            // ADD dst, src, dst
+            let instruction = 0x8B000000 | ((dst as u32) << 16) | ((src as u32) << 5) | (dst as u32);
+            self.code.push(instruction);
+        }
+    }
+
 
     /// Emit function prologue with placeholder for stack allocation
     /// This follows Beagle's pattern of deferred stack allocation
@@ -3147,39 +3415,19 @@ impl Arm64CodeGen {
         self.num_locals = count;
     }
 
-    /// Emit an external function call with automatic X30 (link register) preservation
+    /// Emit an external function call
     ///
-    /// This helper automates the common pattern of:
-    /// 1. Save X30 to stack
-    /// 2. Load function address into register
-    /// 3. Call function via BLR
-    /// 4. Restore X30 from stack
+    /// X30 is already saved in the function prologue (stp x29, x30, [sp, #-16]!),
+    /// so we don't need to save/restore it here. Just load the function address
+    /// and call via BLR - like Beagle's call_builtin.
     ///
     /// # Parameters
     /// - `target_fn`: Address of the external function to call
     /// - `_description`: Human-readable description for debugging (currently unused)
     fn emit_external_call(&mut self, target_fn: usize, _description: &str) {
-        // Save X30 (link register) to stack
-        // sub sp, sp, #16
-        self.emit_sub_sp_imm(16);
-        // str x30, [sp]
-        self.emit_str_offset(30, 31, 0);  // x31 = sp
-
-        // Track the X30 save for GC stack map (2 words = 16 bytes)
-        self.increment_stack_size(2);
-
-        // Load function address and call
+        // Load function address and call (X30 already saved in prologue)
         self.emit_mov_imm(15, target_fn as i64);  // Use x15 as temp
         self.emit_blr(15);
-
-        // Restore X30 from stack
-        // ldr x30, [sp]
-        self.emit_ldr_offset(30, 31, 0);
-        // add sp, sp, #16
-        self.emit_add_sp_imm(16);
-
-        // Restore stack size tracking
-        self.decrement_stack_size(2);
     }
 
     /// Execute the compiled code (for testing)

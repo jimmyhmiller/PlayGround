@@ -3128,8 +3128,8 @@ public class Parser {
                         bigintValue = bi.toString();
                     } catch (NumberFormatException e) { /* keep original */ }
                 }
-                // value should be the decimal bigint WITHOUT 'n' to match Acorn's JSON serialization
-                key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), bigintValue, keyLexeme, null, bigintValue);
+                // For BigInt literals, Acorn sets value to null (the actual BigInt cannot be serialized to JSON)
+                key = new Literal(getStart(keyToken), getEnd(keyToken), keyToken.line(), keyToken.column(), keyToken.endLine(), keyToken.endColumn(), null, keyLexeme, null, bigintValue);
             } else {
                 // Handle Infinity/-Infinity/NaN - value should be null per ESTree spec
                 Object literalValue = keyToken.literal();

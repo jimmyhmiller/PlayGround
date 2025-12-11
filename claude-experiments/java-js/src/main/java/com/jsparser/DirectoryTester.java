@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jsparser.ast.Program;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.file.Files;
@@ -153,6 +155,9 @@ public class DirectoryTester {
             System.out.println();
         }
 
+        // Log file for debugging hangs - write current file being processed
+        Path progressLogPath = Paths.get("/tmp/directory-tester-progress.log");
+
         for (Path file : jsFiles) {
             // Check if we've hit max failures, mismatches, or too-permissive
             if (javaFailedAcornSucceeded.get() >= maxFailures) {
@@ -172,12 +177,24 @@ public class DirectoryTester {
 
             String relativePath = targetDir.relativize(file).toString();
 
+            // Log current file to help debug hangs
+            try (BufferedWriter logWriter = new BufferedWriter(new FileWriter(progressLogPath.toFile()))) {
+                logWriter.write("Processing #" + processed.get() + ": " + file.toAbsolutePath());
+                logWriter.newLine();
+                logWriter.write("Relative: " + relativePath);
+                logWriter.newLine();
+                logWriter.flush();
+            } catch (IOException logErr) {
+                // Ignore logging errors
+            }
+
             // Print progress every 100 files (or every 10 if less than 100 total)
             int progressInterval = jsFiles.size() < 100 ? 10 : 100;
             if (processed.get() % progressInterval == 0 || processed.get() == jsFiles.size()) {
-                System.out.printf("\rProgress: %d/%d (%d matched, %d mismatched, %d Java failed, %d too permissive, %d both failed)",
+                System.out.printf("\rProgress: %d/%d (%d matched, %d mismatched, %d Java failed, %d too permissive, %d both failed) - %s",
                     processed.get(), jsFiles.size(), matched.get(), mismatched.get(),
-                    javaFailedAcornSucceeded.get(), javaSucceededAcornFailed.get(), bothFailed.get());
+                    javaFailedAcornSucceeded.get(), javaSucceededAcornFailed.get(), bothFailed.get(),
+                    relativePath.length() > 60 ? "..." + relativePath.substring(relativePath.length() - 57) : relativePath);
                 System.out.flush();
             }
 

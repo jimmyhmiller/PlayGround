@@ -555,6 +555,92 @@ fn disassemble_arm64(inst: u32) -> String {
     }
 }
 
+/// Load and execute a Clojure file, used for loading clojure.core
+fn load_clojure_file(
+    filename: &str,
+    compiler: &mut Compiler,
+    runtime: &Arc<UnsafeCell<GCRuntime>>,
+    print_results: bool,
+) -> Result<(), String> {
+    use std::fs;
+    use std::io::BufRead;
+
+    let file = match fs::File::open(filename) {
+        Ok(f) => f,
+        Err(e) => return Err(format!("Error reading file '{}': {}", filename, e)),
+    };
+
+    let reader = std::io::BufReader::new(file);
+    let mut accumulated = String::new();
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => return Err(format!("Error reading line: {}", e)),
+        };
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with(';') {
+            continue;
+        }
+
+        accumulated.push_str(&line);
+        accumulated.push('\n');
+
+        match read(&accumulated) {
+            Ok(val) => {
+                match analyze(&val) {
+                    Ok(ast) => {
+                        match compiler.compile(&ast) {
+                            Ok(result_reg) => {
+                                let instructions = compiler.take_instructions();
+                                let mut codegen = Arm64CodeGen::new();
+
+                                let var_table_ptr = unsafe {
+                                    let rt = &*runtime.get();
+                                    rt.var_table_ptr() as usize
+                                };
+                                codegen.set_var_table_ptr(var_table_ptr);
+
+                                match codegen.compile(&instructions, &result_reg, 0) {
+                                    Ok(_) => {
+                                        match codegen.execute() {
+                                            Ok(result) => {
+                                                if print_results && !matches!(ast,
+                                                    Expr::Def { .. } |
+                                                    Expr::Ns { .. } |
+                                                    Expr::Use { .. }
+                                                ) {
+                                                    unsafe {
+                                                        let rt = &*runtime.get();
+                                                        print_tagged_value(result, rt);
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => return Err(format!("Execution error: {}", e)),
+                                        }
+                                    }
+                                    Err(e) => return Err(format!("Codegen error: {}", e)),
+                                }
+                            }
+                            Err(e) => return Err(format!("Compile error: {}", e)),
+                        }
+                    }
+                    Err(e) => return Err(format!("Analysis error: {}", e)),
+                }
+                accumulated.clear();
+            }
+            Err(_) => continue,
+        }
+    }
+
+    if !accumulated.trim().is_empty() {
+        return Err("Incomplete expression at end of file".to_string());
+    }
+
+    Ok(())
+}
+
 /// Execute a Clojure script file (like `clojure script.clj`)
 /// Prints results of top-level expressions, but not def/ns/use
 fn run_script(filename: &str, gc_always: bool) {
@@ -584,6 +670,12 @@ fn run_script(filename: &str, gc_always: bool) {
 
     // Create compiler
     let mut compiler = Compiler::new(runtime.clone());
+
+    // Load clojure.core first (silently)
+    if let Err(e) = load_clojure_file("src/clojure/core.clj", &mut compiler, &runtime, false) {
+        eprintln!("Error loading clojure.core: {}", e);
+        std::process::exit(1);
+    }
 
     // Read and accumulate lines until we have a complete expression
     let reader = std::io::BufReader::new(file);
@@ -728,6 +820,11 @@ fn main() {
 
     // Create a persistent compiler to maintain global environment across REPL iterations
     let mut repl_compiler = Compiler::new(runtime.clone());
+
+    // Load clojure.core first (silently)
+    if let Err(e) = load_clojure_file("src/clojure/core.clj", &mut repl_compiler, &runtime, false) {
+        eprintln!("Warning: Could not load clojure.core: {}", e);
+    }
 
     loop {
         // Show current namespace in prompt

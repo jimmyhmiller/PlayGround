@@ -30,6 +30,9 @@ pub struct LinearScan {
 
     /// Maximum number of physical registers available
     pub max_registers: usize,
+
+    /// Result register (protected from spilling)
+    result_register: Option<VirtualRegister>,
 }
 
 /// Create a physical register (callee-saved registers x19-x28)
@@ -61,10 +64,12 @@ impl LinearScan {
             max_registers,
             spill_locations: HashMap::new(),
             next_stack_slot: 0,  // Start stack slots at 0
+            result_register: None,
         }
     }
 
     /// Mark a register as live until the end (for result registers)
+    /// Also protects this register from being spilled.
     pub fn mark_live_until_end(&mut self, register: VirtualRegister) {
         let end_index = self.instructions.len().saturating_sub(1);
         if let Some((start, _)) = self.lifetimes.get(&register) {
@@ -73,11 +78,15 @@ impl LinearScan {
             // Register not seen - make it live for the whole function
             self.lifetimes.insert(register, (0, end_index));
         }
+        // Mark as the result register (protected from spilling)
+        self.result_register = Some(register);
     }
 
     /// Compute lifetime intervals for all virtual registers
     ///
     /// A register's lifetime is from its first definition to its last use.
+    /// Special handling for loops: registers used within a loop body must have
+    /// their lifetime extended to cover the entire loop (including back edges).
     fn compute_lifetimes(
         instructions: &[Instruction],
     ) -> HashMap<VirtualRegister, (usize, usize)> {
@@ -99,10 +108,32 @@ impl LinearScan {
         // Argument registers are live from function entry (instruction 0),
         // even if their first explicit use is later. This ensures they're
         // properly saved across any calls that precede their first use.
-        for (reg, (start, end)) in result.iter_mut() {
+        for (reg, (start, _end)) in result.iter_mut() {
             if let VirtualRegister::Argument(_) = reg {
                 if *start > 0 {
                     *start = 0;
+                }
+            }
+        }
+
+        // IMPORTANT: Extend lifetimes for registers used within loops
+        // If a register is used inside a loop (between label and recur),
+        // its lifetime must extend to the recur instruction to ensure
+        // the physical register isn't reused before we jump back.
+        for (recur_idx, instruction) in instructions.iter().enumerate() {
+            if let Instruction::Recur(label, _) = instruction {
+                // Find the loop label index
+                if let Some(label_idx) = instructions.iter().position(|instr| {
+                    matches!(instr, Instruction::Label(l) if l == label)
+                }) {
+                    // Extend lifetime of any register used between label and recur
+                    for (reg, (start, end)) in result.iter_mut() {
+                        // If register is defined before or at recur, and used within the loop
+                        // (end >= label_idx), extend its lifetime to cover the recur
+                        if *start <= recur_idx && *end >= label_idx && *end < recur_idx {
+                            *end = recur_idx;
+                        }
+                    }
                 }
             }
         }
@@ -242,6 +273,16 @@ impl LinearScan {
                 }
             }
 
+            Instruction::MakeTypeWithSaves(dst, _type_id, field_values, saves) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                for val in field_values {
+                    if let IrValue::Register(r) = val { regs.push(*r); }
+                }
+                for save in saves {
+                    if let IrValue::Register(r) = save { regs.push(*r); }
+                }
+            }
+
             Instruction::LoadTypeField(dst, obj, _field_name) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
                 if let IrValue::Register(r) = obj { regs.push(*r); }
@@ -334,6 +375,24 @@ impl LinearScan {
 
             Instruction::AssertPost(cond, _index) => {
                 if let IrValue::Register(r) = cond { regs.push(*r); }
+            }
+
+            // Loop recur instructions (like Beagle's Recurse)
+            Instruction::Recur(_label, assignments) => {
+                for (target, source) in assignments {
+                    if let IrValue::Register(r) = target { regs.push(*r); }
+                    if let IrValue::Register(r) = source { regs.push(*r); }
+                }
+            }
+
+            Instruction::RecurWithSaves(_label, assignments, saves) => {
+                for (target, source) in assignments {
+                    if let IrValue::Register(r) = target { regs.push(*r); }
+                    if let IrValue::Register(r) = source { regs.push(*r); }
+                }
+                for save in saves {
+                    if let IrValue::Register(r) = save { regs.push(*r); }
+                }
             }
         }
 
@@ -585,6 +644,16 @@ impl LinearScan {
                 }
             }
 
+            Instruction::MakeTypeWithSaves(dst, _type_id, field_values, saves) => {
+                replace(dst);
+                for val in field_values {
+                    replace(val);
+                }
+                for save in saves {
+                    replace(save);
+                }
+            }
+
             Instruction::LoadTypeField(dst, obj, _field_name) => {
                 replace(dst);
                 replace(obj);
@@ -678,6 +747,24 @@ impl LinearScan {
             Instruction::AssertPost(cond, _index) => {
                 replace(cond);
             }
+
+            // Loop recur instructions
+            Instruction::Recur(_label, assignments) => {
+                for (target, source) in assignments {
+                    replace(target);
+                    replace(source);
+                }
+            }
+
+            Instruction::RecurWithSaves(_label, assignments, saves) => {
+                for (target, source) in assignments {
+                    replace(target);
+                    replace(source);
+                }
+                for save in saves {
+                    replace(save);
+                }
+            }
         }
     }
 
@@ -725,14 +812,26 @@ impl LinearScan {
         // Sort by end point (descending)
         active.sort_by_key(|(_, end, _)| *end);
 
+        // Check if current interval is the result register (protected from spilling)
+        let current_is_result = self.result_register == Some(vreg);
+
         // Get the interval that ends last (spill candidate)
         // IMPORTANT: Never spill argument registers (x0-x7)! They're reserved for calling convention
-        let spill_candidate_index = active.iter().rposition(|(_, _, v)| !matches!(v, VirtualRegister::Argument(_)));
+        // Also never spill the result register!
+        let spill_candidate_index = active.iter().rposition(|(_, _, v)| {
+            !matches!(v, VirtualRegister::Argument(_)) && self.result_register != Some(*v)
+        });
 
         if spill_candidate_index.is_none() {
-            // All active registers are argument registers - spill current interval instead
+            // All active registers are argument registers or the result register
+            if current_is_result {
+                // Can't spill the result register - this is a register allocation failure
+                // In practice, we should try to spill something else or increase register count
+                panic!("Cannot allocate result register: all physical registers are in use by protected registers");
+            }
+            // Spill current interval instead
             let stack_slot = self.allocate_stack_slot();
-            // eprintln!("DEBUG LinearScan: Spilling {} to stack slot {} (all active are arg regs)", vreg.display_name(), stack_slot);
+            // eprintln!("DEBUG LinearScan: Spilling {} to stack slot {} (all active are protected)", vreg.display_name(), stack_slot);
             self.spill_locations.insert(vreg, stack_slot);
             return;
         }
@@ -740,7 +839,8 @@ impl LinearScan {
         let spill = active[spill_candidate_index.unwrap()];
         let (_, spill_end, spill_vreg) = spill;
 
-        if spill_end > end {
+        // If current interval is the result register, always prefer spilling something else
+        if current_is_result || spill_end > end {
             // Spill the interval that ends last, allocate its register to current interval
             let physical_reg = *self.allocated_registers.get(&spill_vreg).unwrap();
 
@@ -921,6 +1021,16 @@ impl LinearScan {
                 }
             }
 
+            Instruction::MakeTypeWithSaves(dst, _type_id, field_values, saves) => {
+                replace(dst);
+                for val in field_values {
+                    replace(val);
+                }
+                for save in saves {
+                    replace(save);
+                }
+            }
+
             Instruction::LoadTypeField(dst, obj, _field_name) => {
                 replace(dst);
                 replace(obj);
@@ -1014,52 +1124,117 @@ impl LinearScan {
             Instruction::AssertPost(cond, _index) => {
                 replace(cond);
             }
+
+            Instruction::Recur(_label, assignments) => {
+                for (dst, src) in assignments.iter_mut() {
+                    replace(dst);
+                    replace(src);
+                }
+            }
+
+            Instruction::RecurWithSaves(_label, assignments, saves) => {
+                for (dst, src) in assignments.iter_mut() {
+                    replace(dst);
+                    replace(src);
+                }
+                for save in saves.iter_mut() {
+                    replace(save);
+                }
+            }
         }
     }
 
-    /// Transform Call and ExternalCall instructions to their WithSaves variants
+    /// Transform Call, ExternalCall, and Recur instructions to their WithSaves variants
     ///
-    /// This analyzes which registers are live across each call site and generates
-    /// CallWithSaves/ExternalCallWithSaves instructions with explicit register preservation.
+    /// This analyzes which registers are live across each call/recur site and generates
+    /// CallWithSaves/ExternalCallWithSaves/RecurWithSaves/MakeTypeWithSaves instructions with explicit register preservation.
     fn transform_calls_to_saves(&mut self) {
         for i in 0..self.instructions.len() {
-            // Check if this is a Call or ExternalCall instruction
+            // Check if this is a Call, ExternalCall, Recur, or MakeType instruction
             let is_call = matches!(self.instructions[i], Instruction::Call(_, _, _));
             let is_external_call = matches!(self.instructions[i], Instruction::ExternalCall(_, _, _));
+            let is_recur = matches!(self.instructions[i], Instruction::Recur(_, _));
+            let is_make_type = matches!(self.instructions[i], Instruction::MakeType(_, _, _));
 
-            if !is_call && !is_external_call {
+            if !is_call && !is_external_call && !is_recur && !is_make_type {
                 continue;
             }
 
-            // Extract destination register for exclusion from saves
+            // Extract destination register for exclusion from saves (Recur has no destination)
             let dest = match &self.instructions[i] {
-                Instruction::Call(d, _, _) => *d,
-                Instruction::ExternalCall(d, _, _) => *d,
+                Instruction::Call(d, _, _) => Some(*d),
+                Instruction::ExternalCall(d, _, _) => Some(*d),
+                Instruction::MakeType(d, _, _) => Some(*d),
+                Instruction::Recur(_, _) => None,
                 _ => continue,
             };
 
-            // Find registers live across this call
+            // For Recur, find the target label index and assignment destinations
+            let (loop_start_index, recur_dests) = if is_recur {
+                if let Instruction::Recur(label, assignments) = &self.instructions[i] {
+                    // Find the label instruction index
+                    let idx = self.instructions.iter().position(|instr| {
+                        matches!(instr, Instruction::Label(l) if l == label)
+                    });
+                    // Collect destination registers from assignments (these should NOT be saved)
+                    let dests: Vec<_> = assignments.iter()
+                        .filter_map(|(dst, _)| {
+                            if let IrValue::Register(vreg) = dst {
+                                Some(*vreg)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    (idx, dests)
+                } else {
+                    (None, Vec::new())
+                }
+            } else {
+                (None, Vec::new())
+            };
+
+            // Find registers live across this call/recur
             let mut saves = Vec::new();
 
             for (vreg, (start, end)) in &self.lifetimes {
-                // Register is live across the call if:
-                // 1. It starts at or before the call (start <= i) - used as argument or earlier
-                // 2. It ends after the call (end > i) - must be used after the call
-                // 3. It's not spilled (has a physical register allocation)
-                if *start <= i && *end > i && !self.spill_locations.contains_key(vreg) {
+                // Determine if register is live across this instruction
+                let is_live_across = if is_recur {
+                    // For Recur: A register needs to be saved if:
+                    // 1. It's defined before the recur (start <= i)
+                    // 2. It's used at or after the loop start (end >= loop_start_index)
+                    // This ensures registers used in the loop body survive iterations
+                    if let Some(loop_idx) = loop_start_index {
+                        *start <= i && *end >= loop_idx && !self.spill_locations.contains_key(vreg)
+                    } else {
+                        // Fallback: treat like a regular call
+                        *start <= i && *end > i && !self.spill_locations.contains_key(vreg)
+                    }
+                } else {
+                    // For Call/ExternalCall: standard liveness check
+                    // Register is live across if it starts before and ends after
+                    *start <= i && *end > i && !self.spill_locations.contains_key(vreg)
+                };
+
+                if is_live_across {
                     // Get the physical register
                     if let Some(&physical_reg) = self.allocated_registers.get(vreg) {
                         // Don't save the destination register (it's about to be overwritten)
-                        let is_dest = match dest {
-                            IrValue::Register(dest_vreg) => {
-                                self.allocated_registers.get(&dest_vreg)
+                        let is_dest = match &dest {
+                            Some(IrValue::Register(dest_vreg)) => {
+                                self.allocated_registers.get(dest_vreg)
                                     .map(|&dest_phys| dest_phys == physical_reg)
                                     .unwrap_or(false)
                             }
                             _ => false,
                         };
 
-                        if !is_dest {
+                        // For Recur: also exclude assignment destination registers
+                        // These are being explicitly updated, so saving/restoring them would
+                        // overwrite the new value with the old value
+                        let is_recur_dest = recur_dests.contains(vreg);
+
+                        if !is_dest && !is_recur_dest {
                             // IMPORTANT: Push the VIRTUAL register, not the physical register!
                             // The codegen will look up the physical register from the allocation map.
                             // If we pushed the physical register (e.g., Temp(1) meaning x1), it would
@@ -1094,6 +1269,17 @@ impl LinearScan {
                 }
             });
 
+            // Apply spill replacement to saves list
+            // (Registers that were spilled after allocation need to be converted to Spill values)
+            let saves: Vec<IrValue> = saves.into_iter().map(|val| {
+                if let IrValue::Register(vreg) = &val {
+                    if let Some(&stack_offset) = self.spill_locations.get(vreg) {
+                        return IrValue::Spill(*vreg, stack_offset);
+                    }
+                }
+                val
+            }).collect();
+
             // Transform to WithSaves variant
             if is_call {
                 let (func, args) = if let Instruction::Call(_, f, a) = &self.instructions[i] {
@@ -1101,15 +1287,30 @@ impl LinearScan {
                 } else {
                     continue;
                 };
-                self.instructions[i] = Instruction::CallWithSaves(dest, func, args, saves);
-            } else {
-                // ExternalCall
+                self.instructions[i] = Instruction::CallWithSaves(dest.unwrap(), func, args, saves);
+            } else if is_external_call {
                 let (func_addr, args) = if let Instruction::ExternalCall(_, addr, a) = &self.instructions[i] {
                     (*addr, a.clone())
                 } else {
                     continue;
                 };
-                self.instructions[i] = Instruction::ExternalCallWithSaves(dest, func_addr, args, saves);
+                self.instructions[i] = Instruction::ExternalCallWithSaves(dest.unwrap(), func_addr, args, saves);
+            } else if is_recur {
+                // Transform Recur to RecurWithSaves
+                let (label, assignments) = if let Instruction::Recur(l, a) = &self.instructions[i] {
+                    (l.clone(), a.clone())
+                } else {
+                    continue;
+                };
+                self.instructions[i] = Instruction::RecurWithSaves(label, assignments, saves);
+            } else if is_make_type {
+                // Transform MakeType to MakeTypeWithSaves
+                let (type_id, field_values) = if let Instruction::MakeType(_, tid, fv) = &self.instructions[i] {
+                    (*tid, fv.clone())
+                } else {
+                    continue;
+                };
+                self.instructions[i] = Instruction::MakeTypeWithSaves(dest.unwrap(), type_id, field_values, saves);
             }
         }
     }

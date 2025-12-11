@@ -986,6 +986,7 @@ fn analyze_try(items: &im::Vector<Value>) -> Result<Expr, String> {
 
 fn analyze_defprotocol(items: &im::Vector<Value>) -> Result<Expr, String> {
     // (defprotocol ProtocolName
+    //   "Optional docstring"
     //   (method1 [this arg1])
     //   (method2 [this] [this arg1 arg2]))  ; multiple arities
     if items.len() < 2 {
@@ -998,11 +999,18 @@ fn analyze_defprotocol(items: &im::Vector<Value>) -> Result<Expr, String> {
         _ => return Err("defprotocol name must be a symbol".to_string()),
     };
 
-    // Parse method signatures
+    // Parse method signatures, skipping any protocol-level docstrings
     let mut methods = Vec::new();
     for i in 2..items.len() {
-        let method_sig = parse_protocol_method_sig(&items[i])?;
-        methods.push(method_sig);
+        match &items[i] {
+            Value::String(_) => {
+                // Protocol docstring - skip it
+            }
+            _ => {
+                let method_sig = parse_protocol_method_sig(&items[i])?;
+                methods.push(method_sig);
+            }
+        }
     }
 
     Ok(Expr::DefProtocol { name, methods })

@@ -19,6 +19,26 @@ use std::sync::Arc;
 // SAFETY: Must be initialized before any JIT code runs
 static mut RUNTIME: Option<Arc<UnsafeCell<GCRuntime>>> = None;
 
+// Static storage for the original stack pointer during JIT execution.
+// We can't use a register (x18 is not callee-saved, x19-x28 are used by JIT code).
+// This is safe because we only have single-threaded JIT execution.
+// SAFETY: Only accessed from a single thread during JIT execution.
+static mut TRAMPOLINE_SAVED_SP: usize = 0;
+
+/// Save the original stack pointer before switching to JIT stack
+#[inline(never)]
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_save_original_sp(sp: usize) {
+    unsafe { TRAMPOLINE_SAVED_SP = sp; }
+}
+
+/// Restore the original stack pointer after JIT execution
+#[inline(never)]
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_get_original_sp() -> usize {
+    unsafe { TRAMPOLINE_SAVED_SP }
+}
+
 /// Get the current frame pointer (x29) for GC stack walking
 /// This is used by allocation trampolines when gc_always is enabled
 #[inline(always)]
@@ -910,6 +930,19 @@ pub extern "C" fn trampoline_throw(_stack_pointer: usize, exception_value: usize
     }
 }
 
+// ========== Debug Trampolines ==========
+
+/// Trampoline: Debug marker to trace execution
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = marker value
+/// - Returns: x0 = same marker value (pass through)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_debug_marker(marker: usize) -> usize {
+    // eprintln!("DEBUG MARKER: {}", marker);
+    marker
+}
+
 // ========== Assertion Trampolines ==========
 
 /// Trampoline: Pre-condition assertion failed
@@ -1216,25 +1249,64 @@ impl Trampoline {
         // stp x19, x20, [sp, #-16]!
         self.code.push(0xa9bf57f4);
 
-        // Save original SP to x20 (which is now safely saved to the stack)
-        // mov x20, sp  (alias for: add x20, sp, #0)
-        self.code.push(0x910003f4);
+        // At this point:
+        // x0 = JIT stack top (where we will switch to)
+        // x1 = JIT function pointer
+        // SP = original stack (with callee-saved regs pushed)
+        //
+        // Strategy: Store original SP at top of JIT stack (x0 points there)
+        // JIT code will push its frame below this, so it won't be overwritten.
 
-        // Switch to JIT stack (x0 contains stack_ptr - top of JIT stack)
-        // mov sp, x0  (alias for: add sp, x0, #0)
-        self.code.push(0x9100001f);
+        // Save JIT args to temp registers (x9, x10 are caller-saved/scratch)
+        // mov x9, x0   ; JIT stack top
+        self.code.push(0xaa0003e9);
+        // mov x10, x1  ; JIT function pointer
+        self.code.push(0xaa0103ea);
+
+        // Store original SP at top of JIT stack [x9 - 8] (above where JIT stack will grow)
+        // NOTE: We can't directly store SP - in ARM64 encoding, Rt=31 means xzr not sp!
+        // So we first copy SP to x11, then store x11.
+        // mov x11, sp
+        self.code.push(0x910003eb);
+        // stur x11, [x9, #-8]
+        self.code.push(0xf81f812b);
+
+        // Switch to JIT stack: sp = JIT_stack_top - 16 (leave room for saved SP + padding)
+        // sub sp, x9, #16
+        self.code.push(0xd100413f);
 
         // Set up frame pointer on JIT stack
         // mov x29, sp
         self.code.push(0x910003fd);
 
-        // Call the JIT function
-        // blr x1
-        self.code.push(0xd63f0020);
+        // Call the JIT function (saved in x10)
+        // blr x10
+        self.code.push(0xd63f0140);
 
-        // Switch back to original stack
-        // mov sp, x20  (alias for: add sp, x20, #0)
-        self.code.push(0x9100029f);
+        // JIT returned with result in x0
+        // We need to restore original SP. It's stored at [JIT_stack_top - 8]
+        // Current SP might be different from where we set it (if JIT pushed/popped)
+        // But FP (x29) should still point to the base we set up.
+
+        // Load original SP from [FP + 8] (since FP = JIT_stack_top - 16, so FP+8 = JIT_stack_top - 8)
+        // ldr x9, [x29, #8]
+        // Encoding for LDR (unsigned offset, 64-bit):
+        //   31-30: size = 11
+        //   29-27: 111
+        //   26: V = 0
+        //   25-24: 01
+        //   23-22: opc = 01
+        //   21: 0
+        //   20-10: imm12 = 1 (offset 8 / scale 8)
+        //   9-5: Rn = 29 = 11101
+        //   4-0: Rt = 9 = 01001
+        // Binary: 11 111 0 01 01 0 000000000001 11101 01001
+        // Grouped: 1111 1001 0100 0000 0000 0111 1010 1001 = 0xf94007a9
+        self.code.push(0xf94007a9);
+
+        // Restore original SP
+        // mov sp, x9
+        self.code.push(0x9100013f);
 
         // Restore callee-saved registers x19-x28 from ORIGINAL stack
         // ldp x19, x20, [sp], #16

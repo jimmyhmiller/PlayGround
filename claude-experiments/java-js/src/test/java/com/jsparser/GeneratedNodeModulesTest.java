@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * Auto-generated tests from cached JS source files.
  * Category: NodeModules
- * Generated: 2025-12-10T20:22:01.815625Z
+ * Generated: 2025-12-11T05:05:59.084112Z
  * 
  * Tests parse with both Acorn (real-time) and our parser, streaming ASTs to temp files
  * for memory-efficient byte-for-byte comparison.
@@ -1078,7 +1078,7 @@ public class GeneratedNodeModulesTest {
                 if (typeof obj === 'undefined') { out.write('null'); return; }
                 if (typeof obj === 'boolean') { out.write(obj.toString()); return; }
                 if (typeof obj === 'number') { out.write(Number.isFinite(obj) ? obj.toString() : 'null'); return; }
-                if (typeof obj === 'bigint') { out.write('\"' + obj.toString() + '\"'); return; }
+                if (typeof obj === 'bigint') { out.write('null'); return; }
                 if (typeof obj === 'string') { out.write(JSON.stringify(obj)); return; }
                 if (Array.isArray(obj)) {
                     out.write('[');

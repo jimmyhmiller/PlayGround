@@ -578,6 +578,7 @@ impl Compiler {
         implementations: &[crate::clojure_ast::ProtocolImpl],
     ) -> Result<IrValue, String> {
         use crate::gc_runtime::DEFTYPE_ID_OFFSET;
+        use std::collections::HashMap;
 
         // Resolve type_id
         let type_id = self.resolve_type_id(type_name)?;
@@ -592,26 +593,37 @@ impl Compiler {
                     .ok_or_else(|| format!("Unknown protocol: {}", impl_.protocol_name))?
             };
 
-            // For each method
+            // Group methods by name to handle multi-arity protocol methods
+            // Multiple implementations with the same name but different param counts
+            // should be combined into a single multi-arity function
+            let mut methods_by_name: HashMap<String, Vec<&crate::clojure_ast::ProtocolMethodImpl>> = HashMap::new();
             for method in &impl_.methods {
+                methods_by_name.entry(method.name.clone()).or_default().push(method);
+            }
+
+            // For each unique method name
+            for (method_name, method_impls) in methods_by_name {
                 let method_index = unsafe {
                     let rt = &*self.runtime.get();
-                    rt.get_protocol_method_index(protocol_id, &method.name)
-                        .ok_or_else(|| format!("Unknown method {} in protocol {}", method.name, impl_.protocol_name))?
+                    rt.get_protocol_method_index(protocol_id, &method_name)
+                        .ok_or_else(|| format!("Unknown method {} in protocol {}", method_name, impl_.protocol_name))?
                 };
 
-                // Compile method as a function
-                // Create a FnArity from the method
-                let fn_arity = crate::value::FnArity {
-                    params: method.params.clone(),
-                    rest_param: None,
-                    body: method.body.clone(),
-                    pre_conditions: vec![],
-                    post_conditions: vec![],
-                };
+                // Compile all arities of this method into FnArity structs
+                let arities: Vec<crate::value::FnArity> = method_impls
+                    .iter()
+                    .map(|method| crate::value::FnArity {
+                        params: method.params.clone(),
+                        rest_param: None,
+                        body: method.body.clone(),
+                        pre_conditions: vec![],
+                        post_conditions: vec![],
+                    })
+                    .collect();
 
-                // Compile the method using compile_fn logic
-                let fn_value = self.compile_fn(&None, &[fn_arity])?;
+                // Compile the method(s) using compile_fn logic
+                // If there are multiple arities, this creates a multi-arity function
+                let fn_value = self.compile_fn(&None, &arities)?;
 
                 // Emit RegisterProtocolMethod instruction
                 self.builder.emit(Instruction::RegisterProtocolMethod(
@@ -1028,15 +1040,17 @@ impl Compiler {
             new_values.push(self.compile(arg)?);
         }
 
-        // Then assign to binding registers
+        // Build assignments list: (target_binding_register, new_value)
+        let mut assignments = Vec::new();
         for (binding_reg, new_value) in context.binding_registers.iter().zip(new_values.iter()) {
-            if binding_reg != new_value {
-                self.builder.emit(Instruction::Assign(*binding_reg, *new_value));
-            }
+            // Include all assignments, even if target == source
+            // Codegen will skip no-ops
+            assignments.push((*binding_reg, *new_value));
         }
 
-        // Jump back to loop
-        self.builder.emit(Instruction::Jump(context.label));
+        // Emit Recur instruction (will be transformed to RecurWithSaves by register allocator)
+        // The Recur instruction handles: 1) saving live registers, 2) assignments, 3) jump
+        self.builder.emit(Instruction::Recur(context.label.clone(), assignments));
 
         // Return dummy (recur never returns normally)
         let dummy = self.builder.new_register();
@@ -1278,16 +1292,24 @@ impl Compiler {
             None
         };
 
-        // Bind parameters to argument registers
+        // Bind parameters to temp registers (copying from argument registers)
         // ARM64 calling convention:
         // - Regular functions (single arity, no closures): arguments are in x0, x1, x2, etc.
         // - Closures/Multi-arity: x0 = closure object, user args in x1, x2, x3, etc.
+        //
+        // IMPORTANT: We copy argument registers to temp registers because x0-x7 are caller-saved
+        // and will be clobbered by any function calls. By copying to temp registers, the register
+        // allocator can properly manage their lifetimes (potentially assigning to callee-saved
+        // registers or spilling to stack).
         let param_offset = if uses_closure_convention { 1 } else { 0 };
         let mut param_registers = Vec::new();
         for (i, param) in arity.params.iter().enumerate() {
             let arg_reg = IrValue::Register(crate::ir::VirtualRegister::Argument(i + param_offset));
-            self.bind_local(param.clone(), arg_reg);
-            param_registers.push(arg_reg);
+            // Copy from argument register to a temp register
+            let temp_reg = self.builder.new_register();
+            self.builder.emit(Instruction::Assign(temp_reg, arg_reg));
+            self.bind_local(param.clone(), temp_reg);
+            param_registers.push(temp_reg);
         }
 
         // Bind rest parameter if variadic
