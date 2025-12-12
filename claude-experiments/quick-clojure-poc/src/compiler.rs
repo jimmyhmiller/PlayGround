@@ -436,8 +436,10 @@ impl Compiler {
         // 1. Compile the object
         let obj_value = self.compile(object)?;
 
-        // 2. Compile the new value
+        // 2. Compile the new value and ensure it's in a register
+        // (StoreTypeField requires a register, not a TaggedConstant)
         let new_value = self.compile(value)?;
+        let new_value = self.ensure_register(new_value);
 
         // 3. Emit GcAddRoot for write barrier (BEFORE the store)
         // This is critical for generational GC correctness:
@@ -702,6 +704,13 @@ impl Compiler {
         let method_bytes = method_name.as_bytes();
         let method_ptr = Box::leak(method_bytes.to_vec().into_boxed_slice()).as_ptr() as usize;
         let method_len = method_name.len();
+
+        // Ensure all arg values are in registers (convert constants if needed)
+        // This is important: constants in codegen use temp registers which can be
+        // clobbered by internal Call computation.
+        let arg_values: Vec<_> = arg_values.into_iter()
+            .map(|v| self.builder.assign_new(v))
+            .collect();
 
         // Step 1: Call trampoline_protocol_lookup(target, method_ptr, method_len) -> fn_ptr
         let fn_ptr = self.builder.new_register();
@@ -1002,9 +1011,11 @@ impl Compiler {
         self.push_scope();
 
         // Compile each binding and track registers
+        // IMPORTANT: Bindings must be in registers (not TaggedConstants) so recur can assign to them
         let mut binding_registers = Vec::new();
         for (name, value_expr) in bindings {
-            let value_reg = self.compile(value_expr)?;
+            let value = self.compile(value_expr)?;
+            let value_reg = self.ensure_register(value);
             self.bind_local(name.clone(), value_reg);
             binding_registers.push(value_reg);
         }
@@ -2301,6 +2312,7 @@ impl Compiler {
             return Err(format!("nil? requires 1 argument, got {}", args.len()));
         }
         let val = self.compile(&args[0])?;
+        let val = self.ensure_register(val);
 
         // Load nil constant (7) into a register for comparison
         let nil_const = self.builder.new_register();
@@ -2316,6 +2328,7 @@ impl Compiler {
             return Err(format!("number? requires 1 argument, got {}", args.len()));
         }
         let val = self.compile(&args[0])?;
+        let val = self.ensure_register(val);
         let tag = self.builder.new_register();
         self.builder.emit(Instruction::GetTag(tag, val));
 
@@ -2334,6 +2347,7 @@ impl Compiler {
             return Err(format!("string? requires 1 argument, got {}", args.len()));
         }
         let val = self.compile(&args[0])?;
+        let val = self.ensure_register(val);
         let tag = self.builder.new_register();
         self.builder.emit(Instruction::GetTag(tag, val));
 
@@ -2351,6 +2365,7 @@ impl Compiler {
             return Err(format!("fn? requires 1 argument, got {}", args.len()));
         }
         let val = self.compile(&args[0])?;
+        let val = self.ensure_register(val);
         let tag = self.builder.new_register();
         self.builder.emit(Instruction::GetTag(tag, val));
 
@@ -2389,7 +2404,9 @@ impl Compiler {
             return Err(format!("identical? requires 2 arguments, got {}", args.len()));
         }
         let left = self.compile(&args[0])?;
+        let left = self.ensure_register(left);
         let right = self.compile(&args[1])?;
+        let right = self.ensure_register(right);
 
         // Compare raw tagged values - identical values have identical bit patterns
         let result = self.builder.new_register();

@@ -201,6 +201,24 @@ pub fn stur(rt: u8, rn: u8, offset: i32) -> u32 {
     raw::stur_gen(0b11, offset, rn, rt)  // size=11 for 64-bit
 }
 
+/// STR Xt, [Xn, #simm9]! - store 64-bit with pre-index (decrement then store)
+#[inline]
+pub fn str_pre(rt: u8, rn: u8, offset: i32) -> u32 {
+    raw::str_imm_gen(0b11, offset, rn, rt, 0, raw::StrImmGenSelector::PreIndex)
+}
+
+/// LDR Xt, [Xn], #simm9 - load 64-bit with post-index (load then increment)
+#[inline]
+pub fn ldr_post(rt: u8, rn: u8, offset: i32) -> u32 {
+    raw::ldr_imm_gen(0b11, offset, rn, rt, 0, raw::LdrImmGenSelector::PostIndex)
+}
+
+/// BRK #imm16 - breakpoint instruction
+#[inline]
+pub fn brk(imm16: u16) -> u32 {
+    0xd4200000 | ((imm16 as u32) << 5)
+}
+
 /// STP Xt1, Xt2, [Xn, #offset]! - store pair with pre-index
 #[inline]
 pub fn stp_pre(rt: u8, rt2: u8, rn: u8, offset: i32) -> u32 {

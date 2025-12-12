@@ -1411,13 +1411,14 @@ impl LinearScan {
                 };
                 self.instructions[i] = Instruction::ExternalCallWithSaves(dest.unwrap(), func_addr, args, saves);
             } else if is_recur {
-                // Transform Recur to RecurWithSaves
-                let (label, assignments) = if let Instruction::Recur(l, a) = &self.instructions[i] {
-                    (l.clone(), a.clone())
-                } else {
-                    continue;
-                };
-                self.instructions[i] = Instruction::RecurWithSaves(label, assignments, saves);
+                // DON'T transform Recur to RecurWithSaves!
+                // Recur is a tail call - it jumps back to the loop head and never returns.
+                // There's no need to save any registers because:
+                // 1. The loop bindings are handled by the assignments
+                // 2. We never return to this point after the jump
+                // Saving/restoring would actually corrupt values by overwriting new loop
+                // binding values with old saved values.
+                continue;
             } else if is_make_type {
                 // Transform MakeType to MakeTypeWithSaves
                 let (type_id, field_values) = if let Instruction::MakeType(_, tid, fv) = &self.instructions[i] {

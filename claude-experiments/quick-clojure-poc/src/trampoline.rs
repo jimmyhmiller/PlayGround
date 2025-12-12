@@ -12,6 +12,7 @@ use std::alloc::{dealloc, Layout};
 use std::arch::asm;
 use std::collections::HashMap;
 use crate::gc_runtime::{GCRuntime, ExceptionHandler};
+use crate::arm_instructions as arm;
 use std::cell::UnsafeCell;
 use std::sync::Arc;
 
@@ -37,17 +38,6 @@ pub extern "C" fn trampoline_save_original_sp(sp: usize) {
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_get_original_sp() -> usize {
     unsafe { TRAMPOLINE_SAVED_SP }
-}
-
-/// Get the current frame pointer (x29) for GC stack walking
-/// This is used by allocation trampolines when gc_always is enabled
-#[inline(always)]
-fn get_frame_pointer() -> usize {
-    let fp: usize;
-    unsafe {
-        asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
-    }
-    fp
 }
 
 /// Set the global runtime reference for trampolines
@@ -237,9 +227,20 @@ pub fn generate_builtin_wrappers() -> HashMap<&'static str, usize> {
 
     // Helper to emit a wrapper that calls a trampoline
     // Args are already in x0, x1, x2 - just need to call the trampoline
-    let mut emit_trampoline_wrapper = |name: &'static str, trampoline_addr: usize| {
+    // If with_stack_pointer is true, pass x29 as first arg and shift original args
+    let mut emit_trampoline_wrapper = |name: &'static str, trampoline_addr: usize, with_stack_pointer: bool| {
         let addr = trampoline_addr;
         let mut code = Vec::new();
+
+        if with_stack_pointer {
+            // Shift args: x2 <- x1, x1 <- x0 (do in reverse order to avoid clobbering)
+            // mov x2, x1
+            code.push(0xAA0103E2);
+            // mov x1, x0
+            code.push(0xAA0003E1);
+            // mov x0, x29   ; pass JIT frame pointer as first argument
+            code.push(0xAA1D03E0);
+        }
 
         // stp x29, x30, [sp, #-16]!   ; save fp/lr
         code.push(0xA9BF7BFD);
@@ -273,17 +274,17 @@ pub fn generate_builtin_wrappers() -> HashMap<&'static str, usize> {
         offset += code.len();
     };
 
-    // make-array: (x0 = length) -> array
-    emit_trampoline_wrapper("make-array", trampoline_make_array as usize);
+    // make-array: (x0 = length) -> array  [ALLOCATES - needs JIT frame pointer]
+    emit_trampoline_wrapper("make-array", trampoline_make_array as usize, true);
 
     // aget: (x0 = array, x1 = index) -> value
-    emit_trampoline_wrapper("aget", trampoline_aget as usize);
+    emit_trampoline_wrapper("aget", trampoline_aget as usize, false);
 
     // aset!: (x0 = array, x1 = index, x2 = value) -> value
-    emit_trampoline_wrapper("aset!", trampoline_aset as usize);
+    emit_trampoline_wrapper("aset!", trampoline_aset as usize, false);
 
     // alength: (x0 = array) -> length
-    emit_trampoline_wrapper("alength", trampoline_alength as usize);
+    emit_trampoline_wrapper("alength", trampoline_alength as usize, false);
 
     // Make the page executable
     unsafe {
@@ -496,12 +497,14 @@ pub extern "C" fn trampoline_println(count: usize, values_ptr: *const usize) -> 
 /// Trampoline: Allocate function object
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = name_ptr (0 for anonymous), x1 = code_ptr, x2 = closure_count, x3 = values_ptr
+/// - Args: x0 = stack_pointer (JIT frame pointer for GC), x1 = name_ptr (0 for anonymous),
+///         x2 = code_ptr, x3 = closure_count, x4 = values_ptr
 /// - Returns: x0 = function pointer (tagged)
 ///
 /// Note: values_ptr points to an array of closure_count tagged values on the stack
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_allocate_function(
+    stack_pointer: usize,
     name_ptr: usize,
     code_ptr: usize,
     closure_count: usize,
@@ -512,7 +515,7 @@ pub extern "C" fn trampoline_allocate_function(
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(get_frame_pointer());
+        rt.maybe_gc_before_alloc(stack_pointer);
 
         // Get function name if provided
         let name = if name_ptr != 0 {
@@ -584,12 +587,13 @@ pub extern "C" fn trampoline_function_closure_count(fn_ptr: usize) -> usize {
 /// Trampoline: Allocate deftype instance
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = type_id, x1 = field_count, x2 = values_ptr
+/// - Args: x0 = stack_pointer (JIT frame pointer for GC), x1 = type_id, x2 = field_count, x3 = values_ptr
 /// - Returns: x0 = instance pointer (tagged HeapObject)
 ///
 /// Note: values_ptr points to an array of field_count tagged values on the stack
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_allocate_type(
+    stack_pointer: usize,
     type_id: usize,
     field_count: usize,
     values_ptr: *const usize,
@@ -599,7 +603,7 @@ pub extern "C" fn trampoline_allocate_type(
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(get_frame_pointer());
+        rt.maybe_gc_before_alloc(stack_pointer);
 
         // Read field values from the pointer
         let field_values = if field_count > 0 {
@@ -639,16 +643,16 @@ pub extern "C" fn trampoline_load_type_field(
 /// Trampoline: Allocate a float on the heap
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = f64 bits (as u64)
+/// - Args: x0 = stack_pointer (JIT frame pointer for GC), x1 = f64 bits (as u64)
 /// - Returns: x0 = tagged float pointer
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_allocate_float(float_bits: u64) -> usize {
+pub extern "C" fn trampoline_allocate_float(stack_pointer: usize, float_bits: u64) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(get_frame_pointer());
+        rt.maybe_gc_before_alloc(stack_pointer);
 
         let value = f64::from_bits(float_bits);
         match rt.allocate_float(value) {
@@ -707,15 +711,17 @@ pub extern "C" fn trampoline_load_type_field_by_name(
 /// Trampoline: Allocate a multi-arity function object
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = name_ptr (0 for anonymous)
-///         x1 = arity_count
-///         x2 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
-///         x3 = variadic_min (usize::MAX if no variadic)
-///         x4 = closure_count
-///         x5 = closures_ptr (pointer to closure values on stack)
+/// - Args: x0 = stack_pointer (JIT frame pointer for GC)
+///         x1 = name_ptr (0 for anonymous)
+///         x2 = arity_count
+///         x3 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
+///         x4 = variadic_min (usize::MAX if no variadic)
+///         x5 = closure_count
+///         x6 = closures_ptr (pointer to closure values on stack)
 /// - Returns: x0 = tagged closure pointer
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_allocate_multi_arity_fn(
+    stack_pointer: usize,
     _name_ptr: usize,
     arity_count: usize,
     arities_ptr: *const usize,
@@ -728,7 +734,7 @@ pub extern "C" fn trampoline_allocate_multi_arity_fn(
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(get_frame_pointer());
+        rt.maybe_gc_before_alloc(stack_pointer);
 
         // Read arities from pointer (each arity is 2 words: param_count, code_ptr)
         let arities: Vec<(usize, usize)> = if arity_count > 0 {
@@ -769,13 +775,15 @@ pub extern "C" fn trampoline_allocate_multi_arity_fn(
 /// Trampoline: Collect rest arguments into a list
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = pointer to args array on stack (excess args after fixed params)
-///         x1 = count of excess arguments
+/// - Args: x0 = stack_pointer (JIT frame pointer for GC)
+///         x1 = pointer to args array on stack (excess args after fixed params)
+///         x2 = count of excess arguments
 /// - Returns: x0 = tagged list (cons cells) or nil
 ///
 /// Builds a list from right to left using cons cells.
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_collect_rest_args(
+    stack_pointer: usize,
     args_ptr: *const usize,
     count: usize,
 ) -> usize {
@@ -788,7 +796,7 @@ pub extern "C" fn trampoline_collect_rest_args(
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(get_frame_pointer());
+        rt.maybe_gc_before_alloc(stack_pointer);
 
         // Read args from pointer
         let args_slice = std::slice::from_raw_parts(args_ptr, count);
@@ -1104,16 +1112,16 @@ pub extern "C" fn trampoline_intern_keyword(keyword_index: usize) -> usize {
 /// Trampoline: Allocate a new raw mutable array
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = length (tagged integer)
+/// - Args: x0 = stack_pointer (JIT frame pointer for GC), x1 = length (tagged integer)
 /// - Returns: x0 = tagged array pointer
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_make_array(length: usize) -> usize {
+pub extern "C" fn trampoline_make_array(stack_pointer: usize, length: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(get_frame_pointer());
+        rt.maybe_gc_before_alloc(stack_pointer);
 
         // Untag the length
         let len = length >> 3;
@@ -1233,100 +1241,66 @@ impl Trampoline {
         //
         // This trampoline switches to a dedicated JIT stack so GC can scan it.
 
+        // Register numbers for ARM64
+        const SP: u8 = 31;
+        const FP: u8 = 29;
+        const LR: u8 = 30;
+
         // Save frame pointer and link register on ORIGINAL stack
-        // stp x29, x30, [sp, #-16]!
-        self.code.push(0xa9bf7bfd);
+        self.code.push(arm::stp_pre(FP, LR, SP, -16));
 
         // Save callee-saved registers x19-x28 on ORIGINAL stack (5 pairs = 80 bytes)
-        // stp x27, x28, [sp, #-16]!
-        self.code.push(0xa9bf77fc);
-        // stp x25, x26, [sp, #-16]!
-        self.code.push(0xa9bf6ffa);
-        // stp x23, x24, [sp, #-16]!
-        self.code.push(0xa9bf67f8);
-        // stp x21, x22, [sp, #-16]!
-        self.code.push(0xa9bf5ff6);
-        // stp x19, x20, [sp, #-16]!
-        self.code.push(0xa9bf57f4);
+        self.code.push(arm::stp_pre(27, 28, SP, -16));
+        self.code.push(arm::stp_pre(25, 26, SP, -16));
+        self.code.push(arm::stp_pre(23, 24, SP, -16));
+        self.code.push(arm::stp_pre(21, 22, SP, -16));
+        self.code.push(arm::stp_pre(19, 20, SP, -16));
 
         // At this point:
         // x0 = JIT stack top (where we will switch to)
         // x1 = JIT function pointer
         // SP = original stack (with callee-saved regs pushed)
         //
-        // Strategy: Store original SP at top of JIT stack (x0 points there)
-        // JIT code will push its frame below this, so it won't be overwritten.
+        // Strategy (following beagle): Push original SP onto JIT stack, call JIT,
+        // pop original SP after JIT returns (ARM64 ABI guarantees callee restores SP)
 
-        // Save JIT args to temp registers (x9, x10 are caller-saved/scratch)
-        // mov x9, x0   ; JIT stack top
-        self.code.push(0xaa0003e9);
-        // mov x10, x1  ; JIT function pointer
-        self.code.push(0xaa0103ea);
+        // Save JIT function pointer to x10 (caller-saved scratch register)
+        self.code.push(arm::mov(10, 1));
 
-        // Store original SP at top of JIT stack [x9 - 8] (above where JIT stack will grow)
-        // NOTE: We can't directly store SP - in ARM64 encoding, Rt=31 means xzr not sp!
-        // So we first copy SP to x11, then store x11.
-        // mov x11, sp
-        self.code.push(0x910003eb);
-        // stur x11, [x9, #-8]
-        self.code.push(0xf81f812b);
+        // Save original SP to x9
+        self.code.push(arm::mov_sp(9, SP));
 
-        // Switch to JIT stack: sp = JIT_stack_top - 16 (leave room for saved SP + padding)
-        // sub sp, x9, #16
-        self.code.push(0xd100413f);
+        // Switch to JIT stack: sp = x0 (JIT stack top)
+        self.code.push(arm::mov_sp(SP, 0));
 
-        // Set up frame pointer on JIT stack
-        // mov x29, sp
-        self.code.push(0x910003fd);
+        // Push original SP onto JIT stack (16-byte aligned)
+        self.code.push(arm::str_pre(9, SP, -16));
 
-        // Call the JIT function (saved in x10)
-        // blr x10
-        self.code.push(0xd63f0140);
+        // Call the JIT function
+        self.code.push(arm::blr(10));
 
         // JIT returned with result in x0
-        // We need to restore original SP. It's stored at [JIT_stack_top - 8]
-        // Current SP might be different from where we set it (if JIT pushed/popped)
-        // But FP (x29) should still point to the base we set up.
+        // ARM64 ABI guarantees callee restores SP to where it was at call time
+        // So SP now points to where we pushed original SP
 
-        // Load original SP from [FP + 8] (since FP = JIT_stack_top - 16, so FP+8 = JIT_stack_top - 8)
-        // ldr x9, [x29, #8]
-        // Encoding for LDR (unsigned offset, 64-bit):
-        //   31-30: size = 11
-        //   29-27: 111
-        //   26: V = 0
-        //   25-24: 01
-        //   23-22: opc = 01
-        //   21: 0
-        //   20-10: imm12 = 1 (offset 8 / scale 8)
-        //   9-5: Rn = 29 = 11101
-        //   4-0: Rt = 9 = 01001
-        // Binary: 11 111 0 01 01 0 000000000001 11101 01001
-        // Grouped: 1111 1001 0100 0000 0000 0111 1010 1001 = 0xf94007a9
-        self.code.push(0xf94007a9);
+        // Pop original SP from JIT stack (post-index: load then increment)
+        self.code.push(arm::ldr_post(9, SP, 16));
 
         // Restore original SP
-        // mov sp, x9
-        self.code.push(0x9100013f);
+        self.code.push(arm::mov_sp(SP, 9));
 
         // Restore callee-saved registers x19-x28 from ORIGINAL stack
-        // ldp x19, x20, [sp], #16
-        self.code.push(0xa8c157f4);
-        // ldp x21, x22, [sp], #16
-        self.code.push(0xa8c15ff6);
-        // ldp x23, x24, [sp], #16
-        self.code.push(0xa8c167f8);
-        // ldp x25, x26, [sp], #16
-        self.code.push(0xa8c16ffa);
-        // ldp x27, x28, [sp], #16
-        self.code.push(0xa8c177fc);
+        self.code.push(arm::ldp_post(19, 20, SP, 16));
+        self.code.push(arm::ldp_post(21, 22, SP, 16));
+        self.code.push(arm::ldp_post(23, 24, SP, 16));
+        self.code.push(arm::ldp_post(25, 26, SP, 16));
+        self.code.push(arm::ldp_post(27, 28, SP, 16));
 
         // Restore frame pointer and link register
-        // ldp x29, x30, [sp], #16
-        self.code.push(0xa8c17bfd);
+        self.code.push(arm::ldp_post(FP, LR, SP, 16));
 
         // Return
-        // ret
-        self.code.push(0xd65f03c0);
+        self.code.push(arm::ret());
     }
 
     fn allocate_code(&mut self) {

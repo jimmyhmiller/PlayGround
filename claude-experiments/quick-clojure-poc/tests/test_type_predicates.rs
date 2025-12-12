@@ -19,7 +19,8 @@ fn run_and_get_tagged(code: &str) -> i64 {
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
     let mut compiler = compiler::Compiler::new(runtime.clone());
-    let result_reg = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
+    let result_val = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
+    let result_reg = compiler.ensure_register(result_val);
     let instructions = compiler.take_instructions();
 
     let mut codegen = arm_codegen::Arm64CodeGen::new();

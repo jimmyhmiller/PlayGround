@@ -181,8 +181,8 @@ impl MarkAndSweep {
             }
 
             object.mark();
-            for object in object.get_heap_references() {
-                to_mark.push(object);
+            for child in object.get_heap_references() {
+                to_mark.push(child);
             }
         }
     }

@@ -158,6 +158,18 @@ public class DirectoryTester {
         // Log file for debugging hangs - write current file being processed
         Path progressLogPath = Paths.get("/tmp/directory-tester-progress.log");
 
+        // Immediately write failures to files as they're found
+        Path failuresPath = Paths.get("/tmp/java-parser-failures.txt");
+        Path mismatchesPath = Paths.get("/tmp/java-parser-mismatches.txt");
+        Path tooPermissivePath = Paths.get("/tmp/java-parser-too-permissive.txt");
+        try {
+            Files.deleteIfExists(failuresPath);
+            Files.deleteIfExists(mismatchesPath);
+            Files.deleteIfExists(tooPermissivePath);
+        } catch (IOException e) {
+            // Ignore
+        }
+
         for (Path file : jsFiles) {
             // Check if we've hit max failures, mismatches, or too-permissive
             if (javaFailedAcornSucceeded.get() >= maxFailures) {
@@ -332,6 +344,15 @@ public class DirectoryTester {
                         javaFailedFiles.add(relativePath + ": " + javaError);
                     }
 
+                    // Immediately write failure to file (append)
+                    try (BufferedWriter fw = new BufferedWriter(new FileWriter(failuresPath.toFile(), true))) {
+                        fw.write(file.toAbsolutePath().toString() + ": " + javaError);
+                        fw.newLine();
+                        fw.flush();
+                    } catch (IOException appendErr) {
+                        // Ignore
+                    }
+
                     // Cache Acorn result for test generation
                     if (cacheBuilder != null && acornResult.astJson != null) {
                         try {
@@ -348,6 +369,15 @@ public class DirectoryTester {
                     javaSucceededAcornFailed.incrementAndGet();
                     if (javaSucceededAcornFailedFiles.size() < 50) {
                         javaSucceededAcornFailedFiles.add(relativePath);
+                    }
+
+                    // Immediately write too-permissive to file (append)
+                    try (BufferedWriter fw = new BufferedWriter(new FileWriter(tooPermissivePath.toFile(), true))) {
+                        fw.write(file.toAbsolutePath().toString());
+                        fw.newLine();
+                        fw.flush();
+                    } catch (IOException appendErr) {
+                        // Ignore
                     }
                 } else {
                     // Both succeeded - compare ASTs
@@ -368,6 +398,15 @@ public class DirectoryTester {
                         mismatched.incrementAndGet();
                         if (mismatchedFiles.size() < 20) {
                             mismatchedFiles.add(relativePath);
+                        }
+
+                        // Immediately write mismatch to file (append)
+                        try (BufferedWriter fw = new BufferedWriter(new FileWriter(mismatchesPath.toFile(), true))) {
+                            fw.write(file.toAbsolutePath().toString());
+                            fw.newLine();
+                            fw.flush();
+                        } catch (IOException appendErr) {
+                            // Ignore
                         }
 
                         // Write first mismatch ASTs to files for debugging
@@ -464,6 +503,22 @@ public class DirectoryTester {
                 .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
                 .limit(20)
                 .forEach(e -> System.out.printf("  [%d] %s%n", e.getValue(), e.getKey()));
+        }
+
+        // Print file locations summary
+        System.out.println("\n=== Output Files ===");
+        if (javaFailedAcornSucceeded.get() > 0) {
+            System.out.println("Java failures:    " + failuresPath.toAbsolutePath() + " (" + javaFailedAcornSucceeded.get() + " files)");
+        }
+        if (mismatched.get() > 0) {
+            System.out.println("AST mismatches:   " + mismatchesPath.toAbsolutePath() + " (" + mismatched.get() + " files)");
+            System.out.println("First mismatch:   /tmp/acorn-ast-mismatch.json, /tmp/java-ast-mismatch.json");
+        }
+        if (javaSucceededAcornFailed.get() > 0) {
+            System.out.println("Too permissive:   " + tooPermissivePath.toAbsolutePath() + " (" + javaSucceededAcornFailed.get() + " files)");
+        }
+        if (javaFailedAcornSucceeded.get() == 0 && mismatched.get() == 0 && javaSucceededAcornFailed.get() == 0) {
+            System.out.println("No failures or mismatches to record.");
         }
 
         if (enableCaching && cachedCount.get() > 0) {

@@ -538,6 +538,14 @@ impl GCRuntime {
                 let mut heap_obj = HeapObject::from_untagged(ptr);
                 heap_obj.write_header(Word::from_word(size_words));
                 heap_obj.write_type_id(type_id as usize);
+
+                // Initialize all fields to null to prevent GC from seeing garbage
+                // as heap pointers. This is critical for gc-always mode.
+                let null_value = BuiltInTypes::null_value() as usize;
+                for i in 0..size_words {
+                    heap_obj.write_field(i, null_value);
+                }
+
                 Ok(ptr as usize)
             }
             Ok(AllocateAction::Gc) => {
@@ -1287,17 +1295,24 @@ impl GCRuntime {
         let heap_obj = HeapObject::from_untagged(fn_ptr as *const u8);
 
         // Write header fields
+        // All integer fields must be tagged to avoid GC treating them as heap pointers
         heap_obj.write_field(multi_arity_layout::FIELD_NAME_PTR, name_ptr);
-        heap_obj.write_field(multi_arity_layout::FIELD_ARITY_COUNT, arity_count);
+        heap_obj.write_field(multi_arity_layout::FIELD_ARITY_COUNT,
+            BuiltInTypes::Int.tag(arity_count as isize) as usize);
         heap_obj.write_field(
             multi_arity_layout::FIELD_VARIADIC_MIN,
-            variadic_min.unwrap_or(multi_arity_layout::NO_VARIADIC),
+            BuiltInTypes::Int.tag(variadic_min.unwrap_or(multi_arity_layout::NO_VARIADIC) as isize) as usize,
         );
-        heap_obj.write_field(multi_arity_layout::FIELD_CLOSURE_COUNT, closure_values.len());
+        heap_obj.write_field(multi_arity_layout::FIELD_CLOSURE_COUNT,
+            BuiltInTypes::Int.tag(closure_values.len() as isize) as usize);
 
         // Write arity table
+        // Note: param_count must be tagged as Int to avoid GC treating it as a heap pointer
+        // code_ptr is a raw address (not a tagged value) but has high bits set so it won't
+        // match heap pointer tag patterns in practice
         for (i, (param_count, code_ptr)) in arities.iter().enumerate() {
-            heap_obj.write_field(multi_arity_layout::arity_param_count_field(i), *param_count);
+            let tagged_param_count = BuiltInTypes::Int.tag(*param_count as isize) as usize;
+            heap_obj.write_field(multi_arity_layout::arity_param_count_field(i), tagged_param_count);
             heap_obj.write_field(multi_arity_layout::arity_code_ptr_field(i), *code_ptr);
         }
 
@@ -1325,12 +1340,14 @@ impl GCRuntime {
         let untagged = self.untag_closure(fn_ptr);
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
 
-        let arity_count = heap_obj.get_field(multi_arity_layout::FIELD_ARITY_COUNT);
-        let variadic_min = heap_obj.get_field(multi_arity_layout::FIELD_VARIADIC_MIN);
+        // Untag integer fields (they were tagged to avoid GC issues)
+        let arity_count = heap_obj.get_field(multi_arity_layout::FIELD_ARITY_COUNT) >> 3;
+        let variadic_min_tagged = heap_obj.get_field(multi_arity_layout::FIELD_VARIADIC_MIN);
+        let variadic_min = variadic_min_tagged >> 3;
 
         // First, try to find an exact match
         for i in 0..arity_count {
-            let param_count = heap_obj.get_field(multi_arity_layout::arity_param_count_field(i));
+            let param_count = heap_obj.get_field(multi_arity_layout::arity_param_count_field(i)) >> 3;
             if param_count == arg_count {
                 let code_ptr = heap_obj.get_field(multi_arity_layout::arity_code_ptr_field(i));
                 return Some((code_ptr, false));
@@ -1338,10 +1355,12 @@ impl GCRuntime {
         }
 
         // If no exact match and we have a variadic arity, check if args >= variadic_min
-        if variadic_min != multi_arity_layout::NO_VARIADIC && arg_count >= variadic_min {
+        // Note: NO_VARIADIC is usize::MAX, when tagged and untagged it stays very large
+        let no_variadic_untagged = multi_arity_layout::NO_VARIADIC >> 3;
+        if variadic_min != no_variadic_untagged && arg_count >= variadic_min {
             // Find the variadic arity (the one with param_count == variadic_min)
             for i in 0..arity_count {
-                let param_count = heap_obj.get_field(multi_arity_layout::arity_param_count_field(i));
+                let param_count = heap_obj.get_field(multi_arity_layout::arity_param_count_field(i)) >> 3;
                 if param_count == variadic_min {
                     let code_ptr = heap_obj.get_field(multi_arity_layout::arity_code_ptr_field(i));
                     return Some((code_ptr, true));
@@ -1356,22 +1375,22 @@ impl GCRuntime {
     pub fn multi_arity_closure_count(&self, fn_ptr: usize) -> usize {
         let untagged = self.untag_closure(fn_ptr);
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
-        heap_obj.get_field(multi_arity_layout::FIELD_CLOSURE_COUNT)
+        heap_obj.get_field(multi_arity_layout::FIELD_CLOSURE_COUNT) >> 3
     }
 
     /// Get arity count from a multi-arity function
     pub fn multi_arity_arity_count(&self, fn_ptr: usize) -> usize {
         let untagged = self.untag_closure(fn_ptr);
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
-        heap_obj.get_field(multi_arity_layout::FIELD_ARITY_COUNT)
+        heap_obj.get_field(multi_arity_layout::FIELD_ARITY_COUNT) >> 3
     }
 
     /// Get closure value by index from a multi-arity function
     pub fn multi_arity_get_closure(&self, fn_ptr: usize, index: usize) -> usize {
         let untagged = self.untag_closure(fn_ptr);
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
-        let arity_count = heap_obj.get_field(multi_arity_layout::FIELD_ARITY_COUNT);
-        let closure_count = heap_obj.get_field(multi_arity_layout::FIELD_CLOSURE_COUNT);
+        let arity_count = heap_obj.get_field(multi_arity_layout::FIELD_ARITY_COUNT) >> 3;
+        let closure_count = heap_obj.get_field(multi_arity_layout::FIELD_CLOSURE_COUNT) >> 3;
         if index >= closure_count {
             panic!("Multi-arity closure index out of bounds: {} >= {}", index, closure_count);
         }

@@ -1,3 +1,4 @@
+use crate::gc::types::BuiltInTypes;
 use crate::ir::{Instruction, IrValue, VirtualRegister, Condition, Label};
 use crate::register_allocation::linear_scan::LinearScan;
 use crate::trampoline::Trampoline;
@@ -235,6 +236,13 @@ impl Arm64CodeGen {
         let prologue_placeholder_index = codegen.code.len();
         codegen.emit_sub_sp_imm(0xAAA);  // Placeholder - will be patched
 
+        // Step 5: Initialize all local/spill slots to null (Beagle pattern)
+        // This ensures GC won't see garbage as heap pointers during stack scanning.
+        // Use x15 as scratch register (it's caller-saved and not used for arguments)
+        // TEMPORARILY DISABLED - causing loop regression
+        // codegen.emit_mov_imm(15, BuiltInTypes::null_value() as i64);  // Load null (0b111)
+        // codegen.set_all_locals_to_null(15);
+
         // Store info for Ret to emit correct epilogue and for patching
         codegen.num_stack_slots = total_stack_slots;
         codegen.saved_callee_registers = used_callee_saved.clone();
@@ -367,6 +375,13 @@ impl Arm64CodeGen {
         let prologue_placeholder_index = self.code.len();
         self.emit_sub_sp_imm(0xAAA);  // Placeholder - will be patched
 
+        // Step 4: Initialize all local/spill slots to null (Beagle pattern)
+        // This ensures GC won't see garbage as heap pointers during stack scanning.
+        // Use x15 as scratch register (it's caller-saved and not used for arguments)
+        // TEMPORARILY DISABLED - causing loop regression
+        // self.emit_mov_imm(15, BuiltInTypes::null_value() as i64);  // Load null (0b111)
+        // self.set_all_locals_to_null(15);
+
         // Reset stack tracking for push_to_stack during compilation
         self.current_stack_size = 0;
         self.max_stack_size = 0;
@@ -405,10 +420,6 @@ impl Arm64CodeGen {
         // Calculate actual stack size needed: spill slots + dynamic stack from push_to_stack
         // Total stack = num_spill_slots + max_stack_size (from push_to_stack usage)
         let total_stack_words = self.num_spill_slots + self.max_stack_size;
-        if self.num_spill_slots > 0 || self.max_stack_size > 0 {
-            eprintln!("DEBUG compile() END: num_spill_slots={}, max_stack_size={}, total_stack_words={}, code_len={}",
-                      self.num_spill_slots, self.max_stack_size, total_stack_words, self.code.len());
-        }
         // Round up to even for 16-byte alignment
         let aligned_stack_words = if total_stack_words % 2 != 0 {
             total_stack_words + 1
@@ -558,7 +569,7 @@ impl Arm64CodeGen {
                     }
                     IrValue::Null => {
                         let temp = self.allocate_temp_register();
-                        self.emit_mov_imm(temp, 0);
+                        self.emit_mov_imm(temp, 7);  // nil is tagged as 7
                         temp
                     }
                     _ => self.get_physical_reg_for_irvalue(value, false)?
@@ -925,10 +936,10 @@ impl Arm64CodeGen {
                 // stp x19, x20, [sp, #-16]!
                 self.emit_stp(19, 20, 31, -2);
 
-                // Move src to x0 (first argument)
-                if src_reg != 0 {
-                    self.emit_mov(0, src_reg);
-                }
+                // Pass JIT frame pointer (x29) as first argument (x0) for GC
+                self.emit_mov(0, 29);
+                // Move src to x1 (second argument, was x0)
+                self.emit_mov(1, src_reg);
 
                 // Call trampoline_allocate_float
                 let trampoline_addr = crate::trampoline::trampoline_allocate_float as usize;
@@ -956,7 +967,7 @@ impl Arm64CodeGen {
                         self.emit_mov_imm(dst_reg, *val as i64);
                     }
                     IrValue::Null => {
-                        self.emit_mov_imm(dst_reg, 0); // nil is 0
+                        self.emit_mov_imm(dst_reg, 7); // nil is tagged as 7
                     }
                     _ => {
                         let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
@@ -1064,7 +1075,6 @@ impl Arm64CodeGen {
             Instruction::Label(label) => {
                 // Record position of this label
                 let pos = self.code.len();
-                // eprintln!("DEBUG: Label {} at code position {}", label, pos);
                 self.label_positions.insert(label.clone(), pos);
                 // Note: With per-function compilation, functions are NOT compiled inline.
                 // Each function has its own prologue/epilogue emitted by compile_function().
@@ -1090,9 +1100,12 @@ impl Arm64CodeGen {
                     }
 
                     // Phase 2: Pop into destinations (reverse order)
+                    // IMPORTANT: Must call store_spill to write back to spill slot!
                     for (dst, _) in assignments.iter().rev() {
+                        let dest_spill = self.dest_spill(dst);
                         let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                         self.emit_ldp(dst_reg, 31, 31, 2); // ldp dst, xzr, [sp], #16
+                        self.store_spill(dst_reg, dest_spill);
                     }
                 }
 
@@ -1105,24 +1118,6 @@ impl Arm64CodeGen {
             Instruction::RecurWithSaves(label, assignments, saves) => {
                 // Loop back-edge with register preservation
                 // Save registers that are live across the loop iteration
-
-                // DEBUG: Print what we're saving AND destinations (need to clear temps after)
-                let save_regs: Vec<usize> = saves.iter()
-                    .filter_map(|v| self.get_physical_reg_for_irvalue(v, false).ok())
-                    .collect();
-                self.clear_temp_registers();
-                let dest_regs: Vec<usize> = assignments.iter()
-                    .filter_map(|(dst, _)| self.get_physical_reg_for_irvalue(dst, true).ok())
-                    .collect();
-                self.clear_temp_registers();
-                // eprintln!("DEBUG RecurWithSaves: saves={:?}, dests={:?}", save_regs, dest_regs);
-
-                // Check for overlap - this would be a bug!
-                for &save_reg in &save_regs {
-                    if dest_regs.contains(&save_reg) {
-                        eprintln!("BUG! Register x{} is both saved and a destination!", save_reg);
-                    }
-                }
 
                 // Step 1: Save all the saves (registers that need to survive)
                 // Clear temps between each iteration to avoid exhausting the pool
@@ -1149,7 +1144,7 @@ impl Arm64CodeGen {
                             }
                             IrValue::Null => {
                                 let temp = self.allocate_temp_register();
-                                self.emit_mov_imm(temp, 0);
+                                self.emit_mov_imm(temp, 7);  // nil is tagged as 7
                                 temp
                             }
                             _ => self.get_physical_reg_for_irvalue(src, false)?
@@ -1190,7 +1185,7 @@ impl Arm64CodeGen {
                     }
                     IrValue::Null => {
                         let temp_reg = self.allocate_temp_register();
-                        self.emit_mov_imm(temp_reg, 0);
+                        self.emit_mov_imm(temp_reg, 7);  // nil is tagged as 7
                         temp_reg
                     }
                     _ => self.get_physical_reg_for_irvalue(src1, false)?
@@ -1203,7 +1198,7 @@ impl Arm64CodeGen {
                         self.emit_cmp_imm(src1_reg, *imm as i64);
                     }
                     IrValue::Null => {
-                        self.emit_cmp_imm(src1_reg, 0);
+                        self.emit_cmp_imm(src1_reg, 7);  // nil is tagged as 7
                     }
                     _ => {
                         let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
@@ -1313,10 +1308,12 @@ impl Arm64CodeGen {
                     self.emit_mov(values_ptr_reg, 31);
 
                     // Step 4: Set up arguments for trampoline call
-                    self.emit_mov_imm(0, 0);  // x0 = 0 (anonymous)
-                    self.emit_mov_imm(1, *code_ptr as i64);  // x1 = code_ptr (raw pointer)
-                    self.emit_mov_imm(2, closure_values.len() as i64);  // x2 = closure_count
-                    self.emit_mov(3, values_ptr_reg);  // x3 = values_ptr
+                    // Args: x0=stack_pointer (JIT FP for GC), x1=name_ptr, x2=code_ptr, x3=closure_count, x4=values_ptr
+                    self.emit_mov(0, 29);  // x0 = JIT frame pointer for GC
+                    self.emit_mov_imm(1, 0);  // x1 = 0 (anonymous)
+                    self.emit_mov_imm(2, *code_ptr as i64);  // x2 = code_ptr (raw pointer)
+                    self.emit_mov_imm(3, closure_values.len() as i64);  // x3 = closure_count
+                    self.emit_mov(4, values_ptr_reg);  // x4 = values_ptr
 
                     // Step 5: Call trampoline to allocate closure heap object
                     let func_addr = crate::trampoline::trampoline_allocate_function as usize;
@@ -2084,9 +2081,10 @@ impl Arm64CodeGen {
                 // Similar to MakeFunctionPtr but for type instances
                 //
                 // ARM64 Calling Convention for trampoline_allocate_type:
-                // - x0 = type_id
-                // - x1 = field_count
-                // - x2 = values_ptr (pointer to field values on stack)
+                // - x0 = stack_pointer (JIT frame pointer for GC)
+                // - x1 = type_id
+                // - x2 = field_count
+                // - x3 = values_ptr (pointer to field values on stack)
                 // - Returns: x0 = tagged HeapObject pointer
 
                 let dest_spill = self.dest_spill(dst);
@@ -2111,7 +2109,7 @@ impl Arm64CodeGen {
                         }
                         IrValue::Null => {
                             let temp = self.allocate_temp_register();
-                            self.emit_mov_imm(temp, 0);
+                            self.emit_mov_imm(temp, 7);  // nil is tagged as 7
                             temp
                         }
                         _ => self.get_physical_reg_for_irvalue(value, false)?
@@ -2126,9 +2124,10 @@ impl Arm64CodeGen {
                 self.emit_mov(values_ptr_reg, 31);
 
                 // Step 4: Set up arguments for trampoline call
-                self.emit_mov_imm(0, *type_id as i64);           // x0 = type_id
-                self.emit_mov_imm(1, field_values.len() as i64); // x1 = field_count
-                self.emit_mov(2, values_ptr_reg);                // x2 = values_ptr
+                self.emit_mov(0, 29);                            // x0 = JIT frame pointer for GC
+                self.emit_mov_imm(1, *type_id as i64);           // x1 = type_id
+                self.emit_mov_imm(2, field_values.len() as i64); // x2 = field_count
+                self.emit_mov(3, values_ptr_reg);                // x3 = values_ptr
 
                 // Step 5: Call trampoline to allocate type instance
                 let func_addr = crate::trampoline::trampoline_allocate_type as usize;
@@ -2186,7 +2185,7 @@ impl Arm64CodeGen {
                         }
                         IrValue::Null => {
                             let temp = self.allocate_temp_register();
-                            self.emit_mov_imm(temp, 0);
+                            self.emit_mov_imm(temp, 7);  // nil is tagged as 7
                             temp
                         }
                         _ => self.get_physical_reg_for_irvalue(value, false)?
@@ -2201,9 +2200,11 @@ impl Arm64CodeGen {
                 self.emit_mov(values_ptr_reg, 31);
 
                 // STEP 5: Set up arguments for trampoline call
-                self.emit_mov_imm(0, *type_id as i64);           // x0 = type_id
-                self.emit_mov_imm(1, field_values.len() as i64); // x1 = field_count
-                self.emit_mov(2, values_ptr_reg);                // x2 = values_ptr
+                // Args: x0=stack_pointer (JIT FP for GC), x1=type_id, x2=field_count, x3=values_ptr
+                self.emit_mov(0, 29);                            // x0 = JIT frame pointer for GC
+                self.emit_mov_imm(1, *type_id as i64);           // x1 = type_id
+                self.emit_mov_imm(2, field_values.len() as i64); // x2 = field_count
+                self.emit_mov(3, values_ptr_reg);                // x3 = values_ptr
 
                 // STEP 6: Call trampoline (just BLR, like Beagle's call_builtin)
                 let func_addr = crate::trampoline::trampoline_allocate_type as usize;
@@ -2600,12 +2601,13 @@ impl Arm64CodeGen {
                 // Similar to MakeFunctionPtr but stores multiple (param_count, code_ptr) pairs
                 //
                 // ARM64 Calling Convention for trampoline_allocate_multi_arity_fn:
-                // - x0 = name_ptr (0 for anonymous)
-                // - x1 = arity_count
-                // - x2 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
-                // - x3 = variadic_min (usize::MAX if no variadic)
-                // - x4 = closure_count
-                // - x5 = closures_ptr (pointer to closure values on stack)
+                // - x0 = stack_pointer (JIT frame pointer for GC)
+                // - x1 = name_ptr (0 for anonymous)
+                // - x2 = arity_count
+                // - x3 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
+                // - x4 = variadic_min (usize::MAX if no variadic)
+                // - x5 = closure_count
+                // - x6 = closures_ptr (pointer to closure values on stack)
                 // - Returns: x0 = tagged closure pointer
 
                 let dest_spill = self.dest_spill(dst);
@@ -2646,12 +2648,13 @@ impl Arm64CodeGen {
                 self.emit_add_imm(closures_ptr_reg, 31, arities_size as i64);  // SP + arities_size = closures_ptr
 
                 // Step 5: Set up arguments for trampoline call
-                self.emit_mov_imm(0, 0);  // x0 = name_ptr (0 for anonymous)
-                self.emit_mov_imm(1, arities.len() as i64);  // x1 = arity_count
-                self.emit_mov(2, arities_ptr_reg);  // x2 = arities_ptr
-                self.emit_mov_imm(3, variadic_min.unwrap_or(usize::MAX) as i64);  // x3 = variadic_min
-                self.emit_mov_imm(4, closure_values.len() as i64);  // x4 = closure_count
-                self.emit_mov(5, closures_ptr_reg);  // x5 = closures_ptr
+                self.emit_mov(0, 29);  // x0 = JIT frame pointer for GC
+                self.emit_mov_imm(1, 0);  // x1 = name_ptr (0 for anonymous)
+                self.emit_mov_imm(2, arities.len() as i64);  // x2 = arity_count
+                self.emit_mov(3, arities_ptr_reg);  // x3 = arities_ptr
+                self.emit_mov_imm(4, variadic_min.unwrap_or(usize::MAX) as i64);  // x4 = variadic_min
+                self.emit_mov_imm(5, closure_values.len() as i64);  // x5 = closure_count
+                self.emit_mov(6, closures_ptr_reg);  // x6 = closures_ptr
 
                 // Step 6: Call trampoline to allocate multi-arity function
                 let func_addr = crate::trampoline::trampoline_allocate_multi_arity_fn as usize;
@@ -2794,12 +2797,14 @@ impl Arm64CodeGen {
                     }
                 }
 
-                // Call trampoline_collect_rest_args(args_ptr, excess_count)
-                // x0 = pointer to excess args on stack
-                // x1 = excess_count
-                // ADD x0, SP, #save_area_aligned
-                self.emit_add_sp_offset_to_reg(0, save_area_aligned as i64);
-                self.emit_mov(1, excess_count_reg);  // x1 = excess_count
+                // Call trampoline_collect_rest_args(stack_pointer, args_ptr, excess_count)
+                // x0 = JIT frame pointer for GC
+                // x1 = pointer to excess args on stack
+                // x2 = excess_count
+                self.emit_mov(0, 29);  // x0 = JIT frame pointer for GC
+                // ADD x1, SP, #save_area_aligned
+                self.emit_add_sp_offset_to_reg(1, save_area_aligned as i64);
+                self.emit_mov(2, excess_count_reg);  // x2 = excess_count
 
                 let trampoline_addr = crate::trampoline::trampoline_collect_rest_args as usize;
                 self.emit_external_call(trampoline_addr, "trampoline_collect_rest_args");
@@ -3556,6 +3561,17 @@ impl Arm64CodeGen {
         self.load_from_stack(reg, offset);
         // Then decrement the logical stack size
         self.current_stack_size = self.current_stack_size.saturating_sub(1);
+    }
+
+    /// Initialize all local/spill slots to null (Beagle pattern)
+    /// This ensures GC won't see garbage as heap pointers during stack scanning.
+    /// Called after stack allocation in function prologues.
+    fn set_all_locals_to_null(&mut self, null_register: usize) {
+        for slot in 0..self.num_spill_slots {
+            // Stack layout: [FP - (slot + 1) * 8] = local/spill slot
+            let offset = -((slot as i32 + 1) * 8);
+            self.emit_store_to_fp(null_register, offset);
+        }
     }
 
     /// Patch prologue and epilogue with actual stack size (Beagle-style)
