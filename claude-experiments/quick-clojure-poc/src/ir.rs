@@ -231,6 +231,9 @@ pub enum Instruction {
     // Return
     Ret(IrValue),
 
+    // Debug
+    Breakpoint,  // BRK #0 - trap for debugger
+
     // GC
     CallGC(IrValue),  // CallGC(dst) - force garbage collection, returns nil
 

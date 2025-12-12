@@ -2,6 +2,7 @@ use crate::gc::types::BuiltInTypes;
 use crate::ir::{Instruction, IrValue, VirtualRegister, Condition, Label};
 use crate::register_allocation::linear_scan::LinearScan;
 use crate::trampoline::Trampoline;
+use crate::arm_instructions as arm;
 use std::collections::{HashMap, BTreeMap};
 
 /// Result of compiling a function, includes code pointer and stack map
@@ -1091,21 +1092,30 @@ impl Arm64CodeGen {
             }
 
             Instruction::Recur(label, assignments) => {
-                // Simple recur without saves - just do assignments and jump
+                // Recur is a tail call - the compiler has already evaluated all new values
+                // into registers/spills BEFORE this instruction, so we just need to:
+                // 1. Move each new value to its binding register
+                // 2. Jump to loop label
+                //
+                // We use push/pop for parallel assignment to handle register overlaps safely.
+                // This ensures that if dst[i] == src[j] for i != j, we don't clobber the source.
+
                 if !assignments.is_empty() {
                     // Phase 1: Push all source values to stack
+                    // Clear temps after EACH push - the value is safe on stack so we can reuse temp
                     for (_, src) in assignments.iter() {
+                        self.clear_temp_registers();
                         let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
                         self.emit_stp(src_reg, 31, 31, -2); // stp src, xzr, [sp, #-16]!
                     }
 
-                    // Phase 2: Pop into destinations (reverse order)
-                    // IMPORTANT: Must call store_spill to write back to spill slot!
+                    // Phase 2: Pop into destinations (reverse order to match push order)
                     for (dst, _) in assignments.iter().rev() {
                         let dest_spill = self.dest_spill(dst);
                         let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                         self.emit_ldp(dst_reg, 31, 31, 2); // ldp dst, xzr, [sp], #16
                         self.store_spill(dst_reg, dest_spill);
+                        self.clear_temp_registers();
                     }
                 }
 
@@ -1154,9 +1164,12 @@ impl Arm64CodeGen {
                     }
 
                     // Step 3: Pop into destinations (reverse order)
+                    // IMPORTANT: Must call store_spill to write back to spill slot!
                     for (dst, _) in valid_assignments.iter().rev() {
+                        let dest_spill = self.dest_spill(dst);
                         let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                         self.emit_ldp(dst_reg, 31, 31, 2); // ldp dst, xzr, [sp], #16
+                        self.store_spill(dst_reg, dest_spill);
                         self.clear_temp_registers();
                     }
                 }
@@ -1393,12 +1406,13 @@ impl Arm64CodeGen {
                     arg_source_regs.push(arg_reg);
                 }
 
-                // Use temp registers from pool (x9, x10, x11) instead of hardcoded x16/x17/x18
+                // Use temp registers from pool for tag/closure_ptr, but NOT for code_ptr!
                 // x18 is RESERVED by macOS and must NEVER be used!
+                // x9 is used for arg_count in closure calling convention, so can't use it for code_ptr
                 self.clear_temp_registers();
                 let tag_reg = self.allocate_temp_register();  // x11 from pool
                 let closure_ptr_reg = self.allocate_temp_register();  // x10 from pool
-                let code_ptr_reg = self.allocate_temp_register();  // x9 from pool
+                let code_ptr_reg = 15;  // x15 - caller-saved, safe for code pointer
 
                 // Extract tag (fn_val & 0b111)
                 self.emit_and_imm(tag_reg, fn_reg, 0b111);
@@ -1724,15 +1738,20 @@ impl Arm64CodeGen {
                 }
 
                 // STEP 1: Save volatile registers to stack (in pairs for 16-byte alignment)
+                // BUG FIX: Must clear temp registers between loading spilled values,
+                // otherwise two Spills would both use x9 and STP would save x9 twice!
                 for save_pair in saves.chunks(2) {
                     if save_pair.len() == 2 {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        self.clear_temp_registers();  // Critical: prevent r2 from reusing r1's temp
                         let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
                         self.emit_stp(r1, r2, 31, -2);  // stp r1, r2, [sp, #-16]!
+                        self.clear_temp_registers();
                     } else {
                         // Odd number - pair with xzr to maintain 16-byte alignment
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
                         self.emit_stp(r1, 31, 31, -2);  // stp r1, xzr, [sp, #-16]!
+                        self.clear_temp_registers();
                     }
                 }
 
@@ -1781,20 +1800,36 @@ impl Arm64CodeGen {
                 let save_words = ((saves.len() + 1) / 2) * 2;
                 self.decrement_stack_size(save_words);
 
+                // BUG FIX: When restoring spilled values, we need to:
+                // 1. Get spill info BEFORE getting registers (which may allocate temps)
+                // 2. Use is_dest=true to get a destination register
+                // 3. Pop from stack into that register
+                // 4. Write back to spill slot if the value was spilled
                 for save_pair in saves.chunks(2).rev() {
                     if save_pair.len() == 2 {
-                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
-                        let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
+                        let spill1 = self.dest_spill(&save_pair[0]);
+                        let spill2 = self.dest_spill(&save_pair[1]);
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], true)?;
+                        let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], true)?;
                         self.emit_ldp(r1, r2, 31, 2);  // ldp r1, r2, [sp], #16
+                        self.store_spill(r1, spill1);
+                        self.store_spill(r2, spill2);
                     } else {
-                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        let spill1 = self.dest_spill(&save_pair[0]);
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], true)?;
                         self.emit_ldp(r1, 31, 31, 2);  // ldp r1, xzr, [sp], #16
+                        self.store_spill(r1, spill1);
                     }
                     self.clear_temp_registers();
                 }
 
                 // Decrement stack counter (deallocate what we allocated)
                 self.current_function_stack_bytes -= save_bytes;
+            }
+
+            Instruction::Breakpoint => {
+                // BRK #0 - trap for debugger
+                self.code.push(arm::brk(0));
             }
 
             Instruction::Ret(value) => {
@@ -1860,25 +1895,22 @@ impl Arm64CodeGen {
             }
 
             Instruction::CallWithSaves(dst, fn_val, args, saves) => {
-                // DEBUG: Print what we're saving (clear temps after)
-                let _save_regs: Vec<usize> = saves.iter()
-                    .filter_map(|v| self.get_physical_reg_for_irvalue(v, false).ok())
-                    .collect();
-                self.clear_temp_registers();
-
                 // STEP 1: Save volatile registers to stack (in pairs for 16-byte alignment)
-                // Clear temps between pairs to avoid exhausting pool
+                // BUG FIX: Must clear temp registers between loading spilled values within a pair,
+                // otherwise two Spills would both use x9 and STP would save x9 twice!
                 for save_pair in saves.chunks(2) {
                     if save_pair.len() == 2 {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        self.clear_temp_registers();  // Critical: prevent r2 from reusing r1's temp
                         let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
                         self.emit_stp(r1, r2, 31, -2);  // stp r1, r2, [sp, #-16]!
+                        self.clear_temp_registers();
                     } else {
                         // Odd number - pair with xzr to maintain 16-byte alignment
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
                         self.emit_stp(r1, 31, 31, -2);  // stp r1, xzr, [sp, #-16]!
+                        self.clear_temp_registers();
                     }
-                    self.clear_temp_registers();
                 }
 
                 // Track stack bytes for patching
@@ -1902,27 +1934,29 @@ impl Arm64CodeGen {
                     return Err("Call with more than 8 arguments not yet supported".to_string());
                 }
 
-                // Get function pointer in its allocated register
-                let fn_reg = self.get_physical_reg_for_irvalue(fn_val, false)?;
+                // Get function pointer - may be in a temp register if spilled
+                // IMPORTANT: If fn_val is spilled, we get a temp register (x9).
+                // We MUST save this to a dedicated register before loading args,
+                // because args loading might also use x9 and clobber our value.
+                let fn_temp = self.get_physical_reg_for_irvalue(fn_val, false)?;
+                let fn_reg = 16;  // x16 - dedicated register for fn pointer
+                if fn_temp != fn_reg {
+                    self.emit_mov(fn_reg, fn_temp);
+                }
                 self.clear_temp_registers();
 
-                // Track argument source registers (x0-x7 are never used by allocator)
-                // Clear temps after each to avoid exhausting pool with many args
-                let mut arg_source_regs = Vec::new();
-                for arg in args.iter() {
-                    let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
-                    arg_source_regs.push(arg_reg);
-                    self.clear_temp_registers();
-                }
-
+                // DON'T load args here - they'll be loaded directly into x1, x2, etc.
+                // later in the single-arity path. Loading into temps now causes them
+                // to be clobbered by tag checking operations that also use temps.
                 let arg_count = args.len();
 
-                // Use temp registers from pool (x9, x10, x11) instead of hardcoded x16/x17/x18
+                // Use temp registers from pool for tag/closure_ptr, but NOT for code_ptr!
                 // x18 is RESERVED by macOS and must NEVER be used!
+                // x9 is used for arg_count in closure calling convention, so can't use it for code_ptr
                 self.clear_temp_registers();
-                let tag_reg = self.allocate_temp_register();  // x11 from pool
-                let closure_ptr_reg = self.allocate_temp_register();  // x10 from pool
-                let code_ptr_reg = self.allocate_temp_register();  // x9 from pool
+                let tag_reg = self.allocate_temp_register();
+                let closure_ptr_reg = self.allocate_temp_register();
+                let code_ptr_reg = 15;  // x15 - caller-saved, safe for code pointer
 
                 // Extract tag (fn_val & 0b111)
                 self.emit_and_imm(tag_reg, fn_reg, 0b111);
@@ -1963,9 +1997,25 @@ impl Arm64CodeGen {
                 // - x1-x7 = user args
                 // - x9 = argument count (for variadic support)
                 self.emit_mov(0, fn_reg);  // x0 = tagged closure pointer
-                for (i, &src_reg) in arg_source_regs.iter().enumerate() {
-                    if i + 1 != src_reg {  // Only move if source != destination
-                        self.emit_mov(i + 1, src_reg);  // x1, x2, x3, etc.
+
+                // Load args directly into x1, x2, etc.
+                // This is done HERE (after tag checking) to avoid temp register clobbering
+                self.clear_temp_registers();
+                for (i, arg) in args.iter().enumerate() {
+                    let target_reg = i + 1;  // x1, x2, x3, etc.
+                    match arg {
+                        IrValue::Spill(_, slot) => {
+                            // Load directly into target register from spill slot
+                            let offset = -((*slot as i32 + 1) * 8);
+                            self.emit_load_from_fp(target_reg, offset);
+                        }
+                        _ => {
+                            let src_reg = self.get_physical_reg_for_irvalue(arg, false)?;
+                            if target_reg != src_reg {
+                                self.emit_mov(target_reg, src_reg);
+                            }
+                            self.clear_temp_registers();
+                        }
                     }
                 }
                 self.emit_mov_imm(9, arg_count as i64);  // x9 = argument count
@@ -1987,8 +2037,19 @@ impl Arm64CodeGen {
                 // Store fn_ptr at offset 0
                 self.emit_str_offset(fn_reg, 31, 0);
                 // Store args at offset 8, 16, 24, ...
-                for (i, &src_reg) in arg_source_regs.iter().enumerate() {
+                self.clear_temp_registers();
+                for (i, arg) in args.iter().enumerate() {
+                    let src_reg = match arg {
+                        IrValue::Spill(_, slot) => {
+                            let temp = self.allocate_temp_register();
+                            let offset = -((*slot as i32 + 1) * 8);
+                            self.emit_load_from_fp(temp, offset);
+                            temp
+                        }
+                        _ => self.get_physical_reg_for_irvalue(arg, false)?
+                    };
                     self.emit_str_offset(src_reg, 31, ((i + 1) * 8) as i32);
+                    self.clear_temp_registers();
                 }
 
                 // Call trampoline_multi_arity_lookup(fn_ptr, arg_count)
@@ -2003,30 +2064,27 @@ impl Arm64CodeGen {
                 // Result in x0 = code_ptr
                 self.emit_mov(code_ptr_reg, 0);
 
-                // Restore fn_ptr and args from stack
+                // Restore fn_ptr from stack
                 self.emit_ldr_offset(fn_reg, 31, 0);
-                for (i, &src_reg) in arg_source_regs.iter().enumerate() {
-                    if src_reg != fn_reg {  // Don't clobber fn_reg
-                        self.emit_ldr_offset(src_reg, 31, ((i + 1) * 8) as i32);
-                    }
-                }
 
-                // Clean up temporary stack space
+                // Clean up temporary stack space BEFORE setting up args
+                // (we'll load args directly into calling convention registers)
+                // Actually, we need to restore args from stack before cleanup
+                // Set up closure calling convention for multi-arity:
+                // - x0 = closure object
+                // - x1-x7 = user args (load from stack)
+                // - x9 = argument count (for variadic support)
+                self.emit_mov(0, fn_reg);  // x0 = tagged closure pointer
+                for i in 0..arg_count {
+                    let target_reg = i + 1;  // x1, x2, x3, etc.
+                    self.emit_ldr_offset(target_reg, 31, ((i + 1) * 8) as i32);
+                }
+                self.emit_mov_imm(9, arg_count as i64);  // x9 = argument count
+
+                // Now clean up temporary stack space
                 if aligned_ma_stack > 0 {
                     self.emit_add_sp_imm(aligned_ma_stack as i64);
                 }
-
-                // Set up closure calling convention for multi-arity:
-                // - x0 = closure object
-                // - x1-x7 = user args
-                // - x9 = argument count (for variadic support)
-                self.emit_mov(0, fn_reg);  // x0 = tagged closure pointer
-                for (i, &src_reg) in arg_source_regs.iter().enumerate() {
-                    if i + 1 != src_reg {
-                        self.emit_mov(i + 1, src_reg);
-                    }
-                }
-                self.emit_mov_imm(9, arg_count as i64);  // x9 = argument count
 
                 self.emit_jump(&do_call_label);
 
@@ -2038,9 +2096,21 @@ impl Arm64CodeGen {
                 self.code.push(lsr_instruction);
 
                 // Set up normal calling convention: args in x0-x7
-                for (i, &src_reg) in arg_source_regs.iter().enumerate() {
-                    if i != src_reg {  // Only move if source != destination
-                        self.emit_mov(i, src_reg);
+                self.clear_temp_registers();
+                for (i, arg) in args.iter().enumerate() {
+                    let target_reg = i;  // x0, x1, x2, etc.
+                    match arg {
+                        IrValue::Spill(_, slot) => {
+                            let offset = -((*slot as i32 + 1) * 8);
+                            self.emit_load_from_fp(target_reg, offset);
+                        }
+                        _ => {
+                            let src_reg = self.get_physical_reg_for_irvalue(arg, false)?;
+                            if target_reg != src_reg {
+                                self.emit_mov(target_reg, src_reg);
+                            }
+                            self.clear_temp_registers();
+                        }
                     }
                 }
 
@@ -2062,12 +2132,22 @@ impl Arm64CodeGen {
 
                 for save_pair in saves.chunks(2).rev() {
                     if save_pair.len() == 2 {
-                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
-                        let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
+                        // Get spill info BEFORE getting registers (which may allocate temps)
+                        let spill1 = self.dest_spill(&save_pair[0]);
+                        let spill2 = self.dest_spill(&save_pair[1]);
+                        // For restore, use is_dest=true so we get a register to pop INTO
+                        // (don't load the old value from spill - we want to overwrite it)
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], true)?;
+                        let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], true)?;
                         self.emit_ldp(r1, r2, 31, 2);  // ldp r1, r2, [sp], #16
+                        // Write back to spill slots if they were spilled
+                        self.store_spill(r1, spill1);
+                        self.store_spill(r2, spill2);
                     } else {
-                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        let spill1 = self.dest_spill(&save_pair[0]);
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], true)?;
                         self.emit_ldp(r1, 31, 31, 2);  // ldp r1, xzr, [sp], #16
+                        self.store_spill(r1, spill1);
                     }
                     self.clear_temp_registers();
                 }
@@ -2507,21 +2587,20 @@ impl Arm64CodeGen {
                 // 4. Restore saved registers
 
                 // STEP 1: Save volatile registers to stack (in pairs for 16-byte alignment)
-                let _save_regs: Vec<usize> = saves.iter()
-                    .filter_map(|v| self.get_physical_reg_for_irvalue(v, false).ok())
-                    .collect();
-                self.clear_temp_registers();
-
+                // BUG FIX: Must clear temp registers between loading spilled values within a pair,
+                // otherwise two Spills would both use x9 and STP would save x9 twice!
                 for save_pair in saves.chunks(2) {
                     if save_pair.len() == 2 {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        self.clear_temp_registers();  // Critical: prevent r2 from reusing r1's temp
                         let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
                         self.emit_stp(r1, r2, 31, -2);
+                        self.clear_temp_registers();
                     } else {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
                         self.emit_stp(r1, 31, 31, -2);  // Pair with xzr
+                        self.clear_temp_registers();
                     }
-                    self.clear_temp_registers();
                 }
 
                 // Track stack bytes for patching
@@ -2580,18 +2659,31 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
 
                 // STEP 5: Restore saved registers (reverse order)
+                // BUG FIX: When restoring spilled values, we need to:
+                // 1. Get spill info BEFORE getting registers (which may allocate temps)
+                // 2. Use is_dest=true to get a destination register
+                // 3. Pop from stack into that register
+                // 4. Write back to spill slot if the value was spilled
                 self.decrement_stack_size(save_words);
 
                 for save_pair in saves.chunks(2).rev() {
                     if save_pair.len() == 2 {
-                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
-                        let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
+                        let spill1 = self.dest_spill(&save_pair[0]);
+                        let spill2 = self.dest_spill(&save_pair[1]);
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], true)?;
+                        self.clear_temp_registers();  // Critical for next register
+                        let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], true)?;
                         self.emit_ldp(r1, r2, 31, 2);
+                        self.store_spill(r1, spill1);
+                        self.store_spill(r2, spill2);
+                        self.clear_temp_registers();
                     } else {
-                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        let spill1 = self.dest_spill(&save_pair[0]);
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], true)?;
                         self.emit_ldp(r1, 31, 31, 2);
+                        self.store_spill(r1, spill1);
+                        self.clear_temp_registers();
                     }
-                    self.clear_temp_registers();
                 }
             }
 

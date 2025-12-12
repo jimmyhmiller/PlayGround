@@ -175,6 +175,13 @@ pub enum Expr {
         method_name: String,  // e.g., "-first"
         args: Vec<Expr>,      // First arg is the dispatch target
     },
+
+    /// (debugger expr)
+    /// Inserts a BRK instruction before evaluating expr, returns expr's value
+    /// Useful for debugging JIT code with lldb
+    Debugger {
+        expr: Box<Expr>,
+    },
 }
 
 /// A catch clause in a try expression
@@ -291,6 +298,7 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
                     "try" => analyze_try(items),
                     "defprotocol" => analyze_defprotocol(items),
                     "extend-type" => analyze_extend_type(items),
+                    "debugger" => analyze_debugger(items),
                     _ => analyze_call(items),
                 }
             } else {
@@ -397,6 +405,16 @@ fn analyze_do(items: &im::Vector<Value>) -> Result<Expr, String> {
     }
 
     Ok(Expr::Do { exprs })
+}
+
+fn analyze_debugger(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // (debugger expr) - inserts breakpoint before evaluating expr
+    if items.len() != 2 {
+        return Err(format!("debugger requires 1 argument, got {}", items.len() - 1));
+    }
+
+    let expr = analyze(&items[1])?;
+    Ok(Expr::Debugger { expr: Box::new(expr) })
 }
 
 fn analyze_quote(items: &im::Vector<Value>) -> Result<Expr, String> {

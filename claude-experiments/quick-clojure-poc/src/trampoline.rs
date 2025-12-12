@@ -947,7 +947,7 @@ pub extern "C" fn trampoline_throw(_stack_pointer: usize, exception_value: usize
 /// - Returns: x0 = same marker value (pass through)
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_debug_marker(marker: usize) -> usize {
-    // eprintln!("DEBUG MARKER: {}", marker);
+    eprintln!("DEBUG MARKER: 0x{:x}", marker);
     marker
 }
 

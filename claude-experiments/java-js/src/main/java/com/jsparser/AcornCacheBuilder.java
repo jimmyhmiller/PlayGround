@@ -36,7 +36,7 @@ public class AcornCacheBuilder {
      * @return CacheResult containing success status and cache file path
      */
     public CacheResult cacheFile(Path filePath, String sourceType) throws IOException {
-        String source = Files.readString(filePath);
+        String source = readFileWithFallbackEncoding(filePath);
 
         // Generate cache file paths
         Path cacheFilePath = generateCacheFilePath(filePath);
@@ -204,7 +204,7 @@ public class AcornCacheBuilder {
         if (args.length > 1) {
             sourceType = args[1];
         } else {
-            String source = Files.readString(filePath);
+            String source = readFileWithFallbackEncoding(filePath);
             if (filePath.toString().endsWith(".mjs") ||
                 source.contains("import ") ||
                 source.contains("export ")) {
@@ -226,6 +226,17 @@ public class AcornCacheBuilder {
         } else {
             System.err.println("✗ Failed: " + result.error);
             System.exit(1);
+        }
+    }
+
+    /**
+     * Read file contents, trying UTF-8 first then falling back to ISO-8859-1
+     */
+    private static String readFileWithFallbackEncoding(Path filePath) throws IOException {
+        try {
+            return Files.readString(filePath);
+        } catch (java.nio.charset.MalformedInputException e) {
+            return Files.readString(filePath, java.nio.charset.StandardCharsets.ISO_8859_1);
         }
     }
 }

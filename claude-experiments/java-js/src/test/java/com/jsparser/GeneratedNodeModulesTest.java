@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * Auto-generated tests from cached JS source files.
  * Category: NodeModules
- * Generated: 2025-12-12T05:21:03.119864Z
+ * Generated: 2025-12-12T14:33:31.571905Z
  * 
  * Tests parse with both Acorn (real-time) and our parser, streaming ASTs to temp files
  * for memory-efficient byte-for-byte comparison.

@@ -149,6 +149,7 @@ impl Compiler {
             Expr::DefProtocol { name, methods } => self.compile_defprotocol(name, methods),
             Expr::ExtendType { type_name, implementations } => self.compile_extend_type(type_name, implementations),
             Expr::ProtocolCall { method_name, args } => self.compile_protocol_call(method_name, args),
+            Expr::Debugger { expr } => self.compile_debugger(expr),
         }
     }
 
@@ -730,6 +731,13 @@ impl Compiler {
         self.builder.emit(Instruction::Call(result, fn_ptr, arg_values));
 
         Ok(result)
+    }
+
+    fn compile_debugger(&mut self, expr: &Expr) -> Result<IrValue, String> {
+        // Emit breakpoint instruction before evaluating the expression
+        self.builder.emit(Instruction::Breakpoint);
+        // Compile and return the expression
+        self.compile(expr)
     }
 
     fn compile_def(&mut self, name: &str, value_expr: &Expr, metadata: &Option<im::HashMap<String, Value>>) -> Result<IrValue, String> {
@@ -1730,6 +1738,10 @@ impl Compiler {
                 for arg in args {
                     self.collect_free_vars_from_expr(arg, bound, free);
                 }
+            }
+
+            Expr::Debugger { expr } => {
+                self.collect_free_vars_from_expr(expr, bound, free);
             }
         }
     }

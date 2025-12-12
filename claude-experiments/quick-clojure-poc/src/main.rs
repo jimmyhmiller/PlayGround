@@ -307,6 +307,10 @@ fn print_ast(ast: &Expr, indent: usize) {
                 print_ast(arg, indent + 2);
             }
         }
+        Expr::Debugger { expr } => {
+            println!("{}Debugger", prefix);
+            print_ast(expr, indent + 1);
+        }
     }
 }
 

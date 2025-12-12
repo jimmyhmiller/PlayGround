@@ -8,6 +8,7 @@ import java.io.BufferedWriter;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -21,8 +22,20 @@ import java.util.stream.Stream;
  */
 public class DirectoryTester {
 
-    private static final ObjectMapper mapper = new ObjectMapper()
+    private static final ObjectMapper mapper;
+    static {
+        // Configure ObjectMapper with increased nesting depth for deeply nested ASTs
+        com.fasterxml.jackson.core.JsonFactory factory = com.fasterxml.jackson.core.JsonFactory.builder()
+            .streamWriteConstraints(com.fasterxml.jackson.core.StreamWriteConstraints.builder()
+                .maxNestingDepth(10000)
+                .build())
+            .streamReadConstraints(com.fasterxml.jackson.core.StreamReadConstraints.builder()
+                .maxNestingDepth(10000)
+                .build())
+            .build();
+        mapper = new ObjectMapper(factory)
             .enable(com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
+    }
 
     public static void main(String[] args) throws IOException {
         if (args.length == 0) {
@@ -158,17 +171,33 @@ public class DirectoryTester {
         // Log file for debugging hangs - write current file being processed
         Path progressLogPath = Paths.get("/tmp/directory-tester-progress.log");
 
-        // Immediately write failures to files as they're found
+        // Immediately write failures to files as they're found - create writers upfront
         Path failuresPath = Paths.get("/tmp/java-parser-failures.txt");
         Path mismatchesPath = Paths.get("/tmp/java-parser-mismatches.txt");
         Path tooPermissivePath = Paths.get("/tmp/java-parser-too-permissive.txt");
+
+        // Create/truncate files and open writers that stay open for the entire run
+        PrintWriter failuresWriter = null;
+        PrintWriter mismatchesWriter = null;
+        PrintWriter tooPermissiveWriter = null;
         try {
-            Files.deleteIfExists(failuresPath);
-            Files.deleteIfExists(mismatchesPath);
-            Files.deleteIfExists(tooPermissivePath);
+            failuresWriter = new PrintWriter(new BufferedWriter(new FileWriter(failuresPath.toFile(), false)));
+            mismatchesWriter = new PrintWriter(new BufferedWriter(new FileWriter(mismatchesPath.toFile(), false)));
+            tooPermissiveWriter = new PrintWriter(new BufferedWriter(new FileWriter(tooPermissivePath.toFile(), false)));
+            System.out.println("Recording failures to:");
+            System.out.println("  - " + failuresPath.toAbsolutePath());
+            System.out.println("  - " + mismatchesPath.toAbsolutePath());
+            System.out.println("  - " + tooPermissivePath.toAbsolutePath());
+            System.out.println();
         } catch (IOException e) {
-            // Ignore
+            System.err.println("ERROR: Could not create output files: " + e.getMessage());
+            System.exit(1);
         }
+
+        // Make effectively final for use in loop
+        final PrintWriter failuresOut = failuresWriter;
+        final PrintWriter mismatchesOut = mismatchesWriter;
+        final PrintWriter tooPermissiveOut = tooPermissiveWriter;
 
         for (Path file : jsFiles) {
             // Check if we've hit max failures, mismatches, or too-permissive
@@ -211,7 +240,13 @@ public class DirectoryTester {
             }
 
             try {
-                String source = Files.readString(file);
+                // Try UTF-8 first, fall back to ISO-8859-1 for non-UTF-8 files
+                String source;
+                try {
+                    source = Files.readString(file);
+                } catch (java.nio.charset.MalformedInputException e) {
+                    source = Files.readString(file, java.nio.charset.StandardCharsets.ISO_8859_1);
+                }
 
                 // Parse with Acorn
                 AcornResult acornResult = parseWithAcorn(source, file);
@@ -344,14 +379,9 @@ public class DirectoryTester {
                         javaFailedFiles.add(relativePath + ": " + javaError);
                     }
 
-                    // Immediately write failure to file (append)
-                    try (BufferedWriter fw = new BufferedWriter(new FileWriter(failuresPath.toFile(), true))) {
-                        fw.write(file.toAbsolutePath().toString() + ": " + javaError);
-                        fw.newLine();
-                        fw.flush();
-                    } catch (IOException appendErr) {
-                        // Ignore
-                    }
+                    // Immediately write failure to file and flush
+                    failuresOut.println(file.toAbsolutePath().toString() + ": " + javaError);
+                    failuresOut.flush();
 
                     // Cache Acorn result for test generation
                     if (cacheBuilder != null && acornResult.astJson != null) {
@@ -371,14 +401,9 @@ public class DirectoryTester {
                         javaSucceededAcornFailedFiles.add(relativePath);
                     }
 
-                    // Immediately write too-permissive to file (append)
-                    try (BufferedWriter fw = new BufferedWriter(new FileWriter(tooPermissivePath.toFile(), true))) {
-                        fw.write(file.toAbsolutePath().toString());
-                        fw.newLine();
-                        fw.flush();
-                    } catch (IOException appendErr) {
-                        // Ignore
-                    }
+                    // Immediately write too-permissive to file and flush
+                    tooPermissiveOut.println(file.toAbsolutePath().toString());
+                    tooPermissiveOut.flush();
                 } else {
                     // Both succeeded - compare ASTs
                     String acornJson = acornResult.astJson;
@@ -400,14 +425,9 @@ public class DirectoryTester {
                             mismatchedFiles.add(relativePath);
                         }
 
-                        // Immediately write mismatch to file (append)
-                        try (BufferedWriter fw = new BufferedWriter(new FileWriter(mismatchesPath.toFile(), true))) {
-                            fw.write(file.toAbsolutePath().toString());
-                            fw.newLine();
-                            fw.flush();
-                        } catch (IOException appendErr) {
-                            // Ignore
-                        }
+                        // Immediately write mismatch to file and flush
+                        mismatchesOut.println(file.toAbsolutePath().toString());
+                        mismatchesOut.flush();
 
                         // Write first mismatch ASTs to files for debugging
                         if (mismatched.get() == 1) {
@@ -443,6 +463,11 @@ public class DirectoryTester {
         }
 
         // Print results
+        // Close the output writers
+        failuresOut.close();
+        mismatchesOut.close();
+        tooPermissiveOut.close();
+
         System.out.println();  // New line after progress
         System.out.println("\n=== Results ===");
         System.out.printf("Total files: %d%n", jsFiles.size());

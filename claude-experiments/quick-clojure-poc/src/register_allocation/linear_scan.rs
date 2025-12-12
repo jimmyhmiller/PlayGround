@@ -431,6 +431,9 @@ impl LinearScan {
                     if let IrValue::Register(r) = save { regs.push(*r); }
                 }
             }
+
+            // Debug instruction - no registers
+            Instruction::Breakpoint => {}
         }
 
         regs
@@ -841,6 +844,9 @@ impl LinearScan {
                     replace(save);
                 }
             }
+
+            // Debug instruction - no registers
+            Instruction::Breakpoint => {}
         }
     }
 
@@ -1256,6 +1262,9 @@ impl LinearScan {
                     replace(save);
                 }
             }
+
+            // Debug instruction - no registers
+            Instruction::Breakpoint => {}
         }
     }
 
