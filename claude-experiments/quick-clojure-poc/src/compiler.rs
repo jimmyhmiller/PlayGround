@@ -328,6 +328,7 @@ impl Compiler {
         matches!(name, "+" | "-" | "*" | "/" | "<" | ">" | "<=" | ">=" | "=" | "__gc" |
                  "bit-and" | "bit-or" | "bit-xor" | "bit-not" |
                  "bit-shift-left" | "bit-shift-right" | "unsigned-bit-shift-right" |
+                 "bit-shift-right-zero-fill" |  // CLJS alias for unsigned-bit-shift-right
                  "nil?" | "number?" | "string?" | "fn?" | "identical?" | "println")
     }
 
@@ -658,7 +659,19 @@ impl Compiler {
     fn resolve_type_id(&self, type_name: &str) -> Result<usize, String> {
         use crate::gc_runtime::*;
 
-        // Check for built-in types first
+        // Check for registered deftypes FIRST - this allows user-defined types
+        // to shadow built-in type names (e.g., deftype PersistentVector)
+        let full_name = format!("{}/{}", self.get_current_namespace(), type_name);
+        let deftype_id = unsafe {
+            let rt = &*self.runtime.get();
+            rt.get_type_id(&full_name)
+        };
+
+        if let Some(id) = deftype_id {
+            return Ok(id + DEFTYPE_ID_OFFSET);
+        }
+
+        // Fall back to built-in types
         match type_name {
             "nil" | "Nil" => Ok(BUILTIN_TYPE_NIL),
             "Boolean" | "bool" => Ok(BUILTIN_TYPE_BOOL),
@@ -671,18 +684,7 @@ impl Compiler {
             "PersistentVector" | "Vector" => Ok(BUILTIN_TYPE_VECTOR),
             "PersistentHashMap" | "Map" => Ok(BUILTIN_TYPE_MAP),
             "PersistentHashSet" | "Set" => Ok(BUILTIN_TYPE_SET),
-            _ => {
-                // Try to find as deftype
-                let full_name = format!("{}/{}", self.get_current_namespace(), type_name);
-                unsafe {
-                    let rt = &*self.runtime.get();
-                    if let Some(deftype_id) = rt.get_type_id(&full_name) {
-                        Ok(deftype_id + DEFTYPE_ID_OFFSET)
-                    } else {
-                        Err(format!("Unknown type: {}", type_name))
-                    }
-                }
-            }
+            _ => Err(format!("Unknown type: {}", type_name)),
         }
     }
 
@@ -933,6 +935,7 @@ impl Compiler {
         // Result register
         let result = self.builder.new_register();
 
+        // In Clojure, both false and nil are falsey
         // Load false into a register for comparison
         let false_reg = self.builder.new_register();
         self.builder.emit(Instruction::LoadFalse(false_reg));
@@ -943,6 +946,16 @@ impl Compiler {
             Condition::Equal,
             test_reg,
             false_reg,
+        ));
+
+        // Also jump to else if test is nil
+        let nil_reg = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(nil_reg, IrValue::Null));
+        self.builder.emit(Instruction::JumpIf(
+            else_label.clone(),
+            Condition::Equal,
+            test_reg,
+            nil_reg,
         ));
 
         // Then branch
@@ -1221,6 +1234,11 @@ impl Compiler {
 
         // Step 1: Analyze closures - find free variables across ALL arities (union)
         let free_vars = self.find_free_variables_across_arities(arities, name)?;
+
+        // DEBUG: Print free vars for protocol methods
+        if !free_vars.is_empty() {
+            eprintln!("DEBUG compile_fn: name={:?}, free_vars={:?}", name, free_vars);
+        }
 
         // Step 2: Capture free variables (evaluate them in current scope)
         // IMPORTANT: This must happen BEFORE compiling the function body to capture
@@ -1779,6 +1797,7 @@ impl Compiler {
                     "bit-shift-left" => self.compile_builtin_bit_shift_left(args),
                     "bit-shift-right" => self.compile_builtin_bit_shift_right(args),
                     "unsigned-bit-shift-right" => self.compile_builtin_unsigned_bit_shift_right(args),
+                    "bit-shift-right-zero-fill" => self.compile_builtin_unsigned_bit_shift_right(args),  // CLJS alias
                     "nil?" => self.compile_builtin_nil_pred(args),
                     "number?" => self.compile_builtin_number_pred(args),
                     "string?" => self.compile_builtin_string_pred(args),

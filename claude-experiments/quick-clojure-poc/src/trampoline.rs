@@ -282,9 +282,14 @@ pub fn generate_builtin_wrappers() -> HashMap<&'static str, usize> {
 
     // aset!: (x0 = array, x1 = index, x2 = value) -> value
     emit_trampoline_wrapper("aset!", trampoline_aset as usize, false);
+    // aset: alias for aset! (ClojureScript uses aset without bang)
+    emit_trampoline_wrapper("aset", trampoline_aset as usize, false);
 
     // alength: (x0 = array) -> length
     emit_trampoline_wrapper("alength", trampoline_alength as usize, false);
+
+    // aclone: (x0 = array) -> new array  [ALLOCATES - needs JIT frame pointer]
+    emit_trampoline_wrapper("aclone", trampoline_aclone as usize, true);
 
     // Make the page executable
     unsafe {
@@ -696,6 +701,11 @@ pub extern "C" fn trampoline_load_type_field_by_name(
             }
         };
 
+        // DEBUG: Print what we're trying to load
+        let untagged = obj_ptr >> 3;
+        eprintln!("DEBUG load_type_field_by_name: obj_ptr={:#x}, untagged={:#x}, tag={}, field={}",
+                  obj_ptr, untagged, obj_ptr & 0b111, field_name);
+
         match rt.load_type_field_by_name(obj_ptr, field_name) {
             Ok(value) => value,
             Err(msg) => {
@@ -1066,7 +1076,11 @@ pub extern "C" fn trampoline_protocol_lookup(
 
         // Look up method implementation
         match rt.lookup_protocol_method(type_id, method_name) {
-            Some(fn_ptr) => fn_ptr,
+            Some(fn_ptr) => {
+                eprintln!("DEBUG protocol_lookup: method={}, type_id={}, fn_ptr={:#x}, tag={}",
+                          method_name, type_id, fn_ptr, fn_ptr & 0b111);
+                fn_ptr
+            }
             None => {
                 // Throw IllegalArgumentException like Clojure
                 let type_name = crate::gc_runtime::GCRuntime::builtin_type_name(type_id);
@@ -1198,6 +1212,30 @@ pub extern "C" fn trampoline_alength(arr_ptr: usize) -> usize {
         let len = rt.array_length(arr_ptr);
         // Tag as integer
         len << 3
+    }
+}
+
+/// Trampoline: Clone an array
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = stack_pointer (JIT frame pointer for GC), x1 = array (tagged)
+/// - Returns: x0 = new array (tagged)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_aclone(stack_pointer: usize, arr_ptr: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // GC before allocation if gc_always is enabled
+        rt.maybe_gc_before_alloc(stack_pointer);
+
+        match rt.array_clone(arr_ptr) {
+            Ok(ptr) => ptr,
+            Err(msg) => {
+                eprintln!("Error cloning array: {}", msg);
+                7 // Return nil on error
+            }
+        }
     }
 }
 

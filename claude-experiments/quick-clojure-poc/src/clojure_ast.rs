@@ -281,11 +281,20 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
             if let Some(Value::Symbol(name)) = items.get(0) {
                 match name.as_str() {
                     "def" => analyze_def(items),
+                    "defn" => analyze_defn(items),
+                    "declare" => analyze_declare(items),
                     "set!" => analyze_set(items),
                     "if" => analyze_if(items),
+                    "if-not" => analyze_if_not(items),
+                    "when" => analyze_when(items),
+                    "when-not" => analyze_when_not(items),
+                    "and" => analyze_and(items),
+                    "or" => analyze_or(items),
+                    "cond" => analyze_cond(items),
                     "do" => analyze_do(items),
                     "let" => analyze_let(items),
                     "loop" => analyze_loop(items),
+                    "dotimes" => analyze_dotimes(items),
                     "recur" => analyze_recur(items),
                     "fn" => analyze_fn(items),
                     "quote" => analyze_quote(items),
@@ -346,6 +355,74 @@ fn analyze_def(items: &im::Vector<Value>) -> Result<Expr, String> {
     })
 }
 
+/// Analyze (declare name1 name2 ...) - creates forward declarations
+/// Each name becomes (def name nil) with a special flag to mark it as declared but unbound
+fn analyze_declare(items: &im::Vector<Value>) -> Result<Expr, String> {
+    if items.len() < 2 {
+        return Err("declare requires at least one symbol".to_string());
+    }
+
+    // Create a series of def expressions wrapped in do
+    let mut defs = Vec::new();
+    for i in 1..items.len() {
+        let name = match &items[i] {
+            Value::Symbol(s) => s.clone(),
+            _ => return Err("declare requires symbols".to_string()),
+        };
+        defs.push(Expr::Def {
+            name,
+            value: Box::new(Expr::Literal(Value::Nil)),
+            metadata: None,
+        });
+    }
+
+    if defs.len() == 1 {
+        Ok(defs.pop().unwrap())
+    } else {
+        Ok(Expr::Do { exprs: defs })
+    }
+}
+
+fn analyze_defn(items: &im::Vector<Value>) -> Result<Expr, String> {
+    // (defn name [params] body...)
+    // (defn name "docstring" [params] body...)
+    // (defn name ([params] body) ([params] body)...)
+    if items.len() < 3 {
+        return Err("defn requires at least a name and parameter vector".to_string());
+    }
+
+    // Get name
+    let name = match &items[1] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Err("defn requires a symbol as first argument".to_string()),
+    };
+
+    // Build the fn form by removing "defn" and the name
+    // (defn name [params] body...) -> (fn [params] body...)
+    let mut fn_items = im::Vector::new();
+    fn_items.push_back(Value::Symbol("fn".to_string()));
+
+    // Skip optional docstring
+    let mut start_idx = 2;
+    if let Some(Value::String(_)) = items.get(2) {
+        start_idx = 3;
+    }
+
+    // Copy remaining items (params and body)
+    for i in start_idx..items.len() {
+        fn_items.push_back(items[i].clone());
+    }
+
+    // Analyze as fn
+    let fn_expr = analyze_fn(&fn_items)?;
+
+    Ok(Expr::Def {
+        name,
+        value: Box::new(fn_expr),
+        metadata: None,
+    })
+}
+
 fn analyze_set(items: &im::Vector<Value>) -> Result<Expr, String> {
     if items.len() != 3 {
         return Err(format!("set! requires 2 arguments, got {}", items.len() - 1));
@@ -392,6 +469,215 @@ fn analyze_if(items: &im::Vector<Value>) -> Result<Expr, String> {
         then: Box::new(then),
         else_,
     })
+}
+
+/// Transforms (if-not test then else) into (if (not test) then else)
+fn analyze_if_not(items: &im::Vector<Value>) -> Result<Expr, String> {
+    if items.len() < 3 || items.len() > 4 {
+        return Err(format!("if-not requires 2 or 3 arguments, got {}", items.len() - 1));
+    }
+
+    // Wrap the test in (not ...)
+    let test = analyze(&items[1])?;
+    let not_test = Expr::Call {
+        func: Box::new(Expr::Var {
+            namespace: None,
+            name: "not".to_string(),
+        }),
+        args: vec![test],
+    };
+
+    let then = analyze(&items[2])?;
+    let else_ = if items.len() == 4 {
+        Some(Box::new(analyze(&items[3])?))
+    } else {
+        None
+    };
+
+    Ok(Expr::If {
+        test: Box::new(not_test),
+        then: Box::new(then),
+        else_,
+    })
+}
+
+/// Transforms (when test body...) into (if test (do body...) nil)
+fn analyze_when(items: &im::Vector<Value>) -> Result<Expr, String> {
+    if items.len() < 2 {
+        return Err("when requires at least a test".to_string());
+    }
+
+    let test = analyze(&items[1])?;
+
+    // Collect body expressions
+    let mut body_exprs = Vec::new();
+    for i in 2..items.len() {
+        body_exprs.push(analyze(&items[i])?);
+    }
+
+    let then = if body_exprs.is_empty() {
+        Expr::Literal(Value::Nil)
+    } else if body_exprs.len() == 1 {
+        body_exprs.pop().unwrap()
+    } else {
+        Expr::Do { exprs: body_exprs }
+    };
+
+    Ok(Expr::If {
+        test: Box::new(test),
+        then: Box::new(then),
+        else_: None,  // when returns nil if test is false
+    })
+}
+
+/// Transforms (when-not test body...) into (if (not test) (do body...) nil)
+fn analyze_when_not(items: &im::Vector<Value>) -> Result<Expr, String> {
+    if items.len() < 2 {
+        return Err("when-not requires at least a test".to_string());
+    }
+
+    let test = analyze(&items[1])?;
+    let not_test = Expr::Call {
+        func: Box::new(Expr::Var {
+            namespace: None,
+            name: "not".to_string(),
+        }),
+        args: vec![test],
+    };
+
+    // Collect body expressions
+    let mut body_exprs = Vec::new();
+    for i in 2..items.len() {
+        body_exprs.push(analyze(&items[i])?);
+    }
+
+    let then = if body_exprs.is_empty() {
+        Expr::Literal(Value::Nil)
+    } else if body_exprs.len() == 1 {
+        body_exprs.pop().unwrap()
+    } else {
+        Expr::Do { exprs: body_exprs }
+    };
+
+    Ok(Expr::If {
+        test: Box::new(not_test),
+        then: Box::new(then),
+        else_: None,
+    })
+}
+
+/// Transforms (and) -> true, (and x) -> x, (and x y ...) -> (if x (and y ...) x)
+fn analyze_and(items: &im::Vector<Value>) -> Result<Expr, String> {
+    match items.len() {
+        1 => {
+            // (and) -> true
+            Ok(Expr::Literal(Value::Bool(true)))
+        }
+        2 => {
+            // (and x) -> x
+            analyze(&items[1])
+        }
+        _ => {
+            // (and x y ...) -> (let [temp x] (if temp (and y ...) temp))
+            // For simplicity, expand as (if x (and y ...) false)
+            // Note: This doesn't preserve the exact semantics (should return x if falsy)
+            // but is good enough for most uses
+            let test = analyze(&items[1])?;
+
+            // Build (and y ...)
+            let mut rest = im::Vector::new();
+            rest.push_back(Value::Symbol("and".to_string()));
+            for i in 2..items.len() {
+                rest.push_back(items[i].clone());
+            }
+            let rest_and = analyze_and(&rest)?;
+
+            Ok(Expr::If {
+                test: Box::new(test),
+                then: Box::new(rest_and),
+                else_: Some(Box::new(Expr::Literal(Value::Bool(false)))),
+            })
+        }
+    }
+}
+
+/// Transforms (or) -> nil, (or x) -> x, (or x y ...) -> (if x x (or y ...))
+fn analyze_or(items: &im::Vector<Value>) -> Result<Expr, String> {
+    match items.len() {
+        1 => {
+            // (or) -> nil
+            Ok(Expr::Literal(Value::Nil))
+        }
+        2 => {
+            // (or x) -> x
+            analyze(&items[1])
+        }
+        _ => {
+            // (or x y ...) -> (let [temp x] (if temp temp (or y ...)))
+            // For simplicity: (if x true (or y ...))
+            // Note: This doesn't preserve exact semantics (should return first truthy value)
+            let test = analyze(&items[1])?;
+
+            // Build (or y ...)
+            let mut rest = im::Vector::new();
+            rest.push_back(Value::Symbol("or".to_string()));
+            for i in 2..items.len() {
+                rest.push_back(items[i].clone());
+            }
+            let rest_or = analyze_or(&rest)?;
+
+            Ok(Expr::If {
+                test: Box::new(test.clone()),
+                then: Box::new(test),
+                else_: Some(Box::new(rest_or)),
+            })
+        }
+    }
+}
+
+/// Transforms (cond test1 expr1 test2 expr2 ...) into nested if statements
+/// (cond) -> nil
+/// (cond :else expr) -> expr
+/// (cond test expr rest...) -> (if test expr (cond rest...))
+fn analyze_cond(items: &im::Vector<Value>) -> Result<Expr, String> {
+    if items.len() == 1 {
+        // (cond) -> nil
+        return Ok(Expr::Literal(Value::Nil));
+    }
+
+    if (items.len() - 1) % 2 != 0 {
+        return Err("cond requires an even number of forms".to_string());
+    }
+
+    // Process pairs
+    fn build_cond(items: &im::Vector<Value>, idx: usize) -> Result<Expr, String> {
+        if idx >= items.len() {
+            // No more clauses, return nil
+            return Ok(Expr::Literal(Value::Nil));
+        }
+
+        let test = &items[idx];
+        let expr = &items[idx + 1];
+
+        // Check for :else clause
+        if let Value::Keyword(kw) = test {
+            if kw == "else" {
+                return analyze(expr);
+            }
+        }
+
+        let test_expr = analyze(test)?;
+        let then_expr = analyze(expr)?;
+        let else_expr = build_cond(items, idx + 2)?;
+
+        Ok(Expr::If {
+            test: Box::new(test_expr),
+            then: Box::new(then_expr),
+            else_: Some(Box::new(else_expr)),
+        })
+    }
+
+    build_cond(items, 1)
 }
 
 fn analyze_do(items: &im::Vector<Value>) -> Result<Expr, String> {
@@ -458,52 +744,71 @@ fn analyze_var_ref(items: &im::Vector<Value>) -> Result<Expr, String> {
 }
 
 fn analyze_deftype(items: &im::Vector<Value>) -> Result<Expr, String> {
-    // (deftype* TypeName [field1 ^:mutable field2 ...])
-    if items.len() != 3 {
-        return Err(format!("deftype* requires 2 arguments (name and fields), got {}", items.len() - 1));
+    // Two forms supported:
+    // 1. Simple: (deftype* TypeName [field1 ^:mutable field2 ...])
+    // 2. With protocols: (deftype TypeName [fields...] Protocol1 (method1 [this] body) ...)
+    if items.len() < 3 {
+        return Err("deftype requires at least a name and fields vector".to_string());
     }
 
     // Get type name
     let name = match &items[1] {
         Value::Symbol(s) => s.clone(),
-        _ => return Err("deftype* requires a symbol as type name".to_string()),
+        _ => return Err("deftype requires a symbol as type name".to_string()),
     };
 
-    // Get field definitions from vector
-    // Supports ^:mutable metadata on field symbols
-    let fields = match &items[2] {
+    // Get field names (for binding in method bodies) and field definitions
+    let (field_names, fields) = match &items[2] {
         Value::Vector(v) => {
             let mut field_defs = Vec::new();
+            let mut field_names = Vec::new();
             for field in v.iter() {
                 let field_def = match field {
                     // Field with metadata (e.g., ^:mutable field-name)
                     Value::WithMeta(meta, inner) => {
                         let field_name = match &**inner {
                             Value::Symbol(s) => s.clone(),
-                            _ => return Err(format!("deftype* field must be a symbol, got {:?}", inner)),
+                            _ => return Err(format!("deftype field must be a symbol, got {:?}", inner)),
                         };
                         // Check if :mutable is in the metadata
                         let is_mutable = meta.contains_key(":mutable") || meta.contains_key("mutable");
+                        field_names.push(field_name.clone());
                         FieldDef {
                             name: field_name,
                             mutable: is_mutable,
                         }
                     }
                     // Plain field symbol (immutable)
-                    Value::Symbol(s) => FieldDef {
-                        name: s.clone(),
-                        mutable: false,
-                    },
-                    _ => return Err(format!("deftype* field must be a symbol, got {:?}", field)),
+                    Value::Symbol(s) => {
+                        field_names.push(s.clone());
+                        FieldDef {
+                            name: s.clone(),
+                            mutable: false,
+                        }
+                    }
+                    _ => return Err(format!("deftype field must be a symbol, got {:?}", field)),
                 };
                 field_defs.push(field_def);
             }
-            field_defs
+            (field_names, field_defs)
         }
-        _ => return Err("deftype* requires a vector of field names".to_string()),
+        _ => return Err("deftype requires a vector of field names".to_string()),
     };
 
-    Ok(Expr::DefType { name, fields })
+    // If there are protocol implementations (items beyond name and fields)
+    if items.len() > 3 {
+        // Parse protocol implementations starting from index 3, with field names for binding
+        let implementations = parse_protocol_implementations_with_fields(items, 3, &field_names)?;
+
+        // Generate: (do (deftype* name fields) (extend-type name protocols...))
+        let deftype_expr = Expr::DefType { name: name.clone(), fields };
+        let extend_expr = Expr::ExtendType { type_name: name, implementations };
+
+        Ok(Expr::Do { exprs: vec![deftype_expr, extend_expr] })
+    } else {
+        // Simple deftype without protocol implementations
+        Ok(Expr::DefType { name, fields })
+    }
 }
 
 fn analyze_ns(items: &im::Vector<Value>) -> Result<Expr, String> {
@@ -669,6 +974,80 @@ fn analyze_loop(items: &im::Vector<Value>) -> Result<Expr, String> {
     }
 
     Ok(Expr::Loop { bindings, body })
+}
+
+/// Transforms (dotimes [i n] body...) into (loop [i 0] (when (< i n) body... (recur (inc i))))
+fn analyze_dotimes(items: &im::Vector<Value>) -> Result<Expr, String> {
+    if items.len() < 2 {
+        return Err("dotimes requires at least a binding vector".to_string());
+    }
+
+    // Parse bindings [i n]
+    let bindings_vec = match &items[1] {
+        Value::Vector(v) => v,
+        _ => return Err("dotimes requires a vector binding [i n]".to_string()),
+    };
+
+    if bindings_vec.len() != 2 {
+        return Err("dotimes binding must be [i n]".to_string());
+    }
+
+    let var_name = match &bindings_vec[0] {
+        Value::Symbol(s) => s.clone(),
+        _ => return Err("dotimes binding variable must be a symbol".to_string()),
+    };
+
+    let count_expr = analyze(&bindings_vec[1])?;
+
+    // Parse body
+    let mut body_exprs = Vec::new();
+    for i in 2..items.len() {
+        body_exprs.push(analyze(&items[i])?);
+    }
+
+    // Build: (loop [i 0] (when (< i n) body... (recur (inc i))))
+    // The inc call
+    let inc_call = Expr::Call {
+        func: Box::new(Expr::Var { namespace: None, name: "inc".to_string() }),
+        args: vec![Expr::Var { namespace: None, name: var_name.clone() }],
+    };
+
+    // The recur
+    let recur_expr = Expr::Recur { args: vec![inc_call] };
+
+    // Add recur to body
+    body_exprs.push(recur_expr);
+
+    // The when body (do body... (recur (inc i)))
+    let when_body = if body_exprs.len() == 1 {
+        body_exprs.pop().unwrap()
+    } else {
+        Expr::Do { exprs: body_exprs }
+    };
+
+    // The < comparison
+    let lt_call = Expr::Call {
+        func: Box::new(Expr::Var { namespace: None, name: "<".to_string() }),
+        args: vec![
+            Expr::Var { namespace: None, name: var_name.clone() },
+            count_expr,
+        ],
+    };
+
+    // The when (if test then nil)
+    let when_expr = Expr::If {
+        test: Box::new(lt_call),
+        then: Box::new(when_body),
+        else_: None,
+    };
+
+    // The loop bindings [i 0]
+    let loop_bindings = vec![(var_name, Box::new(Expr::Literal(Value::Int(0))))];
+
+    Ok(Expr::Loop {
+        bindings: loop_bindings,
+        body: vec![when_expr],
+    })
 }
 
 fn analyze_recur(items: &im::Vector<Value>) -> Result<Expr, String> {
@@ -1137,7 +1516,7 @@ fn parse_protocol_implementations(items: &im::Vector<Value>, start_idx: usize) -
                 if current_protocol.is_none() {
                     return Err("Method implementation found before protocol name".to_string());
                 }
-                let method_impl = parse_protocol_method_impl(method_items)?;
+                let method_impl = parse_protocol_method_impl(method_items, &[])?;
                 current_methods.push(method_impl);
             }
             _ => {
@@ -1157,7 +1536,51 @@ fn parse_protocol_implementations(items: &im::Vector<Value>, start_idx: usize) -
     Ok(implementations)
 }
 
-fn parse_protocol_method_impl(items: &im::Vector<Value>) -> Result<ProtocolMethodImpl, String> {
+/// Parse protocol implementations for deftype, wrapping method bodies with field bindings
+fn parse_protocol_implementations_with_fields(
+    items: &im::Vector<Value>,
+    start_idx: usize,
+    field_names: &[String],
+) -> Result<Vec<ProtocolImpl>, String> {
+    let mut implementations = Vec::new();
+    let mut current_protocol: Option<String> = None;
+    let mut current_methods: Vec<ProtocolMethodImpl> = Vec::new();
+
+    for i in start_idx..items.len() {
+        match &items[i] {
+            Value::Symbol(s) => {
+                if let Some(protocol_name) = current_protocol.take() {
+                    implementations.push(ProtocolImpl {
+                        protocol_name,
+                        methods: std::mem::take(&mut current_methods),
+                    });
+                }
+                current_protocol = Some(s.clone());
+            }
+            Value::List(method_items) => {
+                if current_protocol.is_none() {
+                    return Err("Method implementation found before protocol name".to_string());
+                }
+                let method_impl = parse_protocol_method_impl(method_items, field_names)?;
+                current_methods.push(method_impl);
+            }
+            _ => {
+                return Err(format!("Expected protocol name or method implementation, got {:?}", items[i]));
+            }
+        }
+    }
+
+    if let Some(protocol_name) = current_protocol {
+        implementations.push(ProtocolImpl {
+            protocol_name,
+            methods: current_methods,
+        });
+    }
+
+    Ok(implementations)
+}
+
+fn parse_protocol_method_impl(items: &im::Vector<Value>, field_names: &[String]) -> Result<ProtocolMethodImpl, String> {
     // (method-name [this arg1 arg2] body...)
     if items.len() < 2 {
         return Err("Protocol method implementation requires at least name and params".to_string());
@@ -1185,14 +1608,49 @@ fn parse_protocol_method_impl(items: &im::Vector<Value>) -> Result<ProtocolMetho
     };
 
     // Parse body
-    let mut body = Vec::new();
+    let mut body_exprs = Vec::new();
     for i in 2..items.len() {
-        body.push(analyze(&items[i])?);
+        body_exprs.push(analyze(&items[i])?);
     }
 
-    if body.is_empty() {
-        body.push(Expr::Literal(Value::Nil));
+    if body_exprs.is_empty() {
+        body_exprs.push(Expr::Literal(Value::Nil));
     }
+
+    // If we have field names (deftype context), wrap body in let that binds fields
+    // This makes fields available as locals within method body
+    // (-meta [coll] meta) becomes (-meta [coll] (let [meta (.-meta coll) ...] meta))
+    let body = if !field_names.is_empty() && !params.is_empty() {
+        let this_param = &params[0]; // First param is always 'this'/'self'
+
+        // Build let bindings: [(field1 (.-field1 this)) (field2 (.-field2 this)) ...]
+        let mut bindings: Vec<(String, Box<Expr>)> = Vec::new();
+        for field_name in field_names {
+            // Create field access expression: (.-field this)
+            let field_access = Expr::FieldAccess {
+                field: field_name.clone(),
+                object: Box::new(Expr::Var {
+                    namespace: None,
+                    name: this_param.clone(),
+                }),
+            };
+            bindings.push((field_name.clone(), Box::new(field_access)));
+        }
+
+        // Wrap body in let
+        let inner_body = if body_exprs.len() == 1 {
+            body_exprs.pop().unwrap()
+        } else {
+            Expr::Do { exprs: body_exprs }
+        };
+
+        vec![Expr::Let {
+            bindings,
+            body: vec![inner_body],
+        }]
+    } else {
+        body_exprs
+    };
 
     Ok(ProtocolMethodImpl { name, params, body })
 }

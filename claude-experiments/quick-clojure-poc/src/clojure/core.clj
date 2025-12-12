@@ -742,3 +742,459 @@
   IReduce
   (-reduce [this f] (seq-reduce f this))
   (-reduce [this f start] (seq-reduce f start this)))
+
+;; =============================================================================
+;; Basic Arithmetic Helpers
+;; =============================================================================
+
+(defn inc
+  "Returns a number one greater than num."
+  [x]
+  (+ x 1))
+
+(defn dec
+  "Returns a number one less than num."
+  [x]
+  (- x 1))
+
+(defn zero?
+  "Returns true if num is zero."
+  [x]
+  (= x 0))
+
+(defn pos?
+  "Returns true if num is greater than zero."
+  [x]
+  (> x 0))
+
+(defn neg?
+  "Returns true if num is less than zero."
+  [x]
+  (< x 0))
+
+(defn ==
+  "Returns true if nums have equivalent numeric value."
+  ([x] true)
+  ([x y] (= x y)))
+
+(defn not
+  "Returns true if x is logical false, false otherwise."
+  [x]
+  (if x false true))
+
+;; DEVIATION: Our Error type instead of js/Error
+(deftype Error [message])
+
+;; =============================================================================
+;; VERBATIM FROM CLOJURESCRIPT - PersistentVector
+;; Source: https://github.com/clojure/clojurescript/blob/master/src/main/cljs/cljs/core.cljs
+;; =============================================================================
+
+;; DEVIATION: Forward declarations needed because our compiler doesn't support lazy lookup
+(declare EMPTY-NODE EMPTY-VECTOR PersistentVector)
+
+;; DEVIATION: instance? stub - always returns false for now
+;; TODO: Implement proper type checking
+(defn instance? [type obj]
+  false)
+
+;; DEVIATION: count function - calls the ICounted protocol
+(defn count
+  "Returns the number of items in the collection."
+  [coll]
+  (if (nil? coll)
+    0
+    (-count coll)))
+
+;; DEVIATION: caching-hash stub - returns 0 for now
+;; TODO: Implement proper hash caching
+(defn caching-hash [coll hash-fn hash-key]
+  0)
+
+;; DEVIATION: integer? - uses number? since we only have integers and floats
+(defn integer? [x]
+  (number? x))
+
+;; DEVIATION: vector? stub - always returns false for now
+;; TODO: Implement proper type checking
+(defn vector? [x]
+  false)
+
+;; DEVIATION: with-meta - calls the IWithMeta protocol
+(defn with-meta [o meta]
+  (-with-meta o meta))
+
+;; DEVIATION: reduce - calls the IReduce protocol
+(defn reduce
+  ([f coll]
+   (-reduce coll f))
+  ([f init coll]
+   (-reduce coll f init)))
+
+;; DEVIATION: Simple MapEntry type for IFind protocol
+(deftype MapEntry [key val __hash]
+  IMapEntry
+  (-key [this] key)
+  (-val [this] val))
+
+;; DEVIATION: array function - creates arrays with given elements
+(defn array
+  "Creates a new array with the given elements."
+  ([] (make-array 0))
+  ([a] (let [arr (make-array 1)]
+         (aset arr 0 a)
+         arr))
+  ([a b] (let [arr (make-array 2)]
+           (aset arr 0 a)
+           (aset arr 1 b)
+           arr))
+  ([a b c] (let [arr (make-array 3)]
+             (aset arr 0 a)
+             (aset arr 1 b)
+             (aset arr 2 c)
+             arr)))
+
+;; DEVIATION: array-butlast - replacement for (.slice arr 0 -1)
+;; Creates a new array with all elements except the last
+(defn array-butlast [arr]
+  (let [len (alength arr)
+        new-len (dec len)
+        result (make-array new-len)]
+    (loop [i 0]
+      (if (< i new-len)
+        (do
+          (aset result i (aget arr i))
+          (recur (inc i)))
+        result))))
+
+;; DEVIATION: pv-reduce - simple implementation for now
+(defn pv-reduce
+  ([v f start cnt]
+   (if (> cnt 0)
+     (loop [i start
+            result (-nth v start)]
+       (let [next-i (inc i)]
+         (if (< next-i cnt)
+           (recur next-i (f result (-nth v next-i)))
+           result)))
+     nil))
+  ([v f init start cnt]
+   (loop [i start
+          result init]
+     (if (< i cnt)
+       (recur (inc i) (f result (-nth v i)))
+       result))))
+
+(deftype VectorNode [edit arr])
+
+;; DEVIATION: defn- not supported, using defn
+(defn pv-fresh-node [edit]
+  (VectorNode. edit (make-array 32)))
+
+;; DEVIATION: defn- not supported, using defn
+(defn pv-aget [node idx]
+  (aget (.-arr node) idx))
+
+;; DEVIATION: defn- not supported, using defn
+(defn pv-aset [node idx val]
+  (aset (.-arr node) idx val))
+
+;; DEVIATION: defn- not supported, using defn
+(defn pv-clone-node [node]
+  (VectorNode. (.-edit node) (aclone (.-arr node))))
+
+;; DEVIATION: defn- not supported, using defn
+(defn tail-off [pv]
+  (let [cnt (.-cnt pv)]
+    (if (< cnt 32)
+      0
+      (bit-shift-left (bit-shift-right-zero-fill (dec cnt) 5) 5))))
+
+;; DEVIATION: defn- not supported, using defn
+(defn new-path [edit level node]
+  (loop [ll level
+         ret node]
+    (if (zero? ll)
+      ret
+      (let [embed ret
+            r (pv-fresh-node edit)
+            _ (pv-aset r 0 embed)]
+        (recur (- ll 5) r)))))
+
+;; DEVIATION: defn- not supported, using defn
+(defn push-tail [pv level parent tailnode]
+  (let [ret (pv-clone-node parent)
+        subidx (bit-and (bit-shift-right-zero-fill (dec (.-cnt pv)) level) 0x01f)]
+    (if (== 5 level)
+      (do
+        (pv-aset ret subidx tailnode)
+        ret)
+      (let [child (pv-aget parent subidx)]
+        (if-not (nil? child)
+          (let [node-to-insert (push-tail pv (- level 5) child tailnode)]
+            (pv-aset ret subidx node-to-insert)
+            ret)
+          (let [node-to-insert (new-path nil (- level 5) tailnode)]
+            (pv-aset ret subidx node-to-insert)
+            ret))))))
+
+;; DEVIATION: defn- not supported, using defn
+;; DEVIATION: simplified error message (no str function yet)
+(defn vector-index-out-of-bounds [i cnt]
+  (throw (Error. "Vector index out of bounds")))
+
+;; DEVIATION: defn- not supported, using defn
+(defn first-array-for-longvec [pv]
+  ;; invariants: (count pv) > 32.
+  (loop [node (.-root pv)
+         level (.-shift pv)]
+    (if (pos? level)
+      (recur (pv-aget node 0) (- level 5))
+      (.-arr node))))
+
+;; DEVIATION: defn- not supported, using defn
+(defn unchecked-array-for [pv i]
+  ;; invariant: i is a valid index of pv (use array-for if unknown).
+  (if (>= i (tail-off pv))
+      (.-tail pv)
+      (loop [node (.-root pv)
+             level (.-shift pv)]
+        (if (pos? level)
+          (recur (pv-aget node (bit-and (bit-shift-right-zero-fill i level) 0x01f))
+                 (- level 5))
+          (.-arr node)))))
+
+;; DEVIATION: defn- not supported, using defn
+(defn array-for [pv i]
+  (if (and (<= 0 i) (< i (.-cnt pv)))
+    (unchecked-array-for pv i)
+    (vector-index-out-of-bounds i (.-cnt pv))))
+
+;; DEVIATION: defn- not supported, using defn
+(defn do-assoc [pv level node i val]
+  (let [ret (pv-clone-node node)]
+    (if (zero? level)
+      (do
+        (pv-aset ret (bit-and i 0x01f) val)
+        ret)
+      (let [subidx (bit-and (bit-shift-right-zero-fill i level) 0x01f)]
+        (pv-aset ret subidx (do-assoc pv (- level 5) (pv-aget node subidx) i val))
+        ret))))
+
+;; DEVIATION: defn- not supported, using defn
+(defn pop-tail [pv level node]
+  (let [subidx (bit-and (bit-shift-right-zero-fill (- (.-cnt pv) 2) level) 0x01f)]
+    (cond
+     (> level 5) (let [new-child (pop-tail pv (- level 5) (pv-aget node subidx))]
+                   (if (and (nil? new-child) (zero? subidx))
+                     nil
+                     (let [ret (pv-clone-node node)]
+                       (pv-aset ret subidx new-child)
+                       ret)))
+     (zero? subidx) nil
+     :else (let [ret (pv-clone-node node)]
+             (pv-aset ret subidx nil)
+             ret))))
+
+(declare chunked-seq)
+
+(deftype PersistentVector [meta cnt shift root tail ^:mutable __hash]
+  ICloneable
+  (-clone [_] (PersistentVector. meta cnt shift root tail __hash))
+
+  IWithMeta
+  (-with-meta [coll new-meta]
+    (if (identical? new-meta meta)
+      coll
+      (PersistentVector. new-meta cnt shift root tail __hash)))
+
+  IMeta
+  (-meta [coll] meta)
+
+  IStack
+  (-peek [coll]
+    (when (> cnt 0)
+      (-nth coll (dec cnt))))
+  (-pop [coll]
+    (cond
+     (zero? cnt) (throw (Error. "Can't pop empty vector"))
+     (== 1 cnt) (-with-meta EMPTY-VECTOR meta)
+     (< 1 (- cnt (tail-off coll)))
+      ;; DEVIATION: array-butlast instead of (.slice tail 0 -1)
+      (PersistentVector. meta (dec cnt) shift root (array-butlast tail) nil)
+      :else (let [new-tail (unchecked-array-for coll (- cnt 2))
+                  nr (pop-tail coll shift root)
+                  new-root (if (nil? nr) EMPTY-NODE nr)
+                  cnt-1 (dec cnt)]
+              (if (and (< 5 shift) (nil? (pv-aget new-root 1)))
+                (PersistentVector. meta cnt-1 (- shift 5) (pv-aget new-root 0) new-tail nil)
+                (PersistentVector. meta cnt-1 shift new-root new-tail nil)))))
+
+  ICollection
+  (-conj [coll o]
+    (if (< (- cnt (tail-off coll)) 32)
+      (let [len (alength tail)
+            new-tail (make-array (inc len))]
+        (dotimes [i len]
+          (aset new-tail i (aget tail i)))
+        (aset new-tail len o)
+        (PersistentVector. meta (inc cnt) shift root new-tail nil))
+      (let [root-overflow? (> (bit-shift-right-zero-fill cnt 5) (bit-shift-left 1 shift))
+            new-shift (if root-overflow? (+ shift 5) shift)
+            new-root (if root-overflow?
+                       (let [n-r (pv-fresh-node nil)]
+                           (pv-aset n-r 0 root)
+                           (pv-aset n-r 1 (new-path nil shift (VectorNode. nil tail)))
+                           n-r)
+                       (push-tail coll shift root (VectorNode. nil tail)))]
+        (PersistentVector. meta (inc cnt) new-shift new-root (array o) nil))))
+
+  IEmptyableCollection
+  (-empty [coll] (-with-meta EMPTY-VECTOR meta))
+
+  ISequential
+  IEquiv
+  ;; DEVIATION: Simplified equiv - no iterator support yet
+  (-equiv [coll other]
+    (if (nil? other)
+      false
+      (if (== cnt (count other))
+        ;; Simple element-by-element comparison using nth
+        (loop [i 0]
+          (if (< i cnt)
+            (if (= (-nth coll i) (-nth other i))
+              (recur (inc i))
+              false)
+            true))
+        false)))
+
+  IHash
+  (-hash [coll] (caching-hash coll hash-ordered-coll __hash))
+
+  ISeqable
+  ;; DEVIATION: Simplified seq - no IndexedSeq/chunked-seq yet
+  (-seq [coll]
+    (if (zero? cnt)
+      nil
+      ;; TODO: Return proper seq. For now use a simple loop approach
+      coll))
+
+  ICounted
+  (-count [coll] cnt)
+
+  IIndexed
+  (-nth [coll n]
+    (aget (array-for coll n) (bit-and n 0x01f)))
+  (-nth [coll n not-found]
+    (if (and (<= 0 n) (< n cnt))
+      (aget (unchecked-array-for coll n) (bit-and n 0x01f))
+      not-found))
+
+  ILookup
+  (-lookup [coll k] (-lookup coll k nil))
+  (-lookup [coll k not-found] (if (number? k)
+                                (-nth coll k not-found)
+                                not-found))
+
+  IAssociative
+  (-assoc [coll k v]
+    (if (number? k)
+      (-assoc-n coll k v)
+      (throw (Error. "Vector's key for assoc must be a number."))))
+  (-contains-key? [coll k]
+    (if (integer? k)
+      (and (<= 0 k) (< k cnt))
+      false))
+
+  IFind
+  (-find [coll n]
+    (when (and (<= 0 n) (< n cnt))
+      (MapEntry. n (aget (unchecked-array-for coll n) (bit-and n 0x01f)) nil)))
+
+  IVector
+  (-assoc-n [coll n val]
+    (cond
+      (and (<= 0 n) (< n cnt))
+      (if (<= (tail-off coll) n)
+         (let [new-tail (aclone tail)]
+           (aset new-tail (bit-and n 0x01f) val)
+           (PersistentVector. meta cnt shift root new-tail nil))
+         (PersistentVector. meta cnt shift (do-assoc coll shift root n val) tail nil))
+      (== n cnt) (-conj coll val)
+      ;; DEVIATION: simplified error message (no str function yet)
+      :else (throw (Error. "Index out of bounds"))))
+
+  IReduce
+  (-reduce [v f]
+    (pv-reduce v f 0 cnt))
+  (-reduce [v f init]
+    (loop [i 0 init init]
+      (if (< i cnt)
+        (let [arr  (unchecked-array-for v i)
+              len  (alength arr)
+              init (loop [j 0 init init]
+                     (if (< j len)
+                       (let [init (f init (aget arr j))]
+                         (if (reduced? init)
+                           init
+                           (recur (inc j) init)))
+                       init))]
+          ;; DEVIATION: no @deref support for reduced, just return init
+          (if (reduced? init)
+            init
+            (recur (+ i len) init)))
+        init)))
+
+  IKVReduce
+  (-kv-reduce [v f init]
+    (loop [i 0 init init]
+      (if (< i cnt)
+        (let [arr  (unchecked-array-for v i)
+              len  (alength arr)
+              init (loop [j 0 init init]
+                     (if (< j len)
+                       (let [init (f init (+ j i) (aget arr j))]
+                         (if (reduced? init)
+                           init
+                           (recur (inc j) init)))
+                       init))]
+          ;; DEVIATION: no @deref support for reduced
+          (if (reduced? init)
+            init
+            (recur (+ i len) init)))
+        init)))
+
+  IFn
+  (-invoke [coll k]
+    (if (number? k)
+      (-nth coll k)
+      (throw (Error. "Key must be integer"))))
+
+  IReversible
+  ;; DEVIATION: No RSeq type yet, return nil
+  (-rseq [coll] nil)
+
+  IIterable
+  ;; DEVIATION: No iterator support yet, return nil
+  (-iterator [this] nil))
+
+(def EMPTY-NODE (VectorNode. nil (make-array 32)))
+
+(def EMPTY-VECTOR
+  (PersistentVector. nil 0 5 EMPTY-NODE (array) empty-ordered-hash))
+
+(defn vec
+  "Creates a new vector containing the contents of coll."
+  [coll]
+  (cond
+    (vector? coll)
+    (with-meta coll nil)
+
+    ;; DEVIATION: No transient support yet, use simple conj
+    :else
+    (reduce (fn [v x] (-conj v x)) EMPTY-VECTOR coll)))
+
+(defn vector
+  "Creates a new vector containing the args."
+  [& args]
+  (vec args))

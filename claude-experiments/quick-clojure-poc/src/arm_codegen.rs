@@ -1730,6 +1730,9 @@ impl Arm64CodeGen {
             }
 
             Instruction::ExternalCallWithSaves(dst, func_addr, args, saves) => {
+                // DEBUG: Print args and saves
+                eprintln!("DEBUG ExternalCallWithSaves: func_addr={:#x}, args={:?}, saves={:?}", func_addr, args, saves);
+
                 // ExternalCall: call a known function address (trampoline) with register preservation
                 // Simpler than CallWithSaves - no tag checking, just direct call to known address
 
@@ -1740,16 +1743,19 @@ impl Arm64CodeGen {
                 // STEP 1: Save volatile registers to stack (in pairs for 16-byte alignment)
                 // BUG FIX: Must clear temp registers between loading spilled values,
                 // otherwise two Spills would both use x9 and STP would save x9 twice!
+                eprintln!("DEBUG ExternalCallWithSaves: saving registers to stack");
                 for save_pair in saves.chunks(2) {
                     if save_pair.len() == 2 {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
                         self.clear_temp_registers();  // Critical: prevent r2 from reusing r1's temp
                         let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
+                        eprintln!("  saving {:?}=x{}, {:?}=x{} to stack", save_pair[0], r1, save_pair[1], r2);
                         self.emit_stp(r1, r2, 31, -2);  // stp r1, r2, [sp, #-16]!
                         self.clear_temp_registers();
                     } else {
                         // Odd number - pair with xzr to maintain 16-byte alignment
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        eprintln!("  saving {:?}=x{} to stack", save_pair[0], r1);
                         self.emit_stp(r1, 31, 31, -2);  // stp r1, xzr, [sp, #-16]!
                         self.clear_temp_registers();
                     }
@@ -1789,6 +1795,7 @@ impl Arm64CodeGen {
                 self.emit_external_call(*func_addr, "external_call");
 
                 // STEP 4: Move result from x0 to destination
+                eprintln!("DEBUG ExternalCallWithSaves: dst={:?}, dst_reg=x{}, dest_spill={:?}", dst, dst_reg, dest_spill);
                 if dst_reg != 0 {
                     self.emit_mov(dst_reg, 0);
                 }
@@ -1805,18 +1812,22 @@ impl Arm64CodeGen {
                 // 2. Use is_dest=true to get a destination register
                 // 3. Pop from stack into that register
                 // 4. Write back to spill slot if the value was spilled
+                eprintln!("DEBUG ExternalCallWithSaves: restoring registers from stack");
                 for save_pair in saves.chunks(2).rev() {
                     if save_pair.len() == 2 {
                         let spill1 = self.dest_spill(&save_pair[0]);
                         let spill2 = self.dest_spill(&save_pair[1]);
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], true)?;
                         let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], true)?;
+                        eprintln!("  restoring {:?}->x{} (spill={:?}), {:?}->x{} (spill={:?}) from stack",
+                                  save_pair[0], r1, spill1, save_pair[1], r2, spill2);
                         self.emit_ldp(r1, r2, 31, 2);  // ldp r1, r2, [sp], #16
                         self.store_spill(r1, spill1);
                         self.store_spill(r2, spill2);
                     } else {
                         let spill1 = self.dest_spill(&save_pair[0]);
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], true)?;
+                        eprintln!("  restoring {:?}->x{} (spill={:?}) from stack", save_pair[0], r1, spill1);
                         self.emit_ldp(r1, 31, 31, 2);  // ldp r1, xzr, [sp], #16
                         self.store_spill(r1, spill1);
                     }
@@ -1895,6 +1906,9 @@ impl Arm64CodeGen {
             }
 
             Instruction::CallWithSaves(dst, fn_val, args, saves) => {
+                // DEBUG: Print args and saves
+                eprintln!("DEBUG CallWithSaves: fn_val={:?}, args={:?}, saves={:?}", fn_val, args, saves);
+
                 // STEP 1: Save volatile registers to stack (in pairs for 16-byte alignment)
                 // BUG FIX: Must clear temp registers between loading spilled values within a pair,
                 // otherwise two Spills would both use x9 and STP would save x9 twice!
@@ -2096,16 +2110,20 @@ impl Arm64CodeGen {
                 self.code.push(lsr_instruction);
 
                 // Set up normal calling convention: args in x0-x7
+                // DEBUG: Print physical register assignments
+                eprintln!("DEBUG raw function path: loading args into x0-x7");
                 self.clear_temp_registers();
                 for (i, arg) in args.iter().enumerate() {
                     let target_reg = i;  // x0, x1, x2, etc.
                     match arg {
                         IrValue::Spill(_, slot) => {
+                            eprintln!("  arg[{}]: Spill at slot {} -> x{}", i, slot, target_reg);
                             let offset = -((*slot as i32 + 1) * 8);
                             self.emit_load_from_fp(target_reg, offset);
                         }
                         _ => {
                             let src_reg = self.get_physical_reg_for_irvalue(arg, false)?;
+                            eprintln!("  arg[{}]: {:?} in x{} -> x{}", i, arg, src_reg, target_reg);
                             if target_reg != src_reg {
                                 self.emit_mov(target_reg, src_reg);
                             }

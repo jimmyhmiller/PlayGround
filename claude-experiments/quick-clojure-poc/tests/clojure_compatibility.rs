@@ -389,3 +389,409 @@ fn test_chained_closures() {
     // Chain of closures each capturing previous value
     assert_matches_clojure("(let [f1 (fn [x] (+ x 1)) f2 (fn [x] (+ (f1 x) 2)) f3 (fn [x] (+ (f2 x) 3))] (f3 10))")
 }
+
+// ============================================================================
+// If Expression Tests
+// ============================================================================
+
+#[test]
+fn test_if_true_branch() {
+    assert_matches_clojure("(if true 1 2)");
+}
+
+#[test]
+fn test_if_false_branch() {
+    assert_matches_clojure("(if false 1 2)");
+}
+
+#[test]
+fn test_if_nil_is_falsey() {
+    assert_matches_clojure("(if nil 1 2)");
+}
+
+#[test]
+fn test_if_zero_is_truthy() {
+    assert_matches_clojure("(if 0 1 2)");
+}
+
+#[test]
+fn test_if_empty_string_is_truthy() {
+    // In Clojure, empty string is truthy (unlike JavaScript)
+    assert_matches_clojure("(if \"\" 1 2)");
+}
+
+#[test]
+fn test_if_without_else() {
+    // (if condition then) - returns nil when condition is false
+    assert_matches_clojure("(if false 1)");
+}
+
+#[test]
+fn test_if_nested() {
+    assert_matches_clojure("(if true (if false 1 2) 3)");
+}
+
+// ============================================================================
+// Boolean Logic Tests (TODO: and/or/not not yet implemented)
+// ============================================================================
+
+#[test]
+#[ignore = "and macro not implemented"]
+fn test_and_true_true() {
+    assert_matches_clojure("(and true true)");
+}
+
+#[test]
+#[ignore = "and macro not implemented"]
+fn test_and_true_false() {
+    assert_matches_clojure("(and true false)");
+}
+
+#[test]
+#[ignore = "and macro not implemented"]
+fn test_and_false_short_circuits() {
+    // and returns the first falsey value
+    assert_matches_clojure("(and false 1)");
+}
+
+#[test]
+#[ignore = "and macro not implemented"]
+fn test_and_returns_last_truthy() {
+    // and returns the last truthy value when all are truthy
+    assert_matches_clojure("(and 1 2 3)");
+}
+
+#[test]
+#[ignore = "and macro not implemented"]
+fn test_and_nil_short_circuits() {
+    assert_matches_clojure("(and nil 1)");
+}
+
+#[test]
+#[ignore = "or macro not implemented"]
+fn test_or_false_false() {
+    assert_matches_clojure("(or false false)");
+}
+
+#[test]
+#[ignore = "or macro not implemented"]
+fn test_or_false_true() {
+    assert_matches_clojure("(or false true)");
+}
+
+#[test]
+#[ignore = "or macro not implemented"]
+fn test_or_returns_first_truthy() {
+    // or returns the first truthy value
+    assert_matches_clojure("(or nil false 3 4)");
+}
+
+#[test]
+#[ignore = "or macro not implemented"]
+fn test_or_returns_last_when_all_falsey() {
+    // or returns the last value when all are falsey
+    assert_matches_clojure("(or nil false)");
+}
+
+#[test]
+#[ignore = "not function not implemented"]
+fn test_not_true() {
+    assert_matches_clojure("(not true)");
+}
+
+#[test]
+#[ignore = "not function not implemented"]
+fn test_not_false() {
+    assert_matches_clojure("(not false)");
+}
+
+#[test]
+#[ignore = "not function not implemented"]
+fn test_not_nil() {
+    assert_matches_clojure("(not nil)");
+}
+
+#[test]
+#[ignore = "not function not implemented"]
+fn test_not_zero() {
+    // 0 is truthy in Clojure, so (not 0) = false
+    assert_matches_clojure("(not 0)");
+}
+
+// ============================================================================
+// Loop/Recur Tests
+// ============================================================================
+
+#[test]
+fn test_simple_loop() {
+    // Simple countdown
+    assert_matches_clojure("(loop [x 5] (if (= x 0) x (recur (- x 1))))");
+}
+
+#[test]
+fn test_loop_accumulator() {
+    // Sum 1 to 5 = 15
+    assert_matches_clojure("(loop [i 1 acc 0] (if (> i 5) acc (recur (+ i 1) (+ acc i))))");
+}
+
+#[test]
+fn test_loop_factorial() {
+    // 5! = 120
+    assert_matches_clojure("(loop [n 5 acc 1] (if (= n 0) acc (recur (- n 1) (* acc n))))");
+}
+
+#[test]
+fn test_loop_fibonacci() {
+    // 10th fibonacci (0-indexed): fib(10) = 55
+    assert_matches_clojure("(loop [n 10 a 0 b 1] (if (= n 0) a (recur (- n 1) b (+ a b))))");
+}
+
+#[test]
+fn test_loop_with_let() {
+    // Loop with let inside
+    assert_matches_clojure("(loop [i 0 acc 0] (if (>= i 5) acc (let [sq (* i i)] (recur (+ i 1) (+ acc sq)))))");
+}
+
+#[test]
+fn test_nested_loop() {
+    // Simple nested loop: outer 0-2, inner 0-2, count = 9
+    assert_matches_clojure("(loop [outer 0 count 0] (if (>= outer 3) count (recur (+ outer 1) (loop [inner 0 c count] (if (>= inner 3) c (recur (+ inner 1) (+ c 1)))))))");
+}
+
+// ============================================================================
+// do Expression Tests
+// ============================================================================
+
+#[test]
+fn test_do_returns_last() {
+    assert_matches_clojure("(do 1 2 3)");
+}
+
+#[test]
+fn test_do_single_value() {
+    assert_matches_clojure("(do 42)");
+}
+
+#[test]
+fn test_do_with_side_effects() {
+    // println returns nil, so do returns nil
+    assert_matches_clojure("(do (+ 1 2) (+ 3 4))");
+}
+
+// ============================================================================
+// Integer Division Tests (TODO: quot/rem/mod not yet implemented)
+// ============================================================================
+
+#[test]
+#[ignore = "quot not implemented"]
+fn test_quot_positive() {
+    assert_matches_clojure("(quot 10 3)");
+}
+
+#[test]
+#[ignore = "quot not implemented"]
+fn test_quot_negative() {
+    assert_matches_clojure("(quot -10 3)");
+}
+
+#[test]
+#[ignore = "rem not implemented"]
+fn test_rem_positive() {
+    assert_matches_clojure("(rem 10 3)");
+}
+
+#[test]
+#[ignore = "rem not implemented"]
+fn test_rem_negative() {
+    assert_matches_clojure("(rem -10 3)");
+}
+
+#[test]
+#[ignore = "mod not implemented"]
+fn test_mod_positive() {
+    assert_matches_clojure("(mod 10 3)");
+}
+
+#[test]
+#[ignore = "mod not implemented"]
+fn test_mod_negative() {
+    // Note: mod and rem differ for negative numbers
+    assert_matches_clojure("(mod -10 3)");
+}
+
+// ============================================================================
+// Bit Operation Tests
+// ============================================================================
+
+#[test]
+fn test_bit_and() {
+    assert_matches_clojure("(bit-and 5 3)");
+}
+
+#[test]
+fn test_bit_or() {
+    assert_matches_clojure("(bit-or 5 3)");
+}
+
+#[test]
+fn test_bit_xor() {
+    assert_matches_clojure("(bit-xor 5 3)");
+}
+
+#[test]
+fn test_bit_not() {
+    assert_matches_clojure("(bit-not 5)");
+}
+
+#[test]
+fn test_bit_shift_left() {
+    assert_matches_clojure("(bit-shift-left 1 4)");
+}
+
+#[test]
+fn test_bit_shift_right() {
+    assert_matches_clojure("(bit-shift-right 16 2)");
+}
+
+// ============================================================================
+// Type Predicate Tests
+// ============================================================================
+
+#[test]
+fn test_nil_question() {
+    assert_matches_clojure("(nil? nil)");
+}
+
+#[test]
+fn test_nil_question_false() {
+    assert_matches_clojure("(nil? 0)");
+}
+
+#[test]
+#[ignore = "some? not implemented"]
+fn test_some_question() {
+    assert_matches_clojure("(some? nil)");
+}
+
+#[test]
+#[ignore = "some? not implemented"]
+fn test_some_question_true() {
+    assert_matches_clojure("(some? 0)");
+}
+
+#[test]
+#[ignore = "true? not implemented"]
+fn test_true_question() {
+    assert_matches_clojure("(true? true)");
+}
+
+#[test]
+#[ignore = "true? not implemented"]
+fn test_true_question_false() {
+    assert_matches_clojure("(true? 1)");
+}
+
+#[test]
+#[ignore = "false? not implemented"]
+fn test_false_question() {
+    assert_matches_clojure("(false? false)");
+}
+
+#[test]
+#[ignore = "false? not implemented"]
+fn test_false_question_not_nil() {
+    assert_matches_clojure("(false? nil)");
+}
+
+#[test]
+fn test_number_question() {
+    assert_matches_clojure("(number? 42)");
+}
+
+#[test]
+fn test_number_question_negative() {
+    assert_matches_clojure("(number? -5)");
+}
+
+#[test]
+fn test_number_question_false() {
+    assert_matches_clojure("(number? nil)");
+}
+
+#[test]
+#[ignore = "integer? not implemented"]
+fn test_integer_question() {
+    assert_matches_clojure("(integer? 42)");
+}
+
+#[test]
+fn test_fn_question() {
+    assert_matches_clojure("(fn? (fn [x] x))");
+}
+
+#[test]
+fn test_fn_question_false() {
+    assert_matches_clojure("(fn? 42)");
+}
+
+// ============================================================================
+// inc/dec Tests (TODO: inc/dec not yet implemented)
+// ============================================================================
+
+#[test]
+#[ignore = "inc not implemented"]
+fn test_inc() {
+    assert_matches_clojure("(inc 5)");
+}
+
+#[test]
+#[ignore = "inc not implemented"]
+fn test_inc_zero() {
+    assert_matches_clojure("(inc 0)");
+}
+
+#[test]
+#[ignore = "inc not implemented"]
+fn test_inc_negative() {
+    assert_matches_clojure("(inc -1)");
+}
+
+#[test]
+#[ignore = "dec not implemented"]
+fn test_dec() {
+    assert_matches_clojure("(dec 5)");
+}
+
+#[test]
+#[ignore = "dec not implemented"]
+fn test_dec_zero() {
+    assert_matches_clojure("(dec 0)");
+}
+
+#[test]
+#[ignore = "dec not implemented"]
+fn test_dec_one() {
+    assert_matches_clojure("(dec 1)");
+}
+
+// ============================================================================
+// identity Tests (TODO: identity not yet implemented)
+// ============================================================================
+
+#[test]
+#[ignore = "identity not implemented"]
+fn test_identity_number() {
+    assert_matches_clojure("(identity 42)");
+}
+
+#[test]
+#[ignore = "identity not implemented"]
+fn test_identity_nil() {
+    assert_matches_clojure("(identity nil)");
+}
+
+#[test]
+#[ignore = "identity not implemented"]
+fn test_identity_true() {
+    assert_matches_clojure("(identity true)");
+}

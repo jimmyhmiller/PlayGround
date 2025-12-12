@@ -1515,6 +1515,20 @@ impl GCRuntime {
         heap_obj.get_header().type_id == TYPE_ID_ARRAY
     }
 
+    /// Clone an array (allocates a new array with same contents)
+    pub fn array_clone(&mut self, arr_ptr: usize) -> Result<usize, String> {
+        let length = self.array_length(arr_ptr);
+        let new_arr = self.allocate_array(length)?;
+
+        // Copy each element
+        for i in 0..length {
+            let value = self.array_get(arr_ptr, i)?;
+            self.array_set(new_arr, i, value)?;
+        }
+
+        Ok(new_arr)
+    }
+
     // ========== DefType Methods ==========
 
     /// Register a new deftype and return its type_id
