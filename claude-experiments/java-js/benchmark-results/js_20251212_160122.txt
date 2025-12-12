@@ -1,0 +1,95 @@
+
+════════════════════════════════════════════════════════════════════════════════
+Real-World JavaScript Library Parser Benchmarks
+════════════════════════════════════════════════════════════════════════════════
+Warmup iterations: 3
+Measurement iterations: 3
+Node.js version: v24.3.0
+════════════════════════════════════════════════════════════════════════════════
+
+================================================================================
+Library: react.production.min.js
+Size: 10.5 KB (10,737 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |           0.729 |            1.00x |         14.4 KB/ms
+🥈 Acorn              |           1.078 |            1.48x |          9.7 KB/ms
+🥉 @babel/parser      |           1.881 |            2.58x |          5.6 KB/ms
+
+================================================================================
+Library: vue.global.prod.js
+Size: 130.0 KB (133,165 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |           5.340 |            1.00x |         24.4 KB/ms
+🥈 Acorn              |          10.327 |            1.93x |         12.6 KB/ms
+🥉 @babel/parser      |          13.413 |            2.51x |          9.7 KB/ms
+
+================================================================================
+Library: react-dom.production.min.js
+Size: 128.8 KB (131,882 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |           3.537 |            1.00x |         36.4 KB/ms
+🥈 Acorn              |           7.136 |            2.02x |         18.0 KB/ms
+🥉 @babel/parser      |           8.894 |            2.51x |         14.5 KB/ms
+
+================================================================================
+Library: lodash.js
+Size: 531.3 KB (544,096 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |           5.508 |            1.00x |         96.5 KB/ms
+🥈 Acorn              |           6.243 |            1.13x |         85.1 KB/ms
+🥉 @babel/parser      |           6.932 |            1.26x |         76.7 KB/ms
+
+================================================================================
+Library: three.js
+Size: 1282.3 KB (1,313,048 bytes)
+================================================================================
+
+Warming up Acorn...

@@ -434,6 +434,14 @@ impl LinearScan {
 
             // Debug instruction - no registers
             Instruction::Breakpoint => {}
+
+            // Local variable operations - StoreLocal stores to stack, LoadLocal loads from stack
+            Instruction::StoreLocal(_slot, value) => {
+                if let IrValue::Register(r) = value { regs.push(*r); }
+            }
+            Instruction::LoadLocal(dst, _slot) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+            }
         }
 
         regs
@@ -847,6 +855,14 @@ impl LinearScan {
 
             // Debug instruction - no registers
             Instruction::Breakpoint => {}
+
+            // Local variable operations
+            Instruction::StoreLocal(_slot, value) => {
+                replace(value);
+            }
+            Instruction::LoadLocal(dst, _slot) => {
+                replace(dst);
+            }
         }
     }
 
@@ -1261,6 +1277,14 @@ impl LinearScan {
                 for save in saves.iter_mut() {
                     replace(save);
                 }
+            }
+
+            // Local variable operations
+            Instruction::StoreLocal(_slot, value) => {
+                replace(value);
+            }
+            Instruction::LoadLocal(dst, _slot) => {
+                replace(dst);
             }
 
             // Debug instruction - no registers

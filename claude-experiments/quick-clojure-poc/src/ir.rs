@@ -144,6 +144,29 @@ pub enum Instruction {
     /// StoreVar(var_id, value_reg) - store value to var via var table indirection
     /// var_id indexes into var_table to get current var pointer (GC-safe)
     StoreVar(u32, IrValue),
+
+    // ========== Runtime Symbol-Based Var Access ==========
+    // These instructions look up vars by symbol name at runtime, enabling forward references.
+    // Used instead of LoadVar/StoreVar when vars may not exist at compile time.
+
+    /// LoadVarBySymbol(dest, ns_symbol_id, name_symbol_id)
+    /// At runtime: looks up var by namespace/name symbols via trampoline, returns value.
+    /// Throws "Unable to resolve symbol" if var doesn't exist.
+    LoadVarBySymbol(IrValue, u32, u32),
+
+    /// LoadVarBySymbolDynamic(dest, ns_symbol_id, name_symbol_id)
+    /// Same as LoadVarBySymbol but checks dynamic bindings first.
+    LoadVarBySymbolDynamic(IrValue, u32, u32),
+
+    /// StoreVarBySymbol(ns_symbol_id, name_symbol_id, value)
+    /// At runtime: creates var if needed, stores value. Used by def/defn.
+    StoreVarBySymbol(u32, u32, IrValue),
+
+    /// EnsureVarBySymbol(ns_symbol_id, name_symbol_id)
+    /// At runtime: creates var with unbound placeholder if doesn't exist.
+    /// Used at start of def to enable recursive references.
+    EnsureVarBySymbol(u32, u32),
+
     LoadTrue(IrValue),
     LoadFalse(IrValue),
 
@@ -292,6 +315,17 @@ pub enum Instruction {
     /// ExternalCallWithSaves(dst, func_addr, args, saves) - with register preservation
     /// Created by register allocator from ExternalCall
     ExternalCallWithSaves(IrValue, usize, Vec<IrValue>, Vec<IrValue>),
+
+    // Local variable operations (stack-based)
+
+    /// StoreLocal(slot, value) - store value to local slot on stack
+    /// Used at function entry to save arguments to stack
+    /// slot is 0-based index, codegen converts to FP-relative offset
+    StoreLocal(usize, IrValue),
+
+    /// LoadLocal(dst, slot) - load from local slot to register
+    /// Used when accessing function parameters that were stored as locals
+    LoadLocal(IrValue, usize),
 }
 
 /// IR builder - helps construct IR instructions
@@ -305,6 +339,9 @@ pub struct IrBuilder {
     /// These are allocated before register allocation runs, ensuring
     /// the stack frame is sized correctly in the prologue
     pub reserved_exception_slots: usize,
+    /// Number of local variable slots (for storing arguments)
+    /// Following Beagle's pattern: arguments are stored to locals at function entry
+    pub num_locals: usize,
 }
 
 impl Default for IrBuilder {
@@ -322,6 +359,7 @@ impl IrBuilder {
             next_label: 0,
             instructions: Vec::new(),
             reserved_exception_slots: 0,
+            num_locals: 0,
         }
     }
 
@@ -330,6 +368,15 @@ impl IrBuilder {
     pub fn allocate_exception_slot(&mut self) -> usize {
         let slot = self.reserved_exception_slots;
         self.reserved_exception_slots += 1;
+        slot
+    }
+
+    /// Allocate a local variable slot on the stack
+    /// Used for storing function arguments at entry (Beagle pattern)
+    /// Returns the slot index (0-based, codegen converts to FP-relative offset)
+    pub fn allocate_local(&mut self) -> usize {
+        let slot = self.num_locals;
+        self.num_locals += 1;
         slot
     }
 

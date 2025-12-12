@@ -296,6 +296,14 @@ pub struct GCRuntime {
     /// Cache of allocated keyword heap pointers: index -> Some(tagged_ptr) if allocated
     keyword_heap_ptrs: Vec<Option<usize>>,
 
+    // ========== Symbol Interning (for runtime var lookup) ==========
+
+    /// Symbol table: symbol_id -> symbol string
+    symbol_table: Vec<String>,
+
+    /// Reverse lookup: symbol string -> symbol_id
+    symbol_name_to_id: HashMap<String, u32>,
+
     // ========== Var ID Table (GC-safe var access) ==========
 
     /// Var table: var_id -> tagged var pointer
@@ -379,6 +387,9 @@ impl GCRuntime {
             // Keyword interning
             keyword_constants: Vec::new(),
             keyword_heap_ptrs: Vec::new(),
+            // Symbol interning (for runtime var lookup)
+            symbol_table: Vec::new(),
+            symbol_name_to_id: HashMap::new(),
             // Var ID table (mmap-allocated for stable address)
             var_table_ptr,
             var_table_committed: VAR_TABLE_PAGE_SIZE,
@@ -774,6 +785,25 @@ impl GCRuntime {
         self.keyword_constants.get(index).map(|s| s.as_str())
     }
 
+    // ========== Symbol Interning Methods ==========
+
+    /// Intern a symbol name at compile time.
+    /// Returns a stable symbol_id that can be embedded in generated code.
+    pub fn intern_symbol(&mut self, name: &str) -> u32 {
+        if let Some(&id) = self.symbol_name_to_id.get(name) {
+            return id;
+        }
+        let id = self.symbol_table.len() as u32;
+        self.symbol_table.push(name.to_string());
+        self.symbol_name_to_id.insert(name.to_string(), id);
+        id
+    }
+
+    /// Get symbol string by ID (for runtime lookup).
+    pub fn get_symbol(&self, id: u32) -> Option<&str> {
+        self.symbol_table.get(id as usize).map(|s| s.as_str())
+    }
+
     /// Allocate a namespace object on the heap
     pub fn allocate_namespace(&mut self, name: &str) -> Result<usize, String> {
         let name_ptr = self.allocate_string(name)?;
@@ -893,6 +923,11 @@ impl GCRuntime {
     /// Get all namespace pointers (for syncing compiler registry after GC)
     pub fn get_namespace_pointers(&self) -> &HashMap<String, usize> {
         &self.namespace_roots
+    }
+
+    /// Get namespace pointer by name (for runtime var lookup)
+    pub fn get_namespace_by_name(&self, name: &str) -> Option<usize> {
+        self.namespace_roots.get(name).copied()
     }
 
     /// Read a string from a tagged pointer
@@ -1118,6 +1153,13 @@ impl GCRuntime {
         let untagged = self.untag_heap_object(var_ptr);
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
         heap_obj.get_field(2)
+    }
+
+    /// Set var value (field 2)
+    pub fn var_set_value(&self, var_ptr: usize, value: usize) {
+        let untagged = self.untag_heap_object(var_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.write_field(2, value);
     }
 
     /// Mark a var as dynamic

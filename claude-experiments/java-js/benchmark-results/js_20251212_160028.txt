@@ -1,0 +1,152 @@
+
+════════════════════════════════════════════════════════════════════════════════
+Real-World JavaScript Library Parser Benchmarks
+════════════════════════════════════════════════════════════════════════════════
+Warmup iterations: 5
+Measurement iterations: 10
+Node.js version: v24.3.0
+════════════════════════════════════════════════════════════════════════════════
+
+================================================================================
+Library: react.production.min.js
+Size: 10.5 KB (10,737 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |           0.488 |            1.00x |         21.5 KB/ms
+🥈 Acorn              |           1.019 |            2.09x |         10.3 KB/ms
+🥉 @babel/parser      |           1.248 |            2.56x |          8.4 KB/ms
+
+================================================================================
+Library: vue.global.prod.js
+Size: 130.0 KB (133,165 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |           4.076 |            1.00x |         31.9 KB/ms
+🥈 @babel/parser      |           9.840 |            2.41x |         13.2 KB/ms
+🥉 Acorn              |          10.292 |            2.53x |         12.6 KB/ms
+
+================================================================================
+Library: react-dom.production.min.js
+Size: 128.8 KB (131,882 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |           3.288 |            1.00x |         39.2 KB/ms
+🥈 @babel/parser      |           6.913 |            2.10x |         18.6 KB/ms
+🥉 Acorn              |           7.218 |            2.20x |         17.8 KB/ms
+
+================================================================================
+Library: lodash.js
+Size: 531.3 KB (544,096 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |           4.594 |            1.00x |        115.7 KB/ms
+🥈 Acorn              |           5.838 |            1.27x |         91.0 KB/ms
+🥉 @babel/parser      |           5.891 |            1.28x |         90.2 KB/ms
+
+================================================================================
+Library: three.js
+Size: 1282.3 KB (1,313,048 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |          16.973 |            1.00x |         75.5 KB/ms
+🥈 Acorn              |          31.529 |            1.86x |         40.7 KB/ms
+🥉 @babel/parser      |          43.999 |            2.59x |         29.1 KB/ms
+
+================================================================================
+Library: typescript.js
+Size: 8808.7 KB (9,020,119 bytes)
+================================================================================
+
+Warming up Acorn...
+Benchmarking Acorn...
+Warming up @babel/parser...
+Benchmarking @babel/parser...
+Warming up Meriyah...
+Benchmarking Meriyah...
+
+Results (sorted by performance):
+--------------------------------------------------------------------------------
+Parser               |   Avg Time (ms) |      vs Fastest |      Throughput
+--------------------------------------------------------------------------------
+🥇 Meriyah            |         121.210 |            1.00x |         72.7 KB/ms
+🥈 Acorn              |         203.280 |            1.68x |         43.3 KB/ms
+🥉 @babel/parser      |         263.761 |            2.18x |         33.4 KB/ms
+
+════════════════════════════════════════════════════════════════════════════════
+SUMMARY
+════════════════════════════════════════════════════════════════════════════════
+
+react.production.min.js:
+  🥇 Meriyah: 0.488 ms
+
+vue.global.prod.js:
+  🥇 Meriyah: 4.076 ms
+
+react-dom.production.min.js:
+  🥇 Meriyah: 3.288 ms
+
+lodash.js:
+  🥇 Meriyah: 4.594 ms
+
+three.js:
+  🥇 Meriyah: 16.973 ms
+
+typescript.js:
+  🥇 Meriyah: 121.210 ms
+
+════════════════════════════════════════════════════════════════════════════════

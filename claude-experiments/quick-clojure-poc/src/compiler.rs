@@ -14,6 +14,17 @@ struct LoopContext {
     binding_registers: Vec<IrValue>,
 }
 
+/// Variable binding - can be a register or a local slot on the stack
+/// Following Beagle's pattern: function parameters are stored to local slots
+#[derive(Clone, Copy, Debug)]
+enum Binding {
+    /// Value is in a register (used for let bindings, closure values)
+    Register(IrValue),
+    /// Value is in a local slot on the stack (used for function parameters)
+    /// When accessed, emit LoadLocal to load into a fresh register
+    LocalSlot(usize),
+}
+
 /// Type information for deftype
 #[derive(Clone, Debug)]
 struct TypeInfo {
@@ -41,10 +52,10 @@ pub struct Compiler {
     /// IR builder
     builder: IrBuilder,
 
-    /// Local variable scopes (for let bindings)
-    /// Each scope maps variable name → register
+    /// Local variable scopes (for let bindings and parameters)
+    /// Each scope maps variable name → Binding (register or local slot)
     /// Stack of scopes allows for nested lets
-    local_scopes: Vec<HashMap<String, IrValue>>,
+    local_scopes: Vec<HashMap<String, Binding>>,
 
     /// Stack of loop contexts for recur
     loop_contexts: Vec<LoopContext>,
@@ -1195,19 +1206,42 @@ impl Compiler {
     /// Bind a local variable to a register in the current scope
     fn bind_local(&mut self, name: String, register: IrValue) {
         if let Some(scope) = self.local_scopes.last_mut() {
-            scope.insert(name, register);
+            scope.insert(name, Binding::Register(register));
+        }
+    }
+
+    /// Bind a parameter to a local slot (Beagle pattern)
+    fn bind_local_slot(&mut self, name: String, slot: usize) {
+        if let Some(scope) = self.local_scopes.last_mut() {
+            scope.insert(name, Binding::LocalSlot(slot));
         }
     }
 
     /// Look up a local variable, searching from innermost to outermost scope
-    fn lookup_local(&self, name: &str) -> Option<IrValue> {
+    /// Returns the binding (register or local slot)
+    fn lookup_local_binding(&self, name: &str) -> Option<Binding> {
         // Search from innermost scope outward
         for scope in self.local_scopes.iter().rev() {
-            if let Some(register) = scope.get(name) {
-                return Some(*register);
+            if let Some(binding) = scope.get(name) {
+                return Some(*binding);
             }
         }
         None
+    }
+
+    /// Look up a local variable and get its value as an IrValue
+    /// For LocalSlot bindings, emits LoadLocal to load into a fresh register
+    fn lookup_local(&mut self, name: &str) -> Option<IrValue> {
+        let binding = self.lookup_local_binding(name)?;
+        Some(match binding {
+            Binding::Register(reg) => reg,
+            Binding::LocalSlot(slot) => {
+                // Emit LoadLocal to load from stack into a fresh register
+                let temp = self.builder.new_register();
+                self.builder.emit(Instruction::LoadLocal(temp, slot));
+                temp
+            }
+        })
     }
 
     /// Look up a var pointer by namespace and name
@@ -1342,23 +1376,27 @@ impl Compiler {
             None
         };
 
-        // Bind parameters to temp registers (copying from argument registers)
+        // Bind parameters by storing to local slots on stack (Beagle pattern)
         // ARM64 calling convention:
         // - Regular functions (single arity, no closures): arguments are in x0, x1, x2, etc.
         // - Closures/Multi-arity: x0 = closure object, user args in x1, x2, x3, etc.
         //
-        // IMPORTANT: We copy argument registers to temp registers because x0-x7 are caller-saved
-        // and will be clobbered by any function calls. By copying to temp registers, the register
-        // allocator can properly manage their lifetimes (potentially assigning to callee-saved
-        // registers or spilling to stack).
+        // CRITICAL FIX: Store arguments to stack immediately at function entry!
+        // The x0-x7 registers are caller-saved and will be clobbered by ANY function call.
+        // By storing to local slots (FP-relative stack positions), arguments survive all calls.
+        // This follows Beagle's approach in ast.rs lines 665-684.
         let param_offset = if uses_closure_convention { 1 } else { 0 };
         let mut param_registers = Vec::new();
         for (i, param) in arity.params.iter().enumerate() {
             let arg_reg = IrValue::Register(crate::ir::VirtualRegister::Argument(i + param_offset));
-            // Copy from argument register to a temp register
+            // Allocate a local slot and store the argument there
+            let local_slot = self.builder.allocate_local();
+            self.builder.emit(Instruction::StoreLocal(local_slot, arg_reg));
+            self.bind_local_slot(param.clone(), local_slot);
+            // For recur, we still need a register representation
+            // Load the parameter into a temp register for the param_registers vec
             let temp_reg = self.builder.new_register();
-            self.builder.emit(Instruction::Assign(temp_reg, arg_reg));
-            self.bind_local(param.clone(), temp_reg);
+            self.builder.emit(Instruction::LoadLocal(temp_reg, local_slot));
             param_registers.push(temp_reg);
         }
 
@@ -1444,8 +1482,9 @@ impl Compiler {
             rt.var_table_ptr() as usize
         };
 
-        let num_params = arity.params.len();
-        let compiled = Arm64CodeGen::compile_function(&fn_instructions, num_params, reserved_exception_slots, var_table_ptr)?;
+        // Pass num_locals from the builder (includes all allocated local slots)
+        let num_locals = self.builder.num_locals;
+        let compiled = Arm64CodeGen::compile_function(&fn_instructions, num_locals, reserved_exception_slots, var_table_ptr)?;
 
         // Register stack map with runtime for GC
         unsafe {
@@ -1565,7 +1604,7 @@ impl Compiler {
                 // Only consider unqualified names
                 if !bound.contains(name) && !self.is_builtin(name) {
                     // Check if it's a local variable in current scope
-                    if self.lookup_local(name).is_some() {
+                    if self.lookup_local_binding(name).is_some() {
                         // It's a free variable (captured from outer scope)
                         free.insert(name.clone());
                     }
@@ -1772,7 +1811,7 @@ impl Compiler {
             // shadowing the builtin. E.g., (let [+ my-fn] (+ 1 2)) should NOT inline.
             let is_builtin = match namespace {
                 Some(ns) if ns == "clojure.core" => self.is_builtin(name),
-                None => self.is_builtin(name) && self.lookup_local(name).is_none(),
+                None => self.is_builtin(name) && self.lookup_local_binding(name).is_none(),
                 _ => false,
             };
 

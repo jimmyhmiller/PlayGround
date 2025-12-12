@@ -157,16 +157,18 @@ impl Arm64CodeGen {
     /// - Callee-saved registers (x19-x28) saved as needed
     /// - Spill slots at FP-relative offsets
     /// - Exception slots after spill slots
+    /// - Local variable slots after exception slots (for storing arguments)
     ///
+    /// num_locals: Number of local variable slots from IrBuilder (for storing arguments)
     /// var_table_ptr: Address of the var_table data for GC-safe var access
     pub fn compile_function(
         instructions: &[Instruction],
-        num_params: usize,
+        num_locals: usize,
         reserved_exception_slots: usize,
         var_table_ptr: usize,
     ) -> Result<CompiledFunction, String> {
         let mut codegen = Arm64CodeGen::new();
-        codegen.num_locals = num_params;
+        codegen.num_locals = num_locals;
         codegen.var_table_ptr = var_table_ptr;
         codegen.reserved_exception_slots = reserved_exception_slots;
 
@@ -193,8 +195,9 @@ impl Arm64CodeGen {
 
         let allocated_instructions = allocator.finish();
 
-        // Calculate total stack slots: spill slots + exception slots
-        let total_stack_slots = num_spill_slots + reserved_exception_slots;
+        // Calculate total stack slots: spill slots + exception slots + local variable slots
+        // Layout: [FP] [spills] [exceptions] [locals]
+        let total_stack_slots = num_spill_slots + reserved_exception_slots + num_locals;
 
         // Calculate stack space (round up to 16-byte alignment)
         let stack_space = if total_stack_slots > 0 {
@@ -287,7 +290,7 @@ impl Arm64CodeGen {
         Ok(CompiledFunction {
             code_ptr,
             stack_map,
-            num_locals: num_params,
+            num_locals,
             max_stack_size: codegen.max_stack_size,  // Total frame size in words
         })
     }
@@ -1696,6 +1699,39 @@ impl Arm64CodeGen {
                 self.store_spill(dest_reg, spill_offset);
             }
 
+            // ========== Local Variable Instructions ==========
+            // Following Beagle's pattern: arguments are stored to FP-relative slots at function entry
+
+            Instruction::StoreLocal(slot, value) => {
+                // Store value to local slot on stack (FP-relative, negative offset)
+                // Local slots come AFTER spill slots and exception slots
+                // Layout: [FP] [spills] [exceptions] [locals]
+                let slot_offset = self.num_spill_slots + self.reserved_exception_slots + slot + 1;
+                let offset = -((slot_offset as i32) * 8);
+
+                // Get the source register (may be an Argument register like x0)
+                let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
+
+                // Use emit_store_to_fp which handles negative offsets with STUR
+                self.emit_store_to_fp(src_reg, offset);
+            }
+
+            Instruction::LoadLocal(dest, slot) => {
+                // Load from local slot to destination register
+                // Same layout as StoreLocal
+                let slot_offset = self.num_spill_slots + self.reserved_exception_slots + slot + 1;
+                let offset = -((slot_offset as i32) * 8);
+
+                let dest_spill = self.dest_spill(dest);
+                let dest_reg = self.get_physical_reg_for_irvalue(dest, true)?;
+
+                // LDR dest, [x29, #offset]  (load from FP + offset)
+                self.emit_load_from_fp(dest_reg, offset);
+
+                // Store to spill location if this is a spilled register
+                self.store_spill(dest_reg, dest_spill);
+            }
+
             // ========== Protocol System Instructions ==========
 
             Instruction::RegisterProtocolMethod(type_id, protocol_id, method_index, fn_ptr) => {
@@ -1730,9 +1766,6 @@ impl Arm64CodeGen {
             }
 
             Instruction::ExternalCallWithSaves(dst, func_addr, args, saves) => {
-                // DEBUG: Print args and saves
-                eprintln!("DEBUG ExternalCallWithSaves: func_addr={:#x}, args={:?}, saves={:?}", func_addr, args, saves);
-
                 // ExternalCall: call a known function address (trampoline) with register preservation
                 // Simpler than CallWithSaves - no tag checking, just direct call to known address
 
@@ -1743,19 +1776,16 @@ impl Arm64CodeGen {
                 // STEP 1: Save volatile registers to stack (in pairs for 16-byte alignment)
                 // BUG FIX: Must clear temp registers between loading spilled values,
                 // otherwise two Spills would both use x9 and STP would save x9 twice!
-                eprintln!("DEBUG ExternalCallWithSaves: saving registers to stack");
                 for save_pair in saves.chunks(2) {
                     if save_pair.len() == 2 {
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
                         self.clear_temp_registers();  // Critical: prevent r2 from reusing r1's temp
                         let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
-                        eprintln!("  saving {:?}=x{}, {:?}=x{} to stack", save_pair[0], r1, save_pair[1], r2);
                         self.emit_stp(r1, r2, 31, -2);  // stp r1, r2, [sp, #-16]!
                         self.clear_temp_registers();
                     } else {
                         // Odd number - pair with xzr to maintain 16-byte alignment
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
-                        eprintln!("  saving {:?}=x{} to stack", save_pair[0], r1);
                         self.emit_stp(r1, 31, 31, -2);  // stp r1, xzr, [sp, #-16]!
                         self.clear_temp_registers();
                     }
@@ -1795,7 +1825,6 @@ impl Arm64CodeGen {
                 self.emit_external_call(*func_addr, "external_call");
 
                 // STEP 4: Move result from x0 to destination
-                eprintln!("DEBUG ExternalCallWithSaves: dst={:?}, dst_reg=x{}, dest_spill={:?}", dst, dst_reg, dest_spill);
                 if dst_reg != 0 {
                     self.emit_mov(dst_reg, 0);
                 }
@@ -1812,22 +1841,18 @@ impl Arm64CodeGen {
                 // 2. Use is_dest=true to get a destination register
                 // 3. Pop from stack into that register
                 // 4. Write back to spill slot if the value was spilled
-                eprintln!("DEBUG ExternalCallWithSaves: restoring registers from stack");
                 for save_pair in saves.chunks(2).rev() {
                     if save_pair.len() == 2 {
                         let spill1 = self.dest_spill(&save_pair[0]);
                         let spill2 = self.dest_spill(&save_pair[1]);
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], true)?;
                         let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], true)?;
-                        eprintln!("  restoring {:?}->x{} (spill={:?}), {:?}->x{} (spill={:?}) from stack",
-                                  save_pair[0], r1, spill1, save_pair[1], r2, spill2);
                         self.emit_ldp(r1, r2, 31, 2);  // ldp r1, r2, [sp], #16
                         self.store_spill(r1, spill1);
                         self.store_spill(r2, spill2);
                     } else {
                         let spill1 = self.dest_spill(&save_pair[0]);
                         let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], true)?;
-                        eprintln!("  restoring {:?}->x{} (spill={:?}) from stack", save_pair[0], r1, spill1);
                         self.emit_ldp(r1, 31, 31, 2);  // ldp r1, xzr, [sp], #16
                         self.store_spill(r1, spill1);
                     }
@@ -1906,9 +1931,6 @@ impl Arm64CodeGen {
             }
 
             Instruction::CallWithSaves(dst, fn_val, args, saves) => {
-                // DEBUG: Print args and saves
-                eprintln!("DEBUG CallWithSaves: fn_val={:?}, args={:?}, saves={:?}", fn_val, args, saves);
-
                 // STEP 1: Save volatile registers to stack (in pairs for 16-byte alignment)
                 // BUG FIX: Must clear temp registers between loading spilled values within a pair,
                 // otherwise two Spills would both use x9 and STP would save x9 twice!
@@ -2110,20 +2132,16 @@ impl Arm64CodeGen {
                 self.code.push(lsr_instruction);
 
                 // Set up normal calling convention: args in x0-x7
-                // DEBUG: Print physical register assignments
-                eprintln!("DEBUG raw function path: loading args into x0-x7");
                 self.clear_temp_registers();
                 for (i, arg) in args.iter().enumerate() {
                     let target_reg = i;  // x0, x1, x2, etc.
                     match arg {
                         IrValue::Spill(_, slot) => {
-                            eprintln!("  arg[{}]: Spill at slot {} -> x{}", i, slot, target_reg);
                             let offset = -((*slot as i32 + 1) * 8);
                             self.emit_load_from_fp(target_reg, offset);
                         }
                         _ => {
                             let src_reg = self.get_physical_reg_for_irvalue(arg, false)?;
-                            eprintln!("  arg[{}]: {:?} in x{} -> x{}", i, arg, src_reg, target_reg);
                             if target_reg != src_reg {
                                 self.emit_mov(target_reg, src_reg);
                             }

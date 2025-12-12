@@ -385,6 +385,146 @@ pub extern "C" fn trampoline_set_binding(var_ptr: usize, value: usize) -> usize 
     }
 }
 
+// ========== Runtime Symbol-Based Var Access ==========
+// These trampolines enable forward references by looking up vars at runtime.
+
+/// Trampoline: Load var value by symbol lookup at runtime
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = ns_symbol_id (u32), x1 = name_symbol_id (u32)
+/// - Returns: x0 = value (tagged)
+/// - Panics if var not found (throws "Unable to resolve symbol" error)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_load_var_by_symbol(ns_symbol_id: u32, name_symbol_id: u32) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        // Get symbol strings
+        let ns_name = rt.get_symbol(ns_symbol_id)
+            .expect("invalid ns_symbol_id");
+        let var_name = rt.get_symbol(name_symbol_id)
+            .expect("invalid name_symbol_id");
+
+        // Look up namespace
+        let ns_ptr = rt.get_namespace_by_name(ns_name)
+            .unwrap_or_else(|| panic!("Namespace not found: {}", ns_name));
+
+        // Look up var in namespace
+        let var_ptr = rt.namespace_lookup(ns_ptr, var_name)
+            .unwrap_or_else(|| panic!("Unable to resolve symbol: {}/{}", ns_name, var_name));
+
+        // Get and return value
+        rt.var_get_value(var_ptr)
+    }
+}
+
+/// Trampoline: Load var value by symbol with dynamic binding check
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = ns_symbol_id (u32), x1 = name_symbol_id (u32)
+/// - Returns: x0 = value (tagged)
+/// - Panics if var not found
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_load_var_by_symbol_dynamic(ns_symbol_id: u32, name_symbol_id: u32) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        // Get symbol strings
+        let ns_name = rt.get_symbol(ns_symbol_id)
+            .expect("invalid ns_symbol_id");
+        let var_name = rt.get_symbol(name_symbol_id)
+            .expect("invalid name_symbol_id");
+
+        // Look up namespace
+        let ns_ptr = rt.get_namespace_by_name(ns_name)
+            .unwrap_or_else(|| panic!("Namespace not found: {}", ns_name));
+
+        // Look up var in namespace
+        let var_ptr = rt.namespace_lookup(ns_ptr, var_name)
+            .unwrap_or_else(|| panic!("Unable to resolve symbol: {}/{}", ns_name, var_name));
+
+        // Get value (checking dynamic bindings)
+        rt.var_get_value_dynamic(var_ptr)
+    }
+}
+
+/// Trampoline: Store value to var by symbol (creates var if needed)
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = ns_symbol_id (u32), x1 = name_symbol_id (u32), x2 = value (tagged)
+/// - Returns: x0 = value (tagged) - def returns the value
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_store_var_by_symbol(ns_symbol_id: u32, name_symbol_id: u32, value: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // Get symbol strings
+        let ns_name = rt.get_symbol(ns_symbol_id)
+            .expect("invalid ns_symbol_id");
+        let var_name = rt.get_symbol(name_symbol_id)
+            .expect("invalid name_symbol_id");
+
+        // Look up namespace
+        let ns_ptr = rt.get_namespace_by_name(ns_name)
+            .unwrap_or_else(|| panic!("Namespace not found: {}", ns_name));
+
+        // Look up or create var
+        let var_ptr = if let Some(existing) = rt.namespace_lookup(ns_ptr, var_name) {
+            existing
+        } else {
+            // Create new var
+            let (new_var_ptr, _var_id) = rt.allocate_var(ns_ptr, var_name, value)
+                .expect("Failed to allocate var");
+            rt.namespace_add_binding(ns_ptr, var_name, new_var_ptr)
+                .expect("Failed to add namespace binding");
+            new_var_ptr
+        };
+
+        // Store value
+        rt.var_set_value(var_ptr, value);
+        value
+    }
+}
+
+/// Trampoline: Ensure var exists (creates with nil if needed)
+///
+/// Used at start of def to enable recursive references within the definition.
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = ns_symbol_id (u32), x1 = name_symbol_id (u32)
+/// - Returns: x0 = nil (7)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_ensure_var_by_symbol(ns_symbol_id: u32, name_symbol_id: u32) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // Get symbol strings
+        let ns_name = rt.get_symbol(ns_symbol_id)
+            .expect("invalid ns_symbol_id");
+        let var_name = rt.get_symbol(name_symbol_id)
+            .expect("invalid name_symbol_id");
+
+        // Look up namespace
+        let ns_ptr = rt.get_namespace_by_name(ns_name)
+            .unwrap_or_else(|| panic!("Namespace not found: {}", ns_name));
+
+        // Create var if it doesn't exist
+        if rt.namespace_lookup(ns_ptr, var_name).is_none() {
+            let nil_value = 7usize; // nil tagged value
+            let (new_var_ptr, _var_id) = rt.allocate_var(ns_ptr, var_name, nil_value)
+                .expect("Failed to allocate var");
+            rt.namespace_add_binding(ns_ptr, var_name, new_var_ptr)
+                .expect("Failed to add namespace binding");
+        }
+
+        7 // nil
+    }
+}
+
 /// Trampoline: Force garbage collection
 ///
 /// ARM64 Calling Convention:
@@ -700,11 +840,6 @@ pub extern "C" fn trampoline_load_type_field_by_name(
                 return 7; // nil
             }
         };
-
-        // DEBUG: Print what we're trying to load
-        let untagged = obj_ptr >> 3;
-        eprintln!("DEBUG load_type_field_by_name: obj_ptr={:#x}, untagged={:#x}, tag={}, field={}",
-                  obj_ptr, untagged, obj_ptr & 0b111, field_name);
 
         match rt.load_type_field_by_name(obj_ptr, field_name) {
             Ok(value) => value,
@@ -1076,11 +1211,7 @@ pub extern "C" fn trampoline_protocol_lookup(
 
         // Look up method implementation
         match rt.lookup_protocol_method(type_id, method_name) {
-            Some(fn_ptr) => {
-                eprintln!("DEBUG protocol_lookup: method={}, type_id={}, fn_ptr={:#x}, tag={}",
-                          method_name, type_id, fn_ptr, fn_ptr & 0b111);
-                fn_ptr
-            }
+            Some(fn_ptr) => fn_ptr,
             None => {
                 // Throw IllegalArgumentException like Clojure
                 let type_name = crate::gc_runtime::GCRuntime::builtin_type_name(type_id);
