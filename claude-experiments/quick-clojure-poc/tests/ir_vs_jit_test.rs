@@ -30,7 +30,9 @@ fn run_test(code: &str, expected: i64) {
 
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     let mut compiler = compiler::Compiler::new(runtime);
-    let result_reg = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
+    let result_val = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
+    // Ensure result is in a register (following Beagle's pattern)
+    let result_reg = compiler.ensure_register(result_val);
     let instructions = compiler.take_instructions();
 
     let mut codegen = arm_codegen::Arm64CodeGen::new();
@@ -78,7 +80,9 @@ fn test_ir_backend_literals() {
         // IR-based backend
         let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
         let mut compiler = compiler::Compiler::new(runtime);
-        let result_reg = compiler.compile(&ast).unwrap();
+        let result_val = compiler.compile(&ast).unwrap();
+        // Ensure result is in a register (following Beagle's pattern)
+        let result_reg = compiler.ensure_register(result_val);
         let instructions = compiler.take_instructions();
 
         let mut codegen = arm_codegen::Arm64CodeGen::new();
@@ -114,7 +118,8 @@ fn test_ir_backend_arithmetic() {
 
         let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
         let mut compiler = compiler::Compiler::new(runtime);
-        let result_reg = compiler.compile(&ast).unwrap();
+        let result_val = compiler.compile(&ast).unwrap();
+        let result_reg = compiler.ensure_register(result_val);
         let instructions = compiler.take_instructions();
 
         let mut codegen = arm_codegen::Arm64CodeGen::new();
@@ -309,7 +314,8 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let code = "(def x 5)";
     let val = reader::read(code).unwrap();
     let ast = clojure_ast::analyze(&val).unwrap();
-    let result_reg = compiler.compile(&ast).unwrap();
+    let result_val = compiler.compile(&ast).unwrap();
+    let result_reg = compiler.ensure_register(result_val);
     let instructions = compiler.take_instructions();
     let mut codegen = arm_codegen::Arm64CodeGen::new();
     codegen.set_var_table_ptr(get_var_table_ptr());
@@ -325,7 +331,8 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let code = "x";
     let val = reader::read(code).unwrap();
     let ast = clojure_ast::analyze(&val).unwrap();
-    let result_reg = compiler.compile(&ast).unwrap();
+    let result_val = compiler.compile(&ast).unwrap();
+    let result_reg = compiler.ensure_register(result_val);
     let instructions = compiler.take_instructions();
     let mut codegen = arm_codegen::Arm64CodeGen::new();
     codegen.set_var_table_ptr(get_var_table_ptr());
@@ -337,7 +344,8 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let code = "(def y (* x 2))";
     let val = reader::read(code).unwrap();
     let ast = clojure_ast::analyze(&val).unwrap();
-    let result_reg = compiler.compile(&ast).unwrap();
+    let result_val = compiler.compile(&ast).unwrap();
+    let result_reg = compiler.ensure_register(result_val);
     let instructions = compiler.take_instructions();
     let mut codegen = arm_codegen::Arm64CodeGen::new();
     codegen.set_var_table_ptr(get_var_table_ptr());
@@ -352,11 +360,36 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let code = "(+ x y)";
     let val = reader::read(code).unwrap();
     let ast = clojure_ast::analyze(&val).unwrap();
-    let result_reg = compiler.compile(&ast).unwrap();
+    let result_val = compiler.compile(&ast).unwrap();
+    let result_reg = compiler.ensure_register(result_val);
     let instructions = compiler.take_instructions();
     let mut codegen = arm_codegen::Arm64CodeGen::new();
     codegen.set_var_table_ptr(get_var_table_ptr());
     codegen.compile(&instructions, &result_reg, 0).unwrap();
     let tagged_result = codegen.execute().unwrap();
     assert_eq!(tagged_result >> 3, 15);
+}
+
+#[test]
+fn test_addition_200x_nested() {
+    // (+ 1 (+ 1 (+ 1 ... (+ 1 1)...))) with 200 levels
+    // Result should be 200
+    let mut expr = String::from("1");
+    for _ in 0..199 {
+        expr = format!("(+ 1 {})", expr);
+    }
+    run_test(&expr, 200);
+}
+
+#[test]
+fn test_function_call_100x_deep_3_args() {
+    // 100 levels of nested function calls, each with 3 args
+    // ((fn [a b c] ((fn [a b c] ... (+ a (+ b c)) ...) a b c)) 1 2 3)
+    // Result should be 1 + 2 + 3 = 6
+    let mut expr = String::from("(+ a (+ b c))");
+    for _ in 0..100 {
+        expr = format!("((fn [a b c] {}) a b c)", expr);
+    }
+    expr = format!("(let [a 1 b 2 c 3] {})", expr);
+    run_test(&expr, 6);
 }

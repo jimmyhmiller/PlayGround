@@ -593,6 +593,8 @@ fn load_clojure_file(
                     Ok(ast) => {
                         match compiler.compile(&ast) {
                             Ok(result_reg) => {
+                                // Ensure result is always a register (convert constants if needed)
+                                let result_reg = compiler.ensure_register(result_reg);
                                 let instructions = compiler.take_instructions();
                                 let mut codegen = Arm64CodeGen::new();
 
@@ -639,6 +641,84 @@ fn load_clojure_file(
     }
 
     Ok(())
+}
+
+/// Execute a single Clojure expression (like `clj -e "(+ 1 2)"`)
+/// Prints the result of the expression
+fn run_expr(expr: &str, gc_always: bool) {
+    // Create runtime with GC
+    let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
+    trampoline::set_runtime(runtime.clone());
+
+    // Enable gc-always mode if requested
+    if gc_always {
+        unsafe {
+            let rt = &mut *runtime.get();
+            rt.set_gc_always(true);
+        }
+    }
+
+    // Create compiler
+    let mut compiler = Compiler::new(runtime.clone());
+
+    // Parse the expression
+    let val = match read(expr) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Read error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Analyze the expression
+    let ast = match analyze(&val) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Analysis error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Compile the expression
+    let result_reg = match compiler.compile(&ast) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Compile error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Ensure result is always a register (convert constants if needed)
+    let result_reg = compiler.ensure_register(result_reg);
+    let instructions = compiler.take_instructions();
+    let mut codegen = Arm64CodeGen::new();
+
+    // Set var_table_ptr for GC-safe var access
+    let var_table_ptr = unsafe {
+        let rt = &*runtime.get();
+        rt.var_table_ptr() as usize
+    };
+    codegen.set_var_table_ptr(var_table_ptr);
+
+    // Generate machine code
+    if let Err(e) = codegen.compile(&instructions, &result_reg, 0) {
+        eprintln!("Codegen error: {}", e);
+        std::process::exit(1);
+    }
+
+    // Execute and print result
+    match codegen.execute() {
+        Ok(result) => {
+            unsafe {
+                let rt = &*runtime.get();
+                print_tagged_value(result, rt);
+            }
+        }
+        Err(e) => {
+            eprintln!("Execution error: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Execute a Clojure script file (like `clojure script.clj`)
@@ -708,6 +788,8 @@ fn run_script(filename: &str, gc_always: bool) {
                         // Compile and execute
                         match compiler.compile(&ast) {
                             Ok(result_reg) => {
+                                // Ensure result is always a register (convert constants if needed)
+                                let result_reg = compiler.ensure_register(result_reg);
                                 let instructions = compiler.take_instructions();
                                 let mut codegen = Arm64CodeGen::new();
 
@@ -782,22 +864,37 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() > 1 {
-        // Parse arguments: [binary] [--gc-always] <file>
+        // Parse arguments: [binary] [--gc-always] [-e <expr> | <file>]
         let mut gc_always = false;
-        let mut filename_idx = 1;
+        let mut expr_mode = false;
+        let mut expr_or_file: Option<String> = None;
 
-        for (i, arg) in args.iter().enumerate().skip(1) {
-            if arg == "--gc-always" {
-                gc_always = true;
-            } else {
-                filename_idx = i;
-                break;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--gc-always" => gc_always = true,
+                "-e" => {
+                    expr_mode = true;
+                    if i + 1 < args.len() {
+                        i += 1;
+                        expr_or_file = Some(args[i].clone());
+                    }
+                }
+                _ => {
+                    expr_or_file = Some(args[i].clone());
+                }
             }
+            i += 1;
         }
 
-        if filename_idx < args.len() {
-            // Script mode: execute file without REPL interface
-            run_script(&args[filename_idx], gc_always);
+        if let Some(value) = expr_or_file {
+            if expr_mode {
+                // Expression mode: evaluate inline expression
+                run_expr(&value, gc_always);
+            } else {
+                // Script mode: execute file without REPL interface
+                run_script(&value, gc_always);
+            }
         }
         return;
     }
@@ -1181,6 +1278,8 @@ fn main() {
                                         // Use the REPL compiler so we can access defined vars
                                         match repl_compiler.compile(&ast) {
                                             Ok(result_reg) => {
+                                                // Ensure result is always a register (convert constants if needed)
+                                                let result_reg = repl_compiler.ensure_register(result_reg);
                                                 let instructions = repl_compiler.take_instructions();
                                                 let mut codegen = Arm64CodeGen::new();
                                                 // Set var_table_ptr for GC-safe var access
@@ -1204,6 +1303,8 @@ fn main() {
                                         // Normal execution using IR-based compilation with persistent compiler
                                         match repl_compiler.compile(&ast) {
                                             Ok(result_reg) => {
+                                                // Ensure result is always a register (convert constants if needed)
+                                                let result_reg = repl_compiler.ensure_register(result_reg);
                                                 let instructions = repl_compiler.take_instructions();
                                                 let mut codegen = Arm64CodeGen::new();
                                                 // Set var_table_ptr for GC-safe var access

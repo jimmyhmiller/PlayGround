@@ -90,6 +90,9 @@ pub struct Arm64CodeGen {
     /// Var table pointer for GC-safe var access
     /// This is the address of the var_table Vec's data, used for indirect var access
     var_table_ptr: usize,
+
+    /// Current instruction being compiled (for error reporting)
+    current_instruction: Option<String>,
 }
 
 impl Default for Arm64CodeGen {
@@ -107,7 +110,7 @@ impl Arm64CodeGen {
             label_positions: HashMap::new(),
             pending_fixups: Vec::new(),
             pending_adr_fixups: Vec::new(),
-            temp_register_pool: vec![11, 10, 9],  // Start with x11, x10, x9 available
+            temp_register_pool: vec![11, 10, 9],
             label_counter: 0,
             placeholder_positions: HashMap::new(),
             current_function_stack_bytes: 0,
@@ -124,6 +127,8 @@ impl Arm64CodeGen {
             reserved_exception_slots: 0,
             // Var table pointer (set before codegen)
             var_table_ptr: 0,
+            // Current instruction for error reporting
+            current_instruction: None,
         }
     }
 
@@ -196,50 +201,49 @@ impl Arm64CodeGen {
             0
         };
 
-        // Emit function prologue
+        // Emit function prologue (Beagle-style with placeholder for patching)
         // Stack layout after prologue:
-        //   [old SP + 8]:   saved x30 (LR)
-        //   [old SP + 0]:   saved x29 (old FP)
-        //   [old SP - 8]:   saved callee-saved reg pair 1a
-        //   [old SP - 16]:  saved callee-saved reg pair 1b
+        //   [FP + 8]:       saved x30 (LR)
+        //   [FP + 0]:       saved x29 (old FP) <- FP points here
+        //   [FP - 8]:       spill slot 0 / local 0
+        //   [FP - 16]:      spill slot 1 / local 1
         //   ...
-        //   [FP + 0]:       <- FP points here (after all register saves)
-        //   [FP - 8]:       spill slot 0
-        //   [FP - 16]:      spill slot 1
+        //   [FP - N*8]:     save slot 0 (from push_to_stack)
         //   ...
-        //   [SP]:           <- SP after stack allocation
+        //   [SP]:           <- SP after stack allocation (patched later)
         //
-        // This ensures spill slots don't overlap with saved registers.
+        // Beagle approach: Emit placeholder SUB, patch with actual size after compilation.
 
-        // Step 1: Save FP and LR (don't set FP yet!)
+        // Step 1: Save FP and LR
         codegen.emit_stp(29, 30, 31, -2);  // stp x29, x30, [sp, #-16]!
-        codegen.increment_stack_size(2);  // Track: FP + LR (2 words = 16 bytes)
 
-        // Step 2: Save used callee-saved registers
+        // Step 2: Set FP to current SP (before any stack allocation)
+        codegen.emit_mov(29, 31);  // mov x29, sp
+
+        // Step 3: Save used callee-saved registers AFTER setting FP
+        // These are saved with FP-relative addressing so they don't interfere with spills
         for chunk in used_callee_saved.chunks(2) {
             if chunk.len() == 2 {
                 codegen.emit_stp(chunk[0], chunk[1], 31, -2);
             } else {
                 codegen.emit_stp(chunk[0], 31, 31, -2);  // Pair with xzr
             }
-            codegen.increment_stack_size(2);  // Track: each register pair (2 words)
         }
 
-        // Step 3: NOW set FP to current SP (after all register saves)
-        // This ensures FP-relative spill addressing doesn't overlap saved registers
-        codegen.emit_mov(29, 31);  // mov x29, sp
+        // Step 4: Emit placeholder SUB for stack allocation (will be patched)
+        // Magic value 0xAAA identifies this as a placeholder (fits in 12-bit immediate)
+        let prologue_placeholder_index = codegen.code.len();
+        codegen.emit_sub_sp_imm(0xAAA);  // Placeholder - will be patched
 
-        // Step 4: Allocate stack space for spills
-        if stack_space > 0 {
-            codegen.emit_sub_sp_imm(stack_space as i64);
-            codegen.increment_stack_size(stack_space / 8);  // Track: spill slots (in words)
-        }
-
-        // Store info for Ret to emit correct epilogue
+        // Store info for Ret to emit correct epilogue and for patching
         codegen.num_stack_slots = total_stack_slots;
         codegen.saved_callee_registers = used_callee_saved.clone();
-        codegen.function_stack_space = stack_space;
+        codegen.function_stack_space = stack_space;  // Initial estimate (spills only)
         codegen.is_per_function_compilation = true;
+
+        // Reset stack tracking for push/pop during compilation
+        codegen.current_stack_size = 0;
+        codegen.max_stack_size = 0;
 
         // DEBUG: Print function frame info
         // eprintln!("DEBUG compile_function: callee_saved={:?}, stack_space={}, spill_slots={}",
@@ -249,6 +253,18 @@ impl Arm64CodeGen {
         for inst in &allocated_instructions {
             codegen.compile_instruction(inst)?;
         }
+
+        // Patch prologue and epilogue with actual stack size (Beagle-style)
+        // Total stack = spill slots + max dynamic stack (from push_to_stack)
+        let total_stack_words = total_stack_slots + codegen.max_stack_size;
+        // Round up to even for 16-byte alignment
+        let aligned_stack_words = if total_stack_words % 2 != 0 {
+            total_stack_words + 1
+        } else {
+            total_stack_words
+        };
+        let stack_bytes = aligned_stack_words * 8;
+        codegen.patch_prologue_epilogue(prologue_placeholder_index, stack_bytes);
 
         // Apply fixups
         codegen.apply_fixups()?;
@@ -297,9 +313,7 @@ impl Arm64CodeGen {
 
         allocator.allocate();
 
-        // Debug output BEFORE consuming allocator
-        let num_stack_slots = allocator.next_stack_slot;
-        // eprintln!("DEBUG: {} spills, {} total stack slots", allocator.spill_locations.len(), num_stack_slots);
+        let num_spill_slots = allocator.next_stack_slot;
 
         // Store the register allocation map for use in codegen
         self.register_map = allocator.allocated_registers.clone();
@@ -313,26 +327,19 @@ impl Arm64CodeGen {
         // }
 
         // Find the physical register for the result (before consuming allocator)
-        let result_physical = if let IrValue::Register(vreg) = result_reg {
-            allocator.allocated_registers.get(vreg)
-                .ok_or_else(|| format!("Result register {:?} not allocated", vreg))?
-                .index()
-        } else {
-            return Err(format!("Expected register for result, got {:?}", result_reg));
+        // Result is now always a register thanks to ensure_register() call in main.rs
+        let result_physical = match result_reg {
+            IrValue::Register(vreg) => {
+                allocator.allocated_registers.get(vreg)
+                    .ok_or_else(|| format!("Result register {:?} not allocated", vreg))?
+                    .index()
+            }
+            _ => return Err(format!("Expected register for result, got {:?}", result_reg)),
         };
 
-        // Count spills to determine stack space needed
-        // Add 8 bytes padding so spills are above SP (ARM64 requirement)
-        let stack_space = if num_stack_slots > 0 {
-            num_stack_slots * 8 + 8
-        } else {
-            0
-        };
-
-        // Store for use in calculate_stack_size
-        self.num_stack_slots = num_stack_slots;
-
-        // eprintln!("DEBUG: Allocating {} bytes of stack space", stack_space);
+        // Store for use in calculate_stack_size and push_to_stack offset calculation
+        self.num_stack_slots = num_spill_slots;
+        self.num_spill_slots = num_spill_slots;
 
         let allocated_instructions = allocator.finish();
 
@@ -343,6 +350,7 @@ impl Arm64CodeGen {
         //   [FP - 8]:   spill slot 0
         //   [FP - 16]:  spill slot 1
         //   ...
+        //   [FP - N*8]: dynamic stack from push_to_stack
         //   [SP]:       <- SP after stack allocation
         //
         // NOTE: We don't save callee-saved registers (x19-x28) in the prologue.
@@ -354,11 +362,14 @@ impl Arm64CodeGen {
         // Step 2: Set FP = SP (immediately after saving FP/LR)
         self.emit_mov(29, 31);  // mov x29, sp
 
-        // Step 3: Allocate stack space for spills
-        if stack_space > 0 {
-            // sub sp, sp, #stack_space
-            self.emit_sub_sp_imm(stack_space as i64);
-        }
+        // Step 3: Emit placeholder SUB for stack allocation (will be patched after compilation)
+        // We use 0xAAA as a magic placeholder value (fits in 12-bit immediate)
+        let prologue_placeholder_index = self.code.len();
+        self.emit_sub_sp_imm(0xAAA);  // Placeholder - will be patched
+
+        // Reset stack tracking for push_to_stack during compilation
+        self.current_stack_size = 0;
+        self.max_stack_size = 0;
 
         // Compile each instruction (now with physical registers)
         for inst in &allocated_instructions {
@@ -376,17 +387,14 @@ impl Arm64CodeGen {
         // But for top-level code that falls through (no explicit Ret), we need to move result to x0
         // Since both paths go through here, and Ret already ensures result is in x0,
         // this is a harmless mov x0, x0 for functions with Ret, but necessary for top-level code
-        // eprintln!("DEBUG: Epilogue - result_physical=x{}", result_physical);
         if result_physical != 0 {
             self.emit_mov(0, result_physical);
         }
 
         // Emit function epilogue (matching Beagle's approach)
-        // Deallocate stack space for spills if needed
-        if stack_space > 0 {
-            // add sp, sp, #stack_space
-            self.emit_add_sp_imm(stack_space as i64);
-        }
+        // Emit placeholder ADD for stack deallocation (will be patched to match prologue)
+        let epilogue_placeholder_index = self.code.len();
+        self.emit_add_sp_imm(0xAAA);  // Placeholder - will be patched
 
         // Restore FP and LR (no callee-saved register restoration needed)
         self.emit_ldp(29, 30, 31, 2);    // ldp x29, x30, [sp], #16
@@ -394,8 +402,37 @@ impl Arm64CodeGen {
         // Emit return instruction
         self.emit_ret();
 
-        // Patch all placeholder instructions before applying fixups
-        // (Currently not used for top-level, but ready for per-function frames)
+        // Calculate actual stack size needed: spill slots + dynamic stack from push_to_stack
+        // Total stack = num_spill_slots + max_stack_size (from push_to_stack usage)
+        let total_stack_words = self.num_spill_slots + self.max_stack_size;
+        if self.num_spill_slots > 0 || self.max_stack_size > 0 {
+            eprintln!("DEBUG compile() END: num_spill_slots={}, max_stack_size={}, total_stack_words={}, code_len={}",
+                      self.num_spill_slots, self.max_stack_size, total_stack_words, self.code.len());
+        }
+        // Round up to even for 16-byte alignment
+        let aligned_stack_words = if total_stack_words % 2 != 0 {
+            total_stack_words + 1
+        } else {
+            total_stack_words
+        };
+        let stack_bytes = aligned_stack_words * 8;
+
+        // Patch prologue SUB and epilogue ADD with actual stack size
+        if stack_bytes > 0 {
+            // Generate correct SUB sp, sp, #stack_bytes
+            let sub_instruction = self.generate_stack_sub_sequence(stack_bytes as i64);
+            self.code[prologue_placeholder_index] = sub_instruction[0];
+
+            // Generate correct ADD sp, sp, #stack_bytes
+            let add_instruction = self.generate_stack_add_sequence(stack_bytes as i64);
+            self.code[epilogue_placeholder_index] = add_instruction[0];
+        } else {
+            // No stack needed - replace with NOP
+            self.code[prologue_placeholder_index] = 0xD503201F; // NOP
+            self.code[epilogue_placeholder_index] = 0xD503201F; // NOP
+        }
+
+        // Patch all per-function placeholder instructions
         self.patch_stack_placeholders();
 
         // NOW apply jump fixups after all labels are defined
@@ -405,6 +442,9 @@ impl Arm64CodeGen {
     }
 
     fn compile_instruction(&mut self, inst: &Instruction) -> Result<(), String> {
+        // Track current instruction for error reporting
+        self.current_instruction = Some(format!("{:?}", inst));
+
         match inst {
             Instruction::LoadConstant(dst, value) => {
                 let dest_spill = self.dest_spill(dst);
@@ -508,7 +548,21 @@ impl Arm64CodeGen {
                 // 2. Load var_ptr = var_table[var_id]
                 // 3. Untag var_ptr
                 // 4. Store value to var_ptr + 24
-                let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
+
+                // Handle TaggedConstant inline (like Beagle's Assign)
+                let value_reg = match value {
+                    IrValue::TaggedConstant(val) => {
+                        let temp = self.allocate_temp_register();
+                        self.emit_mov_imm(temp, *val as i64);
+                        temp
+                    }
+                    IrValue::Null => {
+                        let temp = self.allocate_temp_register();
+                        self.emit_mov_imm(temp, 0);
+                        temp
+                    }
+                    _ => self.get_physical_reg_for_irvalue(value, false)?
+                };
 
                 let temp_reg = 15;  // x15 as temp
 
@@ -526,6 +580,7 @@ impl Arm64CodeGen {
 
                 // Store value into var (offset 24 = header + ns_ptr + symbol_ptr)
                 self.emit_str_offset(value_reg, temp_reg, 24);
+                self.clear_temp_registers();
             }
 
             Instruction::LoadKeyword(dst, keyword_index) => {
@@ -588,20 +643,84 @@ impl Arm64CodeGen {
             Instruction::Untag(dst, src) => {
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
-                // eprintln!("DEBUG: Untag - dst={:?} (x{}), src={:?} (x{})", dst, dst_reg, src, src_reg);
-                // Untag: arithmetic right shift by 3
-                self.emit_asr_imm(dst_reg, src_reg, 3);
+                // Handle TaggedConstant: compute untagged value at compile time
+                match src {
+                    IrValue::TaggedConstant(val) => {
+                        // Untag: arithmetic right shift by 3
+                        let untagged = (*val as i64) >> 3;
+                        self.emit_mov_imm(dst_reg, untagged);
+                    }
+                    IrValue::Null => {
+                        // nil >> 3 = 0
+                        self.emit_mov_imm(dst_reg, 0);
+                    }
+                    _ => {
+                        let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                        // Untag: arithmetic right shift by 3
+                        self.emit_asr_imm(dst_reg, src_reg, 3);
+                    }
+                }
                 self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::Tag(dst, src, _tag) => {
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                // Handle TaggedConstant: this shouldn't normally happen but handle it
+                match src {
+                    IrValue::TaggedConstant(val) => {
+                        // Tag: left shift by 3 (int tag is 000)
+                        let tagged = (*val as i64) << 3;
+                        self.emit_mov_imm(dst_reg, tagged);
+                    }
+                    IrValue::Null => {
+                        // 0 << 3 = 0
+                        self.emit_mov_imm(dst_reg, 0);
+                    }
+                    _ => {
+                        let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                        // Tag: left shift by 3 (int tag is 000)
+                        self.emit_lsl_imm(dst_reg, src_reg, 3);
+                    }
+                }
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            // Immediate bitwise/shift operations
+            Instruction::AndImm(dst, src, mask) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
-                // eprintln!("DEBUG: Tag - dst={:?} (x{}), src={:?} (x{})", dst, dst_reg, src, src_reg);
-                // Tag: left shift by 3 (int tag is 000)
-                self.emit_lsl_imm(dst_reg, src_reg, 3);
+                // Note: emit_and_imm takes u32, but mask only uses lower bits for tag extraction
+                self.emit_and_imm(dst_reg, src_reg, *mask as u32);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::ShiftRightImm(dst, src, amount) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                // Logical shift right (unsigned)
+                self.emit_lsr_imm(dst_reg, src_reg, *amount as usize);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            // Memory operations
+            Instruction::HeapLoad(dst, ptr, offset) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let ptr_reg = self.get_physical_reg_for_irvalue(ptr, false)?;
+                // Load 64-bit value from ptr + offset*8
+                self.emit_ldr_offset(dst_reg, ptr_reg, *offset * 8);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::LoadByte(dst, ptr, offset) => {
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                let ptr_reg = self.get_physical_reg_for_irvalue(ptr, false)?;
+                // Load single byte from ptr + offset
+                self.emit_ldrb_offset(dst_reg, ptr_reg, *offset);
                 self.store_spill(dst_reg, dest_spill);
             }
 
@@ -831,9 +950,20 @@ impl Arm64CodeGen {
             Instruction::Assign(dst, src) => {
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
-                if dst_reg != src_reg {
-                    self.emit_mov(dst_reg, src_reg);
+                // Handle TaggedConstant inline (like Beagle does)
+                match src {
+                    IrValue::TaggedConstant(val) => {
+                        self.emit_mov_imm(dst_reg, *val as i64);
+                    }
+                    IrValue::Null => {
+                        self.emit_mov_imm(dst_reg, 0); // nil is 0
+                    }
+                    _ => {
+                        let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                        if dst_reg != src_reg {
+                            self.emit_mov(dst_reg, src_reg);
+                        }
+                    }
                 }
                 self.store_spill(dst_reg, dest_spill);
             }
@@ -1003,15 +1133,33 @@ impl Arm64CodeGen {
                 }
 
                 // Step 2: Push assignment sources to stack (for parallel assignment)
-                if !assignments.is_empty() {
-                    for (_, src) in assignments.iter() {
-                        let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                // Filter out assignments with constant destinations (these are no-ops)
+                let valid_assignments: Vec<_> = assignments.iter()
+                    .filter(|(dst, _)| !matches!(dst, IrValue::TaggedConstant(_) | IrValue::Null))
+                    .collect();
+
+                if !valid_assignments.is_empty() {
+                    for (_, src) in valid_assignments.iter() {
+                        // Handle TaggedConstant inline
+                        let src_reg = match src {
+                            IrValue::TaggedConstant(val) => {
+                                let temp = self.allocate_temp_register();
+                                self.emit_mov_imm(temp, *val as i64);
+                                temp
+                            }
+                            IrValue::Null => {
+                                let temp = self.allocate_temp_register();
+                                self.emit_mov_imm(temp, 0);
+                                temp
+                            }
+                            _ => self.get_physical_reg_for_irvalue(src, false)?
+                        };
                         self.emit_stp(src_reg, 31, 31, -2); // stp src, xzr, [sp, #-16]!
                         self.clear_temp_registers();
                     }
 
                     // Step 3: Pop into destinations (reverse order)
-                    for (dst, _) in assignments.iter().rev() {
+                    for (dst, _) in valid_assignments.iter().rev() {
                         let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                         self.emit_ldp(dst_reg, 31, 31, 2); // ldp dst, xzr, [sp], #16
                         self.clear_temp_registers();
@@ -1033,7 +1181,20 @@ impl Arm64CodeGen {
 
             Instruction::JumpIf(label, cond, src1, src2) => {
                 // Compare src1 and src2
-                let src1_reg = self.get_physical_reg_for_irvalue(src1, false)?;
+                // Handle src1 being a constant (load into temp register)
+                let src1_reg = match src1 {
+                    IrValue::TaggedConstant(val) => {
+                        let temp_reg = self.allocate_temp_register();
+                        self.emit_mov_imm(temp_reg, *val as i64);
+                        temp_reg
+                    }
+                    IrValue::Null => {
+                        let temp_reg = self.allocate_temp_register();
+                        self.emit_mov_imm(temp_reg, 0);
+                        temp_reg
+                    }
+                    _ => self.get_physical_reg_for_irvalue(src1, false)?
+                };
 
                 // Handle comparing with immediate values
                 match src2 {
@@ -1041,11 +1202,15 @@ impl Arm64CodeGen {
                         // Use CMP with immediate
                         self.emit_cmp_imm(src1_reg, *imm as i64);
                     }
+                    IrValue::Null => {
+                        self.emit_cmp_imm(src1_reg, 0);
+                    }
                     _ => {
                         let src2_reg = self.get_physical_reg_for_irvalue(src2, false)?;
                         self.emit_cmp(src1_reg, src2_reg);
                     }
                 }
+                self.clear_temp_registers();
 
                 // Emit conditional branch
                 let fixup_index = self.code.len();
@@ -1231,8 +1396,14 @@ impl Arm64CodeGen {
                     arg_source_regs.push(arg_reg);
                 }
 
+                // Use temp registers from pool (x9, x10, x11) instead of hardcoded x16/x17/x18
+                // x18 is RESERVED by macOS and must NEVER be used!
+                self.clear_temp_registers();
+                let tag_reg = self.allocate_temp_register();  // x11 from pool
+                let closure_ptr_reg = self.allocate_temp_register();  // x10 from pool
+                let code_ptr_reg = self.allocate_temp_register();  // x9 from pool
+
                 // Extract tag (fn_val & 0b111)
-                let tag_reg = 16;  // Use x16 for tag (IP0 register, safe to use)
                 self.emit_and_imm(tag_reg, fn_reg, 0b111);
 
                 // Check if Function (0b100) or Closure (0b101)
@@ -1245,14 +1416,12 @@ impl Arm64CodeGen {
                 // eprintln!("DEBUG: Call - emitting closure path");
 
                 // Untag closure pointer (shift right by 3)
-                let closure_ptr_reg = 17;  // x17 = untagged closure pointer (IP1 register, safe to use)
                 // LSR Xd, Xn, #3 - Logical shift right by 3 = UBFM Xd, Xn, #3, #63
                 let lsr_instruction = 0xD343FC00u32 | ((fn_reg as u32) << 5) | (closure_ptr_reg as u32);
                 self.code.push(lsr_instruction);
 
                 // Load code_ptr from heap object field 1 (using closure_layout constants)
                 use crate::gc_runtime::closure_layout;
-                let code_ptr_reg = 18;  // x18 = code pointer (PR register, safe to use)
                 self.emit_ldr_offset(code_ptr_reg, closure_ptr_reg, closure_layout::FIELD_1_CODE_PTR as i32);
 
                 // Set up closure calling convention: x0 = closure object, user args in x1-x7
@@ -1633,23 +1802,41 @@ impl Arm64CodeGen {
 
             Instruction::Ret(value) => {
                 // Move result to x0 (return register)
-                let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
-                if src_reg != 0 {
-                    self.emit_mov(0, src_reg);
+                // Match on value type like Beagle does (ir.rs:1884-1929)
+                match value {
+                    IrValue::Register(_) => {
+                        let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
+                        if src_reg != 0 {
+                            self.emit_mov(0, src_reg);
+                        }
+                    }
+                    IrValue::TaggedConstant(val) => {
+                        // Direct constant load to return register
+                        self.emit_mov_imm(0, *val as i64);
+                    }
+                    IrValue::Null => {
+                        // Null is tagged value 7 (nil tag)
+                        self.emit_mov_imm(0, 7);
+                    }
+                    IrValue::RawConstant(val) => {
+                        // Raw constant (untagged)
+                        self.emit_mov_imm(0, *val);
+                    }
+                    _ => {
+                        // For spills and other values, use generic handler
+                        let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
+                        if src_reg != 0 {
+                            self.emit_mov(0, src_reg);
+                        }
+                    }
                 }
 
-                // DEBUG: Print epilogue info
-                // eprintln!("DEBUG Ret: is_per_function={}, stack_space={}, callee_saved={:?}",
-                //           self.is_per_function_compilation, self.function_stack_space, self.saved_callee_registers);
-
-                // Emit function epilogue
+                // Emit function epilogue (Beagle-style with placeholder for patching)
                 if self.is_per_function_compilation {
-                    // Per-function compilation: restore what was saved and return
-
-                    // Deallocate spill stack space
-                    if self.function_stack_space > 0 {
-                        self.emit_add_sp_imm(self.function_stack_space as i64);
-                    }
+                    // Per-function compilation: emit placeholder ADD for stack deallocation
+                    // This will be patched with actual stack size after compilation
+                    // Use 0xAAA as magic value (fits in 12-bit immediate field)
+                    self.emit_add_sp_imm(0xAAA);  // Placeholder - will be patched
 
                     // Restore callee-saved registers in reverse order
                     if !self.saved_callee_registers.is_empty() {
@@ -1668,22 +1855,19 @@ impl Arm64CodeGen {
                     self.emit_ldp(29, 30, 31, 2);
                 } else {
                     // For top-level code (compile method), just jump to epilogue
-                    // eprintln!("DEBUG: Ret - jumping to epilogue (top-level)");
                     self.emit_jump(&"__epilogue".to_string());
                     return Ok(());  // Don't emit ret here, epilogue will do it
                 }
 
-                // eprintln!("DEBUG: Emitting ret instruction");
                 self.emit_ret();
             }
 
             Instruction::CallWithSaves(dst, fn_val, args, saves) => {
                 // DEBUG: Print what we're saving (clear temps after)
-                let save_regs: Vec<usize> = saves.iter()
+                let _save_regs: Vec<usize> = saves.iter()
                     .filter_map(|v| self.get_physical_reg_for_irvalue(v, false).ok())
                     .collect();
                 self.clear_temp_registers();
-                // eprintln!("DEBUG CallWithSaves: saving {} registers: {:?}", saves.len(), save_regs);
 
                 // STEP 1: Save volatile registers to stack (in pairs for 16-byte alignment)
                 // Clear temps between pairs to avoid exhausting pool
@@ -1736,8 +1920,14 @@ impl Arm64CodeGen {
 
                 let arg_count = args.len();
 
+                // Use temp registers from pool (x9, x10, x11) instead of hardcoded x16/x17/x18
+                // x18 is RESERVED by macOS and must NEVER be used!
+                self.clear_temp_registers();
+                let tag_reg = self.allocate_temp_register();  // x11 from pool
+                let closure_ptr_reg = self.allocate_temp_register();  // x10 from pool
+                let code_ptr_reg = self.allocate_temp_register();  // x9 from pool
+
                 // Extract tag (fn_val & 0b111)
-                let tag_reg = 16;  // Use x16 for tag (IP0 register, safe to use)
                 self.emit_and_imm(tag_reg, fn_reg, 0b111);
 
                 // Check if Function (0b100) or Closure (0b101)
@@ -1750,15 +1940,14 @@ impl Arm64CodeGen {
                 // Could be single-arity (TYPE_ID_FUNCTION=12) or multi-arity (TYPE_ID_MULTI_ARITY_FN=14)
 
                 // Untag closure pointer (shift right by 3)
-                let closure_ptr_reg = 17;  // x17 = untagged closure pointer
                 let lsr_instruction = 0xD343FC00u32 | ((fn_reg as u32) << 5) | (closure_ptr_reg as u32);
                 self.code.push(lsr_instruction);
 
                 // Load type_id from header (byte 7 of header)
                 // Header layout: | flags(1) | pad(1) | size(1) | type_data(4) | type_id(1) |
                 // So type_id is at byte offset 7
-                // Use LDRB to load just the type_id byte
-                let type_id_reg = 16;  // Reuse x16
+                // Use LDRB to load just the type_id byte - reuse tag_reg since we're done with it
+                let type_id_reg = tag_reg;
                 self.emit_ldrb_offset(type_id_reg, closure_ptr_reg, 7);
 
                 // Check if multi-arity (type_id == 14)
@@ -1769,7 +1958,7 @@ impl Arm64CodeGen {
 
                 // === Single-arity closure path (type_id == 12) ===
                 use crate::gc_runtime::closure_layout;
-                let code_ptr_reg = 18;  // x18 = code pointer
+                // code_ptr_reg already allocated from temp pool above
                 self.emit_ldr_offset(code_ptr_reg, closure_ptr_reg, closure_layout::FIELD_1_CODE_PTR as i32);
 
                 // Set up closure calling convention:
@@ -1913,7 +2102,20 @@ impl Arm64CodeGen {
                 // Step 2: Store field values to stack
                 // Clear temps after each to avoid exhausting pool with many fields
                 for (i, value) in field_values.iter().enumerate() {
-                    let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
+                    // Handle TaggedConstant inline
+                    let src_reg = match value {
+                        IrValue::TaggedConstant(val) => {
+                            let temp = self.allocate_temp_register();
+                            self.emit_mov_imm(temp, *val as i64);
+                            temp
+                        }
+                        IrValue::Null => {
+                            let temp = self.allocate_temp_register();
+                            self.emit_mov_imm(temp, 0);
+                            temp
+                        }
+                        _ => self.get_physical_reg_for_irvalue(value, false)?
+                    };
                     let offset = i * 8;
                     self.emit_str_offset(src_reg, 31, offset as i32);
                     self.clear_temp_registers();
@@ -1975,7 +2177,20 @@ impl Arm64CodeGen {
 
                 // STEP 3: Store field values to stack (SP-relative for trampoline args)
                 for (i, value) in field_values.iter().enumerate() {
-                    let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
+                    // Handle TaggedConstant inline
+                    let src_reg = match value {
+                        IrValue::TaggedConstant(val) => {
+                            let temp = self.allocate_temp_register();
+                            self.emit_mov_imm(temp, *val as i64);
+                            temp
+                        }
+                        IrValue::Null => {
+                            let temp = self.allocate_temp_register();
+                            self.emit_mov_imm(temp, 0);
+                            temp
+                        }
+                        _ => self.get_physical_reg_for_irvalue(value, false)?
+                    };
                     let offset = i * 8;
                     self.emit_str_offset(src_reg, 31, offset as i32);
                     self.clear_temp_registers();
@@ -2222,6 +2437,163 @@ impl Arm64CodeGen {
                 panic!("ExternalCall should have been transformed to ExternalCallWithSaves");
             }
 
+            Instruction::CallDirect(dst, code_ptr, args, is_closure, arg_count_reg) => {
+                // CallDirect: Low-level call with pre-computed code pointer
+                // The tag extraction and dispatch logic has already been done in IR.
+                // This just sets up arguments and makes the call.
+                //
+                // For closures: x0 = closure, user args in x1-x7, x9 = arg count
+                // For functions: user args in x0-x7
+
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+
+                if args.len() > 8 {
+                    return Err("CallDirect with more than 8 arguments not yet supported".to_string());
+                }
+
+                // Get the code pointer register
+                let code_ptr_reg = self.get_physical_reg_for_irvalue(code_ptr, false)?;
+                self.clear_temp_registers();
+
+                // Collect argument source registers
+                let mut arg_source_regs = Vec::new();
+                for arg in args.iter() {
+                    let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
+                    arg_source_regs.push(arg_reg);
+                    self.clear_temp_registers();
+                }
+
+                // Set up arguments in calling convention registers
+                // Note: args already have closure as first element if is_closure is true
+                for (i, &src_reg) in arg_source_regs.iter().enumerate() {
+                    if i != src_reg {
+                        self.emit_mov(i, src_reg);
+                    }
+                }
+
+                // Set arg count in x9 for variadic support (if provided)
+                if let Some(ac) = arg_count_reg {
+                    let ac_reg = self.get_physical_reg_for_irvalue(ac, false)?;
+                    if ac_reg != 9 {
+                        self.emit_mov(9, ac_reg);
+                    }
+                } else if *is_closure {
+                    // For closures without explicit arg_count_reg, emit the count
+                    // User args = total args - 1 (closure is first arg)
+                    let user_arg_count = args.len().saturating_sub(1);
+                    self.emit_mov_imm(9, user_arg_count as i64);
+                }
+
+                // Make the call
+                self.emit_blr(code_ptr_reg);
+
+                // Result is in x0
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
+                }
+
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::CallDirectWithSaves(dst, code_ptr, args, is_closure, arg_count_reg, saves) => {
+                // CallDirectWithSaves: Same as CallDirect but with register preservation
+                //
+                // Following Beagle's pattern:
+                // 1. Save volatile registers to stack
+                // 2. Set up arguments
+                // 3. Make the call
+                // 4. Restore saved registers
+
+                // STEP 1: Save volatile registers to stack (in pairs for 16-byte alignment)
+                let _save_regs: Vec<usize> = saves.iter()
+                    .filter_map(|v| self.get_physical_reg_for_irvalue(v, false).ok())
+                    .collect();
+                self.clear_temp_registers();
+
+                for save_pair in saves.chunks(2) {
+                    if save_pair.len() == 2 {
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
+                        self.emit_stp(r1, r2, 31, -2);
+                    } else {
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        self.emit_stp(r1, 31, 31, -2);  // Pair with xzr
+                    }
+                    self.clear_temp_registers();
+                }
+
+                // Track stack bytes for patching
+                let save_bytes = ((saves.len() + 1) / 2) * 16;
+                self.current_function_stack_bytes += save_bytes;
+
+                // Update stack size tracking for GC
+                let save_words = ((saves.len() + 1) / 2) * 2;
+                self.increment_stack_size(save_words);
+
+                // STEP 2: Get destination and code pointer
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+
+                if args.len() > 8 {
+                    return Err("CallDirectWithSaves with more than 8 arguments not yet supported".to_string());
+                }
+
+                let code_ptr_reg = self.get_physical_reg_for_irvalue(code_ptr, false)?;
+                self.clear_temp_registers();
+
+                // Collect argument source registers
+                let mut arg_source_regs = Vec::new();
+                for arg in args.iter() {
+                    let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
+                    arg_source_regs.push(arg_reg);
+                    self.clear_temp_registers();
+                }
+
+                // STEP 3: Set up arguments
+                for (i, &src_reg) in arg_source_regs.iter().enumerate() {
+                    if i != src_reg {
+                        self.emit_mov(i, src_reg);
+                    }
+                }
+
+                // Set arg count in x9 for variadic support (if provided)
+                if let Some(ac) = arg_count_reg {
+                    let ac_reg = self.get_physical_reg_for_irvalue(ac, false)?;
+                    if ac_reg != 9 {
+                        self.emit_mov(9, ac_reg);
+                    }
+                } else if *is_closure {
+                    let user_arg_count = args.len().saturating_sub(1);
+                    self.emit_mov_imm(9, user_arg_count as i64);
+                }
+
+                // STEP 4: Make the call
+                self.emit_blr(code_ptr_reg);
+
+                // Result is in x0
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
+                }
+
+                self.store_spill(dst_reg, dest_spill);
+
+                // STEP 5: Restore saved registers (reverse order)
+                self.decrement_stack_size(save_words);
+
+                for save_pair in saves.chunks(2).rev() {
+                    if save_pair.len() == 2 {
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        let r2 = self.get_physical_reg_for_irvalue(&save_pair[1], false)?;
+                        self.emit_ldp(r1, r2, 31, 2);
+                    } else {
+                        let r1 = self.get_physical_reg_for_irvalue(&save_pair[0], false)?;
+                        self.emit_ldp(r1, 31, 31, 2);
+                    }
+                    self.clear_temp_registers();
+                }
+            }
+
             // Multi-arity function instructions
             Instruction::MakeMultiArityFn(dst, arities, variadic_min, closure_values) => {
                 // Create a multi-arity function object on the heap
@@ -2317,7 +2689,9 @@ impl Arm64CodeGen {
                 use crate::gc_runtime::multi_arity_layout;
 
                 // Untag closure pointer (shift right by 3)
-                let ptr_reg = 16;
+                // Use temp register from pool instead of hardcoded register
+                self.clear_temp_registers();
+                let ptr_reg = self.allocate_temp_register();
                 let lsr_instruction = 0xD343FC00u32 | ((fn_reg as u32) << 5) | (ptr_reg as u32);
                 self.code.push(lsr_instruction);
 
@@ -2563,7 +2937,21 @@ impl Arm64CodeGen {
                 // For destination, just return temp_reg without loading
                 Ok(temp_reg)
             }
-            _ => Err(format!("Expected register or spill, got {:?}", value)),
+            IrValue::TaggedConstant(_) | IrValue::Null => {
+                // TaggedConstant and Null should be converted to registers via assign_new
+                // in the compiler BEFORE reaching codegen. If we hit this, it means
+                // the compiler is missing an assign_new call.
+                // Beagle handles these only in specific instructions (Ret, Assign, JumpIf, etc.),
+                // not via a generic "get register for value" function.
+                let inst_info = self.current_instruction.as_deref().unwrap_or("unknown");
+                Err(format!(
+                    "Codegen received {:?} where a register was expected.\n\
+                     This value should have been converted to a register via assign_new() in the compiler.\n\
+                     Instruction: {}",
+                    value, inst_info
+                ))
+            }
+            _ => Err(format!("Expected register, spill, or constant, got {:?}", value)),
         }
     }
 
@@ -2992,6 +3380,18 @@ impl Arm64CodeGen {
         self.code.push(instruction);
     }
 
+    fn emit_lsr_imm(&mut self, dst: usize, src: usize, shift: usize) {
+        // LSR Xd, Xn, #shift (logical shift right - unsigned)
+        // This is UBFM (Unsigned Bitfield Move)
+        // LSR #shift is: UBFM Xd, Xn, #shift, #63
+        // Encoding: sf=1 opc=10 N=1 immr=shift imms=63
+        // 1 10 100110 1 immr imms Rn Rd
+        // = 0xD340FC00 | (shift << 16) | (src << 5) | dst
+        let shift = (shift as u32) & 0x3F; // 6 bits
+        let instruction = 0xD340FC00 | (shift << 16) | ((src as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
     fn emit_cmp(&mut self, src1: usize, src2: usize) {
         // CMP Xn, Xm (compare - this is SUBS XZR, Xn, Xm)
         let instruction = 0xEB00001F | ((src2 as u32) << 16) | ((src1 as u32) << 5);
@@ -3133,43 +3533,82 @@ impl Arm64CodeGen {
         self.emit_load_from_fp(reg, byte_offset);
     }
 
-    /// Push register to stack using STR with pre-decrement
-    /// This modifies SP and stores at the new SP location
+    /// Push register to stack (Beagle: push_to_stack)
+    /// Increments logical stack_size and stores at FP-relative offset
+    /// Does NOT modify SP - stack space is allocated in prologue
     fn push_to_stack(&mut self, reg: usize) {
-        // STR Xreg, [SP, #-16]! (pre-decrement SP by 16 for alignment, store reg)
-        // We use 16-byte alignment for ABI compliance
-        self.emit_str_pre_index(reg, 31, -16);
+        self.current_stack_size += 1;
+        if self.current_stack_size > self.max_stack_size {
+            self.max_stack_size = self.current_stack_size;
+        }
+        // Offset = -(num_spill_slots + current_stack_size)
+        // This places saves AFTER spill slots in the stack frame
+        let offset = -((self.num_spill_slots as i32) + (self.current_stack_size as i32));
+        self.store_on_stack(reg, offset);
     }
 
-    /// Pop register from stack using LDR with post-increment
-    /// This loads from SP and then increments SP
+    /// Pop register from stack (Beagle: pop_from_stack)
+    /// Decrements logical stack_size and loads from FP-relative offset
+    /// Does NOT modify SP - stack space is deallocated in epilogue
     fn pop_from_stack(&mut self, reg: usize) {
-        // LDR Xreg, [SP], #16 (load reg, then post-increment SP by 16)
-        self.emit_ldr_post_index(reg, 31, 16);
+        // Load from the slot we're about to pop
+        let offset = -((self.num_spill_slots as i32) + (self.current_stack_size as i32));
+        self.load_from_stack(reg, offset);
+        // Then decrement the logical stack size
+        self.current_stack_size = self.current_stack_size.saturating_sub(1);
     }
 
-    /// Emit STR with pre-indexed addressing: STR Xt, [Xn, #imm]!
-    fn emit_str_pre_index(&mut self, rt: usize, rn: usize, imm: i32) {
-        // STR (immediate, pre-index): 1111100000 0 imm9 11 Rn Rt
-        // imm9 is signed 9-bit offset (-256 to 255)
-        let imm9 = (imm as u32) & 0x1FF;
-        let instruction = 0xF8000C00
-            | (imm9 << 12)
-            | ((rn as u32) << 5)
-            | (rt as u32);
-        self.code.push(instruction);
+    /// Patch prologue and epilogue with actual stack size (Beagle-style)
+    /// Finds placeholder instructions and replaces with correct stack allocation
+    fn patch_prologue_epilogue(&mut self, prologue_index: usize, stack_bytes: usize) {
+        if stack_bytes == 0 {
+            // No stack needed - replace with NOP
+            self.code[prologue_index] = 0xD503201F; // NOP
+            // Find and patch epilogue placeholder too
+            if let Some(epilogue_index) = self.find_epilogue_placeholder() {
+                self.code[epilogue_index] = 0xD503201F; // NOP
+            }
+            return;
+        }
+
+        // Patch prologue SUB
+        if stack_bytes <= 4095 {
+            // Single SUB instruction: SUB SP, SP, #stack_bytes
+            let instruction = 0xD1000000  // SUB (immediate) base
+                | ((stack_bytes as u32) << 10)  // imm12
+                | (31 << 5)  // Rn = SP
+                | 31;  // Rd = SP
+            self.code[prologue_index] = instruction;
+        } else {
+            // For large stack sizes, we need multiple instructions
+            // For now, panic - we can add multi-instruction support later
+            panic!("Stack size {} too large for single SUB instruction", stack_bytes);
+        }
+
+        // Find and patch epilogue ADD placeholder
+        if let Some(epilogue_index) = self.find_epilogue_placeholder() {
+            if stack_bytes <= 4095 {
+                // Single ADD instruction: ADD SP, SP, #stack_bytes
+                let instruction = 0x91000000  // ADD (immediate) base
+                    | ((stack_bytes as u32) << 10)  // imm12
+                    | (31 << 5)  // Rn = SP
+                    | 31;  // Rd = SP
+                self.code[epilogue_index] = instruction;
+            } else {
+                panic!("Stack size {} too large for single ADD instruction", stack_bytes);
+            }
+        }
     }
 
-    /// Emit LDR with post-indexed addressing: LDR Xt, [Xn], #imm
-    fn emit_ldr_post_index(&mut self, rt: usize, rn: usize, imm: i32) {
-        // LDR (immediate, post-index): 1111100001 0 imm9 01 Rn Rt
-        // imm9 is signed 9-bit offset (-256 to 255)
-        let imm9 = (imm as u32) & 0x1FF;
-        let instruction = 0xF8400400
-            | (imm9 << 12)
-            | ((rn as u32) << 5)
-            | (rt as u32);
-        self.code.push(instruction);
+    /// Find the epilogue placeholder ADD instruction (has magic value 0xAAA)
+    fn find_epilogue_placeholder(&self) -> Option<usize> {
+        // Look for ADD SP, SP, #0xAAA from the end
+        // emit_add_sp_imm produces: 0x910003FF | (imm << 10)
+        // So for imm=0xAAA: 0x910003FF | (0xAAA << 10) = 0x910003FF | 0x2AA800 = 0x912AABFF
+        let expected = 0x910003FF_u32 | (0xAAA << 10);
+
+        let result = self.code.iter().rposition(|&inst| inst == expected);
+        result
     }
 
     /// Emit ADD with potentially large immediate (positive or negative)
@@ -3200,7 +3639,7 @@ impl Arm64CodeGen {
 
         // Emit placeholder SUB instruction (will be patched later)
         let prologue_idx = self.code.len();
-        self.emit_sub_sp_imm(0x1111);    // Magic placeholder value
+        self.emit_sub_sp_imm(0xAAA);    // Magic placeholder value (fits in 12-bit imm)
 
         // Record placeholder position
         self.placeholder_positions.entry(label.clone())
@@ -3216,7 +3655,7 @@ impl Arm64CodeGen {
     fn emit_epilogue_with_placeholder(&mut self, label: &Label) {
         // Emit placeholder ADD instruction (will be patched later)
         let epilogue_idx = self.code.len();
-        self.emit_add_sp_imm(0x1111);    // Magic placeholder value
+        self.emit_add_sp_imm(0xAAA);    // Magic placeholder value (fits in 12-bit imm)
 
         // Record placeholder position
         if let Some((_, epi)) = self.placeholder_positions.get_mut(label) {

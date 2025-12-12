@@ -440,6 +440,17 @@ public class DirectoryTester {
         if (!javaFailedFiles.isEmpty()) {
             System.out.println("\nFirst 50 Java parser failures (Acorn succeeded):");
             javaFailedFiles.forEach(f -> System.out.println("  " + f));
+
+            // Also write to a file for easy access
+            try (BufferedWriter failureWriter = new BufferedWriter(new FileWriter("/tmp/java-parser-failures.txt"))) {
+                for (String f : javaFailedFiles) {
+                    failureWriter.write(f);
+                    failureWriter.newLine();
+                }
+                System.out.println("  (Also written to /tmp/java-parser-failures.txt)");
+            } catch (IOException e) {
+                // Ignore
+            }
         }
 
         if (!javaSucceededAcornFailedFiles.isEmpty()) {

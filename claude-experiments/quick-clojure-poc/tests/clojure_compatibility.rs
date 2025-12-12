@@ -4,7 +4,6 @@
 /// then compare the outputs to ensure compatibility.
 
 use std::process::Command;
-use std::fs;
 use std::sync::OnceLock;
 use std::path::PathBuf;
 
@@ -32,22 +31,10 @@ fn get_binary_path() -> &'static PathBuf {
 fn run_our_impl(expr: &str) -> String {
     let binary_path = get_binary_path();
 
-    // Use tempfile to get a unique path, but persist the file
-    // This ensures the file exists during the entire execution
-    let temp_dir = tempfile::tempdir()
-        .expect("Failed to create temp dir");
-
-    let temp_path = temp_dir.path().join("test.clj");
-
-    fs::write(&temp_path, expr)
-        .expect("Failed to write temp file");
-
     let output = Command::new(&binary_path)
-        .arg(temp_path.to_str().unwrap())
+        .args(&["-e", expr])
         .output()
         .expect("Failed to execute our implementation");
-
-    // temp_dir (and its contents) are automatically deleted when it goes out of scope
 
     // Only get stdout, ignore stderr (which has DEBUG output)
     String::from_utf8_lossy(&output.stdout).trim().to_string()
@@ -55,8 +42,15 @@ fn run_our_impl(expr: &str) -> String {
 
 /// Helper to run an expression through Clojure
 fn run_clojure(expr: &str) -> String {
+    // Create a clean directory to run clj from (avoid picking up src/clojure/core.clj)
+    let clean_dir = std::path::Path::new("/tmp/clojure-running");
+    // Remove and recreate to ensure it's clean
+    let _ = std::fs::remove_dir_all(clean_dir);
+    std::fs::create_dir_all(clean_dir).expect("Failed to create clean directory");
+
     let output = Command::new("clj")
         .args(&["-e", expr])
+        .current_dir(clean_dir)
         .output()
         .expect("Failed to execute Clojure - is it installed?");
 
@@ -330,4 +324,68 @@ fn test_nested_fn_calls() {
 #[test]
 fn test_fn_returning_fn() {
     assert_matches_clojure("(((fn [x] (fn [y] (+ x y))) 10) 5)");
+}
+
+// ============================================================================
+// Deep Nesting Tests - Stress test register allocation
+// ============================================================================
+
+#[test]
+fn test_deeply_nested_addition() {
+    // (+ (+ (+ (+ (+ 1 2) 3) 4) 5) 6) = 21
+    assert_matches_clojure("(+ (+ (+ (+ (+ 1 2) 3) 4) 5) 6)");
+}
+
+#[test]
+fn test_deeply_nested_let() {
+    // Nested lets with many variables in scope
+    assert_matches_clojure("(let [a 1] (let [b 2] (let [c 3] (let [d 4] (let [e 5] (+ a (+ b (+ c (+ d e)))))))))");
+}
+
+#[test]
+fn test_many_variables_in_let() {
+    // Many bindings in single let
+    assert_matches_clojure("(let [a 1 b 2 c 3 d 4 e 5 f 6 g 7 h 8] (+ a (+ b (+ c (+ d (+ e (+ f (+ g h))))))))");
+}
+
+#[test]
+fn test_nested_fn_many_closures() {
+    // Multiple levels of closures capturing variables
+    assert_matches_clojure("(let [a 1] ((fn [b] (let [c 2] ((fn [d] (+ a (+ b (+ c d)))) 4))) 3))");
+}
+
+#[test]
+fn test_deeply_nested_arithmetic() {
+    // Complex nested arithmetic: ((1 + 2) * 3) + ((4 - 1) * 2) = 9 + 6 = 15
+    assert_matches_clojure("(+ (* (+ 1 2) 3) (* (- 4 1) 2))");
+}
+
+#[test]
+fn test_ten_variable_let() {
+    // 10 variables in scope simultaneously
+    assert_matches_clojure("(let [v1 1 v2 2 v3 3 v4 4 v5 5 v6 6 v7 7 v8 8 v9 9 v10 10] (+ v1 (+ v2 (+ v3 (+ v4 (+ v5 (+ v6 (+ v7 (+ v8 (+ v9 v10))))))))))");
+}
+
+#[test]
+fn test_nested_closures_deep() {
+    // 5-level deep closure nesting
+    assert_matches_clojure("((((((fn [a] (fn [b] (fn [c] (fn [d] (fn [e] (+ a (+ b (+ c (+ d e))))))))) 1) 2) 3) 4) 5)");
+}
+
+#[test]
+fn test_mixed_nested_operations() {
+    // Mix of let, fn, and arithmetic deeply nested
+    assert_matches_clojure("(let [x 10] ((fn [y] (let [z 3] (+ x (+ y (* z 2))))) 5))");
+}
+
+#[test]
+fn test_many_fn_args() {
+    // Function with many arguments
+    assert_matches_clojure("((fn [a b c d e f] (+ a (+ b (+ c (+ d (+ e f)))))) 1 2 3 4 5 6)");
+}
+
+#[test]
+fn test_chained_closures() {
+    // Chain of closures each capturing previous value
+    assert_matches_clojure("(let [f1 (fn [x] (+ x 1)) f2 (fn [x] (+ (f1 x) 2)) f3 (fn [x] (+ (f2 x) 3))] (f3 10))")
 }

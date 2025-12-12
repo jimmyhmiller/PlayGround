@@ -169,9 +169,24 @@ impl LinearScan {
             | Instruction::GetTag(dst, src)
             | Instruction::LoadFloat(dst, src)
             | Instruction::AllocateFloat(dst, src)
-            | Instruction::BitNot(dst, src) => {
+            | Instruction::BitNot(dst, src)
+            | Instruction::Untag(dst, src) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
                 if let IrValue::Register(r) = src { regs.push(*r); }
+            }
+
+            // Immediate operations (dst, src, immediate)
+            Instruction::AndImm(dst, src, _)
+            | Instruction::ShiftRightImm(dst, src, _) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = src { regs.push(*r); }
+            }
+
+            // Heap access (dst, ptr, offset)
+            Instruction::HeapLoad(dst, ptr, _)
+            | Instruction::LoadByte(dst, ptr, _) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = ptr { regs.push(*r); }
             }
 
             Instruction::Compare(dst, src1, src2, _) => {
@@ -185,10 +200,7 @@ impl LinearScan {
                 if let IrValue::Register(r) = src { regs.push(*r); }
             }
 
-            Instruction::Untag(dst, src) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = src { regs.push(*r); }
-            }
+            // Note: Untag is handled above with the other dst/src instructions
 
             Instruction::LoadConstant(dst, _)
             | Instruction::LoadVar(dst, _)
@@ -260,6 +272,31 @@ impl LinearScan {
                 if let IrValue::Register(r) = fn_val { regs.push(*r); }
                 for arg in args {
                     if let IrValue::Register(r) = arg { regs.push(*r); }
+                }
+                for save in saves {
+                    if let IrValue::Register(r) = save { regs.push(*r); }
+                }
+            }
+
+            Instruction::CallDirect(dst, code_ptr, args, _is_closure, arg_count_reg) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = code_ptr { regs.push(*r); }
+                for arg in args {
+                    if let IrValue::Register(r) = arg { regs.push(*r); }
+                }
+                if let Some(ac) = arg_count_reg {
+                    if let IrValue::Register(r) = ac { regs.push(*r); }
+                }
+            }
+
+            Instruction::CallDirectWithSaves(dst, code_ptr, args, _is_closure, arg_count_reg, saves) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = code_ptr { regs.push(*r); }
+                for arg in args {
+                    if let IrValue::Register(r) = arg { regs.push(*r); }
+                }
+                if let Some(ac) = arg_count_reg {
+                    if let IrValue::Register(r) = ac { regs.push(*r); }
                 }
                 for save in saves {
                     if let IrValue::Register(r) = save { regs.push(*r); }
@@ -561,6 +598,20 @@ impl LinearScan {
                 replace(src);
             }
 
+            // Immediate operations (dst, src, imm)
+            Instruction::AndImm(dst, src, _)
+            | Instruction::ShiftRightImm(dst, src, _) => {
+                replace(dst);
+                replace(src);
+            }
+
+            // Heap access (dst, ptr, offset)
+            Instruction::HeapLoad(dst, ptr, _)
+            | Instruction::LoadByte(dst, ptr, _) => {
+                replace(dst);
+                replace(ptr);
+            }
+
             Instruction::LoadConstant(dst, _)
             | Instruction::LoadVar(dst, _)
             | Instruction::LoadVarDynamic(dst, _)
@@ -631,6 +682,31 @@ impl LinearScan {
                 replace(fn_val);
                 for arg in args {
                     replace(arg);
+                }
+                for save in saves {
+                    replace(save);
+                }
+            }
+
+            Instruction::CallDirect(dst, code_ptr, args, _is_closure, arg_count_reg) => {
+                replace(dst);
+                replace(code_ptr);
+                for arg in args {
+                    replace(arg);
+                }
+                if let Some(ac) = arg_count_reg {
+                    replace(ac);
+                }
+            }
+
+            Instruction::CallDirectWithSaves(dst, code_ptr, args, _is_closure, arg_count_reg, saves) => {
+                replace(dst);
+                replace(code_ptr);
+                for arg in args {
+                    replace(arg);
+                }
+                if let Some(ac) = arg_count_reg {
+                    replace(ac);
                 }
                 for save in saves {
                     replace(save);
@@ -938,6 +1014,20 @@ impl LinearScan {
                 replace(src);
             }
 
+            // Immediate operations (dst, src, imm)
+            Instruction::AndImm(dst, src, _)
+            | Instruction::ShiftRightImm(dst, src, _) => {
+                replace(dst);
+                replace(src);
+            }
+
+            // Heap access (dst, ptr, offset)
+            Instruction::HeapLoad(dst, ptr, _)
+            | Instruction::LoadByte(dst, ptr, _) => {
+                replace(dst);
+                replace(ptr);
+            }
+
             Instruction::LoadConstant(dst, _)
             | Instruction::LoadVar(dst, _)
             | Instruction::LoadVarDynamic(dst, _)
@@ -1008,6 +1098,31 @@ impl LinearScan {
                 replace(fn_val);
                 for arg in args {
                     replace(arg);
+                }
+                for save in saves {
+                    replace(save);
+                }
+            }
+
+            Instruction::CallDirect(dst, code_ptr, args, _is_closure, arg_count_reg) => {
+                replace(dst);
+                replace(code_ptr);
+                for arg in args {
+                    replace(arg);
+                }
+                if let Some(ac) = arg_count_reg {
+                    replace(ac);
+                }
+            }
+
+            Instruction::CallDirectWithSaves(dst, code_ptr, args, _is_closure, arg_count_reg, saves) => {
+                replace(dst);
+                replace(code_ptr);
+                for arg in args {
+                    replace(arg);
+                }
+                if let Some(ac) = arg_count_reg {
+                    replace(ac);
                 }
                 for save in saves {
                     replace(save);

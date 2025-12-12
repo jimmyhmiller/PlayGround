@@ -153,25 +153,35 @@ impl Compiler {
     }
 
     fn compile_literal(&mut self, value: &Value) -> Result<IrValue, String> {
+        // OPTIMIZATION: Return constants directly without loading into registers.
+        // This prevents long-lived registers for literals in nested expressions.
+        // The codegen will load constants into temp registers when needed.
+        match value {
+            Value::Nil => {
+                return Ok(IrValue::Null);
+            }
+            Value::Bool(true) => {
+                // true: (1 << 3) | 0b011 = 11
+                return Ok(IrValue::TaggedConstant(11));
+            }
+            Value::Bool(false) => {
+                // false: (0 << 3) | 0b011 = 3
+                return Ok(IrValue::TaggedConstant(3));
+            }
+            Value::Int(i) => {
+                // Integers: value << 3 | 0b000 (tag 0)
+                let tagged = (*i as isize) << 3;
+                return Ok(IrValue::TaggedConstant(tagged));
+            }
+            _ => {} // Fall through to allocate a register for heap values
+        }
+
+        // Heap-allocated values (floats, strings, keywords) need registers
         let result = self.builder.new_register();
 
         match value {
-            Value::Nil => {
-                self.builder.emit(Instruction::LoadConstant(result, IrValue::Null));
-            }
-            Value::Bool(true) => {
-                self.builder.emit(Instruction::LoadTrue(result));
-            }
-            Value::Bool(false) => {
-                self.builder.emit(Instruction::LoadFalse(result));
-            }
-            Value::Int(i) => {
-                // For now, just store the raw value - we'll add tagging later
-                let tagged = (*i as isize) << 3;  // Simple 3-bit tag (000 for int)
-                self.builder.emit(Instruction::LoadConstant(
-                    result,
-                    IrValue::TaggedConstant(tagged),
-                ));
+            Value::Nil | Value::Bool(_) | Value::Int(_) => {
+                unreachable!("Handled above")
             }
             Value::Float(f) => {
                 // Floats are heap-allocated to preserve full precision
@@ -1198,7 +1208,10 @@ impl Compiler {
         // the correct registers from the outer scope
         let mut closure_values = Vec::new();
         for var_name in &free_vars {
-            if let Some(value_reg) = self.lookup_local(var_name) {
+            if let Some(value) = self.lookup_local(var_name) {
+                // Ensure closure values are in registers (not TaggedConstant)
+                // because MakeFunctionPtr needs physical registers
+                let value_reg = self.builder.assign_new(value);
                 closure_values.push(value_reg);
             } else {
                 return Err(format!("Free variable not found in scope: {}", var_name));
@@ -1763,7 +1776,16 @@ impl Compiler {
             arg_vals.push(self.compile(arg)?);
         }
 
-        // 3. Emit Call instruction
+        // 3. Ensure all values are in registers (convert constants if needed)
+        // This is important: constants in codegen use temp registers which can be
+        // clobbered by internal Call computation. By using assign_new here,
+        // we ensure proper register allocation.
+        let fn_val = self.builder.assign_new(fn_val);
+        let arg_vals: Vec<_> = arg_vals.into_iter()
+            .map(|v| self.builder.assign_new(v))
+            .collect();
+
+        // 4. Emit Call instruction
         let result = self.builder.new_register();
         self.builder.emit(Instruction::Call(result, fn_val, arg_vals));
 
@@ -1780,6 +1802,12 @@ impl Compiler {
         int_op: fn(IrValue, IrValue, IrValue) -> Instruction,
         float_op: fn(IrValue, IrValue, IrValue) -> Instruction,
     ) -> Result<IrValue, String> {
+        // Convert operands to registers at point of use (Beagle pattern)
+        // This is called AFTER inner expressions are compiled, so constants
+        // get registers that live only during this operation, not across nested calls.
+        let left = self.builder.assign_new(left);
+        let right = self.builder.assign_new(right);
+
         // Result register that both paths will write to
         let result = self.builder.new_register();
 
@@ -1979,6 +2007,10 @@ impl Compiler {
         let left = self.compile(&args[0])?;
         let right = self.compile(&args[1])?;
 
+        // Ensure operands are in registers (convert constants if needed)
+        let left = self.builder.assign_new(left);
+        let right = self.builder.assign_new(right);
+
         let left_untagged = self.builder.new_register();
         let right_untagged = self.builder.new_register();
         self.builder.emit(Instruction::Untag(left_untagged, left));
@@ -1998,6 +2030,10 @@ impl Compiler {
 
         let left = self.compile(&args[0])?;
         let right = self.compile(&args[1])?;
+
+        // Ensure operands are in registers (convert constants if needed)
+        let left = self.builder.assign_new(left);
+        let right = self.builder.assign_new(right);
 
         let left_untagged = self.builder.new_register();
         let right_untagged = self.builder.new_register();
@@ -2019,6 +2055,10 @@ impl Compiler {
         let left = self.compile(&args[0])?;
         let right = self.compile(&args[1])?;
 
+        // Ensure operands are in registers (convert constants if needed)
+        let left = self.builder.assign_new(left);
+        let right = self.builder.assign_new(right);
+
         let left_untagged = self.builder.new_register();
         let right_untagged = self.builder.new_register();
         self.builder.emit(Instruction::Untag(left_untagged, left));
@@ -2038,6 +2078,10 @@ impl Compiler {
         let left = self.compile(&args[0])?;
         let right = self.compile(&args[1])?;
 
+        // Ensure operands are in registers (convert constants if needed)
+        let left = self.builder.assign_new(left);
+        let right = self.builder.assign_new(right);
+
         let left_untagged = self.builder.new_register();
         let right_untagged = self.builder.new_register();
         self.builder.emit(Instruction::Untag(left_untagged, left));
@@ -2051,10 +2095,11 @@ impl Compiler {
 
     fn compile_builtin_println(&mut self, args: &[Expr]) -> Result<IrValue, String> {
         // println takes any number of arguments (including 0)
-        // Compile all arguments
+        // Compile all arguments and ensure they're in registers
         let mut arg_vals = Vec::new();
         for arg in args {
-            arg_vals.push(self.compile(arg)?);
+            let val = self.compile(arg)?;
+            arg_vals.push(self.builder.assign_new(val));
         }
 
         let result = self.builder.new_register();
@@ -2071,6 +2116,10 @@ impl Compiler {
 
         let left = self.compile(&args[0])?;
         let right = self.compile(&args[1])?;
+
+        // Ensure operands are in registers (convert constants if needed)
+        let left = self.builder.assign_new(left);
+        let right = self.builder.assign_new(right);
 
         // Compare tagged values directly - this preserves type information
         // nil (7), false (3), true (11), and integers (n<<3) all have different representations
@@ -2352,6 +2401,13 @@ impl Compiler {
     /// This clears the instruction buffer, allowing the compiler to be reused
     pub fn take_instructions(&mut self) -> Vec<Instruction> {
         self.builder.take_instructions()
+    }
+
+    /// Ensure a value is in a register (convert constants to registers if needed)
+    /// This is used for top-level compilation to ensure the result is always a register.
+    /// Following Beagle's pattern: constants are converted to registers at point of use.
+    pub fn ensure_register(&mut self, val: IrValue) -> IrValue {
+        self.builder.assign_new(val)
     }
 
     /// Take compiled function IRs (for display purposes)
