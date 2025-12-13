@@ -19,13 +19,14 @@ fn run_and_get_tagged(code: &str) -> i64 {
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
     let mut compiler = compiler::Compiler::new(runtime.clone());
-    let result_val = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
-    let result_reg = compiler.ensure_register(result_val);
+    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
+    let num_locals = compiler.builder.num_locals;
 
-    let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg, 0).expect(&format!("Codegen failed for: {}", code));
-    codegen.execute().expect(&format!("Execute failed for: {}", code))
+    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0)
+        .expect(&format!("Codegen failed for: {}", code));
+    let tramp = trampoline::Trampoline::new(64 * 1024);
+    unsafe { tramp.execute(compiled.code_ptr as *const u8) }
 }
 
 /// Helper function to run a test case expecting a boolean true result

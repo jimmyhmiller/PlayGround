@@ -30,15 +30,14 @@ fn run_test(code: &str, expected: i64) {
 
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     let mut compiler = compiler::Compiler::new(runtime);
-    let result_val = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
-    // Ensure result is in a register (following Beagle's pattern)
-    let result_reg = compiler.ensure_register(result_val);
+    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
+    let num_locals = compiler.builder.num_locals;
 
-    let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg, 0).expect(&format!("Codegen failed for: {}", code));
-    let tagged_result = codegen.execute()
-        .expect(&format!("Execute failed for: {}", code));
+    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0)
+        .expect(&format!("Codegen failed for: {}", code));
+    let tramp = trampoline::Trampoline::new(64 * 1024);
+    let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
 
     // Untag the result (integers are tagged by shifting left 3 bits)
     let result = tagged_result >> 3;
@@ -80,14 +79,13 @@ fn test_ir_backend_literals() {
         // IR-based backend
         let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
         let mut compiler = compiler::Compiler::new(runtime);
-        let result_val = compiler.compile(&ast).unwrap();
-        // Ensure result is in a register (following Beagle's pattern)
-        let result_reg = compiler.ensure_register(result_val);
+        compiler.compile_toplevel(&ast).unwrap();
         let instructions = compiler.take_instructions();
+        let num_locals = compiler.builder.num_locals;
 
-        let mut codegen = arm_codegen::Arm64CodeGen::new();
-        codegen.compile(&instructions, &result_reg, 0).unwrap();
-        let tagged_result = codegen.execute().unwrap();
+        let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
+        let tramp = trampoline::Trampoline::new(64 * 1024);
+        let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
         let result = tagged_result >> 3;
 
         assert_eq!(result, expected, "Literal test failed for: {}", code);
@@ -118,13 +116,13 @@ fn test_ir_backend_arithmetic() {
 
         let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
         let mut compiler = compiler::Compiler::new(runtime);
-        let result_val = compiler.compile(&ast).unwrap();
-        let result_reg = compiler.ensure_register(result_val);
+        compiler.compile_toplevel(&ast).unwrap();
         let instructions = compiler.take_instructions();
+        let num_locals = compiler.builder.num_locals;
 
-        let mut codegen = arm_codegen::Arm64CodeGen::new();
-        codegen.compile(&instructions, &result_reg, 0).unwrap();
-        let tagged_result = codegen.execute().unwrap();
+        let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
+        let tramp = trampoline::Trampoline::new(64 * 1024);
+        let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
         let result = tagged_result >> 3;
 
         assert_eq!(result, test.expected, "Failed for: {}", test.expr);
@@ -308,12 +306,12 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let code = "(def x 5)";
     let val = reader::read(code).unwrap();
     let ast = clojure_ast::analyze(&val).unwrap();
-    let result_val = compiler.compile(&ast).unwrap();
-    let result_reg = compiler.ensure_register(result_val);
+    compiler.compile_toplevel(&ast).unwrap();
     let instructions = compiler.take_instructions();
-    let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg, 0).unwrap();
-    let tagged_result = codegen.execute().unwrap();
+    let num_locals = compiler.builder.num_locals;
+    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
+    let tramp = trampoline::Trampoline::new(64 * 1024);
+    let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
     assert_eq!(tagged_result >> 3, 5);
 
     // Store the result in globals (simulating REPL behavior)
@@ -324,24 +322,24 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let code = "x";
     let val = reader::read(code).unwrap();
     let ast = clojure_ast::analyze(&val).unwrap();
-    let result_val = compiler.compile(&ast).unwrap();
-    let result_reg = compiler.ensure_register(result_val);
+    compiler.compile_toplevel(&ast).unwrap();
     let instructions = compiler.take_instructions();
-    let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg, 0).unwrap();
-    let tagged_result = codegen.execute().unwrap();
+    let num_locals = compiler.builder.num_locals;
+    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
+    let tramp = trampoline::Trampoline::new(64 * 1024);
+    let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
     assert_eq!(tagged_result >> 3, 5);
 
     // Define another variable using the first
     let code = "(def y (* x 2))";
     let val = reader::read(code).unwrap();
     let ast = clojure_ast::analyze(&val).unwrap();
-    let result_val = compiler.compile(&ast).unwrap();
-    let result_reg = compiler.ensure_register(result_val);
+    compiler.compile_toplevel(&ast).unwrap();
     let instructions = compiler.take_instructions();
-    let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg, 0).unwrap();
-    let tagged_result = codegen.execute().unwrap();
+    let num_locals = compiler.builder.num_locals;
+    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
+    let tramp = trampoline::Trampoline::new(64 * 1024);
+    let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
     assert_eq!(tagged_result >> 3, 10);
 
     // Note: set_global was removed as unused
@@ -351,12 +349,12 @@ fn test_ir_backend_def_with_persistent_compiler() {
     let code = "(+ x y)";
     let val = reader::read(code).unwrap();
     let ast = clojure_ast::analyze(&val).unwrap();
-    let result_val = compiler.compile(&ast).unwrap();
-    let result_reg = compiler.ensure_register(result_val);
+    compiler.compile_toplevel(&ast).unwrap();
     let instructions = compiler.take_instructions();
-    let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg, 0).unwrap();
-    let tagged_result = codegen.execute().unwrap();
+    let num_locals = compiler.builder.num_locals;
+    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
+    let tramp = trampoline::Trampoline::new(64 * 1024);
+    let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
     assert_eq!(tagged_result >> 3, 15);
 }
 

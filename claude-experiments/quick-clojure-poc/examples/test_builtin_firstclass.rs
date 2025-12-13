@@ -9,13 +9,14 @@ fn run_test(code: &str, expected: i64) {
 
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     let mut compiler = compiler::Compiler::new(runtime);
-    let result_reg = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
+    compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
+    let num_locals = compiler.builder.num_locals;
 
-    let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg, 0).expect(&format!("Codegen failed for: {}", code));
-    let tagged_result = codegen.execute()
-        .expect(&format!("Execute failed for: {}", code));
+    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0)
+        .expect(&format!("Codegen failed for: {}", code));
+    let tramp = trampoline::Trampoline::new(64 * 1024);
+    let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
 
     // Untag the result (integers are tagged by shifting left 3 bits)
     let result = tagged_result >> 3;

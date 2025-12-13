@@ -19,7 +19,7 @@ use quick_clojure_poc::compiler::Compiler;
 use quick_clojure_poc::gc_runtime::GCRuntime;
 use quick_clojure_poc::arm_codegen::Arm64CodeGen;
 use quick_clojure_poc::register_allocation::linear_scan::LinearScan;
-use quick_clojure_poc::trampoline;
+use quick_clojure_poc::trampoline::{self, Trampoline};
 use std::sync::Arc;
 use std::cell::UnsafeCell;
 
@@ -43,19 +43,17 @@ fn main() {
     trampoline::set_runtime(runtime.clone());
 
     let mut compiler = Compiler::new(runtime);
-    let result_reg = compiler.compile(&ast).unwrap();
+    compiler.compile(&ast).unwrap();
     let instructions = compiler.take_instructions();
+    let num_locals = compiler.builder.num_locals;
 
     println!("=== IR Instructions ===");
     for (i, inst) in instructions.iter().enumerate() {
         println!("{:3}: {:?}", i, inst);
     }
 
-    // Allocate with 4 registers to force spilling
+    // Allocate with 4 registers to force spilling (for debug info)
     let mut allocator = LinearScan::new(instructions.clone(), 4);
-    if let quick_clojure_poc::ir::IrValue::Register(r) = result_reg {
-        allocator.mark_live_until_end(r);
-    }
     allocator.allocate();
 
     println!("\n=== Allocation Results ===");
@@ -65,29 +63,24 @@ fn main() {
         println!("  v{} spilled to slot {}", vreg.index(), loc);
     }
 
-    let mut codegen = Arm64CodeGen::new();
-    let machine_code = codegen.compile(&instructions, &result_reg, 4).unwrap();
+    let compiled = Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
 
     println!("\n=== ARM64 Machine Code ===");
-    for (i, inst) in machine_code.iter().enumerate() {
-        println!("  0x{:04x}: 0x{:08x}", i * 4, inst);
-    }
+    println!("Compiled {} instructions at {:p}", compiled.code_len, compiled.code_ptr as *const u8);
 
     println!("\n=== Executing (breakpoint will trigger) ===");
 
-    match codegen.execute() {
-        Ok(result) => {
-            println!("\n=== Result ===");
-            println!("Got: {}", result);
-            if result == 15 {
-                println!("✓ SUCCESS");
-            } else {
-                println!("✗ FAILED - expected 15");
-            }
-        }
-        Err(e) => {
-            println!("\n=== ERROR ===");
-            println!("Execution failed: {}", e);
-        }
+    let tramp = Trampoline::new(64 * 1024);
+    let result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
+    // Result is tagged
+    let untagged = result >> 3;
+
+    println!("\n=== Result ===");
+    println!("Got (tagged): {}", result);
+    println!("Got (untagged): {}", untagged);
+    if untagged == 15 {
+        println!("✓ SUCCESS");
+    } else {
+        println!("✗ FAILED - expected 15");
     }
 }

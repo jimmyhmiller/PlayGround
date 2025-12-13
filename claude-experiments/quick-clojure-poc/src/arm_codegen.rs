@@ -292,12 +292,6 @@ impl Arm64CodeGen {
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
-                // Save x0-x7 to stack (argument registers that might be in use)
-                self.emit_stp(0, 1, 31, -2);
-                self.emit_stp(2, 3, 31, -2);
-                self.emit_stp(4, 5, 31, -2);
-                self.emit_stp(6, 7, 31, -2);
-
                 // Load args: x0 = ns_symbol_id, x1 = name_symbol_id
                 self.emit_mov_imm(0, *ns_symbol_id as i64);
                 self.emit_mov_imm(1, *name_symbol_id as i64);
@@ -309,19 +303,9 @@ impl Arm64CodeGen {
                 // Call the trampoline
                 self.emit_blr(15);
 
-                // Result is in x0, save to temp register x9
-                let temp_result = 9;
-                self.emit_mov(temp_result, 0);
-
-                // Restore x0-x7 from stack (reverse order)
-                self.emit_ldp(6, 7, 31, 2);
-                self.emit_ldp(4, 5, 31, 2);
-                self.emit_ldp(2, 3, 31, 2);
-                self.emit_ldp(0, 1, 31, 2);
-
-                // Move result from temp to final destination
-                if dst_reg != temp_result {
-                    self.emit_mov(dst_reg, temp_result);
+                // Move result from x0 to final destination
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
                 }
 
                 self.store_spill(dst_reg, dest_spill);
@@ -334,12 +318,6 @@ impl Arm64CodeGen {
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
-                // Save x0-x7 to stack
-                self.emit_stp(0, 1, 31, -2);
-                self.emit_stp(2, 3, 31, -2);
-                self.emit_stp(4, 5, 31, -2);
-                self.emit_stp(6, 7, 31, -2);
-
                 // Load args
                 self.emit_mov_imm(0, *ns_symbol_id as i64);
                 self.emit_mov_imm(1, *name_symbol_id as i64);
@@ -351,19 +329,9 @@ impl Arm64CodeGen {
                 // Call the trampoline
                 self.emit_blr(15);
 
-                // Result is in x0, save to temp register x9
-                let temp_result = 9;
-                self.emit_mov(temp_result, 0);
-
-                // Restore x0-x7
-                self.emit_ldp(6, 7, 31, 2);
-                self.emit_ldp(4, 5, 31, 2);
-                self.emit_ldp(2, 3, 31, 2);
-                self.emit_ldp(0, 1, 31, 2);
-
                 // Move result to destination
-                if dst_reg != temp_result {
-                    self.emit_mov(dst_reg, temp_result);
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
                 }
 
                 self.store_spill(dst_reg, dest_spill);
@@ -389,24 +357,12 @@ impl Arm64CodeGen {
                     _ => self.get_physical_reg_for_irvalue(value, false)?
                 };
 
-                // Save value_reg to temp if it's x0-x7 (will be clobbered by save/restore)
-                let saved_value_reg = if value_reg < 8 {
-                    self.emit_mov(9, value_reg);  // Save to x9
-                    9
-                } else {
-                    value_reg
-                };
-
-                // Save x0-x7 to stack
-                self.emit_stp(0, 1, 31, -2);
-                self.emit_stp(2, 3, 31, -2);
-                self.emit_stp(4, 5, 31, -2);
-                self.emit_stp(6, 7, 31, -2);
-
                 // Load args: x0 = ns_symbol_id, x1 = name_symbol_id, x2 = value
                 self.emit_mov_imm(0, *ns_symbol_id as i64);
                 self.emit_mov_imm(1, *name_symbol_id as i64);
-                self.emit_mov(2, saved_value_reg);
+                if value_reg != 2 {
+                    self.emit_mov(2, value_reg);
+                }
 
                 // Load trampoline function address
                 let func_addr = crate::trampoline::trampoline_store_var_by_symbol as usize;
@@ -415,12 +371,6 @@ impl Arm64CodeGen {
                 // Call the trampoline
                 self.emit_blr(15);
 
-                // Restore x0-x7 (we don't care about the return value for store)
-                self.emit_ldp(6, 7, 31, 2);
-                self.emit_ldp(4, 5, 31, 2);
-                self.emit_ldp(2, 3, 31, 2);
-                self.emit_ldp(0, 1, 31, 2);
-
                 self.clear_temp_registers();
             }
 
@@ -428,12 +378,6 @@ impl Arm64CodeGen {
                 // EnsureVarBySymbol: Call trampoline to ensure var exists
                 // Args: x0 = ns_symbol_id, x1 = name_symbol_id
                 // Returns: nil (we don't use it)
-
-                // Save x0-x7 to stack
-                self.emit_stp(0, 1, 31, -2);
-                self.emit_stp(2, 3, 31, -2);
-                self.emit_stp(4, 5, 31, -2);
-                self.emit_stp(6, 7, 31, -2);
 
                 // Load args
                 self.emit_mov_imm(0, *ns_symbol_id as i64);
@@ -445,12 +389,6 @@ impl Arm64CodeGen {
 
                 // Call the trampoline
                 self.emit_blr(15);
-
-                // Restore x0-x7
-                self.emit_ldp(6, 7, 31, 2);
-                self.emit_ldp(4, 5, 31, 2);
-                self.emit_ldp(2, 3, 31, 2);
-                self.emit_ldp(0, 1, 31, 2);
             }
 
             Instruction::LoadKeyword(dst, keyword_index) => {
@@ -459,12 +397,6 @@ impl Arm64CodeGen {
                 // We need to call trampoline_intern_keyword(index) which returns tagged pointer
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-
-                // Save x0-x7 to stack (argument registers that might be in use)
-                self.emit_stp(0, 1, 31, -2);
-                self.emit_stp(2, 3, 31, -2);
-                self.emit_stp(4, 5, 31, -2);
-                self.emit_stp(6, 7, 31, -2);
 
                 // Load keyword index into x0 (first argument)
                 self.emit_mov_imm(0, *keyword_index as i64);
@@ -476,19 +408,9 @@ impl Arm64CodeGen {
                 // Call the trampoline
                 self.emit_blr(15);
 
-                // Result is in x0, save to temp register x9
-                let temp_result = 9;
-                self.emit_mov(temp_result, 0);
-
-                // Restore x0-x7 from stack (reverse order)
-                self.emit_ldp(6, 7, 31, 2);
-                self.emit_ldp(4, 5, 31, 2);
-                self.emit_ldp(2, 3, 31, 2);
-                self.emit_ldp(0, 1, 31, 2);
-
-                // Move result from temp to final destination
-                if dst_reg != temp_result {
-                    self.emit_mov(dst_reg, temp_result);
+                // Move result from x0 to final destination
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
                 }
 
                 self.store_spill(dst_reg, dest_spill);
@@ -791,14 +713,12 @@ impl Arm64CodeGen {
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
 
-                // Save caller-saved registers before the call
-                // stp x19, x20, [sp, #-16]!
-                self.emit_stp(19, 20, 31, -2);
-
                 // Pass JIT frame pointer (x29) as first argument (x0) for GC
                 self.emit_mov(0, 29);
-                // Move src to x1 (second argument, was x0)
-                self.emit_mov(1, src_reg);
+                // Move src to x1 (second argument)
+                if src_reg != 1 {
+                    self.emit_mov(1, src_reg);
+                }
 
                 // Call trampoline_allocate_float
                 let trampoline_addr = crate::trampoline::trampoline_allocate_float as usize;
@@ -809,10 +729,6 @@ impl Arm64CodeGen {
                 if dst_reg != 0 {
                     self.emit_mov(dst_reg, 0);
                 }
-
-                // Restore caller-saved registers
-                // ldp x19, x20, [sp], #16
-                self.emit_ldp(19, 20, 31, 2);
 
                 self.store_spill(dst_reg, dest_spill);
             }
@@ -1368,10 +1284,6 @@ impl Arm64CodeGen {
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 let num_args = args.len();
 
-                // Save caller-saved registers we might clobber
-                self.emit_stp(0, 1, 31, -2);
-                self.emit_stp(2, 3, 31, -2);
-
                 if num_args > 0 {
                     // Allocate stack space for argument array (8 bytes per value)
                     let stack_space = (num_args * 8) as i64;
@@ -1382,26 +1294,7 @@ impl Arm64CodeGen {
                     // Store each argument value to the stack array
                     for (i, arg) in args.iter().enumerate() {
                         let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
-                        // If arg_reg is 0-3, it was saved on the stack above
-                        if arg_reg <= 3 {
-                            // Load from saved area: saved regs are at SP + aligned_space + 16 (for stp x2,x3) + 16 (for stp x0,x1)
-                            // Actually the saved regs are at offsets relative to the CURRENT sp:
-                            // SP + aligned_space + 0  -> x2
-                            // SP + aligned_space + 8  -> x3
-                            // SP + aligned_space + 16 -> x0
-                            // SP + aligned_space + 24 -> x1
-                            let saved_offset = (aligned_space + match arg_reg {
-                                0 => 16,
-                                1 => 24,
-                                2 => 0,
-                                3 => 8,
-                                _ => unreachable!(),
-                            }) as i32;
-                            self.emit_ldr_offset(15, 31, saved_offset);
-                            self.emit_str_offset(15, 31, (i * 8) as i32);
-                        } else {
-                            self.emit_str_offset(arg_reg, 31, (i * 8) as i32);
-                        }
+                        self.emit_str_offset(arg_reg, 31, (i * 8) as i32);
                     }
 
                     // x0 = count, x1 = SP (pointer to array)
@@ -1425,10 +1318,6 @@ impl Arm64CodeGen {
                     self.emit_blr(15);
                 }
 
-                // Restore saved registers
-                self.emit_ldp(2, 3, 31, 2);
-                self.emit_ldp(0, 1, 31, 2);
-
                 // Result is nil (7), move to dst
                 self.emit_mov_imm(dst_reg, 7);
                 self.store_spill(dst_reg, dest_spill);
@@ -1437,14 +1326,6 @@ impl Arm64CodeGen {
             Instruction::PushExceptionHandler(catch_label, exception_slot) => {
                 // PushExceptionHandler: Setup exception handler
                 // Call trampoline_push_exception_handler(handler_addr, result_local, LR, SP, FP)
-                //
-                // IMPORTANT: We must save x0-x7 before the call because argument registers
-                // might still be needed by subsequent code (e.g., a variable reference to
-                // a function parameter that's still in its argument register).
-                //
-                // We also must save SP/FP/LR BEFORE pushing the argument registers, because
-                // when throw restores SP, we want to restore to the "real" SP, not one that's
-                // 64 bytes lower due to the saved registers.
 
                 // Compute FP-relative offset for the exception slot
                 // Exception slots come AFTER spill slots in the stack frame:
@@ -1458,17 +1339,10 @@ impl Arm64CodeGen {
                 let slot_offset = self.num_spill_slots + exception_slot + 1;
                 let result_local_offset = -((slot_offset as i64) * 8);
 
-                // Save SP, FP, LR to temp registers BEFORE pushing x0-x7
-                // These will be passed to the trampoline
-                self.emit_mov_sp(9, 31);  // x9 = SP (before pushing args)
+                // Save SP, FP, LR to temp registers
+                self.emit_mov_sp(9, 31);  // x9 = SP
                 self.emit_mov(10, 29);    // x10 = FP
                 self.emit_mov(11, 30);    // x11 = LR
-
-                // Save argument registers x0-x7 to stack
-                self.emit_stp(0, 1, 31, -2);  // stp x0, x1, [sp, #-16]!
-                self.emit_stp(2, 3, 31, -2);  // stp x2, x3, [sp, #-16]!
-                self.emit_stp(4, 5, 31, -2);  // stp x4, x5, [sp, #-16]!
-                self.emit_stp(6, 7, 31, -2);  // stp x6, x7, [sp, #-16]!
 
                 // Get label address using ADR (into x0)
                 let adr_offset = self.code.len();
@@ -1479,43 +1353,25 @@ impl Arm64CodeGen {
                 // x0 = handler address (will be filled by ADR fixup)
                 // x1 = result local offset (negative offset from FP)
                 self.emit_mov_imm(1, result_local_offset);
-                // x2 = LR (from saved value before pushing args)
+                // x2 = LR
                 self.emit_mov(2, 11);
-                // x3 = SP (from saved value before pushing args)
+                // x3 = SP
                 self.emit_mov(3, 9);
-                // x4 = FP (from saved value)
+                // x4 = FP
                 self.emit_mov(4, 10);
 
                 // Call trampoline_push_exception_handler
                 let func_addr = crate::trampoline::trampoline_push_exception_handler as usize;
                 self.emit_mov_imm(15, func_addr as i64);
                 self.emit_blr(15);
-
-                // Restore argument registers x0-x7 from stack (reverse order)
-                self.emit_ldp(6, 7, 31, 2);  // ldp x6, x7, [sp], #16
-                self.emit_ldp(4, 5, 31, 2);  // ldp x4, x5, [sp], #16
-                self.emit_ldp(2, 3, 31, 2);  // ldp x2, x3, [sp], #16
-                self.emit_ldp(0, 1, 31, 2);  // ldp x0, x1, [sp], #16
             }
 
             Instruction::PopExceptionHandler => {
                 // PopExceptionHandler: Remove exception handler (normal exit from try)
-                // Save x0-x7 before call (argument registers might still be needed)
-                self.emit_stp(0, 1, 31, -2);
-                self.emit_stp(2, 3, 31, -2);
-                self.emit_stp(4, 5, 31, -2);
-                self.emit_stp(6, 7, 31, -2);
-
                 let func_addr = crate::trampoline::trampoline_pop_exception_handler as usize;
                 self.emit_mov_imm(15, func_addr as i64);
                 self.emit_blr(15);
                 // Result in x0 is nil, we ignore it
-
-                // Restore x0-x7 after call
-                self.emit_ldp(6, 7, 31, 2);
-                self.emit_ldp(4, 5, 31, 2);
-                self.emit_ldp(2, 3, 31, 2);
-                self.emit_ldp(0, 1, 31, 2);
             }
 
             Instruction::Throw(exc) => {
@@ -2235,10 +2091,6 @@ impl Arm64CodeGen {
                 let field_bytes = field_name.as_bytes();
                 let field_len = field_bytes.len();
 
-                // Save registers that might be in use (x0-x3 for args, plus obj_reg if it's in that range)
-                self.emit_stp(0, 1, 31, -2);
-                self.emit_stp(2, 3, 31, -2);
-
                 // Allocate stack space for field name string (16-byte aligned)
                 let string_stack_space = ((field_len + 15) / 16) * 16;
                 if string_stack_space > 0 {
@@ -2246,12 +2098,9 @@ impl Arm64CodeGen {
                 }
 
                 // Store field name bytes to stack using STRB
-                // First, we need to load each byte into a register and store it
                 let temp_byte_reg = 10;  // Use x10 as temp for byte values
                 for (i, &byte) in field_bytes.iter().enumerate() {
-                    // Load byte value into temp register
                     self.emit_mov_imm(temp_byte_reg, byte as i64);
-                    // Store byte to stack at offset i
                     self.emit_strb_offset(temp_byte_reg, 31, i as i32);
                 }
 
@@ -2259,17 +2108,8 @@ impl Arm64CodeGen {
                 let field_name_ptr_reg = 12;  // x12 = field_name_ptr
                 self.emit_mov(field_name_ptr_reg, 31);
 
-                // Set up trampoline arguments:
-                // x0 = obj_ptr (need to reload if obj_reg was x0-x3 which we saved)
-                if obj_reg <= 3 {
-                    // obj_reg was saved, reload from stack
-                    // Stack layout: [saved x2,x3] [saved x0,x1] [field_name_bytes]
-                    // saved x0,x1 are at SP + string_stack_space + 16
-                    // saved x2,x3 are at SP + string_stack_space
-                    let saved_offset = string_stack_space as i32 + if obj_reg <= 1 { 16 } else { 0 };
-                    let slot_offset = (obj_reg % 2) as i32 * 8;
-                    self.emit_ldr_offset(0, 31, saved_offset + slot_offset);
-                } else {
+                // Set up trampoline arguments
+                if obj_reg != 0 {
                     self.emit_mov(0, obj_reg);
                 }
                 self.emit_mov(1, field_name_ptr_reg);           // x1 = field_name_ptr
@@ -2280,22 +2120,14 @@ impl Arm64CodeGen {
                 self.emit_mov_imm(15, func_addr as i64);
                 self.emit_blr(15);
 
-                // Save result to temp register before restoring saved registers
-                let temp_result = 9;
-                self.emit_mov(temp_result, 0);
-
                 // Clean up stack space for field name
                 if string_stack_space > 0 {
                     self.emit_add_sp_imm(string_stack_space as i64);
                 }
 
-                // Restore saved registers
-                self.emit_ldp(2, 3, 31, 2);
-                self.emit_ldp(0, 1, 31, 2);
-
                 // Move result to destination register
-                if dst_reg != temp_result {
-                    self.emit_mov(dst_reg, temp_result);
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
                 }
 
                 self.store_spill(dst_reg, dest_spill);
@@ -2319,10 +2151,6 @@ impl Arm64CodeGen {
                 let field_bytes = field_name.as_bytes();
                 let field_len = field_bytes.len();
 
-                // Save registers that might be in use (x0-x3 for args)
-                self.emit_stp(0, 1, 31, -2);
-                self.emit_stp(2, 3, 31, -2);
-
                 // Allocate stack space for field name string (16-byte aligned)
                 let string_stack_space = ((field_len + 15) / 16) * 16;
                 if string_stack_space > 0 {
@@ -2340,29 +2168,15 @@ impl Arm64CodeGen {
                 let field_name_ptr_reg = 12;
                 self.emit_mov(field_name_ptr_reg, 31);
 
-                // Save value to a safe register (in case value_reg is x0-x3)
-                let saved_value_reg = 11;
-                if value_reg <= 3 {
-                    // Reload value from stack
-                    let saved_offset = string_stack_space as i32 + if value_reg <= 1 { 16 } else { 0 };
-                    let slot_offset = (value_reg % 2) as i32 * 8;
-                    self.emit_ldr_offset(saved_value_reg, 31, saved_offset + slot_offset);
-                } else {
-                    self.emit_mov(saved_value_reg, value_reg);
-                }
-
-                // Set up trampoline arguments:
-                // x0 = obj_ptr
-                if obj_reg <= 3 {
-                    let saved_offset = string_stack_space as i32 + if obj_reg <= 1 { 16 } else { 0 };
-                    let slot_offset = (obj_reg % 2) as i32 * 8;
-                    self.emit_ldr_offset(0, 31, saved_offset + slot_offset);
-                } else {
+                // Set up trampoline arguments
+                if obj_reg != 0 {
                     self.emit_mov(0, obj_reg);
                 }
                 self.emit_mov(1, field_name_ptr_reg);           // x1 = field_name_ptr
                 self.emit_mov_imm(2, field_len as i64);         // x2 = field_name_len
-                self.emit_mov(3, saved_value_reg);              // x3 = value
+                if value_reg != 3 {
+                    self.emit_mov(3, value_reg);                // x3 = value
+                }
 
                 // Call trampoline_store_type_field
                 let func_addr = crate::trampoline::trampoline_store_type_field as usize;
@@ -2373,10 +2187,6 @@ impl Arm64CodeGen {
                 if string_stack_space > 0 {
                     self.emit_add_sp_imm(string_stack_space as i64);
                 }
-
-                // Restore saved registers
-                self.emit_ldp(2, 3, 31, 2);
-                self.emit_ldp(0, 1, 31, 2);
             }
 
             Instruction::GcAddRoot(obj) => {
@@ -2391,17 +2201,8 @@ impl Arm64CodeGen {
 
                 let obj_reg = self.get_physical_reg_for_irvalue(obj, false)?;
 
-                // Save registers that might be in use
-                self.emit_stp(0, 1, 31, -2);
-                self.emit_stp(2, 3, 31, -2);
-
                 // Set up argument: x0 = obj_ptr
-                if obj_reg <= 3 {
-                    // Need to load from saved area on stack
-                    let saved_offset = if obj_reg <= 1 { 16 } else { 0 };
-                    let slot_offset = (obj_reg % 2) as i32 * 8;
-                    self.emit_ldr_offset(0, 31, saved_offset + slot_offset);
-                } else {
+                if obj_reg != 0 {
                     self.emit_mov(0, obj_reg);
                 }
 
@@ -2409,10 +2210,6 @@ impl Arm64CodeGen {
                 let func_addr = crate::trampoline::trampoline_gc_add_root as usize;
                 self.emit_mov_imm(15, func_addr as i64);
                 self.emit_blr(15);
-
-                // Restore saved registers
-                self.emit_ldp(2, 3, 31, 2);
-                self.emit_ldp(0, 1, 31, 2);
             }
 
             Instruction::ExternalCall(_, _, _) => {
@@ -3899,7 +3696,7 @@ mod tests {
 
         let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
         let mut compiler = Compiler::new(runtime);
-        compiler.compile(&ast).unwrap();
+        compiler.compile_toplevel(&ast).unwrap();
         let instructions = compiler.take_instructions();
         let num_locals = compiler.builder.num_locals;
 
@@ -3922,7 +3719,7 @@ mod tests {
 
         let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
         let mut compiler = Compiler::new(runtime);
-        compiler.compile(&ast).unwrap();
+        compiler.compile_toplevel(&ast).unwrap();
         let instructions = compiler.take_instructions();
         let num_locals = compiler.builder.num_locals;
 

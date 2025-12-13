@@ -9,25 +9,26 @@ fn main() {
 
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     let mut compiler = compiler::Compiler::new(runtime);
-    let result_reg = compiler.compile(&ast).unwrap();
+    compiler.compile(&ast).unwrap();
     let instructions = compiler.take_instructions();
+    let num_locals = compiler.builder.num_locals;
 
     println!("IR instructions:");
     for (i, inst) in instructions.iter().enumerate() {
         println!("  {}: {:?}", i, inst);
     }
 
-    let mut codegen = arm_codegen::Arm64CodeGen::new();
-    let machine_code = codegen.compile(&instructions, &result_reg, 0).unwrap();
+    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
 
-    println!("\nGenerated {} ARM64 instructions", machine_code.len());
-    for (i, inst) in machine_code.iter().enumerate() {
-        println!("  {:04x}: {:08x}", i * 4, inst);
-    }
+    println!("\nGenerated {} ARM64 instructions", compiled.code_len);
 
     println!("\nExecuting...");
-    let result = codegen.execute().unwrap();
-    println!("Result: {}", result);
-    assert_eq!(result, 10);
+    let trampoline = trampoline::Trampoline::new(64 * 1024);
+    let result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
+    // Result is tagged: 10 << 3 = 80
+    println!("Result (tagged): {}", result);
+    let untagged = result >> 3;
+    println!("Result (untagged): {}", untagged);
+    assert_eq!(untagged, 10);
     println!("SUCCESS!");
 }

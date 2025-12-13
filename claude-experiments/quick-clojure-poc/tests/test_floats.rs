@@ -19,13 +19,14 @@ fn run_and_get_tagged(code: &str) -> i64 {
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
     let mut compiler = compiler::Compiler::new(runtime.clone());
-    let result_val = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
-    let result_reg = compiler.ensure_register(result_val);
+    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
+    let num_locals = compiler.builder.num_locals;
 
-    let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg, 0).expect(&format!("Codegen failed for: {}", code));
-    codegen.execute().expect(&format!("Execute failed for: {}", code))
+    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0)
+        .expect(&format!("Codegen failed for: {}", code));
+    let trampoline = trampoline::Trampoline::new(64 * 1024);
+    unsafe { trampoline.execute(compiled.code_ptr as *const u8) }
 }
 
 /// Helper to get the tag from a tagged value
@@ -55,13 +56,14 @@ fn run_test_float(code: &str, expected: f64) {
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
     let mut compiler = compiler::Compiler::new(runtime.clone());
-    let result_val = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
-    let result_reg = compiler.ensure_register(result_val);
+    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
+    let num_locals = compiler.builder.num_locals;
 
-    let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg, 0).expect(&format!("Codegen failed for: {}", code));
-    let tagged_result = codegen.execute().expect(&format!("Execute failed for: {}", code));
+    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0)
+        .expect(&format!("Codegen failed for: {}", code));
+    let tramp = trampoline::Trampoline::new(64 * 1024);
+    let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
 
     let tag = get_tag(tagged_result);
     assert_eq!(tag, 1, "Expected float (tag 1), got tag {} for: {}", tag, code);
@@ -85,13 +87,14 @@ fn run_test_float_approx(code: &str, expected: f64, tolerance: f64) {
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
     let mut compiler = compiler::Compiler::new(runtime.clone());
-    let result_val = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
-    let result_reg = compiler.ensure_register(result_val);
+    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
+    let num_locals = compiler.builder.num_locals;
 
-    let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg, 0).expect(&format!("Codegen failed for: {}", code));
-    let tagged_result = codegen.execute().expect(&format!("Execute failed for: {}", code));
+    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0)
+        .expect(&format!("Codegen failed for: {}", code));
+    let tramp = trampoline::Trampoline::new(64 * 1024);
+    let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
 
     let tag = get_tag(tagged_result);
     assert_eq!(tag, 1, "Expected float (tag 1), got tag {} for: {}", tag, code);
@@ -310,14 +313,15 @@ fn run_test_no_crash(code: &str) {
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
     let mut compiler = compiler::Compiler::new(runtime.clone());
-    let result_val = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
-    let result_reg = compiler.ensure_register(result_val);
+    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
+    let num_locals = compiler.builder.num_locals;
 
-    let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg, 0).expect(&format!("Codegen failed for: {}", code));
+    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0)
+        .expect(&format!("Codegen failed for: {}", code));
+    let tramp = trampoline::Trampoline::new(64 * 1024);
     // Just verify it doesn't crash - any result is acceptable
-    let _ = codegen.execute().expect(&format!("Execute should not crash for: {}", code));
+    let _ = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
 }
 
 #[test]

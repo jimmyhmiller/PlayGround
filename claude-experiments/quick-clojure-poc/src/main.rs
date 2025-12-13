@@ -596,10 +596,8 @@ fn load_clojure_file(
             Ok(val) => {
                 match analyze(&val) {
                     Ok(ast) => {
-                        match compiler.compile(&ast) {
-                            Ok(result_reg) => {
-                                // Emit Ret for top-level expressions (like Beagle's ir.ret(last))
-                                compiler.builder.emit(crate::ir::Instruction::Ret(result_reg));
+                        match compiler.compile_toplevel(&ast) {
+                            Ok(_) => {
                                 let instructions = compiler.take_instructions();
                                 let num_locals = compiler.builder.num_locals;
 
@@ -681,16 +679,11 @@ fn run_expr(expr: &str, gc_always: bool) {
     };
 
     // Compile the expression
-    let result_reg = match compiler.compile(&ast) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Compile error: {}", e);
-            std::process::exit(1);
-        }
-    };
+    if let Err(e) = compiler.compile_toplevel(&ast) {
+        eprintln!("Compile error: {}", e);
+        std::process::exit(1);
+    }
 
-    // Emit Ret for top-level expression
-    compiler.builder.emit(crate::ir::Instruction::Ret(result_reg));
     let instructions = compiler.take_instructions();
     let num_locals = compiler.builder.num_locals;
 
@@ -778,10 +771,8 @@ fn run_script(filename: &str, gc_always: bool) {
                 match analyze(&val) {
                     Ok(ast) => {
                         // Compile and execute
-                        match compiler.compile(&ast) {
-                            Ok(result_reg) => {
-                                // Emit Ret for top-level expression
-                                compiler.builder.emit(crate::ir::Instruction::Ret(result_reg));
+                        match compiler.compile_toplevel(&ast) {
+                            Ok(_) => {
                                 let instructions = compiler.take_instructions();
                                 let num_locals = compiler.builder.num_locals;
 
@@ -1257,10 +1248,8 @@ fn main() {
                                     }
                                     "/asm" | "/machine" => {
                                         // Use the REPL compiler so we can access defined vars
-                                        match repl_compiler.compile(&ast) {
-                                            Ok(result_reg) => {
-                                                // Emit Ret for top-level expression
-                                                repl_compiler.builder.emit(crate::ir::Instruction::Ret(result_reg));
+                                        match repl_compiler.compile_toplevel(&ast) {
+                                            Ok(_) => {
                                                 let instructions = repl_compiler.take_instructions();
                                                 let num_locals = repl_compiler.builder.num_locals;
 
@@ -1283,10 +1272,8 @@ fn main() {
                                     }
                                     "" => {
                                         // Normal execution using IR-based compilation with persistent compiler
-                                        match repl_compiler.compile(&ast) {
-                                            Ok(result_reg) => {
-                                                // Emit Ret for top-level expression
-                                                repl_compiler.builder.emit(crate::ir::Instruction::Ret(result_reg));
+                                        match repl_compiler.compile_toplevel(&ast) {
+                                            Ok(_) => {
                                                 let instructions = repl_compiler.take_instructions();
                                                 let num_locals = repl_compiler.builder.num_locals;
 

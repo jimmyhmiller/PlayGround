@@ -167,6 +167,13 @@ impl Compiler {
         }
     }
 
+    /// Compile a top-level expression (emits Ret instruction)
+    pub fn compile_toplevel(&mut self, expr: &Expr) -> Result<IrValue, String> {
+        let result = self.compile(expr)?;
+        self.builder.emit(Instruction::Ret(result));
+        Ok(result)
+    }
+
     fn compile_literal(&mut self, value: &Value) -> Result<IrValue, String> {
         // OPTIMIZATION: Return constants directly without loading into registers.
         // This prevents long-lived registers for literals in nested expressions.

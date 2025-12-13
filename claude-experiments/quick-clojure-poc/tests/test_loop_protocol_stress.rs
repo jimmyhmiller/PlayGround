@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::cell::UnsafeCell;
 
 /// Helper to load clojure.core into the compiler/runtime
-fn load_core(compiler: &mut compiler::Compiler, runtime: &Arc<UnsafeCell<gc_runtime::GCRuntime>>) {
+fn load_core(compiler: &mut compiler::Compiler, _runtime: &Arc<UnsafeCell<gc_runtime::GCRuntime>>) {
     use std::fs;
     use std::io::BufRead;
 
@@ -29,13 +29,13 @@ fn load_core(compiler: &mut compiler::Compiler, runtime: &Arc<UnsafeCell<gc_runt
 
         if let Ok(val) = reader::read(&accumulated) {
             if let Ok(ast) = clojure_ast::analyze(&val) {
-                if let Ok(result_val) = compiler.compile(&ast) {
-                    let result_reg = compiler.ensure_register(result_val);
+                if let Ok(_) = compiler.compile_toplevel(&ast) {
                     let instructions = compiler.take_instructions();
-                    let mut codegen = arm_codegen::Arm64CodeGen::new();
+                    let num_locals = compiler.builder.num_locals;
 
-                    if codegen.compile(&instructions, &result_reg, 0).is_ok() {
-                        let _ = codegen.execute();
+                    if let Ok(compiled) = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                        let tramp = trampoline::Trampoline::new(64 * 1024);
+                        let _ = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
                     }
                 }
             }
@@ -56,13 +56,14 @@ fn run_and_get_tagged(code: &str) -> i64 {
     let val = reader::read(code).expect(&format!("Failed to read: {}", code));
     let ast = clojure_ast::analyze(&val).expect(&format!("Failed to analyze: {}", code));
 
-    let result_val = compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
-    let result_reg = compiler.ensure_register(result_val);
+    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
+    let num_locals = compiler.builder.num_locals;
 
-    let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.compile(&instructions, &result_reg, 0).expect(&format!("Codegen failed for: {}", code));
-    codegen.execute().expect(&format!("Execute failed for: {}", code))
+    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0)
+        .expect(&format!("Codegen failed for: {}", code));
+    let tramp = trampoline::Trampoline::new(64 * 1024);
+    unsafe { tramp.execute(compiled.code_ptr as *const u8) }
 }
 
 /// Helper to check that code runs without crashing and returns a heap object (list)
